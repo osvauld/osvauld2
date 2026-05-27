@@ -1,0 +1,26 @@
+// The embedded step-1 app: a counter. Proves the Rune VM + the `ui::` bindings
+// + state held across frames. `init` seeds the state; `view` draws and returns
+// the (possibly mutated) state each frame.
+
+struct Counter { count }
+
+pub fn init() {
+    Counter { count: 0 }
+}
+
+pub fn view(state) {
+    ui::heading("Counter");
+    ui::space(8.0);
+    ui::label(`count: ${state.count}`);
+    ui::space(12.0);
+    if ui::button("increment") {
+        state.count = state.count + 1;
+    }
+    if ui::button("decrement") {
+        state.count = state.count - 1;
+    }
+    if ui::button("reset") {
+        state.count = 0;
+    }
+    state
+}

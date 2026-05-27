@@ -1,0 +1,11 @@
+[package]
+name = "sthalam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+app_host = { path = "../app_host" }
+vault = { path = "../vault" }
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+zeroize = { workspace = true }

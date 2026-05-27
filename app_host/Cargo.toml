@@ -1,0 +1,9 @@
+[package]
+name = "app_host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui = "0.34"
+rune = "0.14.2"

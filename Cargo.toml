@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["cryptography", "identity", "storage", "vault", "sthalam", "app_host"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.8"
