@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The compositor owns the app-cell GPU work; the shell drives the egui/wgpu
+# stack only through eframe, so wgpu/egui-wgpu aren't direct deps here.
+compositor = { path = "../compositor" }
 app_host = { path = "../app_host" }
 vault = { path = "../vault" }
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }

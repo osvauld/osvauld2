@@ -35,9 +35,8 @@ pub const WARN_BG: Color32 = Color32::from_rgba_premultiplied(30, 23, 13, 31); /
 pub const ERR: Color32 = Color32::from_rgb(0xF4, 0x70, 0x68);
 pub const ERR_BG: Color32 = Color32::from_rgba_premultiplied(29, 13, 12, 31); // ~0.12, error field ring
 
-// Aliases for the home screen, which still uses the placeholder card layout.
+// Alias for the home screen, which still uses the placeholder card layout.
 pub const CARD: Color32 = BG_2;
-pub const TEXT_DIM: Color32 = FG_3;
 
 // VT323 pixel face — the wordmark.
 pub fn pixel() -> FontFamily {

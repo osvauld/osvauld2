@@ -18,7 +18,11 @@ pub enum Screen {
     Mnemonic(String),       // the recovery phrase, shown exactly once
     Accounts(AccountsView), // cached on entry — never re-read per frame
     Unlock(UnlockForm),
-    Home(app_host::App),
+    Home {
+        /// The window manager: cells arranged as tabs, tiles, or floating windows.
+        /// Boxed so this large variant doesn't bloat every `Screen`.
+        workspace: Box<compositor::Workspace>,
+    },
 }
 
 // The login picker's state: the accounts (cached on entry) and which row is highlighted for
@@ -78,14 +82,14 @@ impl Sthalam {
 
 impl eframe::App for Sthalam {
     // eframe 0.34 wraps this in a CentralPanel and hands us the `ui` directly.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Disjoint borrows: the match holds `self.screen`, the arms take `self.vault`.
         let next = match &mut self.screen {
             Screen::Signup(form) => screens::signup(ui, &mut self.vault, form, &mut self.backdrop),
             Screen::Mnemonic(words) => screens::recovery(ui, words, &mut self.backdrop),
             Screen::Accounts(view) => screens::accounts(ui, view, &mut self.backdrop),
             Screen::Unlock(form) => screens::unlock(ui, &mut self.vault, form, &mut self.backdrop),
-            Screen::Home(app) => screens::home(ui, app, &mut self.vault),
+            Screen::Home { workspace } => screens::home(ui, workspace, &mut self.vault, frame),
         };
         if let Some(next) = next {
             self.transition(next);

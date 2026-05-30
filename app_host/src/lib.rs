@@ -1,100 +1,262 @@
-//! Runs Rune-scripted apps that draw immediate-mode egui surfaces.
+//! Runs sandboxed wasm apps that draw immediate-mode egui surfaces.
 //!
-//! Step 1: a single app, in-process, one egui Context. The host compiles the
-//! app's Rune script, keeps its state across frames, and calls `view` with the
-//! live `egui::Ui` exposed through a thread-local pointer (see `ui_bindings`).
-
-mod ui_bindings;
+//! An app is a wasm module built against the `osvauld-app` SDK, exporting
+//! `alloc`/`dealloc`/`frame`. The host hands it one frame's `RawInput` (encoded
+//! via [`app_abi`]) and gets back a [`Surface`] — GPU-ready triangles plus the
+//! texture uploads they reference — which the shell composites into the app's
+//! cell. egui lives entirely inside the guest; the host exposes none of it. The
+//! module's linear memory is the sandbox.
 
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use rune::runtime::Value;
-use rune::{Context, Diagnostics, Source, Sources, Vm};
+use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// Inline failure-box colour (matches the shell's `theme::ERR`).
 const ERR: egui::Color32 = egui::Color32::from_rgb(0xF4, 0x70, 0x68);
 
-/// The embedded counter app — step 1 ships exactly one app, baked into the binary.
-const COUNTER_SRC: &str = include_str!("../apps/counter.rn");
+/// Where `App::counter` looks for the built counter module. Computed from the
+/// crate dir (not the cwd, which differs between `cargo test` and `cargo run`)
+/// so it resolves to the workspace `target/`. Override with `OSV_COUNTER_WASM`.
+const DEFAULT_COUNTER_WASM: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../target/wasm32-unknown-unknown/release/counter_app.wasm");
 
-/// A running Rune app, or the error that stopped it. `frame` is called once per
-/// egui repaint with the panel's `Ui`.
-pub struct App {
-    state: State,
+/// One frame's worth of drawing, ready for the renderer: egui's own
+/// `ClippedPrimitive` list plus the texture uploads it references.
+///
+/// This is the *host-side* surface. It differs from [`app_abi::Surface`], the
+/// *wire* form the guest sends (meshes only, since a sandboxed guest emits no
+/// GPU paint callbacks); `App::surface` converts the wire form into this.
+pub struct Surface {
+    pub primitives: Vec<egui::ClippedPrimitive>,
+    pub textures_delta: egui::TexturesDelta,
+    pub pixels_per_point: f32,
+    /// When the app wants to be drawn again (egui's repaint signal): `ZERO` while
+    /// it animates, `MAX` when idle. The compositor schedules redraws from this.
+    pub repaint_after: Duration,
 }
 
-enum State {
-    Running { vm: Vm, app_state: Value },
-    Failed(String),
+/// A running wasm app, or the error that stopped it. `surface` is called once
+/// per repaint with the app-local input and returns the picture the app drew.
+pub struct App {
+    inner: Inner,
+}
+
+enum Inner {
+    /// A live module instance.
+    Wasm(WasmApp),
+    /// The app failed to load or trapped; the host renders the message inline.
+    Failed(Failed),
+}
+
+/// A failed app and the host-side egui context used to draw its error message
+/// (the guest can't draw — it's the thing that's broken).
+struct Failed {
+    err: String,
+    ctx: egui::Context,
 }
 
 impl App {
-    /// Build the embedded counter app. Never fails the caller: a compile or
-    /// init error is captured and rendered inline by `frame`.
+    /// Load the counter app. Never fails the caller: a missing module or a load
+    /// error is captured and rendered inline by `surface`.
     pub fn counter() -> Self {
-        let state = match build(COUNTER_SRC) {
-            Ok((vm, app_state)) => State::Running { vm, app_state },
-            Err(err) => State::Failed(err),
+        let inner = match WasmApp::load(&counter_module()) {
+            Ok(app) => Inner::Wasm(app),
+            Err(err) => Inner::Failed(Failed { err, ctx: egui::Context::default() }),
         };
-        App { state }
+        App { inner }
     }
 
-    /// Draw one frame: run the app's `view(state)` against `ui`, threading the
-    /// returned state back so the script keeps it across frames.
-    pub fn frame(&mut self, ui: &mut egui::Ui) {
-        let failure = match &mut self.state {
-            State::Failed(err) => {
-                ui.colored_label(ERR, err.as_str());
-                return;
-            }
-            State::Running { vm, app_state } => {
-                let call = ui_bindings::with_ui_scope(ui, || vm.call(["view"], (app_state.clone(),)));
-                match call {
-                    Ok(next) => {
-                        *app_state = next;
-                        return;
-                    }
-                    Err(err) => format!("view() failed: {err}"),
+    /// Run one frame against the app and return the surface it drew. `input` is
+    /// in the app's local coordinates (its surface spans (0,0)..`screen_rect`);
+    /// translating real screen input into that space is the caller's job.
+    /// `pixels_per_point` matches rasterization to the display so text stays
+    /// crisp. A trap flips the app to `Failed` and renders the error inline.
+    pub fn surface(&mut self, input: egui::RawInput, pixels_per_point: f32) -> Surface {
+        match &mut self.inner {
+            Inner::Failed(f) => render_failure(&f.ctx, &f.err, input, pixels_per_point),
+            Inner::Wasm(app) => match app.surface(&input, pixels_per_point) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    // The instance trapped — it can't be trusted to draw again.
+                    let ctx = egui::Context::default();
+                    let surface = render_failure(&ctx, &err, input, pixels_per_point);
+                    self.inner = Inner::Failed(Failed { err, ctx });
+                    surface
                 }
-            }
-        };
-        self.state = State::Failed(failure);
+            },
+        }
     }
 }
 
-/// Compile `src`, install the `ui` module, and run `init()` for the starting
-/// state. Returns the VM plus that state, ready to drive frames.
-fn build(src: &str) -> Result<(Vm, Value), String> {
-    let mut context = Context::with_default_modules().map_err(|e| e.to_string())?;
-    context
-        .install(ui_bindings::module().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let runtime = Arc::new(context.runtime().map_err(|e| e.to_string())?);
+/// A loaded module instance: its store, memory, and the three exported funcs.
+/// Owned by whichever thread built it (the compositor's per-app worker), so the
+/// non-`Send` `Store` never crosses a thread boundary.
+struct WasmApp {
+    store: Store<()>,
+    memory: Memory,
+    alloc: TypedFunc<u32, u32>,
+    dealloc: TypedFunc<(u32, u32), ()>,
+    frame: TypedFunc<(u32, u32), u64>,
+}
 
-    let mut sources = Sources::new();
-    sources
-        .insert(Source::memory(src).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+impl WasmApp {
+    /// Instantiate `module` and bind its exports. The module imports nothing, so
+    /// instantiation needs no host functions.
+    fn load(module: &Result<Module, String>) -> Result<Self, String> {
+        let module = module.as_ref().map_err(|e| e.clone())?;
+        let mut store = Store::new(engine(), ());
+        let instance = Instance::new(&mut store, module, &[]).map_err(|e| e.to_string())?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or_else(|| "module has no `memory` export".to_string())?;
+        let alloc = instance
+            .get_typed_func::<u32, u32>(&mut store, "alloc")
+            .map_err(|e| format!("missing `alloc` export: {e}"))?;
+        let dealloc = instance
+            .get_typed_func::<(u32, u32), ()>(&mut store, "dealloc")
+            .map_err(|e| format!("missing `dealloc` export: {e}"))?;
+        let frame = instance
+            .get_typed_func::<(u32, u32), u64>(&mut store, "frame")
+            .map_err(|e| format!("missing `frame` export: {e}"))?;
+        Ok(WasmApp { store, memory, alloc, dealloc, frame })
+    }
 
-    let mut diagnostics = Diagnostics::new();
-    let built = rune::prepare(&mut sources)
-        .with_context(&context)
-        .with_diagnostics(&mut diagnostics)
-        .build();
+    /// One frame across the wasm boundary: write the encoded input into a guest
+    /// buffer, call `frame`, read back the encoded surface, and free both
+    /// buffers (the allocator — the host here — frees what it handed in; the
+    /// guest's `frame` allocated the output, which the host frees once read).
+    fn surface(&mut self, input: &egui::RawInput, pixels_per_point: f32) -> Result<Surface, String> {
+        let mut input = input.clone();
+        // Pin the app's rasterization to the display so text stays crisp; the
+        // guest reads this from the input rather than a separate host call.
+        input.viewports.entry(input.viewport_id).or_default().native_pixels_per_point =
+            Some(pixels_per_point);
 
-    let unit = match built {
-        Ok(unit) => unit,
-        Err(_) => {
-            let mut buf = rune::termcolor::Buffer::no_color();
-            let _ = diagnostics.emit(&mut buf, &sources);
-            return Err(String::from_utf8_lossy(buf.as_slice()).into_owned());
+        let bytes = app_abi::encode_input(&input).map_err(|e| format!("encode input: {e}"))?;
+        let in_len = bytes.len() as u32;
+
+        // Host allocates the input buffer in guest memory and writes into it.
+        let in_ptr =
+            self.alloc.call(&mut self.store, in_len).map_err(|e| format!("alloc trapped: {e}"))?;
+        self.memory
+            .write(&mut self.store, in_ptr as usize, &bytes)
+            .map_err(|e| format!("writing input: {e}"))?;
+
+        // Draw. Returns packed (out_ptr << 32) | out_len.
+        let packed = self
+            .frame
+            .call(&mut self.store, (in_ptr, in_len))
+            .map_err(|e| format!("frame trapped: {e}"))?;
+
+        // Done with the input buffer — free it (we allocated it).
+        self.dealloc
+            .call(&mut self.store, (in_ptr, in_len))
+            .map_err(|e| format!("dealloc(input) trapped: {e}"))?;
+
+        let out_ptr = (packed >> 32) as u32;
+        let out_len = (packed & 0xffff_ffff) as u32;
+        let mut out = vec![0u8; out_len as usize];
+        self.memory
+            .read(&self.store, out_ptr as usize, &mut out)
+            .map_err(|e| format!("reading surface: {e}"))?;
+
+        // Free the output buffer the guest allocated for us.
+        self.dealloc
+            .call(&mut self.store, (out_ptr, out_len))
+            .map_err(|e| format!("dealloc(output) trapped: {e}"))?;
+
+        let wire = app_abi::decode_surface(&out).map_err(|e| format!("decode surface: {e}"))?;
+        Ok(Surface {
+            primitives: wire.to_clipped_primitives(),
+            textures_delta: wire.textures_delta,
+            pixels_per_point: wire.pixels_per_point,
+            repaint_after: wire.repaint_after,
+        })
+    }
+}
+
+/// The process-wide wasmtime engine. Cheap to share; `Engine` is `Sync`.
+fn engine() -> &'static Engine {
+    static ENGINE: OnceLock<Engine> = OnceLock::new();
+    ENGINE.get_or_init(Engine::default)
+}
+
+/// Get the counter module — compiled once, then reused. Compiling the wasm to
+/// native code (`Module::new`, via Cranelift) dominates a cold start: seconds in
+/// a debug build. Two things keep us from paying it repeatedly: `get_or_init`
+/// compiles on one thread while the rest block (so cells spawned together share
+/// one compile, not N racing over cores), and [`load_counter_module`] caches the
+/// native artifact to a `.cwasm` a later run maps instead of recompiling — the
+/// "precompile once, map at runtime" model. `Module` is ref-counted (cheap clone
+/// per cell); a load error is memoized too, fine for a startup failure.
+fn counter_module() -> Result<Module, String> {
+    static MODULE: OnceLock<Result<Module, String>> = OnceLock::new();
+    MODULE.get_or_init(load_counter_module).clone()
+}
+
+/// Read the counter wasm and produce a ready `Module`, preferring a cached
+/// native build and falling back to a fresh compile (which it then caches).
+fn load_counter_module() -> Result<Module, String> {
+    let path = counter_wasm_path();
+    let wasm = std::fs::read(&path).map_err(|e| {
+        format!(
+            "couldn't read counter wasm at {path}: {e}\nbuild it with:\n  \
+             cargo build -p counter-app --target wasm32-unknown-unknown --release\n\
+             or set OSV_COUNTER_WASM to its path"
+        )
+    })?;
+
+    // Fast path: a native artifact we compiled before, still newer than its
+    // wasm. `deserialize` is unsafe because it trusts the bytes are a wasmtime
+    // artifact for this engine — they're ours, and a version/engine mismatch is
+    // an `Err` (not UB), so a miss just falls through to a fresh compile.
+    let cache = format!("{path}.cwasm");
+    if fresh(&cache, &path) {
+        if let Ok(bytes) = std::fs::read(&cache) {
+            if let Ok(module) = unsafe { Module::deserialize(engine(), &bytes) } {
+                return Ok(module);
+            }
         }
-    };
+    }
 
-    let mut vm = Vm::new(runtime, Arc::new(unit));
-    let app_state = vm.call(["init"], ()).map_err(|e| format!("init() failed: {e}"))?;
-    Ok((vm, app_state))
+    // Slow path: compile wasm → native, then cache it for next time.
+    let module = Module::new(engine(), &wasm).map_err(|e| format!("compiling counter wasm: {e}"))?;
+    if let Ok(bytes) = module.serialize() {
+        let _ = std::fs::write(&cache, bytes); // best-effort: a failure just recompiles next run
+    }
+    Ok(module)
+}
+
+/// Is `cache` present and at least as new as `source`? A wasm rebuild bumps the
+/// source's mtime, which invalidates a now-stale native cache.
+fn fresh(cache: &str, source: &str) -> bool {
+    let mtime = |p: &str| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((mtime(cache), mtime(source)), (Some(c), Some(s)) if c >= s)
+}
+
+/// The path `App::counter` loads from: `OSV_COUNTER_WASM` if set, else the
+/// workspace's default release artifact.
+fn counter_wasm_path() -> String {
+    std::env::var("OSV_COUNTER_WASM").unwrap_or_else(|_| DEFAULT_COUNTER_WASM.to_string())
+}
+
+/// Draw a failed app's error message on a host-side context and return it as a
+/// surface, so a broken app still shows *something* in its cell.
+fn render_failure(ctx: &egui::Context, err: &str, input: egui::RawInput, pixels_per_point: f32) -> Surface {
+    ctx.set_pixels_per_point(pixels_per_point);
+    let output = ctx.run_ui(input, |ui| {
+        ui.colored_label(ERR, err);
+    });
+    let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+    Surface {
+        primitives,
+        textures_delta: output.textures_delta,
+        pixels_per_point: output.pixels_per_point,
+        // A failure message is static text — draw it once and idle.
+        repaint_after: Duration::MAX,
+    }
 }

@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["cryptography", "identity", "storage", "vault", "sthalam", "app_host"]
+members = ["cryptography", "identity", "storage", "vault", "data", "sthalam", "compositor", "app_host", "app_abi", "osvauld-app", "apps/counter"]
+# Apps are wasm artifacts, built explicitly for wasm32-unknown-unknown (e.g.
+# `cargo build -p counter-app --target wasm32-unknown-unknown`). Keep them out of
+# the default native build/test so root-level `cargo build`/`test` stays fast.
+default-members = ["cryptography", "identity", "storage", "vault", "data", "sthalam", "compositor", "app_host", "app_abi", "osvauld-app"]
 
 [workspace.package]
 version = "0.1.0"

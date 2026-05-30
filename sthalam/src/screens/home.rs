@@ -4,8 +4,14 @@ use vault::Vault;
 use super::common::{back_to_accounts, short_did};
 use crate::app::Screen;
 use crate::theme;
+use compositor::Workspace;
 
-pub fn home(ui: &mut egui::Ui, app: &mut app_host::App, vault: &mut Vault) -> Option<Screen> {
+pub fn home(
+    ui: &mut egui::Ui,
+    workspace: &mut Workspace,
+    vault: &mut Vault,
+    frame: &mut eframe::Frame,
+) -> Option<Screen> {
     let mut next = None;
     let current = vault.current();
 
@@ -24,11 +30,20 @@ pub fn home(ui: &mut egui::Ui, app: &mut app_host::App, vault: &mut Vault) -> Op
                         vault.lock();
                         next = back_to_accounts(vault);
                     }
+                    if ui.button("+ New counter").clicked() {
+                        // Spawn an app-cell mid-session — its own thread, renderer,
+                        // texture, and context — as a floating window.
+                        workspace.add_floating(crate::workspace::new_counter());
+                    }
                 });
             });
         });
 
     ui.add_space(24.0);
-    app.frame(ui);
+    if let Some(rs) = frame.wgpu_render_state() {
+        // The workspace draws both layers: the tiled tree fills the area, the
+        // floating windows draw on top.
+        workspace.ui(ui, rs);
+    }
     next
 }

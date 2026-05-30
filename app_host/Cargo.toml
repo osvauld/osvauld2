@@ -6,4 +6,7 @@ license.workspace = true
 
 [dependencies]
 egui = "0.34"
-rune = "0.14.2"
+# The wire contract shared with the guest SDK (osvauld-app).
+app_abi = { path = "../app_abi" }
+# Runs the sandboxed app modules.
+wasmtime = "44"

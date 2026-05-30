@@ -1,0 +1,12 @@
+[package]
+name = "app_abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# `serde` brings Serialize/Deserialize derives for egui's RawInput and epaint's
+# ClippedPrimitive / TexturesDelta — the types that make up the wire boundary.
+egui = { version = "0.34", features = ["serde"] }
+serde = { workspace = true }
+postcard = { version = "1", features = ["use-std"] }

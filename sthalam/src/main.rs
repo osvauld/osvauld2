@@ -2,6 +2,7 @@ mod app;
 mod components;
 mod screens;
 mod theme;
+mod workspace;
 
 use std::path::PathBuf;
 
@@ -27,7 +28,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "osvauld",
+        "sthalam",
         options,
         Box::new(|cc| {
             theme::apply(&cc.egui_ctx);

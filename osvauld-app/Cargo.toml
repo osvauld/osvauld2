@@ -1,0 +1,16 @@
+[package]
+name = "osvauld-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# An app is built as a `cdylib` for wasm32-unknown-unknown; the SDK is also a
+# normal `rlib` so the host workspace can build and unit-test it natively.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# The app links egui *directly* — the whole framework, no host-curated bindings.
+egui = "0.34"
+# The wire contract shared with the host.
+app_abi = { path = "../app_abi" }
