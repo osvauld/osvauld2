@@ -19,7 +19,7 @@ pub fn recovery(ui: &mut egui::Ui, words: &str, backdrop: &mut Backdrop) -> Opti
     warning_band(ui, content, button.top() - 18.0);
     controls::offset_button(ui, button, "I'VE SAVED IT ▸")
         .clicked()
-        .then(|| Screen::Home { workspace: Box::new(crate::workspace::demo_workspace()) })
+        .then(Screen::home)
 }
 
 // "OSVAULD · 01 · STHALAM" on the left; step dots + "02 / 03" on the right.

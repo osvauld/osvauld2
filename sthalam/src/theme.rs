@@ -62,6 +62,7 @@ fn install_fonts(ctx: &egui::Context) {
             .insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
     };
     add("inter", include_bytes!("../assets/fonts/Inter-Regular.ttf"));
+    add("inter_sb", include_bytes!("../assets/fonts/Inter-SemiBold.ttf"));
     add("jbmono", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"));
     add("jbmono_sb", include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"));
     add("vt323", include_bytes!("../assets/fonts/VT323-Regular.ttf"));
@@ -86,6 +87,13 @@ fn install_fonts(ctx: &egui::Context) {
     let mut sb = vec!["jbmono_sb".to_owned()];
     sb.extend(fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default());
     fonts.families.insert(FontFamily::Name("mono_sb".into()), sb);
+
+    // The doc editor's bold family (bold runs + headings): Inter SemiBold, then the
+    // proportional chain as glyph fallback. Registered under the editor's own name so the
+    // editor and shell can't drift apart.
+    let mut bold = vec!["inter_sb".to_owned()];
+    bold.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
+    fonts.families.insert(FontFamily::Name(doc_editor::theme::BOLD_FAMILY.into()), bold);
 
     ctx.set_fonts(fonts);
 }

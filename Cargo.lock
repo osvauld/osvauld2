@@ -142,10 +142,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "app_engine"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "taffy",
+]
+
+[[package]]
 name = "app_host"
 version = "0.1.0"
 dependencies = [
  "app_abi",
+ "app_engine",
  "egui",
  "wasmtime",
 ]
@@ -1095,6 +1104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "doc_editor"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "loro",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1869,6 +1887,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "grid"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2191,6 +2215,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "intro-app"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "osvauld-app",
 ]
 
 [[package]]
@@ -4198,7 +4230,9 @@ version = "0.1.0"
 dependencies = [
  "app_host",
  "compositor",
+ "doc_editor",
  "eframe",
+ "identity",
  "vault",
  "zeroize",
 ]
@@ -4255,6 +4289,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "taffy"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aea22054047c16c3f34d3ac473a2170be1424b1115b2a3adcf28cfb067c88859"
+dependencies = [
+ "arrayvec",
+ "grid",
+ "serde",
+ "slotmap",
 ]
 
 [[package]]

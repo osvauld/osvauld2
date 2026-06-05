@@ -1,0 +1,19 @@
+[package]
+name = "doc_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The editor is a widget over an `egui::Ui` — it doesn't own the window or the wgpu
+# stack (the shell does). So it depends only on egui, not eframe.
+egui = "0.34"
+# The document model is a Loro CRDT (same version the `data` crate pins). The editor
+# program and the network (courier, later) both feed one LoroDoc; bytes in/out are the
+# persistence + sync seam.
+loro = "1.12.0"
+
+[dev-dependencies]
+# The standalone runner — `cargo run -p doc_editor --example standalone` — hosts the
+# editor full-window so we can iterate on feel without the rest of the shell.
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }

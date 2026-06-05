@@ -1,6 +1,9 @@
+use doc_editor::{Doc, DocEditor};
 use eframe::egui;
 use vault::{AccountInfo, Vault};
 use zeroize::Zeroize;
+
+use compositor::Workspace;
 
 use crate::components::Backdrop;
 use crate::screens;
@@ -19,10 +22,22 @@ pub enum Screen {
     Accounts(AccountsView), // cached on entry — never re-read per frame
     Unlock(UnlockForm),
     Home {
-        /// The window manager: cells arranged as tabs, tiles, or floating windows.
-        /// Boxed so this large variant doesn't bloat every `Screen`.
-        workspace: Box<compositor::Workspace>,
+        /// The `.doc` editor's view state (caret, focus). The document itself is owned
+        /// separately so it can also be fed by the network and persisted.
+        editor: DocEditor,
+        /// The home document, loaded from the vault on this screen's first frame (where
+        /// the vault is unlocked) — see `screens::home`.
+        doc: Option<Doc>,
     },
+    /// A workspace of sandboxed wasm app-cells — the intro app, for the POC.
+    Workspace(Workspace),
+}
+
+impl Screen {
+    /// Enter the home screen with a fresh editor; the document loads lazily on first frame.
+    pub fn home() -> Self {
+        Screen::Home { editor: DocEditor::new(), doc: None }
+    }
 }
 
 // The login picker's state: the accounts (cached on entry) and which row is highlighted for
@@ -83,13 +98,34 @@ impl Sthalam {
 impl eframe::App for Sthalam {
     // eframe 0.34 wraps this in a CentralPanel and hands us the `ui` directly.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // The workspace screen composites wasm app-cells, which needs the wgpu
+        // RenderState from eframe — handled here rather than via a plain screen fn.
+        if matches!(self.screen, Screen::Workspace(_)) {
+            let mut back = false;
+            ui.horizontal(|ui| {
+                if ui.button("← back").clicked() {
+                    back = true;
+                }
+                ui.add_space(6.0);
+                ui.weak("intro");
+            });
+            if let (Screen::Workspace(ws), Some(rs)) = (&mut self.screen, frame.wgpu_render_state()) {
+                ws.ui(ui, rs);
+            }
+            if back {
+                self.screen = Screen::home();
+            }
+            return;
+        }
+
         // Disjoint borrows: the match holds `self.screen`, the arms take `self.vault`.
         let next = match &mut self.screen {
             Screen::Signup(form) => screens::signup(ui, &mut self.vault, form, &mut self.backdrop),
             Screen::Mnemonic(words) => screens::recovery(ui, words, &mut self.backdrop),
             Screen::Accounts(view) => screens::accounts(ui, view, &mut self.backdrop),
             Screen::Unlock(form) => screens::unlock(ui, &mut self.vault, form, &mut self.backdrop),
-            Screen::Home { workspace } => screens::home(ui, workspace, &mut self.vault, frame),
+            Screen::Home { editor, doc } => screens::home(ui, editor, doc, &mut self.vault),
+            Screen::Workspace(_) => None, // handled above
         };
         if let Some(next) = next {
             self.transition(next);

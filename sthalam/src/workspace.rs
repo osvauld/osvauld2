@@ -1,5 +1,9 @@
 //! Which app-cells the shell opens. A placeholder until apps are loaded from a
 //! node — for now every cell is the bundled counter.
+//!
+//! The tiled multi-app dock is kept for later, but Home currently opens a single `.doc`
+//! instead, so this demo is unused for now — silence its dead code rather than delete it.
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,6 +16,20 @@ pub fn demo_workspace() -> Workspace {
     Workspace::new(vec![
         AppView::new(app_host::App::counter, "Counter 1"),
         AppView::new(app_host::App::counter, "Counter 2"),
+    ])
+}
+
+/// The POC workspace: a single intro app cell (the "what is osvauld?" post).
+pub fn intro_workspace() -> Workspace {
+    Workspace::new(vec![AppView::new(app_host::App::intro, "intro")])
+}
+
+/// The engine workspace: the homegrown-engine demo cell alongside the wasm intro app, so
+/// the new render path is visible (and comparable) in the same dock.
+pub fn engine_workspace() -> Workspace {
+    Workspace::new(vec![
+        AppView::new(app_host::App::engine_demo, "engine"),
+        AppView::new(app_host::App::intro, "intro"),
     ])
 }
 

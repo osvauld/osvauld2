@@ -10,7 +10,8 @@
 #[cfg(test)]
 mod tests;
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
@@ -23,6 +24,11 @@ const ERR: egui::Color32 = egui::Color32::from_rgb(0xF4, 0x70, 0x68);
 /// so it resolves to the workspace `target/`. Override with `OSV_COUNTER_WASM`.
 const DEFAULT_COUNTER_WASM: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../target/wasm32-unknown-unknown/release/counter_app.wasm");
+
+/// Where `App::intro` looks for the built intro module (same scheme as counter).
+/// Override with `OSV_INTRO_WASM`.
+const DEFAULT_INTRO_WASM: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../target/wasm32-unknown-unknown/release/intro_app.wasm");
 
 /// One frame's worth of drawing, ready for the renderer: egui's own
 /// `ClippedPrimitive` list plus the texture uploads it references.
@@ -48,6 +54,9 @@ pub struct App {
 enum Inner {
     /// A live module instance.
     Wasm(WasmApp),
+    /// A homegrown-engine app (Lua-tree + native render), not a wasm sandbox. Its frame is
+    /// produced in-process, so there's no ABI round-trip — but it yields the same `Surface`.
+    Engine(app_engine::EngineApp),
     /// The app failed to load or trapped; the host renders the message inline.
     Failed(Failed),
 }
@@ -63,7 +72,26 @@ impl App {
     /// Load the counter app. Never fails the caller: a missing module or a load
     /// error is captured and rendered inline by `surface`.
     pub fn counter() -> Self {
-        let inner = match WasmApp::load(&counter_module()) {
+        Self::from_module(module(&counter_wasm_path(), "counter"))
+    }
+
+    /// Load the intro app (the POC surface). Same contract as `counter`: a missing
+    /// or broken module is captured and rendered inline. Override with `OSV_INTRO_WASM`.
+    pub fn intro() -> Self {
+        Self::from_module(module(&intro_wasm_path(), "intro"))
+    }
+
+    /// The homegrown-engine demo app — the render-spine slice (Taffy + egui paint over a
+    /// hand-built view tree). Built in-process, so unlike the wasm apps it can never fail to
+    /// load.
+    pub fn engine_demo() -> Self {
+        App { inner: Inner::Engine(app_engine::EngineApp::demo()) }
+    }
+
+    /// Build an `App` from a (maybe-failed) module: a load error is captured so
+    /// the host renders it inline instead of failing the caller.
+    fn from_module(module: Result<Module, String>) -> Self {
+        let inner = match WasmApp::load(&module) {
             Ok(app) => Inner::Wasm(app),
             Err(err) => Inner::Failed(Failed { err, ctx: egui::Context::default() }),
         };
@@ -78,6 +106,15 @@ impl App {
     pub fn surface(&mut self, input: egui::RawInput, pixels_per_point: f32) -> Surface {
         match &mut self.inner {
             Inner::Failed(f) => render_failure(&f.ctx, &f.err, input, pixels_per_point),
+            Inner::Engine(app) => {
+                let frame = app.frame(input, pixels_per_point);
+                Surface {
+                    primitives: frame.primitives,
+                    textures_delta: frame.textures_delta,
+                    pixels_per_point: frame.pixels_per_point,
+                    repaint_after: frame.repaint_after,
+                }
+            }
             Inner::Wasm(app) => match app.surface(&input, pixels_per_point) {
                 Ok(surface) => surface,
                 Err(err) => {
@@ -185,28 +222,33 @@ fn engine() -> &'static Engine {
     ENGINE.get_or_init(Engine::default)
 }
 
-/// Get the counter module — compiled once, then reused. Compiling the wasm to
-/// native code (`Module::new`, via Cranelift) dominates a cold start: seconds in
-/// a debug build. Two things keep us from paying it repeatedly: `get_or_init`
-/// compiles on one thread while the rest block (so cells spawned together share
-/// one compile, not N racing over cores), and [`load_counter_module`] caches the
-/// native artifact to a `.cwasm` a later run maps instead of recompiling — the
-/// "precompile once, map at runtime" model. `Module` is ref-counted (cheap clone
-/// per cell); a load error is memoized too, fine for a startup failure.
-fn counter_module() -> Result<Module, String> {
-    static MODULE: OnceLock<Result<Module, String>> = OnceLock::new();
-    MODULE.get_or_init(load_counter_module).clone()
+/// Get a compiled module for `path` — compiled once per path, then reused. Wasm
+/// is portable *bytecode*; wasmtime must compile it to native code (`Module::new`,
+/// via Cranelift) before it runs, and that dominates a cold start. Two caches
+/// avoid paying it twice: an in-process map (cells of one app spawned together
+/// share a compile) and a `<path>.cwasm` on disk a *later run* maps instead of
+/// recompiling — "precompile once, map at runtime" (effectively the app's
+/// *installed* form for this machine). `Module` is ref-counted (cheap clone per
+/// cell); a load error is memoized too. `label` names the app in the build-it
+/// error message.
+fn module(path: &str, label: &str) -> Result<Module, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Result<Module, String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().expect("module cache mutex poisoned");
+    map.entry(path.to_string())
+        .or_insert_with(|| load_module(path, label))
+        .clone()
 }
 
-/// Read the counter wasm and produce a ready `Module`, preferring a cached
-/// native build and falling back to a fresh compile (which it then caches).
-fn load_counter_module() -> Result<Module, String> {
-    let path = counter_wasm_path();
-    let wasm = std::fs::read(&path).map_err(|e| {
+/// Read `path`'s wasm and produce a ready `Module`, preferring a cached native
+/// build (`<path>.cwasm`) and falling back to a fresh compile (which it caches).
+fn load_module(path: &str, label: &str) -> Result<Module, String> {
+    let wasm = std::fs::read(path).map_err(|e| {
+        let upper = label.to_uppercase();
         format!(
-            "couldn't read counter wasm at {path}: {e}\nbuild it with:\n  \
-             cargo build -p counter-app --target wasm32-unknown-unknown --release\n\
-             or set OSV_COUNTER_WASM to its path"
+            "couldn't read {label} wasm at {path}: {e}\nbuild it with:\n  \
+             cargo build -p {label}-app --target wasm32-unknown-unknown --release\n\
+             or set OSV_{upper}_WASM to its path"
         )
     })?;
 
@@ -215,20 +257,20 @@ fn load_counter_module() -> Result<Module, String> {
     // artifact for this engine — they're ours, and a version/engine mismatch is
     // an `Err` (not UB), so a miss just falls through to a fresh compile.
     let cache = format!("{path}.cwasm");
-    if fresh(&cache, &path) {
+    if fresh(&cache, path) {
         if let Ok(bytes) = std::fs::read(&cache) {
-            if let Ok(module) = unsafe { Module::deserialize(engine(), &bytes) } {
-                return Ok(module);
+            if let Ok(m) = unsafe { Module::deserialize(engine(), &bytes) } {
+                return Ok(m);
             }
         }
     }
 
     // Slow path: compile wasm → native, then cache it for next time.
-    let module = Module::new(engine(), &wasm).map_err(|e| format!("compiling counter wasm: {e}"))?;
-    if let Ok(bytes) = module.serialize() {
+    let m = Module::new(engine(), &wasm).map_err(|e| format!("compiling {label} wasm: {e}"))?;
+    if let Ok(bytes) = m.serialize() {
         let _ = std::fs::write(&cache, bytes); // best-effort: a failure just recompiles next run
     }
-    Ok(module)
+    Ok(m)
 }
 
 /// Is `cache` present and at least as new as `source`? A wasm rebuild bumps the
@@ -242,6 +284,12 @@ fn fresh(cache: &str, source: &str) -> bool {
 /// workspace's default release artifact.
 fn counter_wasm_path() -> String {
     std::env::var("OSV_COUNTER_WASM").unwrap_or_else(|_| DEFAULT_COUNTER_WASM.to_string())
+}
+
+/// The path `App::intro` loads from: `OSV_INTRO_WASM` if set, else the
+/// workspace's default release artifact.
+fn intro_wasm_path() -> String {
+    std::env::var("OSV_INTRO_WASM").unwrap_or_else(|_| DEFAULT_INTRO_WASM.to_string())
 }
 
 /// Draw a failed app's error message on a host-side context and return it as a

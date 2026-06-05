@@ -65,6 +65,24 @@ impl Store {
         txn.commit()?;
         Ok(())
     }
+
+    /// Every key that begins with `prefix`, in sorted order. redb keeps keys
+    /// ordered, so this is a range scan from `prefix` that stops at the first key
+    /// that no longer shares it — the enumeration the keyspace comment anticipated.
+    pub fn list_prefixed(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(TABLE)?;
+        let mut keys = Vec::new();
+        for item in table.range(prefix..)? {
+            let (key, _value) = item?;
+            let key = key.value();
+            if !key.starts_with(prefix) {
+                break;
+            }
+            keys.push(key.to_string());
+        }
+        Ok(keys)
+    }
 }
 
 #[cfg(test)]

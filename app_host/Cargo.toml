@@ -8,5 +8,8 @@ license.workspace = true
 egui = "0.34"
 # The wire contract shared with the guest SDK (osvauld-app).
 app_abi = { path = "../app_abi" }
+# The homegrown engine for script/CRDT apps. `App` wraps one as a non-wasm cell kind, so
+# the compositor drives both behind the same `App::surface` seam.
+app_engine = { path = "../app_engine" }
 # Runs the sandboxed app modules.
 wasmtime = "44"

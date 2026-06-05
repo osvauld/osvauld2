@@ -8,7 +8,7 @@ mod error;
 use std::path::{Path, PathBuf};
 
 use identity::{Identity, Keystore, Mnemonic};
-use storage::Store;
+pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
@@ -24,8 +24,8 @@ struct Active {
     did: String,
     label: String,
     identity: Identity,
-    // Held to keep the account's db open for the session; Tier-1 data ops will use it.
-    #[allow(dead_code)]
+    // The account's data store, held open for the session — data layers (`.doc`
+    // snapshots, etc.) live here, exposed via `Vault::store`.
     store: Store,
 }
 
@@ -138,6 +138,12 @@ impl Vault {
 
     pub fn identity(&self) -> Option<&Identity> {
         self.active.as_ref().map(|active| &active.identity)
+    }
+
+    /// The active account's data store, for reading/writing encrypted data layers
+    /// (`.doc` snapshots and the like). `None` when locked.
+    pub fn store(&self) -> Option<&Store> {
+        self.active.as_ref().map(|active| &active.store)
     }
 
     pub fn current(&self) -> Option<AccountInfo> {

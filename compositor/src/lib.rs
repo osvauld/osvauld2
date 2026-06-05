@@ -376,16 +376,10 @@ impl TabViewer for CellViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut AppView) {
-        // SPIKE (temporary): plain content instead of `tab.show(ui, self.rs,
-        // ui.available_size(), focused)`. Tests whether egui_dock's tab-drag,
-        // re-dock, and drop-overlay work without our wgpu texture + input
-        // forwarding. If they do, the bug is in AppView::show's cell rendering.
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.heading(tab.title());
-            ui.label("SPIKE: plain cell — no wgpu texture, no input forwarding.");
-            ui.label("Drag this tab onto the dock to re-dock, or out to float.");
-            let _ = ui.button("a button (input test)");
-        });
+        // Composite the cell's real app surface (un-spiked): keyboard goes to the
+        // focused cell only.
+        let focused = self.focused.as_deref() == Some(tab.title());
+        tab.show(ui, self.rs, ui.available_size(), focused);
     }
 
     /// No scroll area around the cell — its surface fills the tab body exactly.

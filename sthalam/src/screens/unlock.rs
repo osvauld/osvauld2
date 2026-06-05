@@ -21,9 +21,7 @@ pub fn unlock(ui: &mut egui::Ui, vault: &mut Vault, form: &mut UnlockForm, backd
     if let Some(result) = poll_login(form) {
         match result {
             Ok(unlocked) => match vault.commit_login(unlocked) {
-                Ok(()) => {
-                    return Some(Screen::Home { workspace: Box::new(crate::workspace::demo_workspace()) })
-                }
+                Ok(()) => return Some(Screen::home()),
                 Err(error) => form.error = Some(error.to_string()),
             },
             Err(VaultError::WrongPassphrase) => {

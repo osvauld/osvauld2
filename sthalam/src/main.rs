@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod home_doc;
 mod screens;
 mod theme;
 mod workspace;

@@ -1,10 +1,38 @@
 [workspace]
 resolver = "2"
-members = ["cryptography", "identity", "storage", "vault", "data", "sthalam", "compositor", "app_host", "app_abi", "osvauld-app", "apps/counter"]
+members = [
+  "cryptography",
+  "identity",
+  "storage",
+  "vault",
+  "data",
+  "sthalam",
+  "compositor",
+  "app_host",
+  "app_abi",
+  "app_engine",
+  "osvauld-app",
+  "doc_editor",
+  "apps/counter",
+  "apps/intro",
+]
 # Apps are wasm artifacts, built explicitly for wasm32-unknown-unknown (e.g.
 # `cargo build -p counter-app --target wasm32-unknown-unknown`). Keep them out of
 # the default native build/test so root-level `cargo build`/`test` stays fast.
-default-members = ["cryptography", "identity", "storage", "vault", "data", "sthalam", "compositor", "app_host", "app_abi", "osvauld-app"]
+default-members = [
+  "cryptography",
+  "identity",
+  "storage",
+  "vault",
+  "data",
+  "sthalam",
+  "compositor",
+  "app_host",
+  "app_abi",
+  "app_engine",
+  "osvauld-app",
+  "doc_editor",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +41,7 @@ license = "MIT"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
