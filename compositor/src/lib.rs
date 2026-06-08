@@ -1,20 +1,15 @@
 //! Composites isolated app-cells into the shell.
 //!
-//! Each app runs on its own worker thread (performance isolation) that owns the
-//! `app_host::App`; only plain values cross the channels — a translated
-//! `RawInput` in, a `Surface` (GPU-ready triangles) out. The shell keeps the GPU
-//! to itself: it uploads a worker's latest surface into an offscreen
-//! `wgpu::Texture` via the app's *own* `egui_wgpu::Renderer` (so texture ids
-//! never collide with the shell's) and composites it into the workspace — a dock
-//! of tabs, tiles, and floating windows (egui_dock). The shell never blocks on a
-//! worker, so a slow app goes
-//! *stale* rather than stalling the others; and drawing is gated on need (input,
-//! animation, or a worker wake), so idle cells cost nothing. Moving to a process
-//! per app later changes only the channel transport.
+//! Each app runs on its own worker thread owning the `app_host::App`; only plain
+//! values cross the channels (`RawInput` in, GPU-ready `Surface` out). The shell
+//! keeps the GPU to itself, uploading each worker's latest surface into an
+//! offscreen texture via the app's *own* renderer (so texture ids never collide)
+//! and compositing it into an egui_dock of tabs/tiles/floating windows. It never
+//! blocks on a worker — a slow app goes stale rather than stalling the others —
+//! and draws only on need (input, animation, or a worker wake).
 
-// SPIKE (temporary): `CellViewer::ui` draws plain content instead of the cell's
-// wgpu texture, leaving the texture/input path unused — silence it here. Revert
-// this line together with the spike to restore strict dead-code checking.
+// SPIKE: `CellViewer::ui` draws plain content instead of the wgpu texture,
+// leaving the texture/input path unused. Revert with the spike.
 #![allow(dead_code)]
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -23,17 +18,15 @@ use std::thread;
 use std::time::Duration;
 
 use app_host::Surface;
-use egui_dock::{DockArea, DockState, TabViewer};
+use egui_dock::{DockArea, DockState, OverlayType, Style, TabViewer};
 use egui_wgpu::{RenderState, Renderer, RendererOptions, ScreenDescriptor};
 
-/// A requested repaint interval at or beyond this counts as idle — no redraw is
-/// scheduled. egui uses `Duration::MAX` for "no repaint wanted"; the finite cap
-/// also absorbs any absurdly-distant request.
+/// A requested repaint interval at or beyond this counts as idle (no redraw
+/// scheduled); the finite cap also absorbs egui's `Duration::MAX` "no repaint".
 const REPAINT_IDLE: Duration = Duration::from_secs(60);
 
-/// A slot the shell fills with its egui `Context` on a cell's first frame, so the
-/// worker can wake an idle shell when a surface is ready. `request_repaint` is
-/// thread-safe, so no lock is needed.
+/// Holds the shell's egui `Context` so an idle worker can wake the shell when a
+/// surface is ready. `request_repaint` is thread-safe, so no lock is needed.
 #[derive(Default)]
 struct RepaintTrigger(OnceLock<egui::Context>);
 
@@ -53,7 +46,7 @@ impl RepaintTrigger {
 pub struct AppView {
     /// Window title — also egui's tab id and the cell's tab label; unique per cell.
     title: String,
-    /// Translated input to the worker (latest-wins; never blocks the shell).
+    /// Input to the worker (latest-wins; never blocks the shell).
     input_tx: Sender<FrameInput>,
     /// Surfaces back from the worker. Dropping this stops the worker.
     surface_rx: Receiver<Surface>,
@@ -64,13 +57,13 @@ pub struct AppView {
     tex: Option<AppTex>,
     /// The image's screen rect last frame, to translate input into app space.
     last_rect: egui::Rect,
-    /// The newest surface's repaint request — drives whether the cell keeps a
-    /// redraw scheduled (animating) or idles until touched.
+    /// Newest surface's repaint request: drives whether the cell keeps a redraw
+    /// scheduled (animating) or idles until touched.
     repaint_after: Duration,
     /// True until the first surface is composited (cold-start bootstrap).
     awaiting_first: bool,
-    /// Whether the pointer was over the cell last frame, to send one `PointerGone`
-    /// on leave so hover highlights clear.
+    /// Pointer was over the cell last frame; on leave, send one `PointerGone` so
+    /// hover highlights clear.
     was_over: bool,
 }
 
@@ -90,8 +83,8 @@ struct AppTex {
 }
 
 impl AppView {
-    /// Create a cell and spawn its worker, which builds the app via `make_app` so
-    /// the wasm `Store` is born — and stays — on that thread.
+    /// Create a cell and spawn its worker. `make_app` runs on that worker so the
+    /// app's non-`Send` state (Lua VM, egui context) is born and stays there.
     pub fn new(
         make_app: impl FnOnce() -> app_host::App + Send + 'static,
         title: impl Into<String>,
@@ -112,15 +105,16 @@ impl AppView {
         }
     }
 
-    /// The cell's title — its egui tab id, and its tab label in the dock.
+    /// The cell's title — its egui tab id and tab label in the dock.
     pub fn title(&self) -> &str {
         &self.title
     }
 
-    /// One shell frame for the cell: advance its worker only if it needs it (idle
+    /// One shell frame for the cell: advance its worker only if needed (idle
     /// gating), composite the latest ready surface without blocking, and draw it
-    /// into `ui` at `target` logical size (the space the dock allotted this cell).
-    fn show(&mut self, ui: &mut egui::Ui, rs: &RenderState, target: egui::Vec2, focused: bool) {
+    /// into `ui` at `target` logical size. Returns whether a primary press landed
+    /// inside the cell this frame (the shell uses it to move keyboard focus here).
+    fn show(&mut self, ui: &mut egui::Ui, rs: &RenderState, target: egui::Vec2, focused: bool) -> bool {
         self.trigger.arm(ui.ctx().clone()); // idempotent
 
         let ppp = ui.ctx().pixels_per_point();
@@ -132,39 +126,36 @@ impl AppView {
             .get_or_insert_with(|| Renderer::new(&rs.device, rs.target_format, RendererOptions::default()));
         self.ensure_tex(rs, size_px);
 
-        // Place the texture first, so we know where it landed and whether the
-        // pointer is over *this* cell. `contains_pointer` is occlusion-aware, so a
-        // cell covered by another window reports "not over" even though the
-        // pointer is within its rect — that's what routes input to the front cell
-        // only. (Drawing before the render below is fine: `ui.image` just records
-        // a paint command, and the texture write still lands before frame paint.)
+        // Place the texture first to learn where it landed and whether the pointer
+        // is over *this* cell. `contains_pointer` is occlusion-aware, so a covered
+        // cell reports "not over" — that's what routes input to the front cell only.
+        // (Drawing before the render below is fine: `ui.image` only records a paint
+        // command, and the texture write still lands before frame paint.)
         let tex_id = self.tex.as_ref().expect("tex set above").id;
         let resp = ui.image(egui::load::SizedTexture::new(tex_id, logical));
         let over = resp.contains_pointer();
         self.last_rect = resp.rect;
 
-        let (raw, activity) = self.gather_input(ui, target, over, focused);
+        let (raw, activity, pressed_over) = self.gather_input(ui, target, over, focused);
 
-        // Advance the app only when there's a reason to: the user touched it, it's
-        // animating, or it hasn't drawn its first surface yet. Otherwise we don't
-        // even wake the worker.
+        // Advance the app only on a reason: touched, animating, or pre-first-surface.
         let wants_frame = self.repaint_after < REPAINT_IDLE;
         if activity || wants_frame || self.awaiting_first {
             let _ = self.input_tx.send(FrameInput { raw, pixels_per_point: ppp });
         }
 
-        // Keep a redraw scheduled only while needed: poll during bootstrap, follow
-        // the app's cadence while animating. An idle cell schedules nothing — egui
-        // repaints on input, and the worker wakes us when a surface arrives.
+        // Schedule a redraw only while needed: poll during bootstrap, follow the
+        // app's cadence while animating. An idle cell schedules nothing — egui
+        // repaints on input and the worker wakes us when a surface arrives.
         if self.awaiting_first {
             ui.ctx().request_repaint();
         } else if wants_frame {
             ui.ctx().request_repaint_after(self.repaint_after);
         }
 
-        // Drain every ready surface. egui's texture deltas are incremental (the
-        // font atlas ships only in the first surface), so apply *all* of them;
-        // render only the newest geometry.
+        // Drain every ready surface: egui's texture deltas are incremental (font
+        // atlas ships only in the first), so apply *all* of them but render only
+        // the newest geometry.
         let renderer = self.renderer.as_mut().expect("renderer set above");
         let mut newest: Option<(Vec<egui::ClippedPrimitive>, f32)> = None;
         while let Ok(surface) = self.surface_rx.try_recv() {
@@ -183,10 +174,12 @@ impl AppView {
         if let Some((primitives, surf_ppp)) = newest {
             self.render_into_tex(rs, size_px, &primitives, surf_ppp);
         }
+
+        pressed_over
     }
 
-    /// Paint the newest primitives into the offscreen texture. Deltas are applied
-    /// by the caller during draining, since they must not be skipped.
+    /// Paint the newest primitives into the offscreen texture. The caller applies
+    /// texture deltas during draining, since those must not be skipped.
     fn render_into_tex(
         &mut self,
         rs: &RenderState,
@@ -222,8 +215,8 @@ impl AppView {
     }
 
     /// (Re)create the offscreen texture on a size change, register it with the
-    /// shell's renderer (freeing the old one), and clear it so nothing garbage
-    /// shows before the first surface.
+    /// shell's renderer (freeing the old), and clear it so no garbage shows before
+    /// the first surface.
     fn ensure_tex(&mut self, rs: &RenderState, size_px: [u32; 2]) {
         if self.tex.as_ref().map(|t| t.size_px) == Some(size_px) {
             return;
@@ -243,7 +236,6 @@ impl AppView {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Clear once so the first frames (before any surface) aren't garbage.
         let mut encoder =
             rs.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear_app_tex") });
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -266,11 +258,16 @@ impl AppView {
     }
 
     /// Build the app's `RawInput` and report whether it carried anything the app
-    /// reacts to. `over` (the cell's occlusion-aware `contains_pointer`) gates
-    /// pointer input, so events reach a cell only when it's the front one under
-    /// the cursor; keyboard reaches the app only when `focused`. Pointer
-    /// positions are translated into the app's own (0,0)-based space.
-    fn gather_input(&mut self, ui: &egui::Ui, size: egui::Vec2, over: bool, focused: bool) -> (egui::RawInput, bool) {
+    /// reacts to. `over` gates pointer input (front cell under the cursor only),
+    /// `focused` gates keyboard; pointer positions are translated into the app's
+    /// own (0,0)-based space.
+    fn gather_input(
+        &mut self,
+        ui: &egui::Ui,
+        size: egui::Vec2,
+        over: bool,
+        focused: bool,
+    ) -> (egui::RawInput, bool, bool) {
         let origin = self.last_rect.min.to_vec2();
         let was_over = self.was_over;
         let mut raw = egui::RawInput {
@@ -279,6 +276,9 @@ impl AppView {
             ..Default::default()
         };
         let mut activity = false;
+        // A primary press inside the cell this frame: the shell uses it to grant
+        // keyboard focus (egui_dock's body-click focus is unreliable for image cells).
+        let mut pressed_over = false;
         ui.input(|i| {
             raw.time = Some(i.time);
             raw.modifiers = i.modifiers;
@@ -296,6 +296,9 @@ impl AppView {
                             modifiers: *modifiers,
                         });
                         activity = true;
+                        if *pressed && *button == egui::PointerButton::Primary {
+                            pressed_over = true;
+                        }
                     }
                     egui::Event::MouseWheel { .. } | egui::Event::Zoom(_) if over => {
                         raw.events.push(ev.clone());
@@ -318,28 +321,31 @@ impl AppView {
             }
         });
         self.was_over = over;
-        (raw, activity)
+        (raw, activity, pressed_over)
     }
 }
 
 // --- Window manager ----------------------------------------------------------
 //
-// egui_dock owns the whole layout: tabs, splits/tiles, and floating windows, with
-// the user dragging cells freely between all three. We supply only each cell's
-// content (its app surface) through a `TabViewer`; the dock does the rest.
+// egui_dock owns the whole layout (tabs, tiles, floating windows); we supply only
+// each cell's content (its app surface) through a `TabViewer`.
 
 /// The shell's window manager: a dock of cells the user arranges as tabs, tiles,
 /// or floating windows.
 pub struct Workspace {
     dock: DockState<AppView>,
+    /// Which cell owns the keyboard, by title. We track it ourselves because
+    /// egui_dock's body-click focus is unreliable for our wgpu-texture cells.
+    kbd_focus: Option<String>,
+    /// Last frame's egui_dock focus, to detect a tab switch (which moves keyboard).
+    prev_dock_focus: Option<String>,
 }
 
 impl Workspace {
-    /// Open a workspace with `tabbed` cells in one tab group. The user can drag a
-    /// tab out to split it into a tile or pop it into a floating window. Further
-    /// cells open floating via [`Workspace::add_floating`].
+    /// Open a workspace with `tabbed` cells in one tab group. Further cells open
+    /// floating via [`Workspace::add_floating`].
     pub fn new(tabbed: Vec<AppView>) -> Self {
-        Self { dock: DockState::new(tabbed) }
+        Self { dock: DockState::new(tabbed), kbd_focus: None, prev_dock_focus: None }
     }
 
     /// Open a cell as a floating window; the user can dock it by dragging its tab
@@ -348,24 +354,56 @@ impl Workspace {
         self.dock.add_window(vec![app]);
     }
 
-    /// Draw the whole dock for one frame — tabs, tiles, and floating windows.
-    /// Keyboard goes only to the focused cell (the dock tracks which that is).
+    /// Draw the whole dock for one frame. Keyboard goes only to the focused cell.
     pub fn ui(&mut self, ui: &mut egui::Ui, rs: &RenderState) {
-        // The dock tracks one focused leaf; route keyboard to its active cell.
-        // Snapshot its title (owned) first, so that borrow ends before the dock is
-        // borrowed again to draw.
-        let focused = self.dock.find_active_focused().map(|(_, tab)| tab.title().to_owned());
-        let mut viewer = CellViewer { rs, focused };
-        DockArea::new(&mut self.dock).show_inside(ui, &mut viewer);
+        // egui_dock's focused leaf catches tab-header clicks reliably but body
+        // clicks only unreliably (the leaf focus hinges on a layer test our image
+        // cells fail), so we track body presses ourselves and treat either signal
+        // as "focus this cell". Snapshot the owned title so the borrow ends first.
+        let dock_focus = self.dock.find_active_focused().map(|(_, tab)| tab.title().to_owned());
+        if dock_focus.is_some() && dock_focus != self.prev_dock_focus {
+            self.kbd_focus = dock_focus.clone(); // a tab switch moves keyboard
+        }
+        self.prev_dock_focus = dock_focus;
+
+        let style = dock_style(ui);
+        let mut viewer = CellViewer { rs, focused: self.kbd_focus.clone(), claimed: None };
+        DockArea::new(&mut self.dock).style(style).show_inside(ui, &mut viewer);
+
+        // A primary press inside a cell body this frame claims keyboard from the next frame on.
+        if let Some(title) = viewer.claimed {
+            self.kbd_focus = Some(title);
+        }
     }
 }
 
+/// The dock style for one frame, derived from the shell's egui theme (tab bar,
+/// separators, buttons) with two overrides:
+///
+/// - **Position-based drop overlay** (`HighlightedAreas`) instead of egui_dock's
+///   default center button-cluster. The cluster forces you to aim the pointer at a
+///   widget in the *center* of the target — but the dragged cell follows the pointer
+///   and (egui_dock keeps one shared "hovered leaf" slot, last-drawn wins) shadows
+///   the target as you move onto it, so the cluster vanishes mid-aim. Position-based
+///   docking reads the drop zone from where the pointer already is (center → tabify,
+///   edges → split), so there's nothing to chase.
+/// - **Drop highlight in the shell accent** rather than egui_dock's hardcoded cyan.
+fn dock_style(ui: &egui::Ui) -> Style {
+    let mut style = Style::from_egui(ui.style().as_ref());
+    style.overlay.overlay_type = OverlayType::HighlightedAreas;
+    style.overlay.selection_color = ui.visuals().selection.bg_fill;
+    style
+}
+
 /// egui_dock adapter: paints each cell's surface as the tab body, routing keyboard
-/// only to the focused cell. The dock owns all layout and dragging.
+/// only to the focused cell.
 struct CellViewer<'a> {
     rs: &'a RenderState,
     /// Title of the cell that holds focus, so keyboard reaches only it.
     focused: Option<String>,
+    /// Set to a cell's title when it takes a primary press this frame; the shell
+    /// promotes it to keyboard focus next frame.
+    claimed: Option<String>,
 }
 
 impl TabViewer for CellViewer<'_> {
@@ -376,13 +414,15 @@ impl TabViewer for CellViewer<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut AppView) {
-        // Composite the cell's real app surface (un-spiked): keyboard goes to the
-        // focused cell only.
+        // A press inside the cell claims focus for next frame (our reliable
+        // body-click focus); keyboard reaches only the focused cell.
         let focused = self.focused.as_deref() == Some(tab.title());
-        tab.show(ui, self.rs, ui.available_size(), focused);
+        if tab.show(ui, self.rs, ui.available_size(), focused) {
+            self.claimed = Some(tab.title().to_owned());
+        }
     }
 
-    /// No scroll area around the cell — its surface fills the tab body exactly.
+    /// No scroll area: the cell's surface fills the tab body exactly.
     fn scroll_bars(&self, _tab: &AppView) -> [bool; 2] {
         [false, false]
     }
@@ -390,7 +430,7 @@ impl TabViewer for CellViewer<'_> {
 
 /// Spawn a worker that owns the app and turns input frames into surfaces. It
 /// parks on the input channel (no CPU when idle) and exits when the shell drops
-/// either channel end.
+/// a channel end.
 fn spawn_worker(
     make_app: impl FnOnce() -> app_host::App + Send + 'static,
     trigger: Arc<RepaintTrigger>,
@@ -410,8 +450,8 @@ fn spawn_worker(
     (input_tx, surface_rx)
 }
 
-/// Block for the next input frame, then collapse any already queued into it —
-/// keeping the newest geometry but concatenating every frame's events, so a slow
+/// Block for the next input frame, then collapse any already queued into it:
+/// newest geometry wins but every frame's events are concatenated, so a slow
 /// worker drops stale *moves* yet never loses a *click*. `None` once disconnected.
 fn recv_latest(rx: &Receiver<FrameInput>) -> Option<FrameInput> {
     let mut input = rx.recv().ok()?;
@@ -432,8 +472,6 @@ mod tests {
         egui::Event::PointerMoved(egui::pos2(n, n))
     }
 
-    // A backed-up worker collapses queued frames to the newest geometry/ppp while
-    // keeping every event in order — so clicks are never dropped.
     #[test]
     fn recv_latest_merges_events_keeps_newest_ppp() {
         let (tx, rx) = mpsc::channel::<FrameInput>();
@@ -457,7 +495,6 @@ mod tests {
         assert_eq!(xs, [1.0, 2.0, 3.0], "all events preserved, in arrival order");
     }
 
-    // When the shell drops its sender, the worker's wait ends instead of hanging.
     #[test]
     fn recv_latest_returns_none_when_shell_disconnects() {
         let (tx, rx) = mpsc::channel::<FrameInput>();

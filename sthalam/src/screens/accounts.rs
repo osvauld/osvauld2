@@ -1,6 +1,5 @@
-// The login picker: the device's identities as a vertical list (identicon · name · DID),
-// the selected row carrying the accent left-rule. ↑↓ move the selection, ↩ or a click opens
-// that identity's unlock screen. add-account and recover sit as quiet links underneath.
+// The login picker: the device's identities as a vertical list. ↑↓ move the selection, ↩ or
+// a click opens that identity's unlock screen.
 
 use eframe::egui::{self, Align2, CornerRadius, FontFamily, FontId, RichText, Sense, Stroke, StrokeKind};
 use vault::AccountInfo;
@@ -47,7 +46,7 @@ pub fn accounts(ui: &mut egui::Ui, view: &mut AccountsView, backdrop: &mut Backd
                             next = Some(Screen::Signup(SignupForm { from_accounts: true, ..Default::default() }));
                         }
                         ui.label(RichText::new("·").font(FontId::new(11.0, FontFamily::Monospace)).color(theme::FG_4));
-                        // Recover needs the import screen + vault::import (deferred); shown per the design.
+                        // Recover needs the import screen + vault::import (deferred).
                         let _ = quiet_link(ui, "↺ RECOVER WITH PHRASE");
                     });
                 });

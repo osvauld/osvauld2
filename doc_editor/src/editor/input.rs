@@ -1,6 +1,5 @@
-//! **Input / editing**: text insertion, the markdown input rules, the keyboard map, and the
-//! block-editing operations (split / merge / indent) plus caret movement. Every method here
-//! turns a raw key/text event into Loro ops on the document and moves the caret.
+//! Input / editing: text insertion, markdown input rules, the keyboard map, block-editing
+//! ops (split / merge / indent), and caret movement. Each turns a key/text event into Loro ops.
 
 use egui::{text::CCursor, Key, Modifiers, Vec2};
 
@@ -8,6 +7,16 @@ use crate::block;
 use crate::model::{BlockKind, Doc};
 
 use super::{Caret, DocEditor, Placed};
+
+/// Inline markdown delimiters → the mark they apply, in match order (double before single, so
+/// `**` beats `*`). Each is its own opener *and* closer.
+const INLINE_RULES: &[(&str, &str)] = &[
+    ("**", "bold"),
+    ("~~", "strike"),
+    ("`", "code"),
+    ("*", "italic"),
+    ("_", "italic"),
+];
 
 impl DocEditor {
     pub(super) fn insert_text(&mut self, doc: &Doc, t: &str) -> bool {
@@ -35,11 +44,8 @@ impl DocEditor {
         }
         let text = doc.text(c.block);
 
-        // Simple conversions, sourced from each kind's `md_prefixes` in `block::SPECS`: strip
-        // the prefix and set the kind, keeping the caret. (Prefixes are mutually exclusive —
-        // each carries its exact `#`-count / trailing space — so table order is irrelevant.)
-        // `Code`'s ``` folds in cleanly: stripping its 3 chars and setting Code is identical
-        // to the old special case.
+        // Strip the prefix and set the kind, keeping the caret. Prefixes are mutually exclusive
+        // (each carries its exact `#`-count / trailing space), so table order is irrelevant.
         for spec in block::SPECS {
             for prefix in spec.md_prefixes {
                 if text.starts_with(*prefix) {
@@ -47,6 +53,24 @@ impl DocEditor {
                     doc.delete_text(c.block, 0, n);
                     doc.set_kind(c.block, spec.kind);
                     self.set_caret(Caret { block: c.block, index: c.index.saturating_sub(n) });
+                    return;
+                }
+            }
+        }
+
+        // Code fence is special (like Divider): ```␣ → plain code, ```lang␣ → code with that
+        // language. The trailing space is the trigger (so you can type the language between the
+        // fence and the space); the whole `` ```lang `` prefix is consumed. An unknown language
+        // is still stored (it just renders un-highlighted), so new grammars work retroactively.
+        if let Some(after) = text.strip_prefix("```") {
+            if let Some(lang) = after.strip_suffix(' ') {
+                if !lang.contains(char::is_whitespace) {
+                    doc.delete_text(c.block, 0, text.chars().count());
+                    doc.set_kind(c.block, BlockKind::Code);
+                    if !lang.is_empty() {
+                        doc.set_lang(c.block, &lang.to_ascii_lowercase());
+                    }
+                    self.set_caret(Caret { block: c.block, index: 0 });
                     return;
                 }
             }
@@ -63,9 +87,61 @@ impl DocEditor {
         }
     }
 
+    /// If the just-typed char closed `**bold**`, `*italic*`/`_italic_`, `~~strike~~`, or
+    /// `` `code` ``, strip both delimiters and mark the inner text. Double delimiters win over
+    /// single (checked in `INLINE_RULES` order). Runs after each insertion.
+    pub(super) fn apply_inline_markdown(&mut self, doc: &Doc) {
+        let c = self.caret();
+        if matches!(doc.kind(c.block), BlockKind::Code | BlockKind::Divider) {
+            return; // code is literal; a divider has no text
+        }
+        let chars: Vec<char> = doc.text(c.block).chars().collect();
+        let caret = c.index;
+        for (delim, key) in INLINE_RULES {
+            let d: Vec<char> = delim.chars().collect();
+            let dl = d.len();
+            // Need at least open + 1 char of content + close.
+            if caret < 2 * dl + 1 || chars[caret - dl..caret] != d[..] {
+                continue;
+            }
+            // The content's last char (just before the closing delim) must be real, not a
+            // space or another delimiter char (avoids `a * b *` and `** **`).
+            let last = chars[caret - dl - 1];
+            if last.is_whitespace() || last == d[0] {
+                continue;
+            }
+            // Walk left for the nearest opening delimiter whose content is well-formed.
+            let dc = d[0];
+            let mut found = None;
+            let mut o = caret as isize - 2 * dl as isize - 1;
+            while o >= 0 {
+                let oi = o as usize;
+                if chars[oi..oi + dl] == d[..] {
+                    let after = chars[oi + dl]; // content start (always in range here)
+                    let standalone = oi == 0 || chars[oi - 1] != dc;
+                    if after != dc && !after.is_whitespace() && standalone {
+                        found = Some(oi);
+                        break;
+                    }
+                }
+                o -= 1;
+            }
+            let Some(open) = found else { continue };
+            // Strip the closing delimiter, then the opening (later index first so the earlier
+            // stays valid). Content collapses left by `dl`; mark the result.
+            doc.delete_text(c.block, caret - dl, dl);
+            doc.delete_text(c.block, open, dl);
+            let end = caret - 2 * dl;
+            doc.mark(c.block, open, end, key);
+            self.set_caret(Caret { block: c.block, index: end });
+            self.desired_x = None;
+            return;
+        }
+    }
+
     pub(super) fn handle_key(&mut self, doc: &Doc, key: Key, mods: Modifiers, placed: &[Placed], read_only: bool) -> bool {
         match key {
-            // --- Mutations: suppressed in a reader (fall through to no-op) ---
+            // Mutations: suppressed in a reader (fall through to no-op).
             Key::Enter if !read_only => {
                 self.enter(doc, mods.shift);
                 true
@@ -79,12 +155,12 @@ impl DocEditor {
                 true
             }
             Key::Tab if !read_only => self.reindent(doc, !mods.shift),
-            // --- Inline marks: toggle over the selection (Cmd/Ctrl + key) ---
+            // Inline marks: toggle over the selection.
             Key::B if mods.command && !read_only => self.toggle_mark(doc, "bold"),
             Key::I if mods.command && !read_only => self.toggle_mark(doc, "italic"),
             Key::E if mods.command && !read_only => self.toggle_mark(doc, "code"),
             Key::S if mods.command && mods.shift && !read_only => self.toggle_mark(doc, "strike"),
-            // --- Navigation / selection: always live (read-only safe) ---
+            // Navigation / selection: always live (read-only safe).
             Key::ArrowLeft => {
                 self.move_left(doc, mods.shift);
                 false
@@ -131,8 +207,8 @@ impl DocEditor {
             return;
         }
         if (kind.is_list() || kind == BlockKind::Quote) && doc.text_len(c.block) == 0 {
-            // Enter on an empty *nested* item lifts it one level (staying the same kind); at
-            // the top level there's nowhere to lift, so it falls back to a plain paragraph.
+            // Empty nested item lifts one level; at the top level there's nowhere to lift,
+            // so it falls back to a plain paragraph.
             if !doc.outdent(c.block) {
                 doc.set_kind(c.block, BlockKind::Paragraph);
             }
@@ -160,9 +236,7 @@ impl DocEditor {
         let total = doc.text_len(c.block);
         let tail: String = doc.text(c.block).chars().skip(c.index).collect();
         doc.delete_text(c.block, c.index, total - c.index);
-        // The tail rides into a sibling right after this block — same parent, so it inherits
-        // the nesting depth automatically. A list continues its kind; anything else splits
-        // into a paragraph.
+        // The tail becomes a sibling right after this block (same parent), inheriting its depth.
         let new_kind = if kind.is_list() { kind } else { BlockKind::Paragraph };
         let new = doc.insert_after(c.block, new_kind, &tail);
         self.set_caret(Caret { block: new, index: 0 });
@@ -295,8 +369,7 @@ impl DocEditor {
     }
 
     /// Up/Down by one visual line, crossing into the adjacent block at the first/last row.
-    /// Driven by galley geometry + a sticky x, so it works inside wrapped paragraphs and
-    /// across blocks the same way. `extend` grows the selection instead of collapsing.
+    /// Driven by galley geometry + a sticky x, so it works inside wrapped paragraphs too.
     fn move_vertical(&mut self, doc: &Doc, placed: &[Placed], dir: i32, extend: bool) {
         let c = self.caret();
         let ids = doc.block_ids();

@@ -1,9 +1,9 @@
 mod app;
+mod bridge;
 mod components;
-mod home_doc;
 mod screens;
+mod shell;
 mod theme;
-mod workspace;
 
 use std::path::PathBuf;
 
@@ -11,8 +11,7 @@ use app::Sthalam;
 use eframe::egui;
 
 fn main() -> eframe::Result {
-    // The driver resolves the data dir (env override, else the OS default); vault itself
-    // never parses arguments.
+    // Data dir: env override, else the OS default (vault never parses arguments).
     let data_dir = std::env::var_os("OSVAULD_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(vault::default_dir);

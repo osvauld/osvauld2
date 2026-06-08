@@ -1,17 +1,12 @@
 //! The declarative view tree an app produces, and its `Style`.
 //!
-//! A [`Node`] is a box: it has a [`Style`], optional `text`, and `children`. This is the
-//! Rust mirror of the `{tag, props, children}` table a Lua app will eventually return —
-//! built by hand for now so the render spine (layout → paint) can be proven before the
-//! script layer lands.
-//!
-//! [`Style`] is a small, **flat** subset of CSS — inline attributes, no cascade ("CSS-like
-//! attributes are enough"). The layout fields map onto Taffy; the paint fields
-//! (`background`, `corner_radius`, `color`, `font_size`) are read straight by the painter.
-//! The builder methods (`col`/`row`/`text`, then `.padding(..)`, `.bg(..)`, …) keep a tree
-//! readable to write by hand.
+//! A [`Node`] is a box with a [`Style`], optional `text`, and `children` — the Rust mirror of
+//! the `{tag, props, children}` table a Lua app returns. [`Style`] is a flat subset of CSS
+//! (inline attributes, no cascade): layout fields map onto Taffy, paint fields are read straight
+//! by the painter.
 
 use egui::Color32;
+use rich_text::Run;
 use taffy::prelude::{auto, length, percent};
 use taffy::{Dimension, Display, FlexDirection, Rect as TaffyRect, Size, Style as TaffyStyle};
 
@@ -42,8 +37,8 @@ pub enum Direction {
     Column,
 }
 
-/// The inline style on one node. Flat by design — there is no cascade or inheritance; a
-/// node carries every value it's drawn with.
+/// The inline style on one node. Flat by design — no cascade or inheritance; a node carries
+/// every value it's drawn with.
 #[derive(Clone, Debug)]
 pub struct Style {
     pub direction: Direction,
@@ -80,8 +75,8 @@ impl Default for Style {
 }
 
 impl Style {
-    /// Lower the layout-relevant fields onto a Taffy style. Every node is a flex container;
-    /// a text leaf is just a flex node whose size comes from a measured galley.
+    /// Lower the layout-relevant fields onto a Taffy style. Every node is a flex container; a
+    /// text leaf is a flex node whose size comes from a measured galley.
     pub(crate) fn to_taffy(&self) -> TaffyStyle {
         TaffyStyle {
             display: Display::Flex,
@@ -103,29 +98,79 @@ impl Style {
     }
 }
 
-/// One node in the view tree: a styled box that is either a container (`children`) or a
-/// text leaf (`text`).
+/// One node in the view tree: a styled box that is either a container (`children`) or a text
+/// leaf (`text`).
+///
+/// `on_click` is an opaque handler id the script layer assigns (a Lua closure index); the render
+/// core just carries it through layout so a click can be dispatched. `hover` / `active` are
+/// paint-only state styles applied over `style` — layout uses `style` only, so a state never
+/// reflows the box. `editor` makes a text leaf editable, carrying a stable id by which the engine
+/// keys its retained caret/selection (the tree is rebuilt every frame, so a caret can't live on
+/// the node).
 #[derive(Clone, Debug)]
 pub struct Node {
     pub style: Style,
-    pub text: Option<String>,
+    /// A text leaf's content as styled [`Run`]s (plain text is one unmarked run). `None` for a
+    /// container. Rendered through `rich_text`, so any text can carry marks.
+    pub text: Option<Vec<Run>>,
     pub children: Vec<Node>,
+    pub on_click: Option<u32>,
+    pub hover: Option<Style>,
+    pub active: Option<Style>,
+    /// `Some(id)` ⇒ this text leaf is an **editable field** with that stable id; `None` for
+    /// plain text and containers.
+    pub editor: Option<String>,
+    /// `Some(id)` ⇒ this container scrolls its content vertically, offset kept across frames keyed
+    /// by `id` (`""` for the common single-scroll case). The box stays its laid-out size; taller
+    /// content is clipped to it and offset by the scroll position.
+    pub scroll: Option<String>,
 }
 
 impl Node {
+    fn base(style: Style, text: Option<Vec<Run>>) -> Self {
+        Node {
+            style,
+            text,
+            children: Vec::new(),
+            on_click: None,
+            hover: None,
+            active: None,
+            editor: None,
+            scroll: None,
+        }
+    }
+
     /// A column container (children stack top-to-bottom).
     pub fn col() -> Self {
-        Node { style: Style { direction: Direction::Column, ..Style::default() }, text: None, children: Vec::new() }
+        Node::base(Style { direction: Direction::Column, ..Style::default() }, None)
     }
 
     /// A row container (children flow left-to-right).
     pub fn row() -> Self {
-        Node { style: Style { direction: Direction::Row, ..Style::default() }, text: None, children: Vec::new() }
+        Node::base(Style { direction: Direction::Row, ..Style::default() }, None)
     }
 
-    /// A text leaf. Its box sizes to the shaped, wrapped galley plus this node's padding.
+    /// A plain text leaf (one unmarked run), sized to its shaped/wrapped galley plus padding.
     pub fn text(s: impl Into<String>) -> Self {
-        Node { style: Style::default(), text: Some(s.into()), children: Vec::new() }
+        Node::base(Style::default(), Some(vec![Run::plain(s)]))
+    }
+
+    /// A text leaf from explicit styled runs (marks/colour) — for rich content.
+    pub fn runs(runs: Vec<Run>) -> Self {
+        Node::base(Style::default(), Some(runs))
+    }
+
+    /// An editable text leaf bound to a stable `id`: `runs` are the backing buffer's content
+    /// (re-read each frame), and the engine keys this field's caret/selection and input by `id`.
+    pub fn editor(id: impl Into<String>, runs: Vec<Run>) -> Self {
+        let mut node = Node::base(Style::default(), Some(runs));
+        node.editor = Some(id.into());
+        node
+    }
+
+    /// This node's text as a plain concatenated string (runs joined), if it's a text leaf.
+    pub fn plain_text(&self) -> Option<String> {
+        self.text.as_ref().map(|runs| runs.iter().map(|r| r.text.as_str()).collect())
     }
 
     pub fn children(mut self, children: Vec<Node>) -> Self {

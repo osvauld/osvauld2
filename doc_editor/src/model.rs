@@ -1,12 +1,8 @@
-//! The document model — a **Loro CRDT**.
+//! The document model — a Loro CRDT. One `.doc` is one [`loro::LoroDoc`], the single merge point
+//! for editor ops, remote updates ([`Doc::import`]), and persistence ([`Doc::export_snapshot`]);
+//! concurrent edits merge without conflict.
 //!
-//! One `.doc` is one [`loro::LoroDoc`], and it is the single **merge point**: the editor
-//! program applies block/text operations to it, the network (courier, later) feeds it
-//! remote updates via [`Doc::import`], and persistence reads a snapshot via
-//! [`Doc::export_snapshot`]. Because it's a CRDT, concurrent edits from those sources
-//! merge without conflict.
-//!
-//! **Schema (block tree):**
+//! Schema (block tree):
 //! ```text
 //! LoroTree "body"                     ← the block hierarchy: real parent/child nesting
 //!   each node (TreeID) = one block; a node's children are its nested blocks
@@ -16,25 +12,22 @@
 //!       ├─ "lang"    : string          ← code-block language tag
 //!       └─ "content" : LoroText        ← the block's text (marks come later)
 //! ```
-//! **Nesting is structural**, not a stored number: [`indent`](Doc::indent) / [`outdent`](Doc::outdent)
-//! reparent the node (`indent` → child of its previous sibling; `outdent` → sibling after its
-//! parent), and [`depth`](Doc::depth) is the count of ancestors. Document order is a pre-order
-//! DFS ([`blocks`](Doc::blocks)), so a parent is immediately followed by its subtree — exactly
-//! the visual top-to-bottom order the editor lays out and navigates by.
-//!
-//! Block identity is the stable `TreeID` (survives reorders and remote edits); the caret
-//! is anchored to it, not to a list index. Text positions are Unicode code points, which
-//! is exactly what egui's caret (`CCursor`) counts — so caret offsets map straight across.
+//! Nesting is structural, not a stored number: [`indent`](Doc::indent)/[`outdent`](Doc::outdent)
+//! reparent the node, [`depth`](Doc::depth) counts ancestors. Document order is a pre-order DFS
+//! ([`blocks`](Doc::blocks)) — a parent immediately followed by its subtree — the visual order
+//! the editor lays out by. Block identity is the stable `TreeID` (the caret anchors to it, not an
+//! index); text positions are Unicode code points, matching egui's `CCursor`.
 
 use std::cell::RefCell;
 
 use loro::{
-    ExportMode, LoroDoc, LoroError, LoroText, LoroTree, LoroValue, TextDelta, TreeID,
-    TreeParentId, UndoManager, ValueOrContainer,
+    ExpandType, ExportMode, LoroDoc, LoroError, LoroText, LoroTree, LoroValue, StyleConfig,
+    StyleConfigMap, TextDelta, TreeID, TreeParentId, UndoManager, ValueOrContainer,
 };
+use rich_text::{Marks, Run};
 
-/// What a block *is* — drives the type scale and editing behaviour. Stored as a short
-/// string in the node's `meta["kind"]`.
+/// What a block is — drives the type scale and editing behaviour. Stored as a short string in
+/// `meta["kind"]`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
     Paragraph,
@@ -86,45 +79,12 @@ impl BlockKind {
     }
 }
 
-/// A styled span of a block's text — a substring plus the inline marks active on it. This is
-/// the *read shape* the editor lays out: one block's [`LoroText`] becomes a sequence of
-/// `Run`s (Loro stores marks as range annotations and hands them back already split into
-/// runs via its delta). Marks ride along with edits for free, since they're anchored in the
-/// CRDT, not by offset.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Run {
-    pub text: String,
-    pub bold: bool,
-    pub italic: bool,
-    pub strike: bool,
-    pub code: bool,
-    /// The link target, if this run is a link.
-    pub link: Option<String>,
-}
-
-impl Run {
-    /// Whether the boolean mark `key` (`"bold"`/`"italic"`/`"strike"`/`"code"`/`"link"`) is
-    /// set on this run — used for coverage checks when toggling.
-    fn has(&self, key: &str) -> bool {
-        match key {
-            "bold" => self.bold,
-            "italic" => self.italic,
-            "strike" => self.strike,
-            "code" => self.code,
-            "link" => self.link.is_some(),
-            _ => false,
-        }
-    }
-}
-
-/// The document: a thin, schema-aware wrapper over a [`LoroDoc`]. All mutating methods
-/// take `&self` — Loro is interior-mutable — so the document can be shared as the merge
-/// point without `&mut` juggling.
+/// The document: a thin, schema-aware wrapper over a [`LoroDoc`]. All mutating methods take
+/// `&self` (Loro is interior-mutable), so it can be shared as the merge point without `&mut`.
 pub struct Doc {
     doc: LoroDoc,
-    /// CRDT-aware undo/redo for *this peer's* edits (a remote peer's concurrent edits are
-    /// preserved across an undo). `RefCell` because `undo`/`redo` need `&mut` while the
-    /// document's methods take `&self`.
+    /// CRDT-aware undo/redo for this peer's edits (a remote peer's concurrent edits survive an
+    /// undo). `RefCell` because `undo`/`redo` need `&mut` while the doc's methods take `&self`.
     undo: RefCell<UndoManager>,
 }
 
@@ -139,8 +99,8 @@ impl Doc {
     /// A fresh document with one empty paragraph (so the caret always has a home).
     pub fn new() -> Self {
         let doc = LoroDoc::new();
-        // Fractional indexing gives blocks a stable, mergeable sibling order — needed for
-        // ordered insert and (later) drag-reorder. Enable before any node is created.
+        // Fractional indexing gives blocks a stable, mergeable sibling order (for ordered insert
+        // and drag-reorder). Enable before any node is created.
         doc.get_tree(Self::BODY).enable_fractional_index(0);
         Self::finish(doc)
     }
@@ -153,10 +113,23 @@ impl Doc {
         Ok(Self::finish(doc))
     }
 
-    /// Seed an empty paragraph if the tree is empty, commit, then attach a fresh
-    /// `UndoManager` — created *after* the seed (and any imported history) so neither is
-    /// undoable; the first real edit is the first undo step.
+    /// Seed an empty paragraph if empty, commit, then attach a fresh `UndoManager` — created
+    /// after the seed (and imported history) so neither is undoable; the first edit is step one.
     fn finish(doc: LoroDoc) -> Self {
+        // Register inline-mark styles. Loro's defaults cover bold/italic/underline/link but NOT
+        // `strike`/`code`, and marking an unconfigured key errors — so declare the full set
+        // (config is runtime, not in the snapshot, so it must run on every new/from_snapshot).
+        // `None` = a mark covers exactly the chars it was applied to: typing at either edge does
+        // *not* inherit it, so bolding a span then typing past it doesn't make the new text bold.
+        // Insertions strictly inside a marked run still inherit. Continuing a mark while typing at
+        // the edge needs a pending-format ("active mark") UI state we don't have yet.
+        let mut styles = StyleConfigMap::new();
+        for key in ["bold", "italic", "strike", "code"] {
+            styles.insert(key.into(), StyleConfig { expand: ExpandType::None });
+        }
+        styles.insert("link".into(), StyleConfig { expand: ExpandType::None });
+        doc.config_text_style(styles);
+
         let tree = doc.get_tree(Self::BODY);
         if tree.children(TreeParentId::Root).is_none_or(|c| c.is_empty()) {
             let id = tree.create_at(TreeParentId::Root, 0).expect("seed block");
@@ -173,10 +146,9 @@ impl Doc {
 
     // --- Undo / redo (CRDT-aware) -----------------------------------------------------
 
-    /// Undo this peer's last edit-group. The `UndoManager` records a checkpoint of any
-    /// pending edits internally before reverting, so callers must **not** commit around it
-    /// (an extra commit after an undo clears the redo stack). Returns whether anything was
-    /// undone.
+    /// Undo this peer's last edit-group. Callers must NOT commit around it (an extra commit
+    /// after an undo clears the redo stack); the manager checkpoints pending edits itself.
+    /// Returns whether anything was undone.
     pub fn undo(&self) -> bool {
         self.undo.borrow_mut().undo().unwrap_or(false)
     }
@@ -196,8 +168,7 @@ impl Doc {
 
     // --- Network + persistence seam ---------------------------------------------------
 
-    /// Apply remote CRDT updates (a snapshot or update bytes) from the network. This is
-    /// how the courier-style transport feeds the document; the merge is conflict-free.
+    /// Apply remote CRDT updates (snapshot or update bytes) from the network; conflict-free.
     pub fn import(&self, bytes: &[u8]) -> Result<(), LoroError> {
         self.doc.import(bytes)?;
         self.ensure_nonempty();
@@ -217,9 +188,8 @@ impl Doc {
 
     // --- Reading ----------------------------------------------------------------------
 
-    /// Every block in document order — a pre-order DFS of the tree — paired with its depth
-    /// (0 = top level). This *is* the editor's row order: a parent is immediately followed by
-    /// its nested subtree, so the flat list the layout walks matches what the reader sees.
+    /// Every block in document order (pre-order DFS) paired with its depth — the editor's row
+    /// order, a parent immediately followed by its nested subtree.
     pub fn blocks(&self) -> Vec<(TreeID, usize)> {
         fn walk(tree: &LoroTree, parent: TreeParentId, depth: usize, out: &mut Vec<(TreeID, usize)>) {
             if let Some(kids) = tree.children(parent) {
@@ -272,6 +242,21 @@ impl Doc {
         pos.checked_sub(1).map(|i| siblings[i])
     }
 
+    /// Whether `node` lies in `root`'s subtree (including `root`) — the guard against dragging
+    /// a block into its own descendants (which would make a cycle).
+    fn subtree_contains(&self, root: TreeID, node: TreeID) -> bool {
+        let mut cur = node;
+        loop {
+            if cur == root {
+                return true;
+            }
+            match self.parent_of(cur) {
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
+    }
+
     /// The kind of a block.
     pub fn kind(&self, id: TreeID) -> BlockKind {
         let meta = self.doc.get_tree(Self::BODY).get_meta(id).expect("live node");
@@ -292,7 +277,7 @@ impl Doc {
     }
 
     /// A block's text as styled [`Run`]s — the substring spans with their inline marks, in
-    /// order. (Loro hands the rich text back already split into runs via its delta.)
+    /// order (Loro hands the rich text back already split into runs via its delta).
     pub fn runs(&self, id: TreeID) -> Vec<Run> {
         self.content(id)
             .to_delta()
@@ -301,25 +286,23 @@ impl Doc {
                 // A text container's delta is all `Insert`s; ignore anything else defensively.
                 let TextDelta::Insert { insert, attributes } = d else { return None };
                 let attrs = attributes.unwrap_or_default();
-                let flag = |k: &str| matches!(attrs.get(k), Some(LoroValue::Bool(true)));
-                let link = match attrs.get("link") {
-                    Some(LoroValue::String(s)) => Some(s.to_string()),
-                    _ => None,
-                };
-                Some(Run {
-                    text: insert,
-                    bold: flag("bold"),
-                    italic: flag("italic"),
-                    strike: flag("strike"),
-                    code: flag("code"),
-                    link,
-                })
+                let mut marks = Marks::new();
+                for key in ["bold", "italic", "strike", "code"] {
+                    if matches!(attrs.get(key), Some(LoroValue::Bool(true))) {
+                        marks = marks.flag(key);
+                    }
+                }
+                if let Some(LoroValue::String(s)) = attrs.get("link") {
+                    marks = marks.with("link", s.to_string());
+                }
+                // doc_editor carries no per-run explicit colour: block ink rides on the layout
+                // `Style`, and code-block syntax colour is applied in `layout`, not here.
+                Some(Run { text: insert, marks, color: None })
             })
             .collect()
     }
 
-    /// Whether the mark `key` is set across the **entire** `[start, end)` range — i.e. a
-    /// toggle of `key` over that range should *remove* it rather than add it.
+    /// Whether `key` is set across the entire `[start, end)` range (so a toggle removes it).
     pub fn mark_covers(&self, id: TreeID, start: usize, end: usize, key: &str) -> bool {
         if start >= end {
             return true;
@@ -331,7 +314,7 @@ impl Doc {
             pos = run_end;
             // The part of this run inside [start, end). If any such part lacks the mark, the
             // range isn't fully covered.
-            if run_start.max(start) < run_end.min(end) && !run.has(key) {
+            if run_start.max(start) < run_end.min(end) && !run.marks.has(key) {
                 return false;
             }
         }
@@ -358,21 +341,39 @@ impl Doc {
         meta.insert("kind", kind.as_str()).expect("set kind");
     }
 
-    /// Nest `id` under its previous sibling (appended as that sibling's last child) — the
-    /// **Tab** gesture. No-op (returns `false`) when there is no previous sibling to nest
-    /// under (e.g. the first block among its peers).
+    /// Nest `id` under its previous sibling (as that sibling's last child) — the Tab gesture.
+    /// No-op (returns `false`) when there is no previous sibling to nest under.
     pub fn indent(&self, id: TreeID) -> bool {
         let Some(prev) = self.prev_sibling(id) else { return false };
         self.doc.get_tree(Self::BODY).mov(id, prev).expect("indent");
         true
     }
 
-    /// Outdent `id`: lift it to be the sibling immediately after its current parent — the
-    /// **Shift-Tab** gesture. No-op (returns `false`) when it is already top-level.
+    /// Outdent `id`: lift it to be the sibling immediately after its parent — the Shift-Tab
+    /// gesture. No-op (returns `false`) when already top-level.
     pub fn outdent(&self, id: TreeID) -> bool {
         let Some(parent) = self.parent_of(id) else { return false };
         self.doc.get_tree(Self::BODY).mov_after(id, parent).expect("outdent");
         true
+    }
+
+    /// Move `block` to be the sibling immediately before `target` (drag-reorder). No-op when
+    /// `target` lies in `block`'s own subtree (would make a cycle).
+    pub fn move_before(&self, block: TreeID, target: TreeID) -> bool {
+        !self.subtree_contains(block, target)
+            && self.doc.get_tree(Self::BODY).mov_before(block, target).is_ok()
+    }
+
+    /// Move `block` to be the sibling immediately after `target` (drag-reorder).
+    pub fn move_after(&self, block: TreeID, target: TreeID) -> bool {
+        !self.subtree_contains(block, target)
+            && self.doc.get_tree(Self::BODY).mov_after(block, target).is_ok()
+    }
+
+    /// Move `block` to be the last child of `parent` — the drop-INTO / nest gesture.
+    pub fn move_into(&self, block: TreeID, parent: TreeID) -> bool {
+        !self.subtree_contains(block, parent)
+            && self.doc.get_tree(Self::BODY).mov(block, parent).is_ok()
     }
 
     /// Set a to-do's checked state.
@@ -387,6 +388,13 @@ impl Doc {
         meta.insert("lang", lang).expect("set lang");
     }
 
+    /// Replace the full text of a block (delete all then insert).
+    pub fn set_block_text(&self, id: TreeID, text: &str) {
+        let len = self.text_len(id);
+        self.delete_text(id, 0, len);
+        self.insert_text(id, 0, text);
+    }
+
     /// Insert `s` at code-point offset `at` in the block's text.
     pub fn insert_text(&self, id: TreeID, at: usize, s: &str) {
         self.content(id).insert(at, s).expect("insert text");
@@ -399,9 +407,8 @@ impl Doc {
         }
     }
 
-    /// Apply a boolean inline mark (`"bold"`/`"italic"`/`"strike"`/`"code"`) over `[start,
-    /// end)` of a block's text. Marks are CRDT range annotations, so they survive concurrent
-    /// edits and shift with insertions/deletions.
+    /// Apply a boolean inline mark over `[start, end)`. Marks are CRDT range annotations, so
+    /// they survive concurrent edits and shift with insertions/deletions.
     pub fn mark(&self, id: TreeID, start: usize, end: usize, key: &str) {
         if start < end {
             self.content(id).mark(start..end, key, true).expect("mark");
@@ -430,9 +437,8 @@ impl Doc {
         id
     }
 
-    /// Create a block as the sibling immediately after `sibling` (same parent, so the same
-    /// depth) — how Enter, paste, and the gutter `+` grow the document *in place*, whatever
-    /// nesting level the caret is at.
+    /// Create a block as the sibling immediately after `sibling` (same parent, same depth) —
+    /// how Enter, paste, and the gutter `+` grow the document in place at any nesting level.
     pub fn insert_after(&self, sibling: TreeID, kind: BlockKind, text: &str) -> TreeID {
         let tree = self.doc.get_tree(Self::BODY);
         let parent = tree.parent(sibling).unwrap_or(TreeParentId::Root);
@@ -445,13 +451,13 @@ impl Doc {
         id
     }
 
-    /// Delete a block. Its children are **promoted** into its slot first (kept in order, one
-    /// level shallower), because loro's `delete` hides the whole subtree — so a parent line
-    /// can be removed (merged away, say) without taking its nested blocks down with it.
+    /// Delete a block, promoting its children into its slot first (in order, one level
+    /// shallower), because loro's `delete` hides the whole subtree — so removing a parent line
+    /// doesn't take its nested blocks down with it.
     pub fn delete_block(&self, id: TreeID) {
         let tree = self.doc.get_tree(Self::BODY);
-        // Re-home each child as a sibling right after `id`, preserving order: walking in
-        // reverse means each `mov_after` lands ahead of the previously moved one.
+        // Re-home each child as a sibling right after `id`, preserving order: walking in reverse
+        // means each `mov_after` lands ahead of the previously moved one.
         for &child in tree.children(TreeParentId::Node(id)).unwrap_or_default().iter().rev() {
             tree.mov_after(child, id).expect("promote child");
         }
@@ -460,10 +466,9 @@ impl Doc {
 
     // --- Internals --------------------------------------------------------------------
 
-    /// Set a fresh node's kind and **eagerly create its `content` text container**, so the
-    /// first text edit into it is a *pure* text op. (A text-insert bundled with a lazy
-    /// nested-container creation in one undo step breaks loro's redo for tree-nested text —
-    /// regression-guarded by `raw_tree_nested_text_undo_redo`.)
+    /// Set a fresh node's kind and eagerly create its `content` text container, so the first
+    /// text edit is a pure text op. A text-insert bundled with a lazy nested-container creation
+    /// in one undo step breaks loro's redo (guarded by `raw_tree_nested_text_undo_redo`).
     fn init_block(&self, id: TreeID, kind: BlockKind, text: &str) {
         let meta = self.doc.get_tree(Self::BODY).get_meta(id).expect("fresh node");
         meta.insert("kind", kind.as_str()).expect("kind");
@@ -489,8 +494,7 @@ impl Doc {
         }
     }
 
-    /// Guarantee at least one block exists (a doc with no blocks has nowhere for the
-    /// caret to live). Called after construction and after a remote import.
+    /// Guarantee at least one block exists (an empty doc has nowhere for the caret to live).
     fn ensure_nonempty(&self) {
         let tree = self.doc.get_tree(Self::BODY);
         if tree.children(TreeParentId::Root).is_none_or(|c| c.is_empty()) {

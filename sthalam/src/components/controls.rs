@@ -1,5 +1,5 @@
-// Interactive atoms: the square text field and the brand's pixel-offset CTA button (an
-// in-flow full-width form, and a positioned variant for painter-driven screens).
+// Interactive atoms: the square text field and the pixel-offset CTA button (in-flow
+// full-width and positioned variants).
 
 use std::f32::consts::TAU;
 

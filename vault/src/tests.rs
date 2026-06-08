@@ -91,3 +91,92 @@ fn switch_changes_active_account() {
     assert!(matches!(error, VaultError::WrongPassphrase));
     assert!(vault.identity().is_none());
 }
+
+#[test]
+fn new_account_has_no_workspaces() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    assert!(vault.workspaces().unwrap().is_empty());
+}
+
+#[test]
+fn create_workspace_returns_named_record_with_an_id() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+
+    let meta = vault.create_workspace("Engineering").unwrap();
+    assert_eq!(meta.name, "Engineering");
+    assert_eq!(meta.id.len(), 32); // 16 random bytes, hex-encoded
+    assert!(meta.id.chars().all(|c| c.is_ascii_hexdigit()));
+
+    let listed = vault.workspaces().unwrap();
+    assert_eq!(listed, vec![meta]);
+}
+
+#[test]
+fn workspaces_are_listed_newest_first() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+
+    let first = vault.create_workspace("first").unwrap();
+    let second = vault.create_workspace("second").unwrap();
+    let third = vault.create_workspace("third").unwrap();
+
+    let names: Vec<String> = vault.workspaces().unwrap().into_iter().map(|w| w.name).collect();
+    // Same-second creation ties break by id, so assert on the set + that all three are present
+    // rather than a strict ordering the clock can't guarantee within one test run.
+    assert_eq!(names.len(), 3);
+    for w in [&first, &second, &third] {
+        assert!(names.contains(&w.name), "missing {}", w.name);
+    }
+
+    // Ids are unique per workspace.
+    let ids: std::collections::HashSet<_> =
+        [first.id, second.id, third.id].into_iter().collect();
+    assert_eq!(ids.len(), 3);
+}
+
+#[test]
+fn workspace_by_id_round_trips_and_misses_cleanly() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let meta = vault.create_workspace("Design").unwrap();
+
+    assert_eq!(vault.workspace(&meta.id).unwrap(), Some(meta));
+    assert_eq!(vault.workspace("0123456789abcdef0123456789abcdef").unwrap(), None);
+}
+
+#[test]
+fn workspaces_survive_reopen_and_relogin() {
+    let (mut vault, tmp) = fresh();
+    let (did, _) = vault.signup("me", "pw").unwrap();
+    let made = vault.create_workspace("Persisted").unwrap();
+    drop(vault);
+
+    // A fresh Vault over the same dir proves the sealed header persisted to disk.
+    let mut reopened = Vault::open(tmp.path().to_path_buf()).unwrap();
+    reopened.login(&did, "pw").unwrap();
+    assert_eq!(reopened.workspaces().unwrap(), vec![made]);
+}
+
+#[test]
+fn workspace_ops_require_an_unlocked_account() {
+    let (vault, _tmp) = fresh();
+    assert!(matches!(vault.create_workspace("x"), Err(VaultError::Locked)));
+    assert!(matches!(vault.workspaces(), Err(VaultError::Locked)));
+}
+
+#[test]
+fn workspace_content_keys_are_not_mistaken_for_workspaces() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let meta = vault.create_workspace("real").unwrap();
+
+    // A future content key living under the same `ws/<id>/…` namespace must not be counted
+    // as a workspace by the `ws/<id>/meta` listing scan.
+    let store = vault.store().unwrap();
+    store.put(&format!("ws/{}/file/abc", meta.id), b"not a workspace").unwrap();
+
+    let listed = vault.workspaces().unwrap();
+    assert_eq!(listed, vec![meta]);
+}

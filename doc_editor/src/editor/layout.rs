@@ -1,22 +1,32 @@
-//! Per-frame **layout**: turn the block tree into positioned [`Placed`] rows with shaped
-//! galleys, plus the geometry helpers (gutter / checkbox / caret rects, vertical hit-test).
-//! All coordinates are relative to the column rect's top-left; callers add `rect.min`.
+//! Per-frame layout: turn the block tree into positioned [`Placed`] rows with shaped galleys,
+//! plus geometry helpers (gutter / checkbox / caret rects, hit-test). Coordinates are relative
+//! to the column rect's top-left; callers add `rect.min`.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use egui::{pos2, text::{CCursor, LayoutJob}, vec2, FontFamily, FontId, Galley, Rect, Stroke, TextFormat, Ui};
+use egui::{pos2, text::CCursor, vec2, FontFamily, Galley, Rect, Ui};
 use loro::TreeID;
 
-use crate::model::{BlockKind, Doc, Run};
+use crate::model::{BlockKind, Doc};
 use crate::{block, theme};
 
 use super::{CachedBlock, Placed};
 
-/// Lay out every block: compute its row geometry (relative to the column top-left) and
-/// its text galley. The returned `Vec` lines up index-for-index with `ids`. Shaped galleys
-/// are reused from `cache` for blocks whose content/kind/state/width are unchanged.
+/// doc_editor's inline-mark palette handed to the shared `rich_text` renderer (code/link/strike
+/// colours). Block-level colours — heading/quote ink, code-block syntax — ride on the runs and the
+/// `Style`, not here.
+const THEME: rich_text::Theme = rich_text::Theme {
+    code_color: theme::ACCENT_SOFT,
+    code_bg: theme::CODE_INLINE_BG,
+    link_color: theme::ACCENT_HI,
+    link_underline: theme::ACCENT_BG,
+    strike_color: theme::FAINT,
+};
+
+/// Lay out every block into row geometry + galley; the returned `Vec` lines up with `ids`.
+/// Galleys are reused from `cache` when content/kind/state/width are unchanged.
 pub(super) fn layout_all(
     doc: &Doc,
     ids: &[TreeID],
@@ -30,8 +40,7 @@ pub(super) fn layout_all(
 
     for &id in ids {
         let kind = doc.kind(id);
-        // Structural depth: a block's indent is its position in the tree, capped so deep
-        // nesting stops marching rightward off the page (the tree keeps the real depth).
+        // Cap indent depth so deep nesting stops marching off the page (tree keeps real depth).
         let depth = doc.depth(id).min(8);
         let done = doc.done(id);
 
@@ -53,8 +62,8 @@ pub(super) fn layout_all(
             None
         };
 
-        // The gutter (`+` / grip) is pinned to the page margin — the same x at every depth.
-        // Nesting indents only the spine and the text column to its right.
+        // The gutter (`+` / grip) is pinned to the page margin at every depth; nesting indents
+        // only the spine and the text column to its right.
         let gutter_left = theme::OUTER_LEFT;
         let spine_x = theme::OUTER_LEFT + theme::GUTTER + depth as f32 * theme::INDENT;
         let content_x = spine_x + theme::SPINE + theme::CONTENT_PAD;
@@ -67,19 +76,35 @@ pub(super) fn layout_all(
         let wrap = (text_right - text_x).max(80.0);
 
         let st = block::block_style(kind);
-        // Reuse the cached galley unless this block's *styled* content changed. The key is a
-        // fingerprint of the runs (text + marks), not just length, so applying a mark (which
-        // leaves the length unchanged) still invalidates. A hit skips the `LayoutJob` build +
-        // shaping (the expensive part). Computing `runs` per frame is the documented cost to
-        // revisit (switch to Loro's diff) once docs get large.
+        let style = block_to_style(&st, done);
+        // Reuse the cached galley unless styled content changed. The fingerprint covers the runs
+        // (text + marks) AND the block-level `Style` — so promoting to a heading (bold) or
+        // checking a to-do (strike) reshapes even though the text is untouched — plus a code
+        // block's language tag, which drives highlighting from that same text. Computing `runs`
+        // per frame is the cost to revisit (Loro diff) at scale.
         let runs = doc.runs(id);
-        let fp = fingerprint(&runs);
+        let fp = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            rich_text::fingerprint(&runs, style, THEME, wrap).hash(&mut h);
+            if kind == BlockKind::Code {
+                doc.lang(id).hash(&mut h);
+            }
+            h.finish()
+        };
         let (galley, gh) = match cache.get(&id) {
             Some(c) if c.fp == fp && c.kind == kind && c.done == done && c.wrap == wrap => {
                 (c.galley.clone(), c.height)
             }
             _ => {
-                let g = layout_runs(ui, &runs, wrap, &st, done);
+                // Both paths shape through the shared `rich_text::galley`. Code highlights from its
+                // plain source (it carries no inline marks); prose shapes its marked runs.
+                let g = if kind == BlockKind::Code {
+                    let src: String = runs.iter().map(|r| r.text.as_str()).collect();
+                    let cruns = code_runs(&src, doc.lang(id).as_deref());
+                    rich_text::galley(ui.ctx(), &cruns, style, THEME, wrap)
+                } else {
+                    rich_text::galley(ui.ctx(), &runs, style, THEME, wrap)
+                };
                 let h = g.size().y;
                 cache.insert(id, CachedBlock { fp, kind, done, wrap, galley: g.clone(), height: h });
                 (g, h)
@@ -124,96 +149,46 @@ pub(super) fn layout_all(
     (placed, top + theme::PAD_BOTTOM)
 }
 
-/// The block's base text format (font, colour, line height, tracking) before per-run marks.
-fn base_format(st: &block::BlockStyle) -> TextFormat {
-    TextFormat {
-        font_id: st.font.clone(),
+/// Map a block's [`block::BlockStyle`] (+ whether the row is struck — a *done* to-do) onto the
+/// shared [`rich_text::Style`]: the block-level base every run inherits before its own marks.
+/// `mono` rides on the base font family; `bold`/`italic`/`strike` apply to every run.
+pub(super) fn block_to_style(st: &block::BlockStyle, struck: bool) -> rich_text::Style {
+    rich_text::Style {
+        size: st.font.size,
         color: st.color,
+        mono: st.font.family == FontFamily::Monospace,
+        bold: st.bold,
+        italic: st.italics,
+        strike: struck,
         line_height: Some(st.line_height),
-        extra_letter_spacing: st.letter_spacing,
-        italics: st.italics,
-        ..Default::default()
+        letter_spacing: st.letter_spacing,
     }
 }
 
-/// The bold proportional family **if the consumer registered it**, else the default
-/// proportional faces. egui panics on an unbound `FontFamily::Name`, so this lets an embedder
-/// that hasn't bundled a bold face render un-bolded instead of crashing (and keeps headless
-/// tests, which set up no fonts, working).
-fn bold_family(ui: &Ui) -> FontFamily {
-    let want = theme::bold_family();
-    let registered = ui.ctx().fonts(|f| f.definitions().families.contains_key(&want));
-    if registered {
-        want
-    } else {
-        FontFamily::Proportional
-    }
+/// Shape one plain (un-marked) run via `rich_text` — the placeholder inside an empty block.
+pub(super) fn plain_galley(ui: &Ui, text: &str, wrap: f32, st: &block::BlockStyle) -> Arc<Galley> {
+    rich_text::galley(ui.ctx(), &[rich_text::Run::plain(text)], block_to_style(st, false), THEME, wrap)
 }
 
-/// Lay out one block's *plain* text into a galley (used for placeholders — no marks).
-pub(super) fn layout_run(ui: &Ui, text: &str, wrap: f32, st: &block::BlockStyle, struck: bool) -> Arc<Galley> {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = wrap;
-    let mut fmt = base_format(st);
-    if st.bold {
-        fmt.font_id = FontId::new(st.font.size, bold_family(ui));
+/// A code block's source as coloured runs: a tree-sitter pass ([`code_highlight`]) maps each span
+/// to a [`theme::code_color`]; no (or unsupported) language is one uncoloured run that inherits
+/// the block's base ink. The explicit colours bake into the galley, so screen (`paint`), scene,
+/// and PDF (`crate::pdf`) all pick them up for free. Code carries no inline marks, so this bypasses
+/// the [`Doc::runs`] path entirely.
+fn code_runs(src: &str, lang: Option<&str>) -> Vec<rich_text::Run> {
+    let spans = if src.is_empty() { None } else { lang.and_then(|l| code_highlight::highlight(l, src)) };
+    match spans {
+        Some(spans) if !spans.is_empty() => spans
+            .into_iter()
+            .map(|span| rich_text::Run {
+                text: src[span.range].to_string(),
+                marks: rich_text::Marks::new(),
+                color: Some(theme::code_color(span.kind)),
+            })
+            .collect(),
+        // No highlighting (plain / unsupported / empty): one uncoloured run, also the caret row.
+        _ => vec![rich_text::Run::plain(src)],
     }
-    if struck {
-        fmt.strikethrough = Stroke::new(1.0, theme::FAINT);
-    }
-    job.append(text, 0.0, fmt);
-    ui.ctx().fonts_mut(|f| f.layout_job(job))
-}
-
-/// Lay out a block's **styled runs** into one galley: each run appends with the base style
-/// plus its inline marks — bold (a real bold face, or regular if none is bound), italic (egui
-/// slant), strikethrough, inline code (mono + tinted + a soft fill), and link (accent +
-/// underline). A bold *block* (heading) bolds every run. `struck` (a done to-do) strikes all.
-pub(super) fn layout_runs(ui: &Ui, runs: &[Run], wrap: f32, st: &block::BlockStyle, struck: bool) -> Arc<Galley> {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = wrap;
-    let bold_fam = bold_family(ui);
-    let size = st.font.size;
-    // An empty block still needs one (empty) section so the galley has a caret row.
-    if runs.is_empty() {
-        let mut fmt = base_format(st);
-        if st.bold {
-            fmt.font_id = FontId::new(size, bold_fam.clone());
-        }
-        job.append("", 0.0, fmt);
-    }
-    for run in runs {
-        let mut fmt = base_format(st);
-        if run.code {
-            // Inline code wins the font: mono, slightly smaller, tinted, on a soft fill.
-            fmt.font_id = FontId::new(size * 0.92, FontFamily::Monospace);
-            fmt.color = theme::ACCENT_SOFT;
-            fmt.background = theme::CODE_INLINE_BG;
-        } else if st.bold || run.bold {
-            fmt.font_id = FontId::new(size, bold_fam.clone());
-        }
-        if run.italic {
-            fmt.italics = true;
-        }
-        if run.link.is_some() {
-            fmt.color = theme::ACCENT_HI;
-            fmt.underline = Stroke::new(1.0, theme::ACCENT_BG);
-        }
-        if run.strike || struck {
-            let color = if struck { theme::FAINT } else { fmt.color };
-            fmt.strikethrough = Stroke::new(1.0, color);
-        }
-        job.append(&run.text, 0.0, fmt);
-    }
-    ui.ctx().fonts_mut(|f| f.layout_job(job))
-}
-
-/// A cheap content+marks fingerprint for the galley cache (changes whenever any run's text
-/// or marks change, even when the total length doesn't).
-fn fingerprint(runs: &[Run]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    runs.hash(&mut h);
-    h.finish()
 }
 
 // --- Geometry helpers (return absolute rects given the column rect) ----------------
@@ -236,6 +211,16 @@ pub(super) fn grip_rect(p: &Placed, rect: Rect) -> Rect {
 
 pub(super) fn checkbox_rect(p: &Placed, rect: Rect) -> Rect {
     Rect::from_min_size(pos2(rect.left() + p.content_x, rect.top() + p.content_top + 3.0), vec2(16.0, 16.0))
+}
+
+/// The clickable language tag at a code block's top-right — both the hover/click hotspot and
+/// the anchor the language dropdown drops from. Spans the top strip of the code box (above the
+/// first code line, which starts ~15px down), so clicking it never lands on the code text.
+pub(super) fn lang_tag_rect(p: &Placed, rect: Rect) -> Rect {
+    const TAG_W: f32 = 104.0;
+    let right = rect.left() + p.content_right - 1.0;
+    let top = rect.top() + p.row_top + 3.0;
+    Rect::from_min_max(pos2(right - TAG_W, top), pos2(right, top + 15.0))
 }
 
 /// The on-screen rect of a block's caret at offset 0 — the slash palette's anchor.

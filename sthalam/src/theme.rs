@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use eframe::egui::{self, Color32, FontFamily, FontId};
 
-// Sthalam design tokens, ported from the design system's sthalam-theme.css.
-// Swap ACCENT to rebrand. Grouped as the CSS file groups them.
+// Sthalam design tokens, ported from sthalam-theme.css. Swap ACCENT to rebrand.
 
 // Surfaces
 pub const BG_PAGE: Color32 = Color32::from_rgb(0x0A, 0x0B, 0x10); // window canvas
@@ -15,18 +14,24 @@ pub const BG_4: Color32 = Color32::from_rgb(0x26, 0x27, 0x35); // interactive
 
 // Foreground
 pub const FG_1: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF7);
+pub const FG_2: Color32 = Color32::from_rgb(0xB6, 0xB7, 0xC3);
 pub const FG_3: Color32 = Color32::from_rgb(0x7F, 0x81, 0x92);
 pub const FG_4: Color32 = Color32::from_rgb(0x4D, 0x4E, 0x5C);
 
 // Border (white at low alpha, as in the CSS)
 pub const BD_1: Color32 = Color32::from_rgba_premultiplied(15, 15, 15, 15); // ~0.06, hairline
 pub const BD_2: Color32 = Color32::from_rgba_premultiplied(31, 31, 31, 31); // ~0.12
+pub const BD_3: Color32 = Color32::from_rgba_premultiplied(56, 56, 56, 56); // ~0.22, hover
 
 // Accent (single purple family)
 pub const ACCENT: Color32 = Color32::from_rgb(0x8A, 0x86, 0xE5);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xA0, 0x9D, 0xEE);
 pub const ACCENT_PRESS: Color32 = Color32::from_rgb(0x6E, 0x6A, 0xD0);
+pub const ACCENT_SOFT: Color32 = Color32::from_rgb(0xCB, 0xA6, 0xF7);
 pub const ACCENT_BG: Color32 = Color32::from_rgba_premultiplied(19, 18, 32, 36); // ~0.14, selected row / chip
+
+// Tab strip — a shade below the page, as in the flat-shell design.
+pub const TAB_STRIP: Color32 = Color32::from_rgb(0x08, 0x09, 0x0E);
 
 // Semantic
 pub const OK: Color32 = Color32::from_rgb(0x7E, 0xE7, 0x87);
@@ -35,8 +40,25 @@ pub const WARN_BG: Color32 = Color32::from_rgba_premultiplied(30, 23, 13, 31); /
 pub const ERR: Color32 = Color32::from_rgb(0xF4, 0x70, 0x68);
 pub const ERR_BG: Color32 = Color32::from_rgba_premultiplied(29, 13, 12, 31); // ~0.12, error field ring
 
-// Alias for the home screen, which still uses the placeholder card layout.
-pub const CARD: Color32 = BG_2;
+// Workspace tints — a stable colour per id, hashed (FNV-1a) the same way the identicon
+// picks its palette entry, so a workspace's dot/badge is "computed, not chosen".
+const TINTS: [Color32; 6] = [
+    ACCENT,
+    ACCENT_SOFT,
+    Color32::from_rgb(0xE8, 0xC3, 0xFF),
+    Color32::from_rgb(0xB0, 0xE5, 0xFF),
+    Color32::from_rgb(0xFF, 0xD4, 0x9A),
+    Color32::from_rgb(0xC6, 0xFF, 0xD4),
+];
+
+pub fn tint(seed: &str) -> Color32 {
+    let mut h: u32 = 2166136261;
+    for b in seed.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    TINTS[(h % TINTS.len() as u32) as usize]
+}
 
 // VT323 pixel face — the wordmark.
 pub fn pixel() -> FontFamily {

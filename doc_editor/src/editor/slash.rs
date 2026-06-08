@@ -1,6 +1,5 @@
-//! The **slash command palette** controller: opening on `/`, filtering, keyboard + pointer
-//! navigation, applying the chosen kind, and painting the palette on a foreground layer. The
-//! palette state lives off the document; this drives `overlays` (paint + geometry).
+//! The slash command palette controller: open on `/`, filter, navigate, apply the chosen kind,
+//! paint on a foreground layer. Palette state lives off the document; drives `overlays`.
 
 use egui::{Event, Key, Modifiers, Rect, Ui};
 use loro::TreeID;
@@ -86,8 +85,8 @@ impl DocEditor {
         true
     }
 
-    /// Turn `block` into `kind`. Divider spawns a fresh paragraph below (so the caret has
-    /// somewhere to go); every other kind keeps the caret in the now-typed empty block.
+    /// Turn `block` into `kind`. Divider spawns a fresh paragraph below for the caret to land
+    /// in; every other kind keeps the caret in the now-typed empty block.
     fn apply_slash_kind(&mut self, doc: &Doc, block: TreeID, kind: BlockKind) {
         if kind == BlockKind::Divider {
             doc.set_kind(block, BlockKind::Divider);
@@ -109,8 +108,8 @@ impl DocEditor {
         Some(overlays::menu_rect(&items, viewport, layout::caret_screen_rect(rect, p)))
     }
 
-    /// All keyboard while the palette is open. Typing filters; arrows move the highlight;
-    /// Enter/Tab apply; Esc/empty-Backspace close. Nothing reaches the editing path.
+    /// All keyboard while the palette is open (typing filters, arrows move, Enter/Tab apply,
+    /// Esc/empty-Backspace close). Nothing reaches the editing path.
     pub(super) fn slash_keyboard(&mut self, ui: &Ui, doc: &Doc) -> bool {
         let events = ui.input(|i| i.events.clone());
         // Keep Tab out of egui's focus navigation while the palette is open.

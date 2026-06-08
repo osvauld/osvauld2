@@ -4,14 +4,19 @@
 
 mod account;
 mod error;
+mod item;
+mod workspace;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use identity::{Identity, Keystore, Mnemonic};
 pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
+pub use item::{ItemKind, WorkspaceItem};
+pub use workspace::WorkspaceMeta;
 
 use account::{did_to_filename, scan_dids};
 
@@ -29,9 +34,10 @@ struct Active {
     store: Store,
 }
 
+#[derive(Clone)]
 pub struct Vault {
     dir: PathBuf,
-    active: Option<Active>,
+    active: Arc<Mutex<Option<Active>>>,
 }
 
 /// Split out so the Argon2 hashing ([`Vault::prepare_signup`]) can run off the UI thread,
@@ -54,7 +60,7 @@ pub struct UnlockedAccount {
 impl Vault {
     pub fn open(dir: PathBuf) -> Result<Self, VaultError> {
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir, active: None })
+        Ok(Self { dir, active: Arc::new(Mutex::new(None)) })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -89,7 +95,7 @@ impl Vault {
         let store = Store::open(self.dir.join(did_to_filename(&did)?))?;
         store.put(KEYSTORE_KEY, &keystore.to_bytes())?;
         store.put(LABEL_KEY, label.as_bytes())?;
-        self.active = Some(Active { did: did.clone(), label, identity, store });
+        *self.active.lock().unwrap() = Some(Active { did: did.clone(), label, identity, store });
         Ok((did, mnemonic))
     }
 
@@ -118,7 +124,7 @@ impl Vault {
         // Re-open read-write to hold the db for the session (prepare's read-only handle is
         // already dropped, so there's no single-handle conflict).
         let store = Store::open(self.dir.join(did_to_filename(&did)?))?;
-        self.active = Some(Active { did, label, identity, store });
+        *self.active.lock().unwrap() = Some(Active { did, label, identity, store });
         Ok(())
     }
 
@@ -128,7 +134,7 @@ impl Vault {
     }
 
     pub fn lock(&mut self) {
-        self.active = None;
+        *self.active.lock().unwrap() = None;
     }
 
     /// The data directory, so a driver can hand it to [`Vault::prepare_login`] on a worker.
@@ -136,29 +142,145 @@ impl Vault {
         &self.dir
     }
 
-    pub fn identity(&self) -> Option<&Identity> {
-        self.active.as_ref().map(|active| &active.identity)
+    pub fn identity(&self) -> Option<Identity> {
+        self.active.lock().unwrap().as_ref().map(|active| active.identity.clone())
     }
 
-    /// The active account's data store, for reading/writing encrypted data layers
-    /// (`.doc` snapshots and the like). `None` when locked.
-    pub fn store(&self) -> Option<&Store> {
-        self.active.as_ref().map(|active| &active.store)
+    pub fn store(&self) -> Option<Store> {
+        self.active.lock().unwrap().as_ref().map(|a| a.store.clone())
     }
 
     pub fn current(&self) -> Option<AccountInfo> {
-        self.active.as_ref().map(|active| AccountInfo {
+        self.active.lock().unwrap().as_ref().map(|active| AccountInfo {
             did: active.did.clone(),
             label: active.label.clone(),
         })
     }
 
+    /// Create a new workspace named `name` in the active account, returning its header (with
+    /// the freshly generated id). The header is sealed to the account's own key and written
+    /// to `ws/<id>/meta`; no registry doc is touched — the workspace exists by virtue of that
+    /// key. Errs with [`VaultError::Locked`] when no account is unlocked.
+    pub fn create_workspace(&self, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let meta = WorkspaceMeta {
+            id: workspace::new_id(),
+            name: name.to_string(),
+            created: workspace::now_secs(),
+        };
+        let plaintext = serde_json::to_vec(&meta)?;
+        let sealed = identity::encrypt_for(&active.identity.encryption_public_key(), &plaintext)?;
+        active.store.put(&workspace::meta_key(&meta.id), &sealed)?;
+        Ok(meta)
+    }
+
+    /// A single workspace's header by id, or `None` if there's no such workspace. A direct
+    /// key read (`ws/<id>/meta`) — use this to open/restore one workspace without scanning the
+    /// whole set. Errs with [`VaultError::Locked`] when no account is unlocked.
+    pub fn workspace(&self, id: &str) -> Result<Option<WorkspaceMeta>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let Some(sealed) = active.store.get(&workspace::meta_key(id))? else {
+            return Ok(None);
+        };
+        let plaintext = active.identity.decrypt_sealed(&sealed)?;
+        Ok(Some(serde_json::from_slice(&plaintext)?))
+    }
+
+    /// Every workspace in the active account, newest first (ties broken by id for a stable
+    /// order). Found by prefix-scanning the store for `ws/<id>/meta` keys and unsealing each.
+    /// Empty when there are none; errs with [`VaultError::Locked`] when no account is unlocked.
+    pub fn workspaces(&self) -> Result<Vec<WorkspaceMeta>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let mut out = Vec::new();
+        for key in active.store.list_prefixed(workspace::WS_PREFIX)? {
+            if workspace::id_from_meta_key(&key).is_none() {
+                continue;
+            }
+            let Some(sealed) = active.store.get(&key)? else { continue };
+            let plaintext = active.identity.decrypt_sealed(&sealed)?;
+            out.push(serde_json::from_slice(&plaintext)?);
+        }
+        out.sort_by(|a: &WorkspaceMeta, b: &WorkspaceMeta| {
+            b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    /// Create a new item of `kind` named `name` inside workspace `ws_id`.
+    /// App items automatically get a placeholder `manifest.osv` blob.
+    pub fn create_item(&self, ws_id: &str, name: &str, kind: ItemKind) -> Result<WorkspaceItem, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let item = WorkspaceItem::new(ws_id, name, kind);
+        let plaintext = serde_json::to_vec(&item)?;
+        let sealed = identity::encrypt_for(&active.identity.encryption_public_key(), &plaintext)?;
+        active.store.put(&item::meta_key(ws_id, &item.id), &sealed)?;
+        if item.kind == ItemKind::App {
+            active.store.put(
+                &item::blob_key(ws_id, &item.id, "manifest.osv"),
+                item::APP_MANIFEST_PLACEHOLDER,
+            )?;
+        }
+        Ok(item)
+    }
+
+    /// All items in `ws_id`, newest first. Found by prefix scan; each meta is unsealed.
+    pub fn items(&self, ws_id: &str) -> Result<Vec<WorkspaceItem>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let prefix = item::items_prefix(ws_id);
+        let mut out = Vec::new();
+        for key in active.store.list_prefixed(&prefix)? {
+            if item::id_from_meta_key(ws_id, &key).is_none() {
+                continue;
+            }
+            let Some(sealed) = active.store.get(&key)? else { continue };
+            let plaintext = active.identity.decrypt_sealed(&sealed)?;
+            out.push(serde_json::from_slice(&plaintext)?);
+        }
+        out.sort_by(|a: &WorkspaceItem, b: &WorkspaceItem| {
+            b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    /// Read a named blob from an item. Returns `None` if the blob doesn't exist yet.
+    pub fn get_blob(&self, ws_id: &str, item_id: &str, name: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.get(&item::blob_key(ws_id, item_id, name))?)
+    }
+
+    pub fn put_blob(&self, ws_id: &str, item_id: &str, name: &str, data: &[u8]) -> Result<(), VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.put(&item::blob_key(ws_id, item_id, name), data)?)
+    }
+
+    pub fn get_layer(&self, ws_id: &str, item_id: &str, name: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.get(&item::crdt_key(ws_id, item_id, name))?)
+    }
+
+    pub fn put_layer(&self, ws_id: &str, item_id: &str, name: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.put(&item::crdt_key(ws_id, item_id, name), snapshot)?)
+    }
+
     // The active account's label is cached; any other account is opened read-only just
     // long enough to read its label (that db isn't otherwise open, so it can't conflict).
     fn label_for(&self, did: &str) -> Result<String, VaultError> {
-        if let Some(active) = &self.active {
-            if active.did == did {
-                return Ok(active.label.clone());
+        {
+            let guard = self.active.lock().unwrap();
+            if let Some(active) = guard.as_ref() {
+                if active.did == did {
+                    return Ok(active.label.clone());
+                }
             }
         }
         let store = Store::open_readonly(self.dir.join(did_to_filename(did)?))?;

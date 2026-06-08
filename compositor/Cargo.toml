@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 app_host = { path = "../app_host" }
-# Pin to the versions eframe bundles, so one egui spans the graph — mismatched
-# versions silently break shared types (Context, TextureId).
 egui = "0.34"
 egui-wgpu = "0.34"
 wgpu = "29"

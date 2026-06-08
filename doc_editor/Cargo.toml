@@ -5,15 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# The editor is a widget over an `egui::Ui` — it doesn't own the window or the wgpu
-# stack (the shell does). So it depends only on egui, not eframe.
 egui = "0.34"
-# The document model is a Loro CRDT (same version the `data` crate pins). The editor
-# program and the network (courier, later) both feed one LoroDoc; bytes in/out are the
-# persistence + sync seam.
 loro = "1.12.0"
+# Shared UI primitives, extracted to be used by both the Lua-app renderer and the native editors.
+# `text_edit` owns caret/selection geometry; `rich_text` owns the bold face + run renderer. We
+# adopt them piecemeal — first the leaf helpers (selection rects, bold-family resolution), so the
+# duplicated copies in this crate can be deleted.
+text_edit = { path = "../text_edit" }
+rich_text = { path = "../rich_text" }
+printpdf = { version = "0.9.1", default-features = false, features = ["text_layout"] }
+# Syntax highlighting for `.doc` code blocks — a pure leaf that returns semantic spans; the
+# editor's `theme` maps those spans to colours. The colours bake into the code galley, so they
+# reach both the screen and the PDF export with no backend-specific work.
+code_highlight = { path = "../code_highlight" }
 
 [dev-dependencies]
-# The standalone runner — `cargo run -p doc_editor --example standalone` — hosts the
-# editor full-window so we can iterate on feel without the rest of the shell.
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }

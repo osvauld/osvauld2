@@ -1,10 +1,5 @@
-//! Run the `.doc` editor full-window, on its own, for fast iteration on feel:
-//!
-//!   cargo run -p doc_editor --example standalone
-//!
-//! This is scaffolding, not the product — the real editor lives inside the shell's app
-//! cell. But a standalone window is the tightest loop for getting the editing *feel*
-//! right before wiring it in.
+//! Run the `.doc` editor full-window for fast iteration on feel:
+//! `cargo run -p doc_editor --example standalone`. Scaffolding, not the product.
 
 use std::sync::Arc;
 
@@ -36,7 +31,6 @@ struct App {
 }
 
 impl eframe::App for App {
-    // eframe 0.34 wraps this in a CentralPanel and hands us the `ui` directly.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.editor.show(ui, &self.doc, false);
     }
@@ -47,8 +41,7 @@ impl eframe::App for App {
     }
 }
 
-/// Install Inter (body/headings) + JetBrains Mono, reusing the shell's font files, and
-/// paint the page on the near-black canvas.
+/// Install Inter + JetBrains Mono and paint the page on the near-black canvas.
 fn setup(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut add = |name: &str, bytes: &'static [u8]| {
@@ -60,7 +53,6 @@ fn setup(ctx: &egui::Context) {
     // Prepend ours so egui's bundled faces stay as glyph fallback.
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".to_owned());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".to_owned());
-    // The editor's bold family (bold runs + headings): Inter SemiBold, then regular fallback.
     fonts
         .families
         .insert(FontFamily::Name(theme::BOLD_FAMILY.into()), vec!["inter_sb".to_owned(), "inter".to_owned()]);
@@ -72,8 +64,7 @@ fn setup(ctx: &egui::Context) {
     });
 }
 
-/// A realistic starter document — the full block vocabulary, so the type scale, gutter,
-/// spine, focus type-tag, and per-kind treatments are all visible at a glance.
+/// A realistic starter document exercising the full block vocabulary.
 fn sample_doc() -> Doc {
     let d = Doc::new();
     // Repurpose the seeded empty paragraph as the opening heading, then append the rest.
@@ -117,20 +108,16 @@ fn sample_doc() -> Doc {
     d.create_block(12, BlockKind::Divider, "");
     d.create_block(13, BlockKind::Paragraph, "");
 
-    // Nest the third bullet under the second — applied after the flat build, so the
-    // top-level indices used above stay valid while the blocks are being created.
+    // Applied after the flat build so the top-level indices used above stay valid.
     d.indent(nested);
 
-    // Inline marks demo, so the rendering is visible at a glance (bold needs the registered
-    // SemiBold face; the rest work on the regular face). `mark_word` finds the char range.
     mark_word(&d, p1, p1_text, "ProseMirror-class", "bold");
     mark_word(&d, p1, p1_text, "Loro", "code");
     mark_word(&d, p1, p1_text, "rich-text container", "italic");
     d
 }
 
-/// Apply mark `key` to the first occurrence of `word` in `text` (the example uses this to
-/// place marks without hand-counting Unicode offsets).
+/// Apply mark `key` to the first occurrence of `word` in `text`.
 fn mark_word(d: &Doc, id: loro::TreeID, text: &str, word: &str, key: &str) {
     if let Some(byte) = text.find(word) {
         let start = text[..byte].chars().count();

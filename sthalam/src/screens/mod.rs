@@ -2,14 +2,12 @@
 // (the screen to transition to, if any). Shared card-layout helpers live in `common`.
 
 mod accounts;
-mod common;
-mod home;
+pub(crate) mod common;
 mod recovery;
 mod signup;
 mod unlock;
 
 pub use accounts::accounts;
-pub use home::home;
 pub use recovery::recovery;
 pub use signup::signup;
 pub use unlock::unlock;

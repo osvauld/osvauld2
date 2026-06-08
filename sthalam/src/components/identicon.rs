@@ -1,6 +1,5 @@
-// A deterministic pixel avatar for an account: a 5×5 grid mirrored across the vertical axis,
-// two-tone, seeded from the DID (FNV-1a). No assets, stable per identity, and it reads as
-// "computed, not chosen" — matching the VT323 wordmark. (Port of sthalam-login.jsx Identicon.)
+// A deterministic pixel avatar: a 5×5 grid mirrored across the vertical axis, two-tone,
+// seeded from the DID (FNV-1a). Stable per identity, no assets.
 
 use eframe::egui::{self, Color32, Pos2, Rect};
 
@@ -33,8 +32,7 @@ fn fnv1a(s: &str) -> u32 {
     h
 }
 
-// Accent, accent-soft, then the peer pastels from sthalam-theme.css — variety so accounts
-// are distinguishable at a glance.
+// Accent, accent-soft, then peer pastels — variety so accounts are distinguishable.
 const TINTS: [Color32; 6] = [
     theme::ACCENT,
     Color32::from_rgb(0xCB, 0xA6, 0xF7),

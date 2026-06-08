@@ -1,0 +1,25 @@
+[package]
+name = "code_highlight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# A pure, app-agnostic syntax-highlighting leaf (a sibling of `rich_text`): it turns
+# `(language, source)` into flat semantic spans and knows nothing about egui, loro, or any
+# colour palette — the consumer maps the span kinds to its own theme. inkjet is an
+# *implementation detail* hidden behind this crate's API: it vendors a mutually-compatible
+# tree-sitter grammar bundle (sidestepping the notorious grammar/core version-matching), and
+# we subset it to the languages we actually ship. `default-features = false` drops inkjet's
+# bundled HTML formatter + theme API (we render our own galley) and the `all_languages` set.
+inkjet = { version = "0.11", default-features = false, features = [
+    "language-rust",
+    "language-python",
+    "language-javascript",
+    "language-typescript",
+    "language-go",
+    "language-c",
+    "language-json",
+    "language-toml",
+    "language-bash",
+] }

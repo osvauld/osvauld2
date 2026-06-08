@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+      "osvauld": {
+        "command": "/home/abe/osvauld2/target/debug/osvauld-mcp",
+        "args": []
+      }
+    }
+  }

@@ -1,4 +1,4 @@
-use identity::IdentityError;
+use identity::{CryptoError, IdentityError};
 use storage::StorageError;
 use thiserror::Error;
 
@@ -12,10 +12,16 @@ pub enum VaultError {
     NoKeystore,
     #[error("not a valid did: {0}")]
     BadDid(String),
+    #[error("vault is locked")]
+    Locked,
     #[error(transparent)]
     Identity(IdentityError),
     #[error(transparent)]
+    Crypto(#[from] CryptoError),
+    #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

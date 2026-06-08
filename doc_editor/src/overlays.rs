@@ -1,13 +1,7 @@
-//! In-cell overlays for the `.doc` editor. For now: the **slash command** palette.
-//!
-//! Per the design handoff, overlays open and stay *within the cell* (clamp/flip at the
-//! edges). The slash menu is painted on a foreground layer anchored to the caret: a search
-//! header, a grouped, filterable list of block kinds, and a keyboard-hint footer.
-//!
-//! This module is deliberately **paint-only + geometry**: it draws the palette and exposes
-//! the exact rects (`menu_rect`, `item_rects`) the editor hit-tests against itself. Input
-//! is owned by `editor.rs` — no interactive widgets here, so the editor never loses focus
-//! to the overlay. Painter-safe: solid fills, 1px hairlines, square corners.
+//! In-cell overlays for the `.doc` editor. For now: the slash command palette, painted on a
+//! foreground layer anchored to the caret, clamping/flipping within the cell. Deliberately
+//! paint-only + geometry: it exposes the rects (`menu_rect`, `item_rects`) the editor hit-tests
+//! itself — no interactive widgets here, so the editor never loses focus to the overlay.
 
 use egui::{pos2, vec2, Align2, CornerRadius, FontFamily, FontId, Painter, Pos2, Rect, Stroke, StrokeKind};
 
@@ -26,9 +20,8 @@ pub struct SlashItem {
     pub md: &'static str,
 }
 
-/// The items matching `query` (substring on the label, case-insensitive), in catalog order.
-/// The catalog is derived from [`block::SPECS`] — every kind carrying a `SlashSpec`, in
-/// table order. (Equation/math is omitted there — its renderer is a deferred decision.)
+/// The items matching `query` (case-insensitive label substring), in catalog order. Derived
+/// from [`block::SPECS`] — every kind carrying a `SlashSpec`, in table order.
 pub fn filtered(query: &str) -> Vec<SlashItem> {
     let q = query.trim().to_lowercase();
     block::SPECS
@@ -183,6 +176,88 @@ pub fn render(painter: &Painter, menu: Rect, items: &[SlashItem], selected: usiz
         mono(10.0),
         theme::MUTED,
     );
+}
+
+// ── Code-block language dropdown ─────────────────────────────────────────────────────
+// A compact picker dropped from a code block's language tag. Same dark/square/hairline look
+// as the slash palette, but a fixed short list (Plain text + the bundled languages), so it's
+// pointer-first (no search). Like the palette: paint-only here; the editor hit-tests the rects.
+
+/// One row of the language picker.
+pub struct LangRow {
+    /// The token stored via `set_lang` (`"text"` = plain / no highlighting).
+    pub token: &'static str,
+    pub label: &'static str,
+    /// Whether this is the block's current language (gets a ✓).
+    pub current: bool,
+}
+
+/// The picker rows for a code block whose stored language is `current` (`None` = unset). The
+/// "Plain text" row is current when the language is unset, `"text"`, or an unbundled token.
+pub fn lang_rows(current: Option<&str>) -> Vec<LangRow> {
+    let cur = current.map(|s| s.to_ascii_lowercase());
+    let is_plain = match &cur {
+        None => true,
+        Some(s) => s == "text" || !code_highlight::supported(s),
+    };
+    let mut rows = vec![LangRow { token: "text", label: "Plain text", current: is_plain }];
+    for l in code_highlight::LANGUAGES {
+        rows.push(LangRow { token: l.token, label: l.label, current: cur.as_deref() == Some(l.token) });
+    }
+    rows
+}
+
+const LANG_W: f32 = 188.0;
+const LANG_HEADER_H: f32 = 24.0;
+const LANG_ITEM_H: f32 = 28.0;
+const LANG_PAD: f32 = 4.0;
+
+/// The dropdown's screen rect: right-aligned under the tag `anchor`, clamped inside `cell` and
+/// flipped above the tag when there isn't room below.
+pub fn lang_menu_rect(cell: Rect, anchor: Rect, n: usize) -> Rect {
+    let w = LANG_W;
+    let h = LANG_HEADER_H + LANG_PAD * 2.0 + n as f32 * LANG_ITEM_H;
+    let x = (anchor.right() - w).clamp(cell.left() + EDGE, (cell.right() - w - EDGE).max(cell.left() + EDGE));
+    let below = anchor.bottom() + 4.0;
+    let y = if below + h <= cell.bottom() - EDGE { below } else { (anchor.top() - 4.0 - h).max(cell.top() + EDGE) };
+    Rect::from_min_size(pos2(x, y), vec2(w, h))
+}
+
+/// The clickable row rects, in `render_lang`'s layout. The editor hit-tests against these.
+pub fn lang_item_rects(menu: Rect, n: usize) -> Vec<Rect> {
+    let mut rects = Vec::with_capacity(n);
+    let mut y = menu.top() + LANG_HEADER_H + LANG_PAD;
+    for _ in 0..n {
+        rects.push(Rect::from_min_size(pos2(menu.left() + LANG_PAD, y), vec2(menu.width() - LANG_PAD * 2.0, LANG_ITEM_H)));
+        y += LANG_ITEM_H;
+    }
+    rects
+}
+
+/// Draw the language dropdown. `selected` is the hover/keyboard-highlighted row.
+pub fn render_lang(painter: &Painter, menu: Rect, rows: &[LangRow], selected: usize) {
+    painter.rect_filled(menu, CornerRadius::same(0), theme::BG_2);
+    painter.rect_stroke(menu, CornerRadius::same(0), Stroke::new(1.0, theme::BD), StrokeKind::Inside);
+
+    let mono = |s| FontId::new(s, FontFamily::Monospace);
+    let ui_font = |s| FontId::new(s, FontFamily::Proportional);
+
+    let header = Rect::from_min_size(menu.min, vec2(menu.width(), LANG_HEADER_H));
+    painter.hline(menu.left()..=menu.right(), header.bottom(), Stroke::new(1.0, theme::HAIR));
+    painter.text(pos2(header.left() + 11.0, header.center().y), Align2::LEFT_CENTER, "LANGUAGE", mono(9.0), theme::FAINT);
+
+    let rects = lang_item_rects(menu, rows.len());
+    for (i, (row, r)) in rows.iter().zip(&rects).enumerate() {
+        if i == selected {
+            painter.rect_filled(*r, CornerRadius::same(0), theme::ACCENT_BG);
+            painter.vline(r.left(), r.top()..=r.bottom(), Stroke::new(2.0, theme::ACCENT));
+        }
+        let color = if row.current { theme::FG_1 } else { theme::FG_2 };
+        painter.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, row.label, ui_font(13.0), color);
+        if row.current {
+            painter.text(pos2(r.right() - 11.0, r.center().y), Align2::RIGHT_CENTER, "✓", ui_font(12.0), theme::ACCENT);
+        }
+    }
 }
 
 /// A small keyboard pill, right-anchored at `right_center`.

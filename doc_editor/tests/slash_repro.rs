@@ -75,9 +75,9 @@ fn enter_in_palette_applies_not_splits() {
     let mut editor = DocEditor::new();
     let block = doc.block_ids()[0];
 
-    frame(&ctx, &mut editor, &doc, vec![]); // focus
-    frame(&ctx, &mut editor, &doc, vec![text("/")]); // open palette
-    // separate frame, like a human: press Enter to pick the highlighted item (Text).
+    frame(&ctx, &mut editor, &doc, vec![]);
+    frame(&ctx, &mut editor, &doc, vec![text("/")]);
+    // Separate frame, like a human: press Enter to pick the highlighted item (Text).
     frame(&ctx, &mut editor, &doc, vec![key(egui::Key::Enter)]);
 
     assert_eq!(doc.block_ids().len(), 1, "Enter in the palette must NOT split the block");

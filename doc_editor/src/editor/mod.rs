@@ -1,13 +1,9 @@
-//! The [`DocEditor`] widget: renders a [`Doc`] in the Osvauld block-editor design and
-//! drives editing from raw keyboard / pointer events.
+//! The [`DocEditor`] widget: renders a [`Doc`] and drives editing from keyboard/pointer events.
+//! The widget does *not* own the document (the shell does, so it can be fed by the network and
+//! persisted) — it owns only the caret, anchored to a stable block `TreeID` and re-validated
+//! every frame, so a remote delete relocates the caret instead of crashing.
 //!
-//! The widget does **not** own the document — the shell does, so the document can also be
-//! fed by the network (courier) and persisted to the vault. The widget owns only the
-//! **caret**, which is anchored to a stable block `TreeID`; every frame it re-reads the
-//! tree and re-validates the caret, so a block deleted by a remote peer simply relocates
-//! the caret instead of crashing.
-//!
-//! **Block-row anatomy** (per the design handoff), left to right:
+//! Block-row anatomy, left to right:
 //! ```text
 //!  margin     gutter        spine  content
 //! ┌──────┬──────────────┬─┬────────────────────────┐
@@ -16,22 +12,20 @@
 //!  type-tag  affordances  │  lead + text
 //! (focus only) (hover/focus) persistent 1px hairline
 //! ```
-//! The gutter only paints on hover/focus, so the resting page stays writerly and layout
-//! never reflows. The gutter (and the focus type-tag) are **pinned to the page margin** — a
-//! single fixed column at every depth; nesting indents only the spine and the text column to
-//! its right (so the affordances never "march" rightward as items nest). Each frame: read
-//! blocks → lay out (geometry + galleys) → handle pointer + keyboard (applying Loro ops) →
-//! re-lay-out if changed → paint.
-//!
-//! This file is the **orchestration + shared state**; the per-frame work lives in siblings:
-//! `layout` (geometry + galleys), `paint` (rows + caret), `input` (keys + editing),
-//! `slash` (the command palette), and `selection` (ranges — landing next).
+//! The gutter only paints on hover/focus, so the page never reflows. The gutter is pinned to
+//! the page margin at every depth; nesting indents only the spine and text column to its right.
+//! Each frame: read blocks → lay out → handle pointer+keyboard → re-lay-out if changed → paint.
+//! Orchestration + shared state lives here; per-frame work is in the sibling modules.
 
+mod compose;
+mod drag;
 mod input;
+mod langpick;
 mod layout;
 mod paint;
 mod selection;
 mod slash;
+mod toolbar;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,9 +54,15 @@ struct Slash {
     selected: usize,
 }
 
-/// A block laid out for one frame. All coordinates are **relative to the allocated
-/// rect's top-left**; paint/hit-test add `rect.min`. `placed[i]` corresponds to
-/// `block_ids()[i]`.
+/// The code-block **language dropdown**, while open. Anchored to the code block whose tag was
+/// clicked; `selected` is the hover/keyboard-highlighted row. Lives off the document.
+struct LangPick {
+    block: TreeID,
+    selected: usize,
+}
+
+/// A block laid out for one frame. Coordinates are relative to the allocated rect's top-left;
+/// paint/hit-test add `rect.min`. `placed[i]` corresponds to `block_ids()[i]`.
 struct Placed {
     id: TreeID,
     kind: BlockKind,
@@ -70,10 +70,9 @@ struct Placed {
     done: bool,
     ordinal: Option<usize>,
     galley: Arc<Galley>,
-    /// Left of the fixed gutter (`+` / grip) — pinned to the page margin, the same for
-    /// every block regardless of nesting depth.
+    /// Left of the fixed gutter (`+` / grip), pinned to the page margin at every depth.
     gutter_left: f32,
-    /// The 1px spine at the text-column left; this is what *indents* with nesting depth.
+    /// The 1px spine at the text-column left; this is what indents with nesting depth.
     spine_x: f32,
     /// Left of the text column (after the spine + pad), before the lead.
     content_x: f32,
@@ -87,12 +86,9 @@ struct Placed {
     row_bottom: f32,
 }
 
-/// A cached shaped galley for one block. Reused across frames while the block's styled
-/// content, kind, to-do state, and wrap width are unchanged — so a clean block costs an `Arc`
-/// clone instead of a `LayoutJob` build + text shaping. Invalidation is by `fp`, a fingerprint
-/// of the block's runs (text + marks), so a mark that leaves the length unchanged still
-/// invalidates. (Computing the runs each frame to take the fingerprint is the documented cost
-/// to revisit — switch to Loro's `doc.diff` — once docs get large.)
+/// A cached shaped galley for one block, reused while content/kind/done/wrap are unchanged, so
+/// a clean block costs an `Arc` clone instead of re-shaping. Invalidated by `fp`, a run
+/// fingerprint, so a mark that leaves the length unchanged still invalidates.
 struct CachedBlock {
     fp: u64,
     kind: BlockKind,
@@ -104,18 +100,22 @@ struct CachedBlock {
 
 #[derive(Default)]
 pub struct DocEditor {
-    /// The selection (anchor + head). A collapsed selection (anchor == head) is the caret.
-    /// `None` until the first `resolve_caret`. See `selection.rs`.
+    /// The selection (anchor + head); collapsed (anchor == head) is the caret. `None` until
+    /// the first `resolve_caret`.
     sel: Option<Selection>,
     /// Sticky galley-local x for Up/Down movement; cleared by any non-vertical move.
     desired_x: Option<f32>,
     focused_once: bool,
     /// `Some` while the slash command palette is open.
     slash: Option<Slash>,
+    /// `Some` while a code block's language dropdown is open.
+    lang_pick: Option<LangPick>,
+    /// The block being drag-reordered by its grip, while a drag is in progress.
+    drag: Option<TreeID>,
     /// Per-block shaped-galley cache, keyed by stable `TreeID`. See [`CachedBlock`].
     layout_cache: HashMap<TreeID, CachedBlock>,
-    /// Wall-clock time the caret last moved/edited — the blink phase is measured from here,
-    /// so the caret snaps solid on input instead of possibly sitting in its "off" phase.
+    /// Wall-clock time the caret last moved/edited; the blink phase is measured from here, so
+    /// the caret snaps solid on input instead of sitting in its "off" phase.
     blink_origin: f64,
     /// Last frame's caret position, to detect movement and reset the blink.
     last_caret: Option<(TreeID, usize)>,
@@ -126,15 +126,11 @@ impl DocEditor {
         Self::default()
     }
 
-    /// Render and edit the document for one frame. Returns whether the document was
-    /// mutated this frame (so the caller can persist it). The body scrolls vertically — the
-    /// editor owns its own `ScrollArea`, so it behaves identically in the shell's app cell
-    /// and the standalone runner.
+    /// Render and edit the document for one frame; returns whether it was mutated (so the
+    /// caller can persist). The editor owns its own vertical `ScrollArea`.
     ///
-    /// `read_only` (driven by the viewer's permit) gates every *mutation* — typing, the
-    /// slash menu, cut/paste, undo/redo, the `+`/checkbox affordances — while leaving
-    /// selection, copy, caret navigation, and scrolling live. This is the **reader** that
-    /// `.book` / `.blog` published views use; it's the same widget with edit off.
+    /// `read_only` gates every mutation (typing, slash menu, cut/paste, undo/redo, affordances)
+    /// while leaving selection, copy, navigation, and scrolling live — the published reader.
     pub fn show(&mut self, ui: &mut Ui, doc: &Doc, read_only: bool) -> bool {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -155,8 +151,8 @@ impl DocEditor {
         let width = ui.available_rect_before_wrap().width();
         let (placed, column_height) = layout::layout_all(doc, &ids, ui, width, &mut self.layout_cache);
 
-        // Allocate the full content height so the scrollbar reflects it; fill at least the
-        // viewport so clicks below the last block still land in the editor.
+        // Allocate the full content height (so the scrollbar reflects it) but at least the
+        // viewport, so clicks below the last block still land in the editor.
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(width, column_height.max(viewport.height())),
             Sense::click_and_drag(),
@@ -168,14 +164,24 @@ impl DocEditor {
         // Page background fills the visible viewport (fixed behind the scrolling text).
         ui.painter().rect_filled(viewport, CornerRadius::same(0), theme::BG_PAGE);
 
-        // The palette is painted on a foreground layer (no widgets), so the editor never
-        // loses focus to it. We hit-test pointer events against its rect ourselves.
+        // Overlays paint on a foreground layer (no widgets) so the editor never loses focus to
+        // them; we hit-test their rects ourselves.
         let slash_menu = self.slash_menu_rect(rect, viewport, &placed);
+        let lang_menu = self.lang_menu_rect(rect, viewport, &placed);
+        let toolbar = if response.has_focus() {
+            self.toolbar_rect(rect, viewport, &placed)
+        } else {
+            None
+        };
         let hover_pos = ui.input(|i| i.pointer.hover_pos());
         let pointer_over_menu = matches!((slash_menu, hover_pos), (Some(m), Some(p)) if m.contains(p));
+        let pointer_over_toolbar = matches!((toolbar, hover_pos), (Some(t), Some(p)) if t.contains(p));
+        let pointer_over_langmenu = matches!((lang_menu, hover_pos), (Some(m), Some(p)) if m.contains(p));
+        // Any overlay swallows pointer input meant for the text / gutter beneath it.
+        let over_overlay = pointer_over_menu || pointer_over_toolbar || pointer_over_langmenu;
 
         let hovered = hover_pos
-            .filter(|_| !pointer_over_menu)
+            .filter(|_| !over_overlay)
             .and_then(|p| layout::block_at_y(&placed, rect, p.y));
         let caret_idx = ids.iter().position(|&x| x == self.caret().block);
 
@@ -183,9 +189,9 @@ impl DocEditor {
         let mut undo_redo = false;
         let mut consumed_click = false;
 
-        // Underlying gutter / checkbox affordances are inert while the pointer is over the
-        // palette, so a click on the palette can't also toggle a control beneath it.
-        if !pointer_over_menu {
+        // Underlying affordances are inert while the pointer is over an overlay, so a click
+        // there can't also toggle a control beneath.
+        if !over_overlay {
             // To-do checkboxes are always interactive (visible without hover).
             for p in placed.iter().filter(|p| p.kind == BlockKind::Todo) {
                 let r = layout::checkbox_rect(p, rect);
@@ -196,6 +202,24 @@ impl DocEditor {
                     doc.set_done(p.id, !p.done);
                     changed = true;
                     consumed_click = true;
+                }
+            }
+
+            // Code-block language tags are always interactive (the tag is always shown). A click
+            // toggles the language dropdown for that block; clicking the open block's tag closes it.
+            for p in placed.iter().filter(|p| p.kind == BlockKind::Code) {
+                let r = layout::lang_tag_rect(p, rect);
+                let resp = ui
+                    .interact(r, response.id.with(("lang", p.id)), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() && !read_only {
+                    self.lang_pick = match self.lang_pick.take() {
+                        Some(lp) if lp.block == p.id => None,
+                        _ => Some(LangPick { block: p.id, selected: 0 }),
+                    };
+                    self.slash = None; // mutually exclusive with the slash palette
+                    consumed_click = true;
+                    response.request_focus();
                 }
             }
 
@@ -223,10 +247,25 @@ impl DocEditor {
                     consumed_click = true;
                     response.request_focus();
                 }
-                // The grip is paint-only for now (drag-reorder + block menu are a later
-                // phase); claim hover so it shows the grab cursor.
-                ui.interact(layout::grip_rect(p, rect), response.id.with(("grip", p.id)), Sense::hover())
+                // The grip drag-reorders its block. A press that doesn't move is a click
+                // (reserved for the block menu); a press + movement is a drag.
+                let grip = ui
+                    .interact(layout::grip_rect(p, rect), response.id.with(("grip", p.id)), Sense::click_and_drag())
                     .on_hover_cursor(egui::CursorIcon::Grab);
+                if grip.drag_started() && !read_only {
+                    self.start_drag(p.id);
+                }
+            }
+        }
+
+        // An in-progress block drag: commit the move on release, else keep the ghost animating.
+        if self.drag.is_some() {
+            if ui.input(|i| i.pointer.any_released()) {
+                if self.commit_drag(ui, doc, rect, &placed) {
+                    changed = true;
+                }
+            } else {
+                ui.ctx().request_repaint();
             }
         }
 
@@ -236,18 +275,31 @@ impl DocEditor {
             consumed_click = true;
         }
 
-        // A real *pointer* click outside the palette dismisses it and places the caret.
-        // `response.clicked()` also fires when Enter/Space activates the focused editor
-        // (egui's keyboard activation of a clickable widget) — that must NOT count as a
-        // click here, or it would close the palette the instant before the keyboard step
-        // could apply the highlighted item. Gate on a genuine pointer click.
+        // Language dropdown pointer input: hover highlights a row, a click applies the language.
+        if self.lang_pick.is_some() && self.lang_pointer(ui, doc, rect, viewport, &placed) {
+            changed = true;
+            consumed_click = true;
+        }
+
+        // Inline toolbar: a click on a button toggles its mark over the selection.
+        if let Some(tb) = toolbar {
+            if self.toolbar_pointer(ui, doc, tb) {
+                changed = true;
+                consumed_click = true;
+            }
+        }
+
+        // A real pointer click outside the palette dismisses it and places the caret. Gate on
+        // a genuine pointer click: `response.clicked()` also fires on Enter/Space (egui's
+        // keyboard activation), which would close the palette before the keyboard step applies.
         let pointer_clicked = ui.input(|i| i.pointer.any_click());
-        let click_over_menu = matches!(
-            (slash_menu, response.interact_pointer_pos()),
-            (Some(m), Some(p)) if m.contains(p)
-        );
-        if response.clicked() && pointer_clicked && !consumed_click && !click_over_menu {
+        let click_pos = response.interact_pointer_pos();
+        let click_over_overlay = matches!((slash_menu, click_pos), (Some(m), Some(p)) if m.contains(p))
+            || matches!((toolbar, click_pos), (Some(t), Some(p)) if t.contains(p))
+            || matches!((lang_menu, click_pos), (Some(m), Some(p)) if m.contains(p));
+        if response.clicked() && pointer_clicked && !consumed_click && !click_over_overlay {
             self.slash = None;
+            self.lang_pick = None; // a click elsewhere closes the language dropdown too
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(bi) = layout::block_at_y(&placed, rect, pos.y) {
                     let loc = self.loc_at(&ids, &placed, bi, pos, rect);
@@ -258,9 +310,8 @@ impl DocEditor {
             }
         }
 
-        // Pointer drag selects a range: the press sets the anchor (a collapsed caret at the
-        // press point), then dragging moves the head to grow the selection.
-        if !pointer_over_menu && response.drag_started() {
+        // Pointer drag selects a range: the press sets the anchor, dragging moves the head.
+        if self.drag.is_none() && !over_overlay && response.drag_started() {
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
                 if let Some(bi) = layout::block_at_y(&placed, rect, pos.y) {
                     let loc = self.loc_at(&ids, &placed, bi, pos, rect);
@@ -269,7 +320,7 @@ impl DocEditor {
                     response.request_focus();
                 }
             }
-        } else if !pointer_over_menu && response.dragged() {
+        } else if self.drag.is_none() && !over_overlay && response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some(bi) = layout::block_at_y(&placed, rect, pos.y) {
                     let loc = self.loc_at(&ids, &placed, bi, pos, rect);
@@ -278,14 +329,13 @@ impl DocEditor {
             }
         }
 
-        // Keep keyboard focus while the palette is open, so typing keeps filtering it.
-        if self.slash.is_some() {
+        // Keep keyboard focus while an overlay is open, so its keys keep reaching it.
+        if self.slash.is_some() || self.lang_pick.is_some() {
             response.request_focus();
         }
 
-        // Capture Tab / arrows / Escape as *editing* keys rather than letting egui spend them
-        // on focus navigation (the same lock a `TextEdit` sets). Without this, egui's focus
-        // system swallows Tab before our event loop ever sees it, so indent/outdent never fire.
+        // Capture Tab / arrows / Escape as editing keys instead of letting egui spend them on
+        // focus navigation (the lock a `TextEdit` sets); else egui swallows Tab before we see it.
         if response.has_focus() {
             ui.memory_mut(|m| {
                 m.set_focus_lock_filter(
@@ -300,10 +350,16 @@ impl DocEditor {
             });
         }
 
-        if response.has_focus() || self.slash.is_some() {
-            if self.slash.is_some() {
-                // The palette owns the keyboard entirely — its keys can never fall through
-                // to editing (so Enter applies the item; it never splits the block).
+        if response.has_focus() || self.slash.is_some() || self.lang_pick.is_some() {
+            if self.lang_pick.is_some() {
+                // The dropdown owns the keyboard: ↑/↓ move, Enter applies, Esc closes — nothing
+                // falls through to editing.
+                if self.lang_keyboard(ui, doc) {
+                    changed = true;
+                }
+            } else if self.slash.is_some() {
+                // The palette owns the keyboard entirely, so its keys never fall through to
+                // editing (Enter applies the item; it never splits the block).
                 if self.slash_keyboard(ui, doc) {
                     changed = true;
                 }
@@ -323,10 +379,9 @@ impl DocEditor {
                             }
                         }
                         Event::Key { key, pressed: true, modifiers, .. } => {
-                            // Undo/redo are committed and tracked by the UndoManager itself,
-                            // so they must NOT go through the per-edit commit below (an extra
-                            // commit after an undo clears the redo stack) — hence a separate
-                            // flag. `command` = Ctrl on Linux/Windows, Cmd on macOS.
+                            // Undo/redo are tracked by the UndoManager itself, so they must NOT
+                            // go through the per-edit commit below (an extra commit after undo
+                            // clears the redo stack) — hence a separate flag.
                             if modifiers.command && matches!(key, Key::Z | Key::Y) {
                                 if !read_only {
                                     let did = if *key == Key::Z && !modifiers.shift {
@@ -356,15 +411,16 @@ impl DocEditor {
                     }
                 }
                 if inserted {
-                    self.apply_markdown(doc);
+                    self.apply_markdown(doc); // line-start rules (# , - , > …)
+                    self.apply_inline_markdown(doc); // **bold**, *italic*, `code`, ~~strike~~
                 }
             }
         }
 
-        // If the doc changed, the galleys above are stale — re-read and re-lay-out so the
-        // caret (and the slash anchor) match what we paint. (Docs are short; this is cheap.)
+        // If the doc changed, the galleys above are stale — re-read and re-lay-out so the caret
+        // and slash anchor match what we paint.
         let placed = if changed || undo_redo {
-            // Commit this frame's *edits* so the UndoManager checkpoints them (bursts within
+            // Commit this frame's edits so the UndoManager checkpoints them (bursts within
             // `UNDO_MERGE_MS` fold into one step). Undo/redo must NOT be committed here.
             if changed {
                 doc.commit();
@@ -375,9 +431,8 @@ impl DocEditor {
         } else {
             placed
         };
-        // Reset the blink phase whenever the caret moves or the doc changes, so the caret
-        // stays solid while you type (it otherwise blinks on a wall clock and can sit in its
-        // "off" phase mid-keystroke — which reads as input lag / a skipping cursor).
+        // Reset the blink phase on any caret move or edit, so the caret stays solid while you
+        // type instead of sitting in its "off" phase mid-keystroke (reads as input lag).
         let caret_key = self.sel.map(|s| (s.head.block, s.head.index));
         if changed || undo_redo || caret_key != self.last_caret {
             self.blink_origin = ui.input(|i| i.time);
@@ -386,9 +441,25 @@ impl DocEditor {
 
         self.paint(ui, &response, rect, doc, &placed, hovered);
 
-        // The slash palette paints last, on a foreground layer above the text.
+        // Overlays paint last, above the text. Palette and toolbar are mutually exclusive (one
+        // wants an empty block, the other a selection); the toolbar rect is recomputed from the
+        // final post-edit layout.
         if self.slash.is_some() {
             self.paint_slash(ui, rect, viewport, &placed);
+        } else if response.has_focus() {
+            if let Some(tb) = self.toolbar_rect(rect, viewport, &placed) {
+                self.paint_toolbar(ui, doc, tb, viewport);
+            }
+        }
+
+        // The language dropdown paints over the text (independent of palette/toolbar).
+        if self.lang_pick.is_some() {
+            self.paint_lang(ui, doc, rect, viewport, &placed);
+        }
+
+        // The drag ghost + drop indicator paint on top of everything while a block is held.
+        if self.drag.is_some() {
+            self.paint_drag(ui, doc, rect, viewport, &placed);
         }
         changed || undo_redo
     }
@@ -423,4 +494,15 @@ impl DocEditor {
         let cc = p.galley.cursor_from_pos(pos - origin);
         Caret { block: ids[bi], index: cc.index }
     }
+}
+
+/// Lay out + compose a document into the content [`Scene`](crate::scene) at `width`, using a
+/// throwaway galley cache. This is the bridge the PDF export (`crate::pdf`) uses to obtain the
+/// *exact* display list the screen renders — same layout, same galleys — so paper can't drift
+/// from glass. It needs an `&Ui` only for the egui font system (shaping); nothing is painted.
+pub(crate) fn scene_for_export(doc: &Doc, ui: &Ui, width: f32) -> crate::scene::Scene {
+    let ids = doc.block_ids();
+    let mut cache = HashMap::new();
+    let (placed, _height) = layout::layout_all(doc, &ids, ui, width, &mut cache);
+    compose::build(doc, &placed)
 }

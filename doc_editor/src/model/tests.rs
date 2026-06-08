@@ -1,5 +1,5 @@
-//! The document is the merge point for the editor program *and* the network. These
-//! tests stand in for courier: bytes out of one `Doc`, into another, must converge.
+//! The document is the merge point for editor and network; these tests stand in for courier:
+//! bytes out of one `Doc`, into another, must converge.
 
 use super::*;
 
@@ -25,7 +25,7 @@ fn edits_read_back() {
     assert_eq!(ids, vec![p, h], "new block lands after the paragraph");
     assert_eq!(d.kind(h), BlockKind::H1);
 
-    d.delete_text(p, 0, 1); // drop the leading 'h'
+    d.delete_text(p, 0, 1);
     assert_eq!(d.text(p), "ello");
     d.set_kind(p, BlockKind::H2);
     assert_eq!(d.kind(p), BlockKind::H2);
@@ -119,7 +119,7 @@ fn delete_promotes_children() {
     let parent = d.block_ids()[0];
     d.set_kind(parent, BlockKind::BulletList);
     let child = d.create_block(1, BlockKind::BulletList, "child");
-    d.indent(child); // child nested under parent
+    d.indent(child);
     assert_eq!(d.parent_of(child), Some(parent));
 
     // Deleting the parent keeps the child — promoted into the parent's slot, one level up.
@@ -155,6 +155,41 @@ fn nesting_survives_a_snapshot_roundtrip() {
     assert_eq!(ids.len(), 2);
     assert_eq!(b.depth(ids[1]), 1, "the child is still nested after a roundtrip");
     assert_eq!(b.parent_of(ids[1]), Some(ids[0]));
+}
+
+// --- Drag-reorder moves ---------------------------------------------------------------
+
+#[test]
+fn drag_moves_reorder_and_nest() {
+    let d = Doc::new();
+    let a = d.block_ids()[0];
+    d.insert_text(a, 0, "a");
+    let b = d.create_block(1, BlockKind::Paragraph, "b");
+    let c = d.create_block(2, BlockKind::Paragraph, "c");
+
+    assert!(d.move_before(c, a)); // c jumps to the front
+    assert_eq!(d.block_ids(), vec![c, a, b]);
+    assert!(d.move_after(c, b)); // and back to the end
+    assert_eq!(d.block_ids(), vec![a, b, c]);
+
+    assert!(d.move_into(b, a)); // nest b under a (drop-INTO)
+    assert_eq!(d.parent_of(b), Some(a));
+    assert_eq!(d.depth(b), 1);
+    assert_eq!(d.block_ids(), vec![a, b, c], "DFS order: a, its child b, then c");
+}
+
+#[test]
+fn drag_into_own_subtree_is_rejected() {
+    let d = Doc::new();
+    let parent = d.block_ids()[0];
+    let child = d.create_block(1, BlockKind::BulletList, "child");
+    d.move_into(child, parent); // child under parent
+    assert_eq!(d.parent_of(child), Some(parent));
+    // Moving the parent into its own descendant would make a cycle — rejected, no change.
+    assert!(!d.move_into(parent, child));
+    assert_eq!(d.parent_of(parent), None);
+    // A move relative to itself is also rejected.
+    assert!(!d.move_before(parent, parent));
 }
 
 // --- Inline marks ---------------------------------------------------------------------
@@ -200,6 +235,22 @@ fn marks_shift_with_edits_and_survive_snapshot() {
     // And the mark survives a persistence roundtrip.
     let b = Doc::from_snapshot(&a.export_snapshot()).unwrap();
     assert!(b.mark_covers(b.block_ids()[0], 0, 6, "bold"));
+}
+
+#[test]
+fn marks_do_not_expand_past_their_edges() {
+    // Bolding a span must not leak into text typed at its boundaries — the mark expands to neither
+    // edge (`ExpandType::None`). Without this, typing after a bold word keeps everything bold.
+    let d = Doc::new();
+    let p = d.block_ids()[0];
+    d.insert_text(p, 0, "hello");
+    d.mark(p, 0, 5, "bold");
+    d.insert_text(p, 5, "!"); // type past the right edge
+    d.insert_text(p, 0, ">"); // and before the left edge
+    assert_eq!(d.text(p), ">hello!");
+    assert!(d.mark_covers(p, 1, 6, "bold"), "the original 'hello' stays bold");
+    assert!(!d.mark_covers(p, 6, 7, "bold"), "the trailing '!' is not bold");
+    assert!(!d.mark_covers(p, 0, 1, "bold"), "the leading '>' is not bold");
 }
 
 #[test]

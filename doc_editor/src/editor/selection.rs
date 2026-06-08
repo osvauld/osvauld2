@@ -1,14 +1,10 @@
-//! The **selection model**: an anchor/head range over caret positions, the range operations
-//! (ordering, text extraction, deletion), and the highlight render.
-//!
-//! A [`Selection`] is two [`super::Caret`] positions. When `anchor == head` it's a plain
-//! caret; otherwise it spans the text from the earlier to the later position in document
-//! order. Reads (extent, [`selected_text`](DocEditor::selected_text)) are allowed in a
-//! read-only document; [`delete_selection`](DocEditor::delete_selection) mutates.
+//! The selection model: an anchor/head range over caret positions, the range ops (ordering,
+//! text extraction, deletion), and the highlight render. `anchor == head` is a plain caret;
+//! otherwise it spans document order. Reads are read-only safe; deletion mutates.
 
 use std::cmp::Ordering;
 
-use egui::{pos2, text::CCursor, CornerRadius, Galley, Painter, Pos2, Rect, Ui};
+use egui::{CornerRadius, Painter, Pos2, Rect, Ui};
 use loro::TreeID;
 
 use crate::model::{BlockKind, Doc};
@@ -90,8 +86,8 @@ impl DocEditor {
         if si == ei {
             doc.delete_text(start.block, start.index, end.index - start.index);
         } else {
-            // Trim the start block's tail and the end block's head, splice the end's
-            // remainder onto the start, then drop every block from the next through the end.
+            // Trim the start tail and end head, splice the end's remainder onto the start, then
+            // drop every block from the next through the end.
             let start_len = doc.text_len(start.block);
             doc.delete_text(start.block, start.index, start_len - start.index);
             doc.delete_text(end.block, 0, end.index);
@@ -130,10 +126,8 @@ impl DocEditor {
         out
     }
 
-    /// Toggle an inline mark (`"bold"`/`"italic"`/`"strike"`/`"code"`) over the selection. If
-    /// the mark already covers the *whole* selection it's removed, else it's applied — across
-    /// every block the selection spans (each block's local sub-range). No-op when the
-    /// selection is collapsed (a caret has no range to mark). Returns whether it changed.
+    /// Toggle an inline mark over the selection, across every spanned block: removed if it
+    /// already covers the whole selection, else applied. No-op when collapsed. Returns changed.
     pub(super) fn toggle_mark(&mut self, doc: &Doc, key: &str) -> bool {
         if self.collapsed() {
             return false;
@@ -168,8 +162,28 @@ impl DocEditor {
         true
     }
 
-    /// Put the selected text on the system clipboard. A read operation — allowed even in a
-    /// read-only document. No-op when nothing is selected.
+    /// Whether `key` covers the entire selection (so the toolbar shows it active). False when
+    /// collapsed.
+    pub(super) fn selection_has_mark(&self, doc: &Doc, key: &str) -> bool {
+        if self.collapsed() {
+            return false;
+        }
+        let ids = doc.block_ids();
+        let (start, end) = self.ordered(&ids);
+        let (Some(si), Some(ei)) = (
+            ids.iter().position(|&x| x == start.block),
+            ids.iter().position(|&x| x == end.block),
+        ) else {
+            return false;
+        };
+        (si..=ei).all(|i| {
+            let a = if i == si { start.index } else { 0 };
+            let b = if i == ei { end.index } else { doc.text_len(ids[i]) };
+            a >= b || doc.mark_covers(ids[i], a, b, key)
+        })
+    }
+
+    /// Put the selected text on the system clipboard. A read — read-only safe; no-op when empty.
     pub(super) fn copy_to_clipboard(&self, ui: &Ui, doc: &Doc) {
         let s = self.selected_text(doc);
         if !s.is_empty() {
@@ -177,8 +191,7 @@ impl DocEditor {
         }
     }
 
-    /// Cut: copy the selection to the clipboard, then delete it. Returns whether the
-    /// document changed (false when nothing is selected). Mutates — gate on edit mode.
+    /// Cut: copy the selection, then delete it. Returns whether the document changed. Mutates.
     pub(super) fn cut(&mut self, ui: &Ui, doc: &Doc) -> bool {
         if self.collapsed() {
             return false;
@@ -188,9 +201,8 @@ impl DocEditor {
         true
     }
 
-    /// Paste `text` at the caret, first deleting any selection. Newlines split into new
-    /// paragraphs: the first line joins the caret block, the block's original tail rides to
-    /// the end of the last pasted line, and interior lines become their own blocks. Mutates.
+    /// Paste `text` at the caret, first deleting any selection. Newlines split into paragraphs;
+    /// the caret block's original tail rides to the end of the last pasted line. Mutates.
     pub(super) fn paste(&mut self, doc: &Doc, text: &str) -> bool {
         if text.is_empty() {
             return false;
@@ -200,35 +212,50 @@ impl DocEditor {
         }
         let c = self.caret();
 
-        // Normalise: drop carriage returns, split on '\n', strip other control chars per line.
-        let lines: Vec<String> = text
-            .replace('\r', "")
-            .split('\n')
-            .map(|l| l.chars().filter(|ch| !ch.is_control()).collect())
-            .collect();
-
-        if lines.len() == 1 {
-            doc.insert_text(c.block, c.index, &lines[0]);
-            self.set_caret(Caret { block: c.block, index: c.index + lines[0].chars().count() });
+        // Code is a single multi-line block: paste verbatim, keeping newlines (and tabs) literal
+        // instead of splitting on '\n' into paragraphs. Normalise CRLF; drop other control chars.
+        if doc.kind(c.block) == BlockKind::Code {
+            let body: String = text
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .chars()
+                .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+                .collect();
+            doc.insert_text(c.block, c.index, &body);
+            self.set_caret(Caret { block: c.block, index: c.index + body.chars().count() });
             return true;
         }
 
-        // Multi-line: truncate the caret block at the caret (saving its tail), append the
-        // first line, then emit one new paragraph per remaining line; the last carries the
-        // saved tail.
+        // Prose: paragraphs are separated by BLANK lines; single newlines inside a paragraph are
+        // soft wraps, joined with a space — so a hard-wrapped paragraph pastes as ONE block, not
+        // one block per wrapped line. (A blank line is a real paragraph break, and splits.)
+        let paras = split_paragraphs(text);
+        let Some(first) = paras.first() else {
+            return false; // only blank lines / control chars — nothing to paste
+        };
+
+        if paras.len() == 1 {
+            doc.insert_text(c.block, c.index, first);
+            self.set_caret(Caret { block: c.block, index: c.index + first.chars().count() });
+            return true;
+        }
+
+        // Multi-paragraph: truncate the caret block at the caret (saving its tail), append the
+        // first paragraph, then emit one new paragraph block per remaining chunk; the last
+        // carries the saved tail.
         let block_len = doc.text_len(c.block);
         let tail: String = doc.text(c.block).chars().skip(c.index).collect();
         doc.delete_text(c.block, c.index, block_len - c.index);
-        doc.insert_text(c.block, c.index, &lines[0]);
+        doc.insert_text(c.block, c.index, first);
 
         let mut after = c.block;
-        let mut caret = Caret { block: c.block, index: c.index + lines[0].chars().count() };
-        let last = lines.len() - 1;
-        for (i, line) in lines.iter().enumerate().skip(1) {
-            let content = if i == last { format!("{line}{tail}") } else { line.clone() };
+        let mut caret = Caret { block: c.block, index: c.index + first.chars().count() };
+        let last = paras.len() - 1;
+        for (i, para) in paras.iter().enumerate().skip(1) {
+            let content = if i == last { format!("{para}{tail}") } else { para.clone() };
             let nb = doc.insert_after(after, BlockKind::Paragraph, &content);
             after = nb;
-            caret = Caret { block: nb, index: line.chars().count() };
+            caret = Caret { block: nb, index: para.chars().count() };
         }
         self.set_caret(caret);
         true
@@ -255,34 +282,42 @@ impl DocEditor {
             let a = if i == si { start.index } else { 0 };
             let b = if i == ei { end.index } else { doc.text_len(p.id) };
             let origin = Pos2::new(rect.left() + p.text_x, rect.top() + p.content_top);
-            for r in selection_rects(&p.galley, a, b) {
+            for r in text_edit::selection_rects(&p.galley, a, b) {
                 painter.rect_filled(r.translate(origin.to_vec2()), CornerRadius::same(0), theme::SEL_BG);
             }
         }
     }
 }
 
-/// Galley-local rects covering the codepoint range `[a, b)`, one per visual row it spans.
-/// X positions come from `pos_from_cursor` (galley space); a selection that runs off the
-/// end of a wrapped row extends to that row's right edge instead.
-fn selection_rects(galley: &Galley, a: usize, b: usize) -> Vec<Rect> {
-    let mut rects = Vec::new();
-    if a >= b {
-        return rects;
-    }
-    let mut idx = 0usize; // first codepoint index of the current row
-    for row in &galley.rows {
-        let row_start = idx;
-        let row_end = idx + row.char_count_excluding_newline();
-        let sa = a.max(row_start);
-        let sb = b.min(row_end);
-        if sa < sb {
-            let rr = row.rect();
-            let x0 = if a <= row_start { rr.left() } else { galley.pos_from_cursor(CCursor::new(sa)).left() };
-            let x1 = if b >= row_end { rr.right() } else { galley.pos_from_cursor(CCursor::new(sb)).left() };
-            rects.push(Rect::from_min_max(pos2(x0, rr.top()), pos2(x1, rr.bottom())));
+/// Split pasted plain text into prose paragraphs. A **blank line** (empty or whitespace-only)
+/// is a paragraph boundary; consecutive non-blank lines are **soft wraps** joined with a single
+/// space — so a hard-wrapped paragraph becomes one block, not one block per wrapped line. CR/CRLF
+/// is normalised; tabs and stray control chars collapse to spaces; runs of whitespace collapse.
+/// Returns the cleaned, single-line paragraph strings (no empties).
+fn split_paragraphs(text: &str) -> Vec<String> {
+    let normalized = text.replace('\r', "\n");
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in normalized.split('\n') {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                chunks.push(cur.join(" "));
+                cur.clear();
+            }
+        } else {
+            cur.push(line);
         }
-        idx = row_start + row.char_count_including_newline();
     }
-    rects
+    if !cur.is_empty() {
+        chunks.push(cur.join(" "));
+    }
+    chunks
+        .into_iter()
+        .map(|p| {
+            // Control chars (incl. tabs) → spaces, then collapse whitespace runs to one space.
+            let spaced: String = p.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+            spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
 }

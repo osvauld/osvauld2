@@ -1,12 +1,11 @@
-// Brand text atoms shared across screens: the wordmark, pixel headings, the tagline, and
-// the corner tags. All draw the VT323 pixel face twice for the signature offset shadow.
+// Brand text atoms: the wordmark, pixel headings, tagline, and corner tags. Pixel faces are
+// drawn twice for the signature offset shadow (egui has no text-shadow).
 
 use eframe::egui::{self, Align2, FontFamily, FontId, Pos2, Rect, RichText};
 
 use crate::theme;
 
-// The "sthalam" wordmark, allocated in-flow, with a pixel-offset shadow scaled to the size
-// (96px on signup, 64px on login). Left edge of the allocated box is the glyph origin.
+// The "sthalam" wordmark, allocated in-flow with a size-scaled offset shadow.
 pub fn wordmark(ui: &mut egui::Ui, size: f32) {
     let offset = (size / 24.0).round();
     let font = FontId::new(size, theme::pixel());
@@ -20,7 +19,7 @@ pub fn pixel_heading(painter: &egui::Painter, left_top: Pos2, text: &str, size: 
     pixel_text(painter, left_top, text, FontId::new(size, theme::pixel()), 3.0);
 }
 
-// Shadow + face — egui has no text-shadow, so the glyphs are drawn twice.
+// Shadow then face.
 fn pixel_text(painter: &egui::Painter, left_top: Pos2, text: &str, font: FontId, offset: f32) {
     painter.text(left_top + egui::vec2(offset, offset), Align2::LEFT_TOP, text, font.clone(), theme::ACCENT_PRESS);
     painter.text(left_top, Align2::LEFT_TOP, text, font, theme::ACCENT);

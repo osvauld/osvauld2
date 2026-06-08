@@ -5,10 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-# The engine paints with egui's own epaint (native meshes — no texture round-trip,
-# no FFI) and shapes text with egui's fonts, so its frame output is the same shape
-# the compositor already consumes from a wasm app. Pinned to the shell's egui.
 egui = "0.34"
-# Standalone flexbox/grid/block layout. The view tree is laid out by Taffy; text is
-# measured back through egui's fonts via Taffy's measure callback.
 taffy = "0.10"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+loro = "1.12.0"
+rich_text = { path = "../rich_text" }
+text_edit = { path = "../text_edit" }

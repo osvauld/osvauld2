@@ -143,20 +143,43 @@ fn paste_single_line_inserts_at_caret() {
     assert_eq!(doc.block_ids().len(), 1);
 }
 
-/// Multi-line paste splits into one paragraph per line.
+/// Prose paste joins hard-wrapped lines into one paragraph and only splits at blank lines —
+/// so pasting a wrapped paragraph doesn't explode into a block per line.
 #[test]
-fn paste_multiline_splits_into_blocks() {
+fn paste_prose_joins_wraps_and_splits_on_blank_lines() {
     let ctx = egui::Context::default();
+
+    // A hard-wrapped single paragraph (single newlines) → ONE block, lines joined with spaces.
     let doc = Doc::new();
     let mut editor = DocEditor::new();
     frame(&ctx, &mut editor, &doc, vec![]); // focus
-    frame(&ctx, &mut editor, &doc, vec![paste("one\ntwo\nthree")]);
-
+    frame(&ctx, &mut editor, &doc, vec![paste("The quick\nbrown fox\njumps.")]);
     let ids = doc.block_ids();
-    assert_eq!(ids.len(), 3, "three lines → three blocks");
-    assert_eq!(doc.text(ids[0]), "one");
-    assert_eq!(doc.text(ids[1]), "two");
-    assert_eq!(doc.text(ids[2]), "three");
+    assert_eq!(ids.len(), 1, "wrapped lines stay one paragraph");
+    assert_eq!(doc.text(ids[0]), "The quick brown fox jumps.");
+
+    // A blank line is a real paragraph break → two blocks (each with its wraps joined).
+    let doc2 = Doc::new();
+    let mut editor2 = DocEditor::new();
+    frame(&ctx, &mut editor2, &doc2, vec![]); // focus
+    frame(&ctx, &mut editor2, &doc2, vec![paste("Para one\nwrapped.\n\nPara two.")]);
+    let ids2 = doc2.block_ids();
+    assert_eq!(ids2.len(), 2, "blank line → new paragraph");
+    assert_eq!(doc2.text(ids2[0]), "Para one wrapped.");
+    assert_eq!(doc2.text(ids2[1]), "Para two.");
+}
+
+/// Multi-line paste into a code block stays one block with newlines intact (code is one
+/// multi-line block — it must NOT split into paragraphs the way prose does).
+#[test]
+fn paste_multiline_into_code_stays_one_block() {
+    let ctx = egui::Context::default();
+    let (doc, mut editor, block) = type_into(&ctx, "```rust "); // becomes an empty code block
+    assert_eq!(doc.kind(block), doc_editor::BlockKind::Code);
+
+    frame(&ctx, &mut editor, &doc, vec![paste("fn main() {\n    let x = 1;\n}")]);
+    assert_eq!(doc.block_ids().len(), 1, "pasted code stays in the single code block");
+    assert_eq!(doc.text(block), "fn main() {\n    let x = 1;\n}", "newlines kept literal");
 }
 
 /// Paste over a selection replaces it.
@@ -207,7 +230,7 @@ fn undo_redo_round_trips_a_paste() {
     let doc = Doc::new();
     let mut editor = DocEditor::new();
     frame(&ctx, &mut editor, &doc, vec![]); // focus
-    frame(&ctx, &mut editor, &doc, vec![paste("one\ntwo")]);
+    frame(&ctx, &mut editor, &doc, vec![paste("one\n\ntwo")]); // blank line → two paragraphs
     assert_eq!(doc.block_ids().len(), 2);
 
     frame(&ctx, &mut editor, &doc, vec![]);
@@ -288,6 +311,82 @@ fn ctrl_b_toggles_bold_on_selection() {
     // The selection persists, so a second Ctrl+B toggles it back off.
     frame(&ctx, &mut editor, &doc, vec![cmd(egui::Key::B, false)]);
     assert!(!doc.mark_covers(block, 0, 5, "bold"), "Ctrl+B again removes the bold");
+}
+
+/// Type `s` one character at a time into a fresh focused block; returns the doc/editor/block.
+fn type_into(ctx: &egui::Context, s: &str) -> (Doc, DocEditor, loro::TreeID) {
+    let doc = Doc::new();
+    let mut editor = DocEditor::new();
+    let block = doc.block_ids()[0];
+    frame(ctx, &mut editor, &doc, vec![]); // focus
+    for ch in s.chars() {
+        frame(ctx, &mut editor, &doc, vec![text(&ch.to_string())]);
+    }
+    (doc, editor, block)
+}
+
+/// A code fence captures an optional language on the trailing-space trigger: ` ```rust␣ ` →
+/// a code block tagged `rust`; ` ```␣ ` → a plain code block (no tag). The fence is consumed,
+/// and three backticks alone (no space) do NOT convert — leaving room to type the language.
+#[test]
+fn markdown_code_fence_with_language() {
+    let ctx = egui::Context::default();
+
+    let (doc, _e, b) = type_into(&ctx, "```rust ");
+    assert_eq!(doc.kind(b), doc_editor::BlockKind::Code);
+    assert_eq!(doc.text(b), "", "the whole ```rust␣ prefix is consumed");
+    assert_eq!(doc.lang(b).as_deref(), Some("rust"));
+
+    let (doc2, _e2, b2) = type_into(&ctx, "``` ");
+    assert_eq!(doc2.kind(b2), doc_editor::BlockKind::Code);
+    assert_eq!(doc2.text(b2), "");
+    assert_eq!(doc2.lang(b2), None, "bare fence → plain code, no language");
+
+    // Three backticks with no trigger space stay a paragraph (so a language can still be typed).
+    let (doc3, _e3, b3) = type_into(&ctx, "```");
+    assert_eq!(doc3.kind(b3), doc_editor::BlockKind::Paragraph);
+    assert_eq!(doc3.text(b3), "```");
+}
+
+/// `*italic*` → the word, italicised, delimiters stripped.
+#[test]
+fn markdown_italic_rule() {
+    let ctx = egui::Context::default();
+    let (doc, _e, block) = type_into(&ctx, "*italic*");
+    assert_eq!(doc.text(block), "italic", "the `*` delimiters are consumed");
+    assert!(doc.mark_covers(block, 0, 6, "italic"));
+}
+
+/// `**bold**` → bold (and the single-`*` rule must not fire mid-way and mangle it).
+#[test]
+fn markdown_bold_rule() {
+    let ctx = egui::Context::default();
+    let (doc, _e, block) = type_into(&ctx, "**bold**");
+    assert_eq!(doc.text(block), "bold");
+    assert!(doc.mark_covers(block, 0, 4, "bold"));
+    assert!(!doc.mark_covers(block, 0, 4, "italic"), "bold, not italic");
+}
+
+/// `` `code` `` and `~~strike~~` round out the set.
+#[test]
+fn markdown_code_and_strike_rules() {
+    let ctx = egui::Context::default();
+    let (doc, _e, b1) = type_into(&ctx, "`code`");
+    assert_eq!(doc.text(b1), "code");
+    assert!(doc.mark_covers(b1, 0, 4, "code"));
+
+    let (doc2, _e2, b2) = type_into(&ctx, "~~gone~~");
+    assert_eq!(doc2.text(b2), "gone");
+    assert!(doc2.mark_covers(b2, 0, 4, "strike"));
+}
+
+/// A delimiter pair with nothing between it is left as literal text (no empty mark).
+#[test]
+fn markdown_rule_needs_content() {
+    let ctx = egui::Context::default();
+    let (doc, _e, block) = type_into(&ctx, "****");
+    assert_eq!(doc.text(block), "****", "no content between the stars → no conversion");
+    assert!(!doc.mark_covers(block, 0, 4, "bold"));
 }
 
 /// A plain arrow collapses a selection to its edge without deleting anything.

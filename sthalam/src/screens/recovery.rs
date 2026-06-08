@@ -4,8 +4,8 @@ use crate::app::Screen;
 use crate::components::{brand, controls, Backdrop};
 use crate::theme;
 
-// The "your seed" screen: the 24 words in quiet column-major rows, one amber warning, and a
-// centered "I've saved it" button. No reveal/copy/checkbox — write them down and continue.
+// The "your seed" screen: the 24 words in column-major rows, an amber warning, and a centered
+// "I've saved it" button. No reveal/copy/checkbox — write them down and continue.
 pub fn recovery(ui: &mut egui::Ui, words: &str, backdrop: &mut Backdrop) -> Option<Screen> {
     let rect = ui.max_rect();
     backdrop.show(ui, rect);
@@ -19,7 +19,7 @@ pub fn recovery(ui: &mut egui::Ui, words: &str, backdrop: &mut Backdrop) -> Opti
     warning_band(ui, content, button.top() - 18.0);
     controls::offset_button(ui, button, "I'VE SAVED IT ▸")
         .clicked()
-        .then(Screen::home)
+        .then(Screen::shell)
 }
 
 // "OSVAULD · 01 · STHALAM" on the left; step dots + "02 / 03" on the right.
@@ -39,8 +39,8 @@ fn topbar(ui: &egui::Ui, content: Rect) {
     }
 }
 
-// 24 words as hairline rows, laid out column-major so each column reads 1→N top-to-bottom
-// (how you write them on paper). 3 columns normally, 2 when the window is narrow.
+// 24 words as hairline rows, column-major so each column reads top-to-bottom (how you write
+// them on paper). 3 columns normally, 2 when the window is narrow.
 fn word_columns(ui: &egui::Ui, content: Rect, top: f32, words: &str) {
     let words: Vec<&str> = words.split_whitespace().collect();
     if words.is_empty() {
@@ -67,8 +67,7 @@ fn word_columns(ui: &egui::Ui, content: Rect, top: f32, words: &str) {
     }
 }
 
-// Amber band — the one piece of emphasis now that the checkbox gate is gone. Its bottom sits
-// at `bottom`; height grows with the wrapped text so it stays readable on narrow windows.
+// Amber band; height grows with the wrapped text so it stays readable on narrow windows.
 fn warning_band(ui: &egui::Ui, content: Rect, bottom: f32) {
     const PAD: f32 = 14.0;
     const MARKER: f32 = 22.0;
@@ -82,7 +81,7 @@ fn warning_band(ui: &egui::Ui, content: Rect, bottom: f32) {
 
     let p = ui.painter();
     p.rect_filled(band, 0.0, theme::WARN_BG);
-    p.rect_filled(Rect::from_min_size(band.min, egui::vec2(2.0, height)), 0.0, theme::WARN); // left rule
+    p.rect_filled(Rect::from_min_size(band.min, egui::vec2(2.0, height)), 0.0, theme::WARN);
     p.text(egui::pos2(left + PAD, band.top() + PAD - 1.0), Align2::LEFT_TOP, "!", FontId::new(13.0, theme::mono_sb()), theme::WARN);
     p.galley(egui::pos2(left + PAD + MARKER, band.top() + PAD), galley, theme::WARN);
 }

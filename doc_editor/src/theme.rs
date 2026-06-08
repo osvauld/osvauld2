@@ -1,12 +1,8 @@
-//! Osvauld `.doc` editor design tokens, the document **type scale**, and the canonical
-//! block-row **geometry**.
-//!
-//! These mirror the design handoff's `ED` palette, `KIND` type scale, and `G` geometry
-//! (the dark, square, hairline block editor). The colour values also echo
-//! `sthalam::theme`; they're duplicated here so the editor crate stands alone — once a
-//! shared `ui`/`theme` crate exists, this module should re-export from it instead.
+//! Osvauld `.doc` editor design tokens, type scale, and canonical block-row geometry. Colour
+//! values echo `sthalam::theme`, duplicated so the editor crate stands alone — once a shared
+//! `ui`/`theme` crate exists, this should re-export from it instead.
 
-use egui::{Color32, FontFamily};
+use egui::Color32;
 
 // ── Surfaces ──────────────────────────────────────────────────────────────────────
 pub const BG_PAGE: Color32 = Color32::from_rgb(0x0A, 0x0B, 0x10); // doc surface
@@ -61,18 +57,50 @@ pub const PAD_BOTTOM: f32 = 40.0;
 /// The longest a line runs before wrapping — a comfortable long-form reading measure.
 pub const MAX_CONTENT: f32 = 760.0;
 
-// ── Fonts ─────────────────────────────────────────────────────────────────────────
-/// The font-family name the editor uses for **bold** runs and for headings (egui cannot
-/// synthesise weight — it needs a real bold face). The *consumer* (the shell, the standalone
-/// runner) must register a bold proportional face under this exact name; see each crate's
-/// font setup. Kept as the single source so the names can't drift.
-pub const BOLD_FAMILY: &str = "inter_sb";
+// ── Code syntax palette ─────────────────────────────────────────────────────────────
+// Code-block highlight colours, tuned for the dark page; mapped from the engine-neutral
+// `code_highlight::HlKind` so the highlighter stays palette-free. The PDF export runs these
+// through its luminance-inverting `ink()`, so no separate print palette is needed.
+pub const CODE_KW: Color32 = Color32::from_rgb(0xC4, 0xA7, 0xF7); // keyword — violet
+pub const CODE_FN: Color32 = Color32::from_rgb(0x82, 0xAA, 0xFF); // function — blue
+pub const CODE_TY: Color32 = Color32::from_rgb(0x7F, 0xD1, 0xC0); // type — teal
+pub const CODE_STR: Color32 = Color32::from_rgb(0x9E, 0xCE, 0x6A); // string — green
+pub const CODE_NUM: Color32 = Color32::from_rgb(0xFF, 0x9E, 0x64); // number — orange
+pub const CODE_CONST: Color32 = Color32::from_rgb(0xFF, 0xCB, 0x6B); // constant — amber
+pub const CODE_COMMENT: Color32 = Color32::from_rgb(0x6B, 0x6D, 0x7E); // comment — muted
+pub const CODE_PROP: Color32 = Color32::from_rgb(0x89, 0xDD, 0xFF); // member — cyan
+pub const CODE_OP: Color32 = Color32::from_rgb(0xC0, 0xCA, 0xF5); // operator — soft blue
+pub const CODE_TAG: Color32 = Color32::from_rgb(0xF7, 0x76, 0x8E); // tag/escape — coral
 
-/// The bold proportional family (see [`BOLD_FAMILY`]).
-pub fn bold_family() -> FontFamily {
-    FontFamily::Name(BOLD_FAMILY.into())
+/// Map a semantic highlight kind to its on-screen colour. `Variable`/`Text` stay the code
+/// block's base ink (`FG_2`); `Punctuation` is muted so structure recedes behind tokens.
+pub fn code_color(kind: code_highlight::HlKind) -> Color32 {
+    use code_highlight::HlKind::*;
+    match kind {
+        Keyword => CODE_KW,
+        Function => CODE_FN,
+        Type => CODE_TY,
+        Constant => CODE_CONST,
+        Number => CODE_NUM,
+        String => CODE_STR,
+        Comment => CODE_COMMENT,
+        Property => CODE_PROP,
+        Operator => CODE_OP,
+        Attribute => CODE_CONST,
+        Tag => CODE_TAG,
+        Escape => CODE_TAG,
+        Variable | Text => FG_2,
+        Punctuation => MUTED,
+    }
 }
 
-// Per-kind presentation (the type scale, type-tags, placeholders) now lives in `block.rs`
-// as the `BlockSpec` table — the single source for how a kind appears. This module is the
-// raw design tokens it draws from.
+// ── Fonts ─────────────────────────────────────────────────────────────────────────
+/// The font-family name for bold runs and headings (egui can't synthesise weight — it needs a
+/// real bold face). The consumer must register a bold proportional face under this exact name.
+/// Re-exported from [`rich_text`] so the native editor and the Lua-app renderer share one source
+/// of truth — the family names can't drift apart. The actual face is installed by
+/// [`rich_text::install_fonts`]; the bold-or-fallback resolver is [`rich_text::bold_or_fallback`].
+pub use rich_text::BOLD_FAMILY;
+
+// Per-kind presentation (type scale, type-tags, placeholders) lives in `block.rs` as the
+// `BlockSpec` table; this module is the raw design tokens it draws from.

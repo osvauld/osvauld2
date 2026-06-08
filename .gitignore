@@ -1,1 +1,4 @@
 /target
+
+# Engine app local data snapshots (dev-grade persistence; real store is the encrypted vault)
+*.lua.snapshot

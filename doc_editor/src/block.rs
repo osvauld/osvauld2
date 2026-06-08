@@ -1,21 +1,8 @@
-//! The **block-kind descriptor** — one [`BlockSpec`] per [`BlockKind`], the *single source*
-//! for how a kind presents: its type scale, focus type-tag, placeholder, lead width, how it
-//! appears in the slash palette, and which markdown prefixes convert into it.
-//!
-//! This is the seam that keeps adding a block kind a *one-place* change. Before this, a
-//! kind's presentation was scattered across `theme.rs` (3 functions), `overlays.rs` (the
-//! slash catalog), and `editor.rs` (lead widths + markdown rules). They now all read from
-//! [`SPECS`].
-//!
-//! Note the layer split: the **data/semantic** attributes — the stored string id and
-//! `is_list` — stay on [`BlockKind`] in `model.rs`, which depends only on `loro` and is
-//! egui-free. *Presentation* (fonts, colours, geometry, palette) lives here, where egui and
-//! the theme are in scope. So adding a kind touches `model.rs` (the enum + its id) and this
-//! table — each in its proper layer.
-//!
-//! The per-kind *rendering* (bullet glyph, checkbox, code box) is still a `match` in
-//! `paint.rs`: that's genuine custom paint, not data, and it becomes a real node-view
-//! registry later (arch §8 step 6) once selection/marks define the interface.
+//! The block-kind descriptor — one [`BlockSpec`] per [`BlockKind`], the single source for how
+//! a kind presents (type scale, type-tag, placeholder, lead width, slash palette, md prefixes).
+//! Keeps adding a kind a one-place change. Layer split: semantic attrs (string id, `is_list`)
+//! stay on [`BlockKind`] in egui-free `model.rs`; presentation lives here where egui is in scope.
+//! Per-kind custom paint stays a `match` in `paint.rs` (it's paint, not data).
 
 use egui::{Color32, FontFamily, FontId};
 
@@ -31,9 +18,8 @@ pub struct SlashSpec {
     pub md: &'static str,
 }
 
-/// Everything presentational about one block kind. Held as raw type-scale numbers (not a
-/// built `FontId`) so the table can be `const`; [`block_style`] composes the [`BlockStyle`]
-/// the layout/paint code consumes.
+/// Everything presentational about one block kind. Held as raw numbers (not a built `FontId`)
+/// so the table can be `const`; [`block_style`] composes the consumed [`BlockStyle`].
 pub struct BlockSpec {
     pub kind: BlockKind,
 
@@ -55,15 +41,13 @@ pub struct BlockSpec {
     pub type_tag: &'static str,
     /// Faint prompt inside an empty, focused block.
     pub placeholder: &'static str,
-    /// Width reserved at the content-column left for the lead marker (bullet / number /
-    /// checkbox / quote rule / code inset).
+    /// Width reserved at the content-column left for the lead marker.
     pub lead_w: f32,
 
     // ── authoring ──
     pub slash: Option<SlashSpec>,
-    /// Paragraph prefixes that convert into this kind on input (strip prefix, set kind).
-    /// `Divider` is *not* listed here — it clears the line and spawns a paragraph, so it
-    /// stays special-cased in the markdown handler.
+    /// Paragraph prefixes that convert into this kind on input. `Divider` is omitted — it
+    /// clears the line and spawns a paragraph, so it stays special-cased in the md handler.
     pub md_prefixes: &'static [&'static str],
 }
 
@@ -131,7 +115,9 @@ pub const SPECS: &[BlockSpec] = &[
         size: 13.5, line_ratio: 1.60, py: 0.0, ls_em: 0.0, mono: true, color: theme::FG_2, italics: false,
         type_tag: "</>", placeholder: "Code", lead_w: 14.0,
         slash: Some(SlashSpec { group: "BLOCKS", label: "Code", hint: "Monospace, lang tag", md: "```" }),
-        md_prefixes: &["```"],
+        // The fence is special-cased in the markdown handler (like Divider): ```lang␣ captures
+        // the language, so it can't fire instantly on the third backtick via a plain prefix.
+        md_prefixes: &[],
     },
     BlockSpec {
         kind: BlockKind::Divider,
@@ -148,8 +134,7 @@ pub fn spec(kind: BlockKind) -> &'static BlockSpec {
     SPECS.iter().find(|s| s.kind == kind).expect("every BlockKind has a BlockSpec")
 }
 
-/// How a block renders: font, colour, line height, vertical row padding (`py`), letter
-/// spacing, and synthesised italics. Taken across the kinds, this *is* the type scale.
+/// How a block renders: font, colour, line height, row padding, letter spacing, italics.
 pub struct BlockStyle {
     pub font: FontId,
     pub color: Color32,
@@ -166,9 +151,8 @@ pub struct BlockStyle {
 /// Compose the [`BlockStyle`] the layout/paint code consumes from a kind's [`BlockSpec`].
 pub fn block_style(kind: BlockKind) -> BlockStyle {
     let s = spec(kind);
-    // Headings are bold (the design's 650–700 weight). The base font here stays the regular
-    // proportional/mono face; `layout` swaps in the bold family when it's available (egui
-    // can't synthesise weight, so a missing bold face must fall back, not panic).
+    // Base font stays the regular face; `layout` swaps in the bold family when available
+    // (egui can't synthesise weight, so a missing bold face must fall back, not panic).
     let family = if s.mono { FontFamily::Monospace } else { FontFamily::Proportional };
     BlockStyle {
         font: FontId::new(s.size, family),

@@ -1,6 +1,5 @@
-// The auth-screen backdrop: a line-art banyan tree that grows once on load (egui has no
-// SVG, so it's painted as flattened bezier polylines revealed by arc-length), under a
-// radial reading vignette. Reusable — any screen calls `Backdrop::show`.
+// The auth-screen backdrop: a line-art banyan tree that grows once on load, under a radial
+// vignette. egui has no SVG, so it's painted as flattened bezier polylines revealed by length.
 
 use std::f32::consts::TAU;
 

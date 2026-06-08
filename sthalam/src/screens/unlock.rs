@@ -1,6 +1,5 @@
-// Unlock the selected identity: its chip (with a switch-back link), a passphrase field, the
-// pixel-offset unlock button, and quiet recover/forget links. The Argon2 decrypt runs on a
-// worker thread so the window never freezes; the button shows a spinner while it's in flight.
+// Unlock the selected identity. The Argon2 decrypt runs on a worker thread so the window
+// never freezes; the button shows a spinner while it's in flight.
 
 use eframe::egui::{self, Align2, CornerRadius, FontFamily, FontId, Margin, RichText, Sense, Stroke, StrokeKind};
 use vault::{Vault, VaultError};
@@ -21,7 +20,7 @@ pub fn unlock(ui: &mut egui::Ui, vault: &mut Vault, form: &mut UnlockForm, backd
     if let Some(result) = poll_login(form) {
         match result {
             Ok(unlocked) => match vault.commit_login(unlocked) {
-                Ok(()) => return Some(Screen::home()),
+                Ok(()) => return Some(Screen::shell()),
                 Err(error) => form.error = Some(error.to_string()),
             },
             Err(VaultError::WrongPassphrase) => {
@@ -70,8 +69,7 @@ pub fn unlock(ui: &mut egui::Ui, vault: &mut Vault, form: &mut UnlockForm, backd
     next
 }
 
-// Identicon · name · DID for the chosen identity, with a "switch ↺" link to return to the
-// picker. The chip body is inert; only the switch zone is clickable.
+// The chosen identity's chip. The body is inert; only the "switch ↺" zone is clickable.
 fn account_chip(ui: &mut egui::Ui, form: &UnlockForm) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 58.0), Sense::hover());
     let p = ui.painter();
@@ -142,8 +140,7 @@ fn passphrase_field(ui: &mut egui::Ui, form: &mut UnlockForm, loading: bool) {
     ui.label(RichText::new(text).font(FontId::new(11.0, FontFamily::Monospace)).color(color));
 }
 
-// recover (import) and forget (delete keystore) need backend that isn't built yet; rendered
-// per the design, wired in a later slice.
+// recover (import) and forget (delete keystore) need backend that isn't built yet; wired later.
 fn footer_links(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         let _ = quiet_link(ui, "↺ RECOVER WITH PHRASE");

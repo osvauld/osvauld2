@@ -1,5 +1,4 @@
-// Cross-screen helpers: where to return when an account screen is dismissed, the inline
-// error line (signup), and DID shortening.
+// Cross-screen helpers shared by the account screens.
 
 use eframe::egui;
 use vault::Vault;
@@ -7,8 +6,7 @@ use vault::Vault;
 use crate::app::{AccountsView, Screen, SignupForm};
 use crate::theme;
 
-// Where to go when an account screen is dismissed: the picker if any account exists, else
-// straight to signup.
+// The picker if any account exists, else signup.
 pub(crate) fn back_to_accounts(vault: &Vault) -> Option<Screen> {
     match vault.accounts() {
         Ok(accounts) if !accounts.is_empty() => Some(Screen::Accounts(AccountsView { accounts, selected: 0 })),
@@ -16,7 +14,7 @@ pub(crate) fn back_to_accounts(vault: &Vault) -> Option<Screen> {
     }
 }
 
-// A quiet mono caps text link (add account / recover / forget). Returns its click Response.
+// A quiet mono caps text link (add account / recover / forget).
 pub(crate) fn quiet_link(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(
         egui::Label::new(
