@@ -130,6 +130,7 @@ pub const LANGUAGES: &[LangInfo] = &[
     LangInfo { token: "typescript", label: "TypeScript" },
     LangInfo { token: "go", label: "Go" },
     LangInfo { token: "c", label: "C" },
+    LangInfo { token: "lua", label: "Lua" },
     LangInfo { token: "json", label: "JSON" },
     LangInfo { token: "toml", label: "TOML" },
     LangInfo { token: "bash", label: "Bash" },

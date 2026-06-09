@@ -58,7 +58,15 @@ fn ok_response_with_item_list_roundtrips() {
 
 #[test]
 fn ok_response_with_block_list_roundtrips() {
-    let blocks = vec![BlockSummary { id: "0@1".to_string(), kind: "paragraph".to_string(), text: "hi".to_string(), depth: 0 }];
+    let blocks = vec![BlockSummary {
+        id: "0@1".to_string(),
+        kind: "paragraph".to_string(),
+        text: "hi".to_string(),
+        depth: 0,
+        done: None,
+        lang: None,
+        marks: Vec::new(),
+    }];
     let back: Response = roundtrip(&Response::ok(&blocks));
     assert!(matches!(back, Response::Ok { .. }));
 }

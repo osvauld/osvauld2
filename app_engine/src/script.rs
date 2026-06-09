@@ -93,6 +93,57 @@ impl Script {
         Script { lua, view, setup_error, handlers: Vec::new(), doc, editors: Vec::new() }
     }
 
+    /// Load a multi-file app: every `*.lua` file is registered as a `require`-able module
+    /// (`lib/state.lua` → `require("lib.state")`) via `package.preload`, then `main.lua` runs as
+    /// the entry chunk and must `return function() ... end`. Non-`.lua` files (manifest, assets)
+    /// are ignored here. Never panics: any failure is captured and reported by every `view()`.
+    pub fn load_app(files: &[(String, String)], doc: Rc<LoroDoc>) -> Self {
+        let lua = Lua::new();
+        let mut view = None;
+        let mut setup_error = None;
+
+        // Run the whole setup as one fallible block so the first error wins and is reported.
+        let result = (|| -> Result<Function, String> {
+            lua.load(UI_PRELUDE).set_name("ui").exec().map_err(|e| format!("engine prelude failed: {e}"))?;
+            crdt::install(&lua, doc.clone()).map_err(|e| format!("doc binding failed: {e}"))?;
+
+            // Preload every module except the entry point, so `require` resolves them lazily
+            // against this VM (and the chunk only runs the first time it's required).
+            let package: Table = lua.globals().get("package").map_err(|e| e.to_string())?;
+            let preload: Table = package.get("preload").map_err(|e| e.to_string())?;
+            let mut entry = None;
+            for (path, src) in files {
+                if !path.ends_with(".lua") {
+                    continue;
+                }
+                if path == "main.lua" {
+                    entry = Some(src.clone());
+                    continue;
+                }
+                let module = path.trim_end_matches(".lua").replace('/', ".");
+                let func = lua
+                    .load(src)
+                    .set_name(&format!("@{path}"))
+                    .into_function()
+                    .map_err(|e| e.to_string())?;
+                preload.set(module, func).map_err(|e| e.to_string())?;
+            }
+
+            let entry = entry.ok_or_else(|| "app has no main.lua".to_string())?;
+            match lua.load(&entry).set_name("@main.lua").eval::<Value>().map_err(|e| e.to_string())? {
+                Value::Function(f) => Ok(f),
+                other => Err(format!("main.lua must `return function() ... end`, got {}", other.type_name())),
+            }
+        })();
+
+        match result {
+            Ok(f) => view = Some(f),
+            Err(e) => setup_error = Some(e),
+        }
+
+        Script { lua, view, setup_error, handlers: Vec::new(), doc, editors: Vec::new() }
+    }
+
     /// A script that failed before any Lua ran (e.g. its source couldn't be read). Every `view()`
     /// reports `error`.
     pub fn failed(error: String) -> Self {

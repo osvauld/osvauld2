@@ -1,15 +1,14 @@
 //! Workspace items: the typed files a workspace holds (.doc, .table, .app, .canvas, …).
 //!
-//! Each item is a named, kinded container with two storage buckets:
-//!   - **blobs** (`ws/<ws>/item/<id>/blob/<name>`) — raw bytes: Lua scripts, manifest.osv,
-//!     assets. Not encrypted at rest; authorship comes from the identity layer later.
-//!   - **CRDT layers** (`ws/<ws>/item/<id>/crdt/<name>`) — Loro snapshots: the collaborative
-//!     data the item type defines (e.g. the block tree for a .doc, per-channel messages for
-//!     an app).
+//! Each item is a named, kinded container under `ws/<ws>/item/<id>/` with three kinds of key:
+//!   - **meta** (`…/meta`) — the sealed [`WorkspaceItem`] header, encrypted to the account key.
+//!   - **state** (`…/state`) — the item's runtime CRDT (a Loro snapshot): the block tree of a
+//!     .doc, the rows of a .table, an app's own opaque runtime doc. One per item.
+//!   - **files** (`…/files/<path>`) — a path-addressed source tree: an .app's `main.lua`,
+//!     `lib/state.lua`, `manifest.osv`, assets. The path *is* the identity (S3-style); the
+//!     folder structure is read back off the `/`-separated paths, never stored as a tree.
 //!
-//! The item's header (`ws/<ws>/item/<id>/meta`) is sealed to the account key, same as
-//! workspace headers. Discovery is a prefix scan for meta keys; other keys under
-//! `ws/<ws>/item/<id>/` are only loaded on demand.
+//! Item discovery is a prefix scan for `meta` keys; `state` and `files/*` are loaded on demand.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,12 +61,24 @@ pub(crate) fn meta_key(ws_id: &str, item_id: &str) -> String {
     format!("ws/{ws_id}/item/{item_id}/meta")
 }
 
-pub(crate) fn blob_key(ws_id: &str, item_id: &str, name: &str) -> String {
-    format!("ws/{ws_id}/item/{item_id}/blob/{name}")
+/// The item's single runtime CRDT snapshot (`…/state`).
+pub(crate) fn state_key(ws_id: &str, item_id: &str) -> String {
+    format!("ws/{ws_id}/item/{item_id}/state")
 }
 
-pub(crate) fn crdt_key(ws_id: &str, item_id: &str, name: &str) -> String {
-    format!("ws/{ws_id}/item/{item_id}/crdt/{name}")
+/// A source file at `path` in the item's folder tree (`…/files/<path>`).
+pub(crate) fn file_key(ws_id: &str, item_id: &str, path: &str) -> String {
+    format!("ws/{ws_id}/item/{item_id}/files/{path}")
+}
+
+/// Prefix for an item's whole source tree — used to enumerate its files.
+pub(crate) fn files_prefix(ws_id: &str, item_id: &str) -> String {
+    format!("ws/{ws_id}/item/{item_id}/files/")
+}
+
+/// Recover the file path from a `…/files/<path>` key under `files_prefix`.
+pub(crate) fn path_from_file_key<'a>(ws_id: &str, item_id: &str, key: &'a str) -> Option<&'a str> {
+    key.strip_prefix(&files_prefix(ws_id, item_id))
 }
 
 /// Prefix for all meta keys under a workspace — used to enumerate items.
@@ -76,12 +87,24 @@ pub(crate) fn items_prefix(ws_id: &str) -> String {
 }
 
 /// Extract the item id from a `ws/<ws>/item/<id>/meta` key, `None` for any other key
-/// under the same prefix (blobs, layers, etc.).
+/// under the same prefix (state, files, etc.).
 pub(crate) fn id_from_meta_key<'a>(ws_id: &str, key: &'a str) -> Option<&'a str> {
     let rest = key.strip_prefix(&format!("ws/{ws_id}/item/"))?.strip_suffix("/meta")?;
     (!rest.is_empty() && !rest.contains('/')).then_some(rest)
 }
 
-/// The placeholder manifest written into every new App item until the real
-/// manifest.osv format is defined.
-pub(crate) const APP_MANIFEST_PLACEHOLDER: &[u8] = b"app \"unnamed\" version \"0.1.0\" {}\n";
+/// The placeholder manifest seeded into every new App item until the real manifest.osv
+/// format is defined.
+pub(crate) const APP_MANIFEST_SEED: &[u8] = b"app \"unnamed\" version \"0.1.0\" {}\n";
+
+/// The starter entry point seeded into every new App item, so a freshly created app renders
+/// immediately (before an agent has written anything). A complete `view = f(state)` app.
+pub(crate) const APP_MAIN_SEED: &[u8] = br##"return function()
+  return ui.col{ style = { padding = 28, gap = 12, background = "#14161a",
+                           width = "100%", height = "100%" },
+    ui.text{ "new app", style = { font = 22, color = "#e6e6ea" } },
+    ui.text{ "Edit main.lua to build your app.",
+             style = { font = 14, color = "#9aa0ab" } },
+  }
+end
+"##;

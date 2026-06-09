@@ -157,14 +157,15 @@ impl EngineApp {
         }
     }
 
-    /// Build an engine app from a vault-stored Lua script (UTF-8 bytes) and an optional CRDT
-    /// snapshot. No hot-reload — the source is fixed at upload time; CRDT persists to vault.
-    pub fn from_source(lua: &str, crdt_snapshot: Option<&[u8]>) -> Self {
+    /// Build an engine app from a vault-stored source tree (`(path, source)` pairs, e.g.
+    /// `main.lua` + `lib/*.lua`) and an optional runtime CRDT snapshot. No hot-reload — the
+    /// source is fixed at load time; the caller persists the CRDT back to the vault.
+    pub fn from_files(files: &[(String, String)], crdt_snapshot: Option<&[u8]>) -> Self {
         let doc = Rc::new(LoroDoc::new());
         if let Some(bytes) = crdt_snapshot {
             let _ = doc.import(bytes);
         }
-        let script = script::Script::load(lua, doc.clone());
+        let script = script::Script::load_app(files, doc.clone());
         EngineApp {
             ctx: engine_ctx(),
             view: ViewSource::Script { source: Source::Inline, script },

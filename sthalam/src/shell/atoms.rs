@@ -20,10 +20,6 @@ pub(super) fn hairline_bottom(ui: &egui::Ui) {
     ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, theme::BD_2));
 }
 
-pub(super) fn right_divider(ui: &egui::Ui, rect: egui::Rect) {
-    ui.painter().vline(rect.right(), rect.y_range(), egui::Stroke::new(1.0, theme::BD_1));
-}
-
 pub(super) fn elide(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();

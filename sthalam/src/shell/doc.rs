@@ -3,7 +3,6 @@ use eframe::egui::{self, FontFamily, FontId};
 use vault::WorkspaceItem;
 
 use crate::theme;
-use super::atoms::hairline_bottom;
 
 /// Render the doc editor surface. Returns `true` if the doc was edited this frame (autosave trigger).
 pub(super) fn body(ui: &mut egui::Ui, item: &WorkspaceItem, doc: &Doc, editor: &mut DocEditor) -> bool {
@@ -11,7 +10,6 @@ pub(super) fn body(ui: &mut egui::Ui, item: &WorkspaceItem, doc: &Doc, editor: &
         .exact_size(30.0)
         .frame(egui::Frame::default().fill(theme::BG_1))
         .show_inside(ui, |ui| {
-            hairline_bottom(ui);
             ui.horizontal_centered(|ui| {
                 ui.add_space(16.0);
                 ui.label(egui::RichText::new(format!(".{}", item.kind.as_str())).font(FontId::new(10.0, FontFamily::Monospace)).color(theme::FG_4));

@@ -3,7 +3,7 @@ use std::sync::mpsc::Receiver;
 use vault::{AccountInfo, Vault};
 use zeroize::Zeroize;
 
-use crate::bridge::{self, DocRefresh};
+use crate::bridge::{self, Refresh};
 use crate::components::Backdrop;
 use crate::screens;
 use crate::shell::Shell;
@@ -12,7 +12,7 @@ pub struct Sthalam {
     vault: Vault,
     screen: Screen,
     backdrop: Backdrop,
-    refresh_rx: Receiver<DocRefresh>,
+    refresh_rx: Receiver<Refresh>,
 }
 
 pub enum Screen {
@@ -58,9 +58,9 @@ pub struct UnlockForm {
 }
 
 impl Sthalam {
-    pub fn new(vault: Vault) -> Self {
+    pub fn new(vault: Vault, ctx: eframe::egui::Context) -> Self {
         let screen = launch_screen(&vault);
-        let refresh_rx = bridge::start(bridge::socket_path(), vault.clone());
+        let refresh_rx = bridge::start(bridge::socket_path(), vault.clone(), ctx);
         Self { vault, screen, backdrop: Backdrop::default(), refresh_rx }
     }
 
@@ -80,10 +80,10 @@ impl Sthalam {
 
 impl eframe::App for Sthalam {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        // Merge any snapshots written by the bridge into open tabs.
+        // Merge any writes made by the bridge (MCP) into open tabs.
         while let Ok(refresh) = self.refresh_rx.try_recv() {
             if let Screen::Shell(shell) = &mut self.screen {
-                shell.apply_doc_refresh(&refresh.ws_id, &refresh.item_id, &refresh.snapshot);
+                shell.apply_refresh(&self.vault, refresh);
             }
         }
 

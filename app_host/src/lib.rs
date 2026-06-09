@@ -14,10 +14,10 @@ pub struct App {
 }
 
 impl App {
-    /// Load an app from a vault-stored Lua script (UTF-8 bytes) and an optional CRDT snapshot.
-    pub fn from_script(lua_bytes: &[u8], crdt_snapshot: Option<&[u8]>) -> Self {
-        let lua = String::from_utf8_lossy(lua_bytes);
-        App { inner: app_engine::EngineApp::from_source(&lua, crdt_snapshot) }
+    /// Load an app from a vault-stored source tree (`(path, source)` pairs) and an optional
+    /// runtime CRDT snapshot.
+    pub fn from_files(files: &[(String, String)], crdt_snapshot: Option<&[u8]>) -> Self {
+        App { inner: app_engine::EngineApp::from_files(files, crdt_snapshot) }
     }
 
     /// The built-in static demo — used by the compositor's demo cell.

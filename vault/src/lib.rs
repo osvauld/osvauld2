@@ -210,7 +210,8 @@ impl Vault {
     }
 
     /// Create a new item of `kind` named `name` inside workspace `ws_id`.
-    /// App items automatically get a placeholder `manifest.osv` blob.
+    /// App items are seeded with a starter source tree (`manifest.osv` + `main.lua`) so they
+    /// render and can be edited (by an agent over MCP) right away.
     pub fn create_item(&self, ws_id: &str, name: &str, kind: ItemKind) -> Result<WorkspaceItem, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
@@ -219,10 +220,8 @@ impl Vault {
         let sealed = identity::encrypt_for(&active.identity.encryption_public_key(), &plaintext)?;
         active.store.put(&item::meta_key(ws_id, &item.id), &sealed)?;
         if item.kind == ItemKind::App {
-            active.store.put(
-                &item::blob_key(ws_id, &item.id, "manifest.osv"),
-                item::APP_MANIFEST_PLACEHOLDER,
-            )?;
+            active.store.put(&item::file_key(ws_id, &item.id, "manifest.osv"), item::APP_MANIFEST_SEED)?;
+            active.store.put(&item::file_key(ws_id, &item.id, "main.lua"), item::APP_MAIN_SEED)?;
         }
         Ok(item)
     }
@@ -247,29 +246,49 @@ impl Vault {
         Ok(out)
     }
 
-    /// Read a named blob from an item. Returns `None` if the blob doesn't exist yet.
-    pub fn get_blob(&self, ws_id: &str, item_id: &str, name: &str) -> Result<Option<Vec<u8>>, VaultError> {
+    /// Read a source file at `path` from an item's folder tree. `None` if it doesn't exist.
+    pub fn get_file(&self, ws_id: &str, item_id: &str, path: &str) -> Result<Option<Vec<u8>>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.get(&item::blob_key(ws_id, item_id, name))?)
+        Ok(active.store.get(&item::file_key(ws_id, item_id, path))?)
     }
 
-    pub fn put_blob(&self, ws_id: &str, item_id: &str, name: &str, data: &[u8]) -> Result<(), VaultError> {
+    /// Write a source file at `path` in an item's folder tree (the path *is* the identity;
+    /// intermediate folders are implied, never created). Overwrites any existing file.
+    pub fn put_file(&self, ws_id: &str, item_id: &str, path: &str, data: &[u8]) -> Result<(), VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.put(&item::blob_key(ws_id, item_id, name), data)?)
+        Ok(active.store.put(&item::file_key(ws_id, item_id, path), data)?)
     }
 
-    pub fn get_layer(&self, ws_id: &str, item_id: &str, name: &str) -> Result<Option<Vec<u8>>, VaultError> {
+    /// Every source-file path in an item's folder tree, sorted (so the order is stable for a
+    /// file-tree UI). Empty for items with no files (e.g. a fresh .doc).
+    pub fn list_files(&self, ws_id: &str, item_id: &str) -> Result<Vec<String>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.get(&item::crdt_key(ws_id, item_id, name))?)
+        let mut out = Vec::new();
+        for key in active.store.list_prefixed(&item::files_prefix(ws_id, item_id))? {
+            if let Some(path) = item::path_from_file_key(ws_id, item_id, &key) {
+                out.push(path.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
-    pub fn put_layer(&self, ws_id: &str, item_id: &str, name: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+    /// Read the item's runtime CRDT snapshot (a .doc's blocks, an app's runtime). `None` until
+    /// the item first stores state.
+    pub fn get_state(&self, ws_id: &str, item_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.put(&item::crdt_key(ws_id, item_id, name), snapshot)?)
+        Ok(active.store.get(&item::state_key(ws_id, item_id))?)
+    }
+
+    /// Persist the item's runtime CRDT snapshot.
+    pub fn put_state(&self, ws_id: &str, item_id: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.put(&item::state_key(ws_id, item_id), snapshot)?)
     }
 
     // The active account's label is cached; any other account is opened read-only just

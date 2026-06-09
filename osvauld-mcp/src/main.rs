@@ -92,6 +92,228 @@ fn tools_list() -> Value {
                     },
                     "required": ["ws_id", "item_id", "block", "text"]
                 }
+            },
+            {
+                "name": "insert_block",
+                "description": "Insert a new block into a .doc. It lands immediately after the block given by 'after'; omit 'after' to append at the end. 'kind' is one of: paragraph, h1, h2, h3, li (bullet), ol (numbered), todo, quote, code, divider. Returns the new block's stable id (use it as the next 'after' to build a doc top-to-bottom).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "after": { "type": "string", "description": "Block ID to insert after (from read_doc); omit to append at the end" },
+                        "kind": { "type": "string", "description": "Block kind: paragraph, h1, h2, h3, li, ol, todo, quote, code, divider" },
+                        "text": { "type": "string", "description": "Initial text content (may be empty)" }
+                    },
+                    "required": ["ws_id", "item_id", "kind", "text"]
+                }
+            },
+            {
+                "name": "set_block_kind",
+                "description": "Change an existing block's kind (e.g. turn a paragraph into a heading, list item, or code block), identified by its stable block ID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "kind": { "type": "string", "description": "New kind: paragraph, h1, h2, h3, li, ol, todo, quote, code, divider" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "kind"]
+                }
+            },
+            {
+                "name": "delete_block",
+                "description": "Delete a block from a .doc, identified by its stable block ID. Any nested child blocks are promoted into its place rather than deleted.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" }
+                    },
+                    "required": ["ws_id", "item_id", "block"]
+                }
+            },
+            {
+                "name": "indent_block",
+                "description": "Indent a block one nesting level (make it a child of its previous sibling) — e.g. to create a sub-bullet. Returns whether it moved (false if it has no previous sibling to nest under).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" }
+                    },
+                    "required": ["ws_id", "item_id", "block"]
+                }
+            },
+            {
+                "name": "outdent_block",
+                "description": "Outdent a block one nesting level (promote it out of its parent). Returns whether it moved (false if already at the top level).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" }
+                    },
+                    "required": ["ws_id", "item_id", "block"]
+                }
+            },
+            {
+                "name": "move_block",
+                "description": "Move a block to a new position relative to a target block. 'position' is 'before' or 'after' (as a sibling of target) or 'into' (as the last child of target). Fails if target is the block itself or one of its descendants.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID to move (from read_doc)" },
+                        "position": { "type": "string", "description": "before | after | into" },
+                        "target": { "type": "string", "description": "Block ID to move relative to" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "position", "target"]
+                }
+            },
+            {
+                "name": "set_todo_done",
+                "description": "Set the checked state of a 'todo' block.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "done": { "type": "boolean", "description": "true = checked, false = unchecked" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "done"]
+                }
+            },
+            {
+                "name": "set_code_lang",
+                "description": "Set the language tag of a 'code' block (e.g. 'rust', 'python'), which drives syntax highlighting.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "lang": { "type": "string", "description": "Language tag, e.g. rust, python, javascript" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "lang"]
+                }
+            },
+            {
+                "name": "apply_mark",
+                "description": "Apply an inline formatting mark over a character range of a block's text. 'mark' is bold, italic, strike, or code. 'start'/'end' are code-point offsets (apply AFTER setting the block's final text, since set_block_text replaces text and clears its marks). Use apply_link for links.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "start": { "type": "integer", "description": "Start offset (code points, inclusive)" },
+                        "end": { "type": "integer", "description": "End offset (code points, exclusive)" },
+                        "mark": { "type": "string", "description": "bold | italic | strike | code" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "start", "end", "mark"]
+                }
+            },
+            {
+                "name": "apply_link",
+                "description": "Apply a link mark carrying a URL over a character range of a block's text. 'start'/'end' are code-point offsets.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "start": { "type": "integer", "description": "Start offset (code points, inclusive)" },
+                        "end": { "type": "integer", "description": "End offset (code points, exclusive)" },
+                        "url": { "type": "string", "description": "Link target URL" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "start", "end", "url"]
+                }
+            },
+            {
+                "name": "clear_mark",
+                "description": "Remove an inline mark (bold, italic, strike, code, or link) over a character range of a block's text. 'start'/'end' are code-point offsets.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "block": { "type": "string", "description": "Block ID (from read_doc)" },
+                        "start": { "type": "integer", "description": "Start offset (code points, inclusive)" },
+                        "end": { "type": "integer", "description": "End offset (code points, exclusive)" },
+                        "mark": { "type": "string", "description": "bold | italic | strike | code | link" }
+                    },
+                    "required": ["ws_id", "item_id", "block", "start", "end", "mark"]
+                }
+            },
+            {
+                "name": "create_doc",
+                "description": "Create a new .doc item in a workspace. It starts with a single empty paragraph block; call read_doc to get that block's ID, then set_block_text to fill it. Returns the new item (with its ID).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "name": { "type": "string", "description": "Doc name" }
+                    },
+                    "required": ["ws_id", "name"]
+                }
+            },
+            {
+                "name": "create_app",
+                "description": "Create a new .app item in a workspace. It is seeded with a starter source tree (manifest.osv + main.lua); use write_file to build it out. Returns the new item (with its ID).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "name": { "type": "string", "description": "App name" }
+                    },
+                    "required": ["ws_id", "name"]
+                }
+            },
+            {
+                "name": "list_files",
+                "description": "List the source-file paths of an .app's folder tree (e.g. 'main.lua', 'lib/state.lua', 'manifest.osv').",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" }
+                    },
+                    "required": ["ws_id", "item_id"]
+                }
+            },
+            {
+                "name": "read_file",
+                "description": "Read one source file from an .app's folder tree.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" }
+                    },
+                    "required": ["ws_id", "item_id", "path"]
+                }
+            },
+            {
+                "name": "write_file",
+                "description": "Write (create or overwrite) one source file in an .app's folder tree. The folder structure is the path itself (e.g. 'lib/state.lua'). The entry point is 'main.lua', which must `return function() ... end`; other .lua files are require-able as modules (lib/state.lua -> require('lib.state')). An open app tab reloads immediately.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" },
+                        "content": { "type": "string", "description": "Full file content" }
+                    },
+                    "required": ["ws_id", "item_id", "path", "content"]
+                }
             }
         ]
     })
@@ -138,6 +360,116 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
             Request::SetBlockText { ws_id, item_id, block, text }
+        }
+        "insert_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let after = args["after"].as_str().map(|s| s.to_string());
+            let kind = args["kind"].as_str().ok_or("missing kind")?.to_string();
+            let text = args["text"].as_str().ok_or("missing text")?.to_string();
+            Request::InsertBlock { ws_id, item_id, after, kind, text }
+        }
+        "set_block_kind" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let kind = args["kind"].as_str().ok_or("missing kind")?.to_string();
+            Request::SetBlockKind { ws_id, item_id, block, kind }
+        }
+        "delete_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            Request::DeleteBlock { ws_id, item_id, block }
+        }
+        "indent_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            Request::IndentBlock { ws_id, item_id, block }
+        }
+        "outdent_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            Request::OutdentBlock { ws_id, item_id, block }
+        }
+        "move_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let position = args["position"].as_str().ok_or("missing position")?.to_string();
+            let target = args["target"].as_str().ok_or("missing target")?.to_string();
+            Request::MoveBlock { ws_id, item_id, block, position, target }
+        }
+        "set_todo_done" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let done = args["done"].as_bool().ok_or("missing done")?;
+            Request::SetTodoDone { ws_id, item_id, block, done }
+        }
+        "set_code_lang" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let lang = args["lang"].as_str().ok_or("missing lang")?.to_string();
+            Request::SetCodeLang { ws_id, item_id, block, lang }
+        }
+        "apply_mark" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let start = args["start"].as_u64().ok_or("missing start")? as usize;
+            let end = args["end"].as_u64().ok_or("missing end")? as usize;
+            let mark = args["mark"].as_str().ok_or("missing mark")?.to_string();
+            Request::ApplyMark { ws_id, item_id, block, start, end, mark }
+        }
+        "apply_link" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let start = args["start"].as_u64().ok_or("missing start")? as usize;
+            let end = args["end"].as_u64().ok_or("missing end")? as usize;
+            let url = args["url"].as_str().ok_or("missing url")?.to_string();
+            Request::ApplyLink { ws_id, item_id, block, start, end, url }
+        }
+        "clear_mark" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let start = args["start"].as_u64().ok_or("missing start")? as usize;
+            let end = args["end"].as_u64().ok_or("missing end")? as usize;
+            let mark = args["mark"].as_str().ok_or("missing mark")?.to_string();
+            Request::ClearMark { ws_id, item_id, block, start, end, mark }
+        }
+        "create_doc" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let name = args["name"].as_str().ok_or("missing name")?.to_string();
+            Request::CreateItem { ws_id, name, kind: "doc".to_string() }
+        }
+        "create_app" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let name = args["name"].as_str().ok_or("missing name")?.to_string();
+            Request::CreateItem { ws_id, name, kind: "app".to_string() }
+        }
+        "list_files" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            Request::ListFiles { ws_id, item_id }
+        }
+        "read_file" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            Request::ReadFile { ws_id, item_id, path }
+        }
+        "write_file" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            let content = args["content"].as_str().ok_or("missing content")?.to_string();
+            Request::WriteFile { ws_id, item_id, path, content }
         }
         _ => return Err(format!("unknown tool: {name}")),
     };

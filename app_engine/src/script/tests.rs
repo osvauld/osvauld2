@@ -49,6 +49,36 @@ fn parses_text_into_styled_runs() {
     assert_eq!(runs[2].color, Some(Color32::from_rgb(0xff, 0x00, 0x00)), "explicit run colour parsed");
 }
 
+/// Build a multi-file app with a fresh empty CRDT.
+fn load_app(files: &[(&str, &str)]) -> Script {
+    let owned: Vec<(String, String)> = files.iter().map(|(p, s)| (p.to_string(), s.to_string())).collect();
+    Script::load_app(&owned, Rc::new(LoroDoc::new()))
+}
+
+#[test]
+fn multi_file_app_requires_modules() {
+    // main.lua pulls a value out of lib/state.lua via `require`; a nested path maps to a dotted
+    // module name (lib/state.lua -> "lib.state").
+    let mut s = load_app(&[
+        ("lib/state.lua", r#"return { title = "from module" }"#),
+        (
+            "main.lua",
+            r#"local state = require("lib.state")
+               return function()
+                 return ui.text{ state.title }
+               end"#,
+        ),
+    ]);
+    let node = s.view().expect("view ok");
+    assert_eq!(node.plain_text().as_deref(), Some("from module"));
+}
+
+#[test]
+fn app_without_main_is_an_error() {
+    let mut s = load_app(&[("lib/util.lua", "return {}")]);
+    assert!(s.view().is_err(), "an app with no main.lua reports a setup error");
+}
+
 #[test]
 fn setup_error_is_captured_not_panicked() {
     // Not a function — setup should fail cleanly rather than panic.

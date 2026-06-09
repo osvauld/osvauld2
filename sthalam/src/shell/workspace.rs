@@ -3,14 +3,13 @@ use vault::{ItemKind, WorkspaceItem};
 
 use crate::theme;
 use super::Action;
-use super::atoms::{column, elide, hairline_bottom};
+use super::atoms::{column, elide};
 
 pub(super) fn body(ui: &mut egui::Ui, ws_id: &str, ws_name: &str, items: &[WorkspaceItem], action: &mut Option<Action>) {
     egui::Panel::top(egui::Id::new(("ws_context", ws_id)))
         .exact_size(30.0)
         .frame(egui::Frame::default().fill(theme::BG_1))
         .show_inside(ui, |ui| {
-            hairline_bottom(ui);
             ui.horizontal_centered(|ui| {
                 ui.add_space(16.0);
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
@@ -33,10 +32,10 @@ pub(super) fn body(ui: &mut egui::Ui, ws_id: &str, ws_name: &str, items: &[Works
             egui::ScrollArea::vertical().show(ui, |ui| {
                 column(ui, 1100.0, |ui| {
                     ui.add_space(32.0);
-                    section_head(ui, items.len(), action);
+                    section_head(ui, ws_id, items.len(), action);
                     ui.add_space(14.0);
                     if items.is_empty() {
-                        empty_state(ui, action);
+                        empty_state(ui, ws_id, action);
                     } else {
                         items_grid(ui, items, action);
                     }
@@ -46,7 +45,7 @@ pub(super) fn body(ui: &mut egui::Ui, ws_id: &str, ws_name: &str, items: &[Works
         });
 }
 
-fn section_head(ui: &mut egui::Ui, count: usize, action: &mut Option<Action>) {
+fn section_head(ui: &mut egui::Ui, ws_id: &str, count: usize, action: &mut Option<Action>) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("items").font(FontId::new(10.5, FontFamily::Monospace)).color(theme::FG_4).extra_letter_spacing(1.8));
         ui.add_space(4.0);
@@ -60,13 +59,13 @@ fn section_head(ui: &mut egui::Ui, count: usize, action: &mut Option<Action>) {
                 ui.painter().hline(r.x_range(), r.bottom() + 1.0, Stroke::new(1.0, theme::FG_3));
             }
             if resp.clicked() {
-                *action = Some(Action::CreateItem(ItemKind::Doc));
+                *action = Some(Action::CreateItem { ws_id: ws_id.to_string(), kind: ItemKind::Doc });
             }
         });
     });
 }
 
-fn empty_state(ui: &mut egui::Ui, action: &mut Option<Action>) {
+fn empty_state(ui: &mut egui::Ui, ws_id: &str, action: &mut Option<Action>) {
     egui::Frame::default()
         .fill(theme::BG_1)
         .stroke(Stroke::new(1.0, theme::BD_1))
@@ -79,7 +78,7 @@ fn empty_state(ui: &mut egui::Ui, action: &mut Option<Action>) {
                 ui.label(egui::RichText::new("create a .doc, .table, or .app to get started.").font(FontId::new(12.0, FontFamily::Proportional)).color(theme::FG_3));
                 ui.add_space(18.0);
                 if ui.add(egui::Button::new(egui::RichText::new("+  new .doc").font(FontId::new(13.0, theme::mono_sb())).color(Color32::WHITE)).fill(theme::ACCENT).min_size(egui::vec2(160.0, 40.0))).clicked() {
-                    *action = Some(Action::CreateItem(ItemKind::Doc));
+                    *action = Some(Action::CreateItem { ws_id: ws_id.to_string(), kind: ItemKind::Doc });
                 }
             });
         });
@@ -99,7 +98,7 @@ fn items_grid(ui: &mut egui::Ui, items: &[WorkspaceItem], action: &mut Option<Ac
         .show(ui, |ui| {
             for (i, item) in items.iter().enumerate() {
                 if item_card(ui, card_w, item).clicked() {
-                    *action = Some(Action::OpenItem(i));
+                    *action = Some(Action::OpenItem(item.clone()));
                 }
                 if (i + 1).is_multiple_of(COLS) {
                     ui.end_row();
