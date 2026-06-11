@@ -20,9 +20,9 @@ use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Galley, Strok
 
 /// The font-family name for bold runs. Matches `doc_editor::theme::BOLD_FAMILY` so a single bold
 /// face serves both.
-pub const BOLD_FAMILY: &str = "inter_sb";
+pub const BOLD_FAMILY: &str = "sans_sb";
 
-const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/Inter-SemiBold.ttf");
+const SANS_SEMIBOLD: &[u8] = include_bytes!("../assets/NotoSans-SemiBold.ttf");
 
 fn bold_family() -> FontFamily {
     FontFamily::Name(BOLD_FAMILY.into())
@@ -32,7 +32,7 @@ fn bold_family() -> FontFamily {
 /// (bold falls back to the proportional face), so tests need not call it.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
-    fonts.font_data.insert(BOLD_FAMILY.to_owned(), Arc::new(FontData::from_static(INTER_SEMIBOLD)));
+    fonts.font_data.insert(BOLD_FAMILY.to_owned(), Arc::new(FontData::from_static(SANS_SEMIBOLD)));
     fonts.families.insert(bold_family(), vec![BOLD_FAMILY.to_owned()]);
     ctx.set_fonts(fonts);
 }

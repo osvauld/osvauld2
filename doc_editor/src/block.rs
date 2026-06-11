@@ -31,7 +31,7 @@ pub struct BlockSpec {
     pub py: f32,
     /// Tracking in em (`letter_spacing = size * ls_em`; negative tightens headings).
     pub ls_em: f32,
-    /// JetBrains Mono when true, Inter otherwise.
+    /// JetBrains Mono when true, the proportional sans otherwise.
     pub mono: bool,
     pub color: Color32,
     pub italics: bool,

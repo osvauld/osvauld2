@@ -1,0 +1,11 @@
+[package]
+name = "block_doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# A bare CRDT block container — no egui, no Lua, no rich-text marks. The shared substrate under
+# both the prose editor (`doc_editor`, nested superset) and the Lua code editor
+# (`code_editor`, flat subset).
+loro = "1.12.0"

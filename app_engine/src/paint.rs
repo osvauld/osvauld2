@@ -5,13 +5,21 @@
 //! background, apply a default feedback tint only when the app declared no state styles, and
 //! stamp the recoloured galley (plus selection + caret for the focused editor).
 
-use egui::{pos2, Color32, CornerRadius, Stroke};
+use egui::epaint::Shadow;
+use egui::{pos2, Color32, CornerRadius, Stroke, StrokeKind};
 use text_edit::TextField;
 
 use crate::layout::Placed;
+use crate::node::Corners;
 
 /// The selection highlight (the accent at low alpha) painted behind a focused editor's glyphs.
 const SELECTION: Color32 = Color32::from_rgba_premultiplied(0x2b, 0x44, 0x73, 0x80);
+
+/// Per-corner radii in egui's u8 form.
+fn corner_radius(c: Corners) -> CornerRadius {
+    let r = |v: f32| v.clamp(0.0, 255.0) as u8;
+    CornerRadius { nw: r(c.tl), ne: r(c.tr), sw: r(c.bl), se: r(c.br) }
+}
 
 /// Live pointer state for click feedback: cursor position in app-local coordinates (`None` when
 /// not over the cell) and whether the primary button is held.
@@ -40,9 +48,29 @@ pub(crate) fn paint(ui: &egui::Ui, placed: &[Placed], pointer: &Pointer, focus: 
             node.base
         };
 
-        let radius = CornerRadius::same(look.corner_radius.clamp(0.0, 255.0) as u8);
+        let radius = corner_radius(look.corner_radius);
+        let alpha = look.opacity;
+
+        // Shadow → fill → border, back-to-front like CSS paints a box.
+        if let Some(s) = look.shadow {
+            let shadow = Shadow {
+                offset: [s.offset[0].round() as i8, s.offset[1].round() as i8],
+                blur: s.blur.clamp(0.0, 255.0) as u8,
+                spread: s.spread.clamp(0.0, 255.0) as u8,
+                color: s.color.gamma_multiply(alpha),
+            };
+            painter.add(shadow.as_shape(node.rect, radius));
+        }
         if let Some(bg) = look.background {
-            painter.rect_filled(node.rect, radius, bg);
+            painter.rect_filled(node.rect, radius, bg.gamma_multiply(alpha));
+        }
+        if let Some(b) = look.border {
+            painter.rect_stroke(
+                node.rect,
+                radius,
+                Stroke::new(b.width, b.color.gamma_multiply(alpha)),
+                StrokeKind::Inside,
+            );
         }
 
         // Default feedback only for clickable boxes that declared no states of their own, so
@@ -61,16 +89,20 @@ pub(crate) fn paint(ui: &egui::Ui, placed: &[Placed], pointer: &Pointer, focus: 
             // Selection highlight goes *behind* the glyphs.
             if let Some(field) = field {
                 for r in field.selection_rects(galley) {
-                    painter.rect_filled(r.translate(shift), 0.0, SELECTION);
+                    painter.rect_filled(r.translate(shift), 0.0, SELECTION.gamma_multiply(alpha));
                 }
             }
             // The galley is colour-neutral (`PLACEHOLDER`); the state's colour applies here.
-            painter.galley(*origin, galley.clone(), look.color);
+            // Caveat: baked per-run colours ignore alpha — only neutral text dims for now.
+            painter.galley(*origin, galley.clone(), look.color.gamma_multiply(alpha));
             // The caret goes on top of the glyphs.
             if let Some(field) = field {
                 let c = field.caret_rect(galley).translate(shift);
                 let x = c.center().x;
-                painter.line_segment([pos2(x, c.top()), pos2(x, c.bottom())], Stroke::new(1.5, look.color));
+                painter.line_segment(
+                    [pos2(x, c.top()), pos2(x, c.bottom())],
+                    Stroke::new(1.5, look.color.gamma_multiply(alpha)),
+                );
             }
         }
     }

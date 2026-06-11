@@ -7,13 +7,17 @@ license.workspace = true
 [dependencies]
 egui = "0.34"
 loro = "1.12.0"
+# The shared CRDT block container (tree structure, text, undo, sync); this crate layers the
+# `.doc` schema — BlockKind vocabulary, inline marks/runs, the seeded paragraph — on top.
+block_doc = { path = "../block_doc" }
 # Shared UI primitives, extracted to be used by both the Lua-app renderer and the native editors.
 # `text_edit` owns caret/selection geometry; `rich_text` owns the bold face + run renderer. We
 # adopt them piecemeal — first the leaf helpers (selection rects, bold-family resolution), so the
 # duplicated copies in this crate can be deleted.
 text_edit = { path = "../text_edit" }
 rich_text = { path = "../rich_text" }
-printpdf = { version = "0.9.1", default-features = false, features = ["text_layout"] }
+# Shared egui→printpdf emission (glyph-exact galleys + vector prims); printpdf re-exported there.
+pdf_paint = { path = "../pdf_paint" }
 # Syntax highlighting for `.doc` code blocks — a pure leaf that returns semantic spans; the
 # editor's `theme` maps those spans to colours. The colours bake into the code galley, so they
 # reach both the screen and the PDF export with no backend-specific work.

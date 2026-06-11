@@ -159,11 +159,120 @@ fn bundled_example_apps_load_and_render() {
         ("todo.lua", include_str!("../../examples/todo.lua")),
         ("kanban.lua", include_str!("../../examples/kanban.lua")),
         ("notes.lua", include_str!("../../examples/notes.lua")),
+        ("gallery.lua", include_str!("../../examples/gallery.lua")),
+        ("dashboard.lua", include_str!("../../examples/dashboard.lua")),
+        ("settings.lua", include_str!("../../examples/settings.lua")),
     ] {
         let mut s = Script::load(src, Rc::new(LoroDoc::new()));
         let root = s.view().unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
         assert!(!root.children.is_empty(), "{name} rendered an empty tree");
     }
+    // Multi-file showcase apps load through the require shim.
+    for (name, files) in [
+        (
+            "deck",
+            vec![
+                ("main.lua".to_string(), include_str!("../../examples/deck/main.lua").to_string()),
+                ("slides.lua".to_string(), include_str!("../../examples/deck/slides.lua").to_string()),
+            ],
+        ),
+        (
+            "kit",
+            vec![
+                ("main.lua".to_string(), include_str!("../../examples/kit/main.lua").to_string()),
+                ("lib/kit.lua".to_string(), include_str!("../../examples/kit/lib/kit.lua").to_string()),
+            ],
+        ),
+    ] {
+        let mut s = Script::load_app(&files, Rc::new(LoroDoc::new()));
+        let root = s.view().unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
+        assert!(!root.children.is_empty(), "{name} rendered an empty tree");
+    }
+}
+
+#[test]
+fn deck_example_navigates_through_crdt_state() {
+    // The deck's slide index is CRDT state: clicking "›" advances it for every viewer.
+    let doc = Rc::new(LoroDoc::new());
+    let mut s = Script::load_app(
+        &[
+            ("main.lua".into(), include_str!("../../examples/deck/main.lua").into()),
+            ("slides.lua".into(), include_str!("../../examples/deck/slides.lua").into()),
+        ],
+        doc.clone(),
+    );
+
+    // Find the "›" nav button by its label.
+    fn find_next(n: &crate::node::Node) -> Option<u32> {
+        if n.on_click.is_some() && n.plain_text().as_deref() == Some("›") {
+            return n.on_click;
+        }
+        n.children.iter().find_map(find_next)
+    }
+    let root = s.view().expect("deck renders slide 1");
+    let next = find_next(&root).expect("a next button exists");
+    s.dispatch(next).expect("nav handler runs");
+
+    let i = doc.get_map("nav").get("i").and_then(|v| match v {
+        loro::ValueOrContainer::Value(loro::LoroValue::I64(n)) => Some(n),
+        _ => None,
+    });
+    assert_eq!(i, Some(2), "the slide index advanced in the CRDT");
+    // And the rendered slide changed: slide 2's title appears in the new tree.
+    fn has_text(n: &crate::node::Node, t: &str) -> bool {
+        n.plain_text().is_some_and(|s| s.contains(t)) || n.children.iter().any(|c| has_text(c, t))
+    }
+    let root = s.view().expect("deck renders slide 2");
+    assert!(has_text(&root, "Apps are Lua over CRDTs"), "slide 2 is on screen");
+}
+
+#[test]
+fn board_example_renders_and_toggles_a_task() {
+    // The multi-file board exercises the full new-style surface plus require + CRDT interaction.
+    let doc = Rc::new(LoroDoc::new());
+    let mut s = Script::load_app(
+        &[
+            ("main.lua".into(), include_str!("../../examples/board/main.lua").into()),
+            ("lib/theme.lua".into(), include_str!("../../examples/board/lib/theme.lua").into()),
+        ],
+        doc.clone(),
+    );
+    s.view().expect("empty board renders");
+
+    // Type a task into the draft and submit it.
+    doc.get_text("draft").insert(0, "ship the style engine").unwrap();
+    doc.commit();
+    s.view().expect("re-render with draft");
+    assert!(s.submit("draft").expect("submit runs"), "draft declared on_submit");
+    assert_eq!(doc.get_movable_list("tasks").len(), 1, "task added");
+    assert_eq!(doc.get_text("draft").to_string(), "", "draft cleared");
+
+    // The task row toggles done via its on_click (found by its "○" marker — the Add button is
+    // also clickable and comes first in pre-order).
+    let root = s.view().expect("board with one task renders");
+    fn row_click(n: &crate::node::Node) -> Option<u32> {
+        let is_row = n.on_click.is_some()
+            && n.children.iter().any(|c| c.plain_text().is_some_and(|t| t.starts_with('○')));
+        if is_row {
+            n.on_click
+        } else {
+            n.children.iter().find_map(row_click)
+        }
+    }
+    let row = row_click(&root).expect("a clickable task row exists");
+    s.dispatch(row).expect("toggle runs");
+    let toggled = doc
+        .get_movable_list("tasks")
+        .get(0)
+        .and_then(|v| match v {
+            loro::ValueOrContainer::Container(loro::Container::Map(m)) => m.get("done"),
+            _ => None,
+        })
+        .and_then(|v| match v {
+            loro::ValueOrContainer::Value(loro::LoroValue::Bool(b)) => Some(b),
+            _ => None,
+        });
+    assert_eq!(toggled, Some(true), "click marked the task done");
 }
 
 #[test]
@@ -246,4 +355,115 @@ fn external_crdt_write_shows_in_view() {
     doc.commit();
 
     assert_eq!(s.view().unwrap().plain_text().as_deref(), Some("n=1"), "external CRDT write shows in the view");
+}
+
+// --- CSS-named style keys, shorthands, colors -------------------------------------------------
+
+#[test]
+fn parses_css_named_style_keys() {
+    let mut s = load(
+        r##"return function()
+              return ui.col{ style = {
+                justify_content = "center", align_items = "center",
+                padding = "10 20", margin = 8,
+                position = "absolute", top = 5, left = 12,
+                border = "2 #ff0000", box_shadow = "0 4 12 #00000080",
+                border_radius = "8 8 0 0", opacity = 0.5,
+                font_size = 22, flex_grow = 2, max_width = 300,
+              } }
+            end"##,
+    );
+    let n = s.view().expect("view ok");
+    let st = &n.style;
+    assert_eq!(st.justify_content, Some(crate::node::Align::Center));
+    assert_eq!(st.align_items, Some(crate::node::Align::Center));
+    assert_eq!(st.padding.top, crate::node::Val::Px(10.0));
+    assert_eq!(st.padding.left, crate::node::Val::Px(20.0));
+    assert_eq!(st.margin.top, crate::node::Val::Px(8.0));
+    assert_eq!(st.position, crate::node::Position::Absolute);
+    assert_eq!(st.inset.top, crate::node::Val::Px(5.0));
+    assert_eq!(st.inset.left, crate::node::Val::Px(12.0));
+    let b = st.border.expect("border parsed");
+    assert!((b.width - 2.0).abs() < 0.01);
+    assert_eq!(b.color, Color32::from_rgb(0xff, 0, 0));
+    let sh = st.shadow.expect("shadow parsed");
+    assert_eq!(sh.offset, [0.0, 4.0]);
+    assert!((sh.blur - 12.0).abs() < 0.01);
+    assert_eq!(st.corner_radius.tl, 8.0);
+    assert_eq!(st.corner_radius.br, 0.0);
+    assert!((st.opacity - 0.5).abs() < 0.01);
+    assert!((st.font_size - 22.0).abs() < 0.01);
+    assert!((st.flex_grow - 2.0).abs() < 0.01);
+    assert_eq!(st.max_width, crate::node::Val::Px(300.0));
+}
+
+#[test]
+fn old_short_keys_still_work_as_aliases() {
+    let mut s = load(
+        r##"return function()
+              return ui.col{ style = { font = 18, corner = 6, grow = 1, direction = "row", padding = 12 } }
+            end"##,
+    );
+    let st = s.view().expect("view ok").style;
+    assert!((st.font_size - 18.0).abs() < 0.01);
+    assert_eq!(st.corner_radius.tl, 6.0);
+    assert!((st.flex_grow - 1.0).abs() < 0.01);
+    assert!(matches!(st.direction, crate::node::Direction::Row));
+    assert_eq!(st.padding.left, crate::node::Val::Px(12.0));
+}
+
+#[test]
+fn parses_full_css_colors_and_units() {
+    let mut s = load(
+        r##"return function()
+              return ui.col{ style = {
+                background = "hsl(220, 50%, 20%)", color = "rebeccapurple",
+                width = "1.5rem", height = "50%",
+              } }
+            end"##,
+    );
+    let st = s.view().expect("view ok").style;
+    assert!(st.background.is_some(), "hsl() parses");
+    assert_eq!(st.color, Color32::from_rgb(0x66, 0x33, 0x99), "named CSS color parses");
+    assert_eq!(st.width, crate::node::Val::Px(24.0), "rem = 16px");
+    assert_eq!(st.height, crate::node::Val::Pct(50.0));
+}
+
+// --- Sandbox ----------------------------------------------------------------------------------
+
+#[test]
+fn sandbox_has_no_os_io_or_loaders() {
+    let mut s = load(
+        r#"return function()
+             local leaks = {}
+             for _, k in ipairs({ "os", "io", "package", "debug", "dofile", "loadfile", "load" }) do
+               if _G[k] ~= nil then leaks[#leaks + 1] = k end
+             end
+             return ui.text{ table.concat(leaks, ",") }
+           end"#,
+    );
+    let n = s.view().expect("view ok");
+    assert_eq!(n.plain_text().as_deref(), Some(""), "no sandbox-hostile global is visible");
+}
+
+#[test]
+fn runaway_loop_errors_instead_of_hanging() {
+    let mut s = load("return function() while true do end end");
+    let err = s.view().expect_err("budget exhausted");
+    assert!(err.contains("instruction budget"), "got: {err}");
+    // …and the VM recovers: the next entry gets a fresh budget.
+    let mut ok = load(r#"return function() return ui.text{ "fine" } end"#);
+    assert!(ok.view().is_ok());
+}
+
+#[test]
+fn memory_bomb_errors_instead_of_oom() {
+    let mut s = load(
+        r#"return function()
+             local t = {}
+             for i = 1, 1e9 do t[i] = string.rep("x", 1024) end
+             return ui.text{ "unreachable" }
+           end"#,
+    );
+    assert!(s.view().is_err(), "allocation past the cap errors");
 }

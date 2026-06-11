@@ -13,7 +13,7 @@ use egui::{Color32, FontId, Galley, Pos2, Rect, Vec2};
 use rich_text::Run;
 use taffy::{AvailableSpace, NodeId, Size, TaffyTree};
 
-use crate::node::{Node, Style};
+use crate::node::{Border, BoxShadow, Corners, Node, Style};
 
 /// The engine's mark palette passed to `rich_text` (theme-in — the renderer hardcodes nothing).
 const THEME: rich_text::Theme = rich_text::Theme {
@@ -29,7 +29,12 @@ const THEME: rich_text::Theme = rich_text::Theme {
 pub(crate) struct Look {
     pub background: Option<Color32>,
     pub color: Color32,
-    pub corner_radius: f32,
+    pub corner_radius: Corners,
+    pub border: Option<Border>,
+    pub shadow: Option<BoxShadow>,
+    /// Effective opacity: this node's own × every ancestor's (CSS subtree semantics), resolved
+    /// here so paint just multiplies colours by it.
+    pub opacity: f32,
 }
 
 /// One node, laid out for this frame in absolute (cell-local) coordinates.
@@ -74,16 +79,24 @@ struct TextSpec {
 
 /// Pull the paint properties out of a style.
 fn look(style: &Style) -> Look {
-    Look { background: style.background, color: style.color, corner_radius: style.corner_radius }
+    Look {
+        background: style.background,
+        color: style.color,
+        corner_radius: style.corner_radius,
+        border: style.border,
+        shadow: style.shadow,
+        opacity: style.opacity.clamp(0.0, 1.0),
+    }
 }
 
-/// Lay `root` out to fill the egui screen rect, returning every box in pre-order (parents first
-/// = painter back-to-front). `offsets` are the retained scroll positions by region id.
-pub(crate) fn layout(ctx: &egui::Context, root: &Node, offsets: &HashMap<String, f32>) -> Vec<Placed> {
+/// Lay `root` out to fill `host` (the rect the engine was handed — a panel, a dock tab body, or the
+/// whole window), returning every box in pre-order (parents first = painter back-to-front).
+/// `offsets` are the retained scroll positions by region id.
+pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &HashMap<String, f32>) -> Vec<Placed> {
     let mut tree: TaffyTree<Ctx> = TaffyTree::new();
     let root_id = build(&mut tree, root);
 
-    let screen = ctx.content_rect();
+    let screen = host;
     let available = Size {
         width: AvailableSpace::Definite(screen.width()),
         height: AvailableSpace::Definite(screen.height()),
@@ -95,7 +108,7 @@ pub(crate) fn layout(ctx: &egui::Context, root: &Node, offsets: &HashMap<String,
     .expect("taffy layout never fails for a well-formed tree");
 
     let mut out = Vec::new();
-    collect(&tree, root_id, screen.min, screen, offsets, ctx, &mut out);
+    collect(&tree, root_id, screen.min, screen, 1.0, offsets, ctx, &mut out);
     out
 }
 
@@ -151,24 +164,29 @@ fn measure(
     let Some(spec) = node_ctx.text.as_ref() else {
         return Size { width: 0.0, height: 0.0 };
     };
-    // Wrap at the width Taffy fixed, else the definite space it offers, else don't wrap (a
-    // min/max-content probe).
-    let wrap = known.width.or(match space.width {
-        AvailableSpace::Definite(w) => Some(w),
-        _ => None,
+    // Wrap at the width Taffy fixed, else the offered space: definite → that width, min-content
+    // → 0 (longest word, CSS min-content), max-content → unwrapped.
+    let wrap = known.width.unwrap_or(match space.width {
+        AvailableSpace::Definite(w) => w,
+        AvailableSpace::MinContent => 0.0,
+        AvailableSpace::MaxContent => f32::INFINITY,
     });
-    let galley = shape_text(ctx, &spec.runs, spec.size, node_ctx.base.color, wrap.unwrap_or(f32::INFINITY));
-    Size { width: galley.size().x, height: galley.size().y }
+    let galley = shape_text(ctx, &spec.runs, spec.size, node_ctx.base.color, wrap);
+    // Ceil so Taffy's whole-pixel rounding can't hand back a box a hair narrower than the galley
+    // (re-shaping at that shaved width would wrap an extra line).
+    Size { width: galley.size().x.ceil(), height: galley.size().y.ceil() }
 }
 
 /// Walk the computed layout, turning Taffy's parent-relative boxes into absolute `Placed`s.
 /// `clip` is the rect this box paints within; a scroll region offsets its children by the
-/// retained scroll position and clips them to itself.
+/// retained scroll position and clips them to itself. `opacity` is the inherited ancestor
+/// product, folded into every state's `Look` (CSS subtree opacity).
 fn collect(
     tree: &TaffyTree<Ctx>,
     id: NodeId,
     origin: Pos2,
     clip: Rect,
+    opacity: f32,
     offsets: &HashMap<String, f32>,
     ctx: &egui::Context,
     out: &mut Vec<Placed>,
@@ -180,21 +198,34 @@ fn collect(
     );
 
     let node_ctx = tree.get_node_context(id);
+    let fold = |mut l: Look| {
+        l.opacity *= opacity;
+        l
+    };
     let base = node_ctx.map_or(
-        Look { background: None, color: Color32::from_gray(0xdd), corner_radius: 0.0 },
-        |c| c.base,
+        Look {
+            background: None,
+            color: Color32::from_gray(0xdd),
+            corner_radius: Corners::default(),
+            border: None,
+            shadow: None,
+            opacity,
+        },
+        |c| fold(c.base),
     );
-    let hover = node_ctx.and_then(|c| c.hover);
-    let active = node_ctx.and_then(|c| c.active);
+    let hover = node_ctx.and_then(|c| c.hover).map(fold);
+    let active = node_ctx.and_then(|c| c.active).map(fold);
     let on_click = node_ctx.and_then(|c| c.on_click);
     let editor = node_ctx.and_then(|c| c.editor.clone());
     let scroll_id = node_ctx.and_then(|c| c.scroll.clone());
     let text = node_ctx.and_then(|c| c.text.as_ref()).map(|spec| {
         // Re-shape at the final content width so the painted wrapping matches the laid-out box.
+        // Content box sits inside padding + border (border-box layout).
         let pad = layout.padding;
-        let content_w = (rect.width() - pad.left - pad.right).max(0.0);
+        let bord = layout.border;
+        let content_w = (rect.width() - pad.left - pad.right - bord.left - bord.right).max(0.0);
         let galley = shape_text(ctx, &spec.runs, spec.size, base.color, content_w);
-        (rect.min + Vec2::new(pad.left, pad.top), galley)
+        (rect.min + Vec2::new(pad.left + bord.left, pad.top + bord.top), galley)
     });
 
     // A scroll region offsets its children up by the (clamped) scroll position and confines them
@@ -218,10 +249,11 @@ fn collect(
         None => (rect.min, clip, None),
     };
 
+    let child_opacity = base.opacity;
     out.push(Placed { rect, text, base, hover, active, on_click, editor, clip, scroll });
 
     for child in tree.children(id).expect("children list") {
-        collect(tree, child, child_origin, child_clip, offsets, ctx, out);
+        collect(tree, child, child_origin, child_clip, child_opacity, offsets, ctx, out);
     }
 }
 

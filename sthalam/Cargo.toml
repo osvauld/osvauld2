@@ -12,6 +12,11 @@ eframe = { version = "0.34", default-features = false, features = ["wgpu", "defa
 zeroize = { workspace = true }
 osvauld-rpc = { path = "../osvauld-rpc" }
 serde_json = { workspace = true }
+# The bridge edits .app runtime CRDTs (app-data MCP tools) directly, no script run involved.
+loro = "1.12.0"
 app_host = { path = "../app_host" }
 code_highlight = { path = "../code_highlight" }
+code_editor = { path = "../code_editor" }
 egui_dock = "0.19"
+# Screenshot PNGs ride the rpc JSON as base64.
+base64 = "0.22"

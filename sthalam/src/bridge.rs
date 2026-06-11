@@ -3,8 +3,10 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+use code_editor::{BlockDoc, BlockId};
 use doc_editor::{BlockKind, Doc, TreeID};
 use eframe::egui;
+use loro::{ExportMode, LoroDoc};
 use osvauld_rpc::{BlockSummary, ItemSummary, MarkSpan, Request, Response, WorkspaceSummary};
 use serde_json::json;
 use vault::{ItemKind, Vault, WorkspaceItem};
@@ -20,9 +22,15 @@ pub enum Refresh {
     Doc { ws_id: String, item_id: String, snapshot: Vec<u8> },
     /// An .app's source files changed; reload the engine from the vault.
     App { ws_id: String, item_id: String },
+    /// One `.lua` file changed block-wise (a per-block MCP edit); merge `snapshot` into the open
+    /// editor if it's the file showing, preserving the human's live edits + caret.
+    Lua { ws_id: String, item_id: String, path: String, snapshot: Vec<u8> },
     /// A workspace's item list changed (e.g. the bridge created an item); the open
     /// workspace tab must re-read its items so the new one becomes visible.
     Workspace { ws_id: String },
+    /// An .app's runtime data CRDT changed (an MCP app-data write); merge `snapshot` into the
+    /// live engine so the open run pane updates this frame.
+    AppData { ws_id: String, item_id: String, snapshot: Vec<u8> },
 }
 
 pub fn start(path: impl AsRef<Path>, vault: Vault, ctx: egui::Context) -> Receiver<Refresh> {
@@ -209,12 +217,15 @@ fn handle(vault: &Vault, refresh_tx: &Sender<Refresh>, req: Request) -> Response
             Err(e) => Response::err(e.to_string()),
         },
         Request::ReadFile { ws_id, item_id, path } => match vault.get_file(&ws_id, &item_id, &path) {
-            Ok(Some(bytes)) => Response::ok(json!({ "content": String::from_utf8_lossy(&bytes) })),
+            // `.lua` files are stored as block snapshots; `decode` emits them back to source.
+            Ok(Some(bytes)) => Response::ok(json!({ "content": code_editor::store::decode(&path, &bytes) })),
             Ok(None) => Response::err(format!("no such file '{path}'")),
             Err(e) => Response::err(e.to_string()),
         },
         Request::WriteFile { ws_id, item_id, path, content } => {
-            match vault.put_file(&ws_id, &item_id, &path, content.as_bytes()) {
+            // Whole-file write: `.lua` source is split into blocks and stored as a snapshot.
+            let bytes = code_editor::store::encode(&path, &content);
+            match vault.put_file(&ws_id, &item_id, &path, &bytes) {
                 Ok(()) => {
                     // Reload any open app tab against the new source.
                     let _ = refresh_tx.send(Refresh::App { ws_id, item_id });
@@ -223,18 +234,196 @@ fn handle(vault: &Vault, refresh_tx: &Sender<Refresh>, req: Request) -> Response
                 Err(e) => Response::err(e.to_string()),
             }
         }
+        Request::ReadFileBlocks { ws_id, item_id, path } => match load_lua(vault, &ws_id, &item_id, &path) {
+            Ok(doc) => Response::ok(lua_to_summaries(&doc)),
+            Err(e) => Response::err(e),
+        },
+        Request::SetFileBlockText { ws_id, item_id, path, block, text } => {
+            mutate_lua(vault, refresh_tx, &ws_id, &item_id, &path, |doc| {
+                let id = parse_lua_block(doc, &block)?;
+                doc.set_block_text(id, &text);
+                Ok(serde_json::Value::Null)
+            })
+        }
+        Request::InsertFileBlock { ws_id, item_id, path, after, kind, text } => {
+            mutate_lua(vault, refresh_tx, &ws_id, &item_id, &path, |doc| {
+                let kind = if kind.is_empty() { "statement" } else { &kind };
+                let new_id = match after {
+                    Some(s) => doc.insert_after(parse_lua_block(doc, &s)?, kind, &text),
+                    None => doc.push(kind, &text),
+                };
+                Ok(json!({ "id": new_id.to_string() }))
+            })
+        }
+        Request::DeleteFileBlock { ws_id, item_id, path, block } => {
+            mutate_lua(vault, refresh_tx, &ws_id, &item_id, &path, |doc| {
+                doc.delete_block(parse_lua_block(doc, &block)?);
+                Ok(serde_json::Value::Null)
+            })
+        }
+        Request::AppDataGet { ws_id, item_id } => {
+            let doc = load_app_state(vault, &ws_id, &item_id);
+            match serde_json::to_value(doc.get_deep_value()) {
+                Ok(v) => Response::ok(v),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        Request::AppDataSetText { ws_id, item_id, name, text } => {
+            // Whole-container replace, the same op the Lua binding's `text:set` makes; since the
+            // data is a CRDT the open run pane merges it like any peer edit.
+            let doc = load_app_state(vault, &ws_id, &item_id);
+            let t = doc.get_text(name.as_str());
+            let len = t.len_unicode();
+            let res: Result<(), loro::LoroError> = (|| {
+                if len > 0 {
+                    t.delete(0, len)?;
+                }
+                t.insert(0, &text)
+            })();
+            if let Err(e) = res {
+                return Response::err(e.to_string());
+            }
+            doc.commit();
+            let snapshot = match doc.export(ExportMode::Snapshot) {
+                Ok(s) => s,
+                Err(e) => return Response::err(e.to_string()),
+            };
+            if let Err(e) = vault.put_state(&ws_id, &item_id, &snapshot) {
+                return Response::err(e.to_string());
+            }
+            let _ = refresh_tx.send(Refresh::AppData { ws_id, item_id, snapshot });
+            Response::ok(serde_json::Value::Null)
+        }
+        Request::ExportPdf { ws_id, item_id } => export_app_pdf(vault, &ws_id, &item_id),
+        Request::Screenshot { ws_id, item_id, width, height, scale } => {
+            screenshot_app(vault, &ws_id, &item_id, width, height, scale)
+        }
     }
 }
 
+/// Render a headless app off-screen and return base64 PNG. A page app frames its page on white
+/// (the run pane's sheet); anything else renders the requested/default viewport on the shell
+/// canvas colour. Explicit `width`/`height` win over the page.
+fn screenshot_app(
+    vault: &Vault,
+    ws_id: &str,
+    item_id: &str,
+    width: Option<f32>,
+    height: Option<f32>,
+    scale: Option<f32>,
+) -> Response {
+    use base64::Engine as _;
+    let (_, mut app) = match headless_app(vault, ws_id, item_id) {
+        Ok(v) => v,
+        Err(e) => return Response::err(e),
+    };
+    let page = app.page();
+    let (w, h) = match (width, height, page) {
+        (Some(w), Some(h), _) => (w, h),
+        (_, _, Some(p)) => (width.unwrap_or(p.width), height.unwrap_or(p.height)),
+        _ => (width.unwrap_or(900.0), height.unwrap_or(700.0)),
+    };
+    let clear = if page.is_some() { egui::Color32::WHITE } else { crate::theme::BG_PAGE };
+    let scale = scale.unwrap_or(2.0).clamp(0.5, 4.0);
+    match app.screenshot(w, h, scale, clear, host_fonts()) {
+        Ok(png) => Response::ok(serde_json::json!({
+            "png_base64": base64::engine::general_purpose::STANDARD.encode(&png),
+            "width_px": (w * scale).round() as u32,
+            "height_px": (h * scale).round() as u32,
+        })),
+        Err(e) => Response::err(e),
+    }
+}
+
+/// An .app's runtime data CRDT from its persisted snapshot (empty when never persisted).
+fn load_app_state(vault: &Vault, ws_id: &str, item_id: &str) -> LoroDoc {
+    let doc = LoroDoc::new();
+    if let Ok(Some(bytes)) = vault.get_state(ws_id, item_id) {
+        let _ = doc.import(&bytes);
+    }
+    doc
+}
+
+/// Build a headless engine from the vault's source tree + runtime state — the same inputs an
+/// open tab uses — plus the item's name. The render paths (PDF, screenshot) start here.
+fn headless_app(vault: &Vault, ws_id: &str, item_id: &str) -> Result<(String, app_host::App), String> {
+    let item = vault
+        .items(ws_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|i| i.id == item_id)
+        .ok_or("item not found")?;
+    let mut files = Vec::new();
+    for path in vault.list_files(ws_id, item_id).unwrap_or_default() {
+        if let Ok(Some(bytes)) = vault.get_file(ws_id, item_id, &path) {
+            files.push((path.clone(), code_editor::store::decode(&path, &bytes)));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let state = vault.get_state(ws_id, item_id).ok().flatten();
+    Ok((item.name, app_host::App::from_files(&files, state.as_deref())))
+}
+
+/// The shell's faces, so headless renders shape like the live tab.
+fn host_fonts() -> app_host::FontBytes<'static> {
+    app_host::FontBytes {
+        regular: crate::theme::FONT_SANS,
+        bold: crate::theme::FONT_SANS_SB,
+        mono: crate::theme::FONT_MONO,
+    }
+}
+
+/// Export a headless app's declared page to [`pdf_path`]. Returns the written path.
+fn export_app_pdf(vault: &Vault, ws_id: &str, item_id: &str) -> Response {
+    let (name, mut app) = match headless_app(vault, ws_id, item_id) {
+        Ok(v) => v,
+        Err(e) => return Response::err(e),
+    };
+    match app.export_pdf(host_fonts()) {
+        Ok(bytes) => {
+            let path = pdf_path(&name);
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => Response::ok(
+                    serde_json::json!({ "path": path.display().to_string(), "bytes": bytes.len() }),
+                ),
+                Err(e) => Response::err(format!("write failed: {e}")),
+            }
+        }
+        Err(e) => Response::err(e),
+    }
+}
+
+/// `~/Downloads/<sanitized-name>.pdf`, falling back to the temp dir.
+pub(crate) fn pdf_path(name: &str) -> std::path::PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let dir = std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join("Downloads"))
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("{safe}.pdf"))
+}
+
 /// Persist a starter CRDT snapshot for a freshly created item so it is readable and writable the
-/// instant it exists — without a human first opening it in the GUI. The vault seeds an app's source
-/// tree but deliberately knows nothing about Loro, so a `.doc`'s live state is seeded here, the one
-/// layer that has `doc_editor`. The seed block's `TreeID` is now durable, so an agent's `read_doc`
-/// and the `set_block_text` that follows it address the *same* block. Called by every create path
-/// (the bridge below and the GUI's `Action::CreateItem`).
+/// instant it exists — without a human first opening it in the GUI. The vault seeds an app's
+/// `manifest.osv` but deliberately knows nothing about Loro, so the layers that do are seeded here:
+///   - a `.doc`'s live block tree (`doc_editor`), and
+///   - an `.app`'s `main.lua`, split into blocks and stored as a `block_doc` snapshot (`code_editor`).
+/// Seeding as blocks makes each block's `TreeID` durable from birth, so an agent's read and the
+/// `set_block_text` that follows it address the *same* block. Called by every create path (the
+/// bridge below and the GUI's `Action::CreateItem`).
 pub fn seed_item_state(vault: &Vault, item: &WorkspaceItem) {
-    if item.kind == ItemKind::Doc {
-        let _ = vault.put_state(&item.ws_id, &item.id, &Doc::new().export_snapshot());
+    match item.kind {
+        ItemKind::Doc => {
+            let _ = vault.put_state(&item.ws_id, &item.id, &Doc::new().export_snapshot());
+        }
+        ItemKind::App => {
+            let bytes = code_editor::store::encode("main.lua", vault::APP_MAIN_SEED);
+            let _ = vault.put_file(&item.ws_id, &item.id, "main.lua", &bytes);
+        }
+        _ => {}
     }
 }
 
@@ -281,6 +470,79 @@ fn mutate_doc(
 /// Parse a block id, mapping the failure to a client-facing message.
 fn parse_block(id: &str) -> Result<TreeID, String> {
     TreeID::try_from(id).map_err(|_| format!("invalid block id '{id}'"))
+}
+
+/// Load a `.lua` file as its block doc (identity-preserving), with client-facing errors for a
+/// missing or non-block file — the read spine of every per-block `.lua` request.
+fn load_lua(vault: &Vault, ws_id: &str, item_id: &str, path: &str) -> Result<BlockDoc, String> {
+    let bytes = vault
+        .get_file(ws_id, item_id, path)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no such file '{path}'"))?;
+    code_editor::store::doc_from_bytes(path, &bytes)
+        .ok_or_else(|| format!("'{path}' is not a .lua block file"))
+}
+
+/// Load a `.lua` block doc, run a per-block mutation, then persist the *live* snapshot (identity
+/// preserved, never re-split) and notify the UI to merge it — the `.lua` counterpart of
+/// [`mutate_doc`]. `f` returns the JSON result or a client-facing error; the file is written only
+/// on success.
+fn mutate_lua(
+    vault: &Vault,
+    refresh_tx: &Sender<Refresh>,
+    ws_id: &str,
+    item_id: &str,
+    path: &str,
+    f: impl FnOnce(&BlockDoc) -> Result<serde_json::Value, String>,
+) -> Response {
+    let doc = match load_lua(vault, ws_id, item_id, path) {
+        Ok(doc) => doc,
+        Err(e) => return Response::err(e),
+    };
+    let result = match f(&doc) {
+        Ok(v) => v,
+        Err(e) => return Response::err(e),
+    };
+    doc.commit();
+    let snapshot = code_editor::store::snapshot_from_doc(&doc);
+    if let Err(e) = vault.put_file(ws_id, item_id, path, &snapshot) {
+        return Response::err(e.to_string());
+    }
+    let _ = refresh_tx.send(Refresh::Lua {
+        ws_id: ws_id.to_string(),
+        item_id: item_id.to_string(),
+        path: path.to_string(),
+        snapshot,
+    });
+    Response::ok(result)
+}
+
+/// Parse a `.lua` block id and verify it exists in `doc` (a stale id from before a delete would
+/// otherwise panic the Loro op).
+fn parse_lua_block(doc: &BlockDoc, id: &str) -> Result<BlockId, String> {
+    let bid = BlockId::try_from(id).map_err(|_| format!("invalid block id '{id}'"))?;
+    if doc.contains(bid) {
+        Ok(bid)
+    } else {
+        Err(format!("no such block '{id}'"))
+    }
+}
+
+/// Flatten a `.lua` block doc into block summaries (flat — Lua blocks don't nest — and without the
+/// `.doc`-only fields), the per-block read shape an agent edits against.
+fn lua_to_summaries(doc: &BlockDoc) -> Vec<BlockSummary> {
+    doc.block_ids()
+        .into_iter()
+        .map(|id| BlockSummary {
+            id: id.to_string(),
+            kind: doc.kind(id),
+            text: doc.text(id),
+            depth: 0,
+            done: None,
+            lang: None,
+            marks: Vec::new(),
+        })
+        .collect()
 }
 
 /// Parse a block-kind tag, erroring on an unknown one (the model would silently fall back to a

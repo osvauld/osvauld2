@@ -13,7 +13,10 @@ members = [
   "text_edit",
   "rich_text",
   "code_highlight",
+  "block_doc",
+  "code_editor",
   "doc_editor",
+  "pdf_paint",
   "osvauld-rpc",
   "osvauld-mcp",
 ]

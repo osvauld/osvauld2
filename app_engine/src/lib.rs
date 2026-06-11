@@ -8,7 +8,11 @@
 mod layout;
 mod node;
 mod paint;
+mod pdf;
 mod script;
+mod shot;
+
+pub use pdf::FontBytes;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +24,14 @@ use loro::{ExportMode, LoroDoc};
 use text_edit::TextField;
 
 pub use node::{Direction, Node, Style, Val};
+
+/// A print-page declaration from the app (`page = { size = "A4", orientation = "landscape" }`):
+/// fixed host-rect dimensions in logical px, sized so 1 px = 1 PDF pt.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PageSpec {
+    pub width: f32,
+    pub height: f32,
+}
 
 /// One frame's drawing from an app: GPU-ready triangles plus their texture uploads and a
 /// repaint signal. Field-for-field the host-side `app_host::Surface`, kept separate so the
@@ -85,6 +97,10 @@ fn mtime(path: &PathBuf) -> Option<SystemTime> {
 fn engine_ctx() -> egui::Context {
     let ctx = egui::Context::default();
     rich_text::install_fonts(&ctx);
+    // Match the shell: Gamma(0.7) keeps the AA ramp on curves (dark default hardens it).
+    ctx.global_style_mut(|s| {
+        s.visuals.text_options.alpha_from_coverage = egui::epaint::AlphaFromCoverage::Gamma(0.7);
+    });
     ctx
 }
 
@@ -177,6 +193,25 @@ impl EngineApp {
         }
     }
 
+    /// Rebuild the script from edited source, keeping the live runtime CRDT so state survives the
+    /// edit. Ephemeral UI state (focus/caret/scroll) resets — the node tree may have changed.
+    pub fn reload_source(&mut self, files: &[(String, String)]) {
+        let script = script::Script::load_app(files, self.doc.clone());
+        self.view = ViewSource::Script { source: Source::Inline, script };
+        self.fields.clear();
+        self.focus = None;
+        self.scroll.clear();
+    }
+
+    /// The app's print-page declaration, if it made one. The host renders such an app inside a
+    /// fixed page-sized rect (print preview) and may export it to PDF.
+    pub fn page(&self) -> Option<PageSpec> {
+        match &self.view {
+            ViewSource::Script { script, .. } => script.page(),
+            ViewSource::Static(_) => None,
+        }
+    }
+
     /// Render one frame into a `Ui`, handling input and returning the CRDT snapshot if
     /// state changed (so the caller can persist it to vault). Consumes the available rect.
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Vec<u8>> {
@@ -228,7 +263,7 @@ impl EngineApp {
         let focus_field = focus_id.as_ref().and_then(|id| self.fields.get(id)).copied();
         let scroll = self.scroll.clone();
 
-        let placed = layout::layout(ui.ctx(), &root, &scroll);
+        let placed = layout::layout(ui.ctx(), rect, &root, &scroll);
         let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
         let pointer = paint::Pointer { hover, pressed: ui.input(|i| i.pointer.primary_down()) };
         let focus = focus_id.as_deref().zip(focus_field.as_ref());
@@ -300,22 +335,10 @@ impl EngineApp {
         }
     }
 
-    /// Build a minimal `RawInput` for an app embedded in a `Ui` cell (pointer in app-local
-    /// coords, keyboard only when focused).
-    fn collect_input(ui: &egui::Ui, rect: egui::Rect) -> egui::RawInput {
-        ui.ctx().input(|i| {
-            let mut raw = i.raw.clone();
-            // Translate pointer events into app-local coordinates (origin at rect.min).
-            for event in &mut raw.events {
-                match event {
-                    egui::Event::PointerMoved(p) => *p -= rect.min.to_vec2(),
-                    egui::Event::PointerButton { pos, .. } => *pos -= rect.min.to_vec2(),
-                    _ => {}
-                }
-            }
-            raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, rect.size()));
-            raw
-        })
+    /// This frame's `RawInput` for an app embedded in a `Ui` cell. Pointer positions stay in
+    /// screen coordinates — `show` lays out and hit-tests in screen space (host-rect origin).
+    fn collect_input(ui: &egui::Ui, _rect: egui::Rect) -> egui::RawInput {
+        ui.ctx().input(|i| i.raw.clone())
     }
 
     /// Build an engine app from a Lua file loaded at run time (the uploadable-app path),
@@ -366,6 +389,17 @@ impl EngineApp {
     }
 
     /// The app's live CRDT. A peer or MCP writes *this* doc; mutations show on the next frame.
+    /// Merge an external runtime-CRDT write (a peer or MCP) into the live doc — the same CRDT
+    /// op the UI makes, so the next frame re-reads the merged state.
+    pub fn import_state(&self, snapshot: &[u8]) -> Result<(), String> {
+        self.doc.import(snapshot).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// The runtime CRDT as a snapshot (for persisting a merged union).
+    pub fn export_state(&self) -> Option<Vec<u8>> {
+        self.doc.export(ExportMode::Snapshot).ok()
+    }
+
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
     }
@@ -440,7 +474,7 @@ impl EngineApp {
         let mut drag_to: Option<(String, usize)> = None;
         let mut wheel: Option<(String, f32, f32)> = None;
         let output = self.ctx.run_ui(input, |ui| {
-            let placed = layout::layout(ui.ctx(), &root, &scroll);
+            let placed = layout::layout(ui.ctx(), ui.ctx().content_rect(), &root, &scroll);
             let hover = ui.input(|i| i.pointer.hover_pos());
             let pointer = paint::Pointer { hover, pressed: ui.input(|i| i.pointer.primary_down()) };
             let focus = focus_id.as_deref().zip(focus_field.as_ref());

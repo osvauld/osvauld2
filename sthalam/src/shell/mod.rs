@@ -152,8 +152,12 @@ impl TabViewer for ShellViewer<'_> {
                     }
                 }
                 TabBody::App { tab } => {
-                    if let Some(crdt) = app_view::body(ui, item, tab) {
+                    let out = app_view::body(ui, item, tab);
+                    if let Some(crdt) = out.runtime {
                         let _ = self.vault.put_state(&item.ws_id, &item.id, &crdt);
+                    }
+                    for (path, bytes) in out.files {
+                        let _ = self.vault.put_file(&item.ws_id, &item.id, &path, &bytes);
                     }
                 }
             },
@@ -335,7 +339,27 @@ impl Shell {
         match refresh {
             Refresh::Doc { ws_id, item_id, snapshot } => self.refresh_doc(vault, &ws_id, &item_id, &snapshot),
             Refresh::App { ws_id, item_id } => self.refresh_app(vault, &ws_id, &item_id),
+            Refresh::Lua { ws_id, item_id, path, snapshot } => self.refresh_lua(vault, &ws_id, &item_id, &path, &snapshot),
             Refresh::Workspace { ws_id } => self.refresh_workspace(&ws_id),
+            Refresh::AppData { ws_id, item_id, snapshot } => {
+                self.refresh_app_data(vault, &ws_id, &item_id, &snapshot)
+            }
+        }
+    }
+
+    /// Merge an MCP app-data write into the open app tab's live runtime CRDT (the run pane shows
+    /// it this frame), persisting the union (the live doc may hold edits the bridge's
+    /// read-modify-write didn't see).
+    fn refresh_app_data(&mut self, vault: &Vault, ws_id: &str, item_id: &str, snapshot: &[u8]) {
+        for (_, tab) in self.dock.iter_all_tabs_mut() {
+            if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
+                if item.ws_id == ws_id && item.id == item_id {
+                    if let Some(union) = app.import_runtime(snapshot) {
+                        let _ = vault.put_state(ws_id, item_id, &union);
+                    }
+                    return;
+                }
+            }
         }
     }
 
@@ -360,6 +384,21 @@ impl Shell {
             if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
                 if item.ws_id == ws_id && item.id == item_id {
                     app.reload(vault, item);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Merge a per-block `.lua` edit into the open app tab (surgical, keeps the human's live edits),
+    /// persisting the union if the live doc absorbed it.
+    fn refresh_lua(&mut self, vault: &Vault, ws_id: &str, item_id: &str, path: &str, snapshot: &[u8]) {
+        for (_, tab) in self.dock.iter_all_tabs_mut() {
+            if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
+                if item.ws_id == ws_id && item.id == item_id {
+                    if let Some(union) = app.merge_lua(path, snapshot) {
+                        let _ = vault.put_file(ws_id, item_id, path, &union);
+                    }
                     return;
                 }
             }

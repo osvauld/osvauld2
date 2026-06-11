@@ -3,16 +3,20 @@
 //! A [`Node`] is a box with a [`Style`], optional `text`, and `children` — the Rust mirror of
 //! the `{tag, props, children}` table a Lua app returns. [`Style`] is a flat subset of CSS
 //! (inline attributes, no cascade): layout fields map onto Taffy, paint fields are read straight
-//! by the painter.
+//! by the painter. Field names follow CSS so the vocabulary stays in-distribution for an LLM
+//! author (`justify_content`, `border_radius`, …).
 
 use egui::Color32;
 use rich_text::Run;
 use taffy::prelude::{auto, length, percent};
-use taffy::{Dimension, Display, FlexDirection, Rect as TaffyRect, Size, Style as TaffyStyle};
+use taffy::{
+    AlignItems, Dimension, Display, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
+    LengthPercentageAuto, Position as TaffyPosition, Rect as TaffyRect, Size, Style as TaffyStyle,
+};
 
 /// A length in our CSS-vocabulary: `auto` (size to content / stretch), a pixel length, or
 /// a percent of the parent's corresponding axis.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Val {
     Auto,
     Px(f32),
@@ -28,6 +32,70 @@ impl Val {
             Val::Pct(p) => percent(p / 100.0),
         }
     }
+
+    /// As a Taffy `LengthPercentage` (no auto — used for padding, where `auto` means `0`).
+    fn to_lp(self) -> LengthPercentage {
+        match self {
+            Val::Auto => length(0.0),
+            Val::Px(px) => length(px),
+            Val::Pct(p) => percent(p / 100.0),
+        }
+    }
+
+    /// As a Taffy `LengthPercentageAuto` (margin / inset, where `auto` is meaningful).
+    fn to_lpa(self) -> LengthPercentageAuto {
+        match self {
+            Val::Auto => auto(),
+            Val::Px(px) => length(px),
+            Val::Pct(p) => percent(p / 100.0),
+        }
+    }
+}
+
+/// Per-side values (CSS `padding` / `margin` / inset sides).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edges {
+    pub top: Val,
+    pub right: Val,
+    pub bottom: Val,
+    pub left: Val,
+}
+
+impl Edges {
+    pub fn all(v: Val) -> Self {
+        Edges { top: v, right: v, bottom: v, left: v }
+    }
+
+    pub fn zero() -> Self {
+        Edges::all(Val::Px(0.0))
+    }
+
+    /// All four sides `auto` — the default for `inset`, where auto means "not set".
+    pub fn unset() -> Self {
+        Edges::all(Val::Auto)
+    }
+
+    pub fn px(v: f32) -> Self {
+        Edges::all(Val::Px(v))
+    }
+
+    fn to_lp_rect(self) -> TaffyRect<LengthPercentage> {
+        TaffyRect {
+            left: self.left.to_lp(),
+            right: self.right.to_lp(),
+            top: self.top.to_lp(),
+            bottom: self.bottom.to_lp(),
+        }
+    }
+
+    fn to_lpa_rect(self) -> TaffyRect<LengthPercentageAuto> {
+        TaffyRect {
+            left: self.left.to_lpa(),
+            right: self.right.to_lpa(),
+            top: self.top.to_lpa(),
+            bottom: self.bottom.to_lpa(),
+        }
+    }
 }
 
 /// Main-axis direction of a box's children (CSS `flex-direction`).
@@ -37,21 +105,125 @@ pub enum Direction {
     Column,
 }
 
+/// One CSS alignment keyword, shared by `justify_content` / `align_items` / `align_self`
+/// (keywords that don't apply to an axis fall back to something sensible there).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Align {
+    Start,
+    Center,
+    End,
+    Stretch,
+    Baseline,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+impl Align {
+    fn to_justify(self) -> JustifyContent {
+        match self {
+            Align::Start | Align::Baseline => JustifyContent::FlexStart,
+            Align::Center => JustifyContent::Center,
+            Align::End => JustifyContent::FlexEnd,
+            Align::Stretch => JustifyContent::Stretch,
+            Align::SpaceBetween => JustifyContent::SpaceBetween,
+            Align::SpaceAround => JustifyContent::SpaceAround,
+            Align::SpaceEvenly => JustifyContent::SpaceEvenly,
+        }
+    }
+
+    fn to_align(self) -> AlignItems {
+        match self {
+            Align::Start | Align::SpaceBetween | Align::SpaceAround | Align::SpaceEvenly => {
+                AlignItems::FlexStart
+            }
+            Align::Center => AlignItems::Center,
+            Align::End => AlignItems::FlexEnd,
+            Align::Stretch => AlignItems::Stretch,
+            Align::Baseline => AlignItems::Baseline,
+        }
+    }
+}
+
+/// CSS `position`: `Absolute` takes the node out of flex flow and places it by `inset`
+/// relative to its parent's box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Position {
+    Relative,
+    Absolute,
+}
+
+/// A solid border painted just inside the box edge (CSS `border`). The width also participates
+/// in layout (border-box), so content never sits under the stroke.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Border {
+    pub width: f32,
+    pub color: Color32,
+}
+
+/// A drop shadow behind the box (CSS `box-shadow`: offset, blur, spread, colour).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxShadow {
+    pub offset: [f32; 2],
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color32,
+}
+
+/// Per-corner radii (CSS `border-radius`, top-left first, clockwise).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Corners {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+impl Corners {
+    pub fn same(r: f32) -> Self {
+        Corners { tl: r, tr: r, br: r, bl: r }
+    }
+}
+
 /// The inline style on one node. Flat by design — no cascade or inheritance; a node carries
-/// every value it's drawn with.
+/// every value it's drawn with (the one exception is `opacity`, which multiplies down the
+/// subtree like CSS).
 #[derive(Clone, Debug)]
 pub struct Style {
     pub direction: Direction,
+    /// CSS `flex-wrap: wrap` when true.
+    pub wrap: bool,
+    /// Main-axis distribution of children (CSS `justify-content`). `None` = Taffy default.
+    pub justify_content: Option<Align>,
+    /// Cross-axis alignment of children (CSS `align-items`). `None` = Taffy default (stretch).
+    pub align_items: Option<Align>,
+    /// This node's own cross-axis override (CSS `align-self`).
+    pub align_self: Option<Align>,
     pub width: Val,
     pub height: Val,
-    /// Uniform inner padding (CSS `padding`), in points.
-    pub padding: f32,
+    pub min_width: Val,
+    pub min_height: Val,
+    pub max_width: Val,
+    pub max_height: Val,
+    /// Inner padding per side (CSS `padding`), in points.
+    pub padding: Edges,
+    /// Outer margin per side (CSS `margin`); `auto` centres along that axis.
+    pub margin: Edges,
+    pub position: Position,
+    /// Offsets for `position: absolute` (CSS `top`/`right`/`bottom`/`left`); `auto` = unset.
+    pub inset: Edges,
     /// Space between children along the main axis (CSS `gap`), in points.
     pub gap: f32,
     /// How much free main-axis space this node absorbs (CSS `flex-grow`).
     pub flex_grow: f32,
+    /// How readily this node gives up space (CSS `flex-shrink`; CSS default `1`).
+    pub flex_shrink: f32,
     pub background: Option<Color32>,
-    pub corner_radius: f32,
+    pub corner_radius: Corners,
+    pub border: Option<Border>,
+    pub shadow: Option<BoxShadow>,
+    /// `0.0..=1.0`; multiplies every colour this node and its subtree paint with (CSS `opacity`).
+    pub opacity: f32,
     /// Text colour for this node's own `text` (not inherited by children).
     pub color: Color32,
     pub font_size: f32,
@@ -61,13 +233,28 @@ impl Default for Style {
     fn default() -> Self {
         Style {
             direction: Direction::Column,
+            wrap: false,
+            justify_content: None,
+            align_items: None,
+            align_self: None,
             width: Val::Auto,
             height: Val::Auto,
-            padding: 0.0,
+            min_width: Val::Auto,
+            min_height: Val::Auto,
+            max_width: Val::Auto,
+            max_height: Val::Auto,
+            padding: Edges::zero(),
+            margin: Edges::zero(),
+            position: Position::Relative,
+            inset: Edges::unset(),
             gap: 0.0,
             flex_grow: 0.0,
+            flex_shrink: 1.0,
             background: None,
-            corner_radius: 0.0,
+            corner_radius: Corners::default(),
+            border: None,
+            shadow: None,
+            opacity: 1.0,
             color: Color32::from_gray(0xdd),
             font_size: 16.0,
         }
@@ -78,21 +265,32 @@ impl Style {
     /// Lower the layout-relevant fields onto a Taffy style. Every node is a flex container; a
     /// text leaf is a flex node whose size comes from a measured galley.
     pub(crate) fn to_taffy(&self) -> TaffyStyle {
+        let border = self.border.map_or(0.0, |b| b.width.max(0.0));
         TaffyStyle {
             display: Display::Flex,
             flex_direction: match self.direction {
                 Direction::Row => FlexDirection::Row,
                 Direction::Column => FlexDirection::Column,
             },
-            size: Size { width: self.width.to_dim(), height: self.height.to_dim() },
-            padding: TaffyRect {
-                left: length(self.padding),
-                right: length(self.padding),
-                top: length(self.padding),
-                bottom: length(self.padding),
+            flex_wrap: if self.wrap { FlexWrap::Wrap } else { FlexWrap::NoWrap },
+            position: match self.position {
+                Position::Relative => TaffyPosition::Relative,
+                Position::Absolute => TaffyPosition::Absolute,
             },
+            inset: self.inset.to_lpa_rect(),
+            size: Size { width: self.width.to_dim(), height: self.height.to_dim() },
+            min_size: Size { width: self.min_width.to_dim(), height: self.min_height.to_dim() },
+            max_size: Size { width: self.max_width.to_dim(), height: self.max_height.to_dim() },
+            padding: self.padding.to_lp_rect(),
+            margin: self.margin.to_lpa_rect(),
+            // Border participates in layout (border-box) so content clears the stroke.
+            border: Edges::px(border).to_lp_rect(),
             gap: Size { width: length(self.gap), height: length(self.gap) },
             flex_grow: self.flex_grow,
+            flex_shrink: self.flex_shrink,
+            justify_content: self.justify_content.map(Align::to_justify),
+            align_items: self.align_items.map(Align::to_align),
+            align_self: self.align_self.map(Align::to_align),
             ..Default::default()
         }
     }
@@ -189,7 +387,12 @@ impl Node {
     }
 
     pub fn padding(mut self, v: f32) -> Self {
-        self.style.padding = v;
+        self.style.padding = Edges::px(v);
+        self
+    }
+
+    pub fn margin(mut self, v: f32) -> Self {
+        self.style.margin = Edges::px(v);
         self
     }
 
@@ -203,13 +406,38 @@ impl Node {
         self
     }
 
+    pub fn justify(mut self, a: Align) -> Self {
+        self.style.justify_content = Some(a);
+        self
+    }
+
+    pub fn align(mut self, a: Align) -> Self {
+        self.style.align_items = Some(a);
+        self
+    }
+
     pub fn bg(mut self, c: Color32) -> Self {
         self.style.background = Some(c);
         self
     }
 
     pub fn radius(mut self, v: f32) -> Self {
-        self.style.corner_radius = v;
+        self.style.corner_radius = Corners::same(v);
+        self
+    }
+
+    pub fn border(mut self, width: f32, color: Color32) -> Self {
+        self.style.border = Some(Border { width, color });
+        self
+    }
+
+    pub fn shadow(mut self, s: BoxShadow) -> Self {
+        self.style.shadow = Some(s);
+        self
+    }
+
+    pub fn opacity(mut self, v: f32) -> Self {
+        self.style.opacity = v;
         self
     }
 

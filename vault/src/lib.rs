@@ -15,7 +15,7 @@ pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
-pub use item::{ItemKind, WorkspaceItem};
+pub use item::{ItemKind, WorkspaceItem, APP_MAIN_SEED};
 pub use workspace::WorkspaceMeta;
 
 use account::{did_to_filename, scan_dids};
@@ -210,8 +210,9 @@ impl Vault {
     }
 
     /// Create a new item of `kind` named `name` inside workspace `ws_id`.
-    /// App items are seeded with a starter source tree (`manifest.osv` + `main.lua`) so they
-    /// render and can be edited (by an agent over MCP) right away.
+    /// App items get a starter `manifest.osv` here; their `main.lua` is seeded by the host as a
+    /// `block_doc` snapshot (the vault stays Loro-free), so a fresh app renders and is editable by
+    /// an agent over MCP right away.
     pub fn create_item(&self, ws_id: &str, name: &str, kind: ItemKind) -> Result<WorkspaceItem, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
@@ -221,7 +222,6 @@ impl Vault {
         active.store.put(&item::meta_key(ws_id, &item.id), &sealed)?;
         if item.kind == ItemKind::App {
             active.store.put(&item::file_key(ws_id, &item.id, "manifest.osv"), item::APP_MANIFEST_SEED)?;
-            active.store.put(&item::file_key(ws_id, &item.id, "main.lua"), item::APP_MAIN_SEED)?;
         }
         Ok(item)
     }

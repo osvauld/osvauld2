@@ -75,6 +75,11 @@ pub fn apply(ctx: &egui::Context) {
     install_style(ctx);
 }
 
+// The shipped faces, shared with the PDF exporters (embedding the same bytes egui shaped with).
+pub const FONT_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
+pub const FONT_SANS_SB: &[u8] = include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf");
+pub const FONT_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -83,9 +88,9 @@ fn install_fonts(ctx: &egui::Context) {
             .font_data
             .insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
     };
-    add("inter", include_bytes!("../assets/fonts/Inter-Regular.ttf"));
-    add("inter_sb", include_bytes!("../assets/fonts/Inter-SemiBold.ttf"));
-    add("jbmono", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"));
+    add("sans", FONT_SANS);
+    add("sans_sb", FONT_SANS_SB);
+    add("jbmono", FONT_MONO);
     add("jbmono_sb", include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"));
     add("vt323", include_bytes!("../assets/fonts/VT323-Regular.ttf"));
 
@@ -94,7 +99,7 @@ fn install_fonts(ctx: &egui::Context) {
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, "inter".to_owned());
+        .insert(0, "sans".to_owned());
     fonts
         .families
         .entry(FontFamily::Monospace)
@@ -110,10 +115,10 @@ fn install_fonts(ctx: &egui::Context) {
     sb.extend(fonts.families.get(&FontFamily::Monospace).cloned().unwrap_or_default());
     fonts.families.insert(FontFamily::Name("mono_sb".into()), sb);
 
-    // The doc editor's bold family (bold runs + headings): Inter SemiBold, then the
+    // The doc editor's bold family (bold runs + headings): Noto Sans SemiBold, then the
     // proportional chain as glyph fallback. Registered under the editor's own name so the
     // editor and shell can't drift apart.
-    let mut bold = vec!["inter_sb".to_owned()];
+    let mut bold = vec!["sans_sb".to_owned()];
     bold.extend(fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default());
     fonts.families.insert(FontFamily::Name(doc_editor::theme::BOLD_FAMILY.into()), bold);
 
@@ -126,6 +131,8 @@ fn install_style(ctx: &egui::Context) {
     v.window_fill = BG_2;
     v.window_stroke = egui::Stroke::new(1.0, BD_2);
     v.override_text_color = Some(FG_1);
+    // Dark default (2c−c²) hardens AA pixels — rough curves on big glyphs; 0.7 keeps the ramp.
+    v.text_options.alpha_from_coverage = egui::epaint::AlphaFromCoverage::Gamma(0.7);
     v.extreme_bg_color = BG_1; // TextEdit background
     v.hyperlink_color = ACCENT;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0x8A, 0x86, 0xE5, 64);

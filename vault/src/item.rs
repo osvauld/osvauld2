@@ -97,9 +97,14 @@ pub(crate) fn id_from_meta_key<'a>(ws_id: &str, key: &'a str) -> Option<&'a str>
 /// format is defined.
 pub(crate) const APP_MANIFEST_SEED: &[u8] = b"app \"unnamed\" version \"0.1.0\" {}\n";
 
-/// The starter entry point seeded into every new App item, so a freshly created app renders
-/// immediately (before an agent has written anything). A complete `view = f(state)` app.
-pub(crate) const APP_MAIN_SEED: &[u8] = br##"return function()
+/// The starter entry point for every new App item, so a freshly created app renders immediately
+/// (before an agent has written anything). A complete `view = f(state)` app.
+///
+/// The vault owns the *text* but no longer writes `main.lua` itself: a `.lua` file is stored as a
+/// `block_doc` snapshot, and the vault deliberately knows nothing about Loro (same reason `.doc`
+/// state is seeded above the vault). The host splits this into blocks and writes it — see
+/// `sthalam`'s `seed_item_state`.
+pub const APP_MAIN_SEED: &str = r##"return function()
   return ui.col{ style = { padding = 28, gap = 12, background = "#14161a",
                            width = "100%", height = "100%" },
     ui.text{ "new app", style = { font = 22, color = "#e6e6ea" } },

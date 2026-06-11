@@ -1,0 +1,10 @@
+[package]
+name = "pdf_paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui = "0.34"
+rich_text = { path = "../rich_text" }
+printpdf = { version = "0.9.1", default-features = false, features = ["text_layout"] }

@@ -314,6 +314,117 @@ fn tools_list() -> Value {
                     },
                     "required": ["ws_id", "item_id", "path", "content"]
                 }
+            },
+            {
+                "name": "read_file_blocks",
+                "description": "Read a .lua file as its blocks (one per top-level construct: a function, a statement, a comment), each with a stable block ID — the per-block counterpart of read_file. Use this to target a single construct with set_file_block_text / insert_file_block / delete_file_block instead of rewriting the whole file (which preserves block identity and won't clobber a human's concurrent edits).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" }
+                    },
+                    "required": ["ws_id", "item_id", "path"]
+                }
+            },
+            {
+                "name": "set_file_block_text",
+                "description": "Replace the text of one block of a .lua file, identified by its stable block ID (from read_file_blocks). Every other block keeps its identity. The block's text is raw Lua; to restructure into more/fewer constructs use insert/delete_file_block.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" },
+                        "block": { "type": "string", "description": "Block ID (from read_file_blocks)" },
+                        "text": { "type": "string", "description": "New Lua text for the block" }
+                    },
+                    "required": ["ws_id", "item_id", "path", "block", "text"]
+                }
+            },
+            {
+                "name": "insert_file_block",
+                "description": "Insert a new block into a .lua file. It lands immediately after the block given by 'after'; omit 'after' to append at the end. 'kind' is a structural tag (statement, comment, function) and is advisory. Returns the new block's stable id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" },
+                        "after": { "type": "string", "description": "Block ID to insert after (from read_file_blocks); omit to append at the end" },
+                        "kind": { "type": "string", "description": "Structural tag: statement, comment, function (advisory; defaults to statement)" },
+                        "text": { "type": "string", "description": "Lua text for the new block" }
+                    },
+                    "required": ["ws_id", "item_id", "path", "text"]
+                }
+            },
+            {
+                "name": "delete_file_block",
+                "description": "Delete one block of a .lua file by its stable block ID (from read_file_blocks).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "path": { "type": "string", "description": "File path within the app (e.g. 'main.lua')" },
+                        "block": { "type": "string", "description": "Block ID (from read_file_blocks)" }
+                    },
+                    "required": ["ws_id", "item_id", "path", "block"]
+                }
+            },
+            {
+                "name": "app_data_get",
+                "description": "Read an .app's runtime data CRDT as JSON — the named top-level containers the app's Lua reads via doc:text/map/list. Use this to see the app's current content (e.g. a letterhead's body text) before editing it with app_data_set_text.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" }
+                    },
+                    "required": ["ws_id", "item_id"]
+                }
+            },
+            {
+                "name": "app_data_set_text",
+                "description": "Replace the content of one top-level text container in an .app's runtime data CRDT (the container the app's Lua opens as doc:text(name) and binds to a ui.editor). This is the same CRDT op the app's own editor makes, so an open run pane updates live. Edits the app's DATA — use write_file / set_file_block_text for its CODE.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "name": { "type": "string", "description": "Top-level text container name (a key from app_data_get, e.g. 'body')" },
+                        "text": { "type": "string", "description": "New full content for the container" }
+                    },
+                    "required": ["ws_id", "item_id", "name", "text"]
+                }
+            },
+            {
+                "name": "export_pdf",
+                "description": "Export a page-declaring .app (one with `page = { size = 'A4', ... }` in its Lua) to a PDF laid out exactly as its page preview renders. Writes ~/Downloads/<name>.pdf and returns the path. Errors if the app declares no page.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" }
+                    },
+                    "required": ["ws_id", "item_id"]
+                }
+            },
+            {
+                "name": "screenshot",
+                "description": "Render an .app off-screen and return the image — exactly what its run pane shows, no open tab needed. A page-declaring app defaults to its page size on white; others default to 900x700 on the shell canvas. Use it to see the result of code or data edits.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "width": { "type": "number", "description": "Viewport width in logical px (default: page width, else 900)" },
+                        "height": { "type": "number", "description": "Viewport height in logical px (default: page height, else 700)" },
+                        "scale": { "type": "number", "description": "Pixels per logical px, 0.5-4 (default 2)" }
+                    },
+                    "required": ["ws_id", "item_id"]
+                }
             }
         ]
     })
@@ -471,6 +582,61 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let content = args["content"].as_str().ok_or("missing content")?.to_string();
             Request::WriteFile { ws_id, item_id, path, content }
         }
+        "read_file_blocks" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            Request::ReadFileBlocks { ws_id, item_id, path }
+        }
+        "set_file_block_text" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            let text = args["text"].as_str().ok_or("missing text")?.to_string();
+            Request::SetFileBlockText { ws_id, item_id, path, block, text }
+        }
+        "insert_file_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            let after = args["after"].as_str().map(|s| s.to_string());
+            let kind = args["kind"].as_str().unwrap_or("statement").to_string();
+            let text = args["text"].as_str().ok_or("missing text")?.to_string();
+            Request::InsertFileBlock { ws_id, item_id, path, after, kind, text }
+        }
+        "delete_file_block" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            let block = args["block"].as_str().ok_or("missing block")?.to_string();
+            Request::DeleteFileBlock { ws_id, item_id, path, block }
+        }
+        "app_data_get" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            Request::AppDataGet { ws_id, item_id }
+        }
+        "app_data_set_text" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let name = args["name"].as_str().ok_or("missing name")?.to_string();
+            let text = args["text"].as_str().ok_or("missing text")?.to_string();
+            Request::AppDataSetText { ws_id, item_id, name, text }
+        }
+        "export_pdf" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            Request::ExportPdf { ws_id, item_id }
+        }
+        "screenshot" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let width = args["width"].as_f64().map(|v| v as f32);
+            let height = args["height"].as_f64().map(|v| v as f32);
+            let scale = args["scale"].as_f64().map(|v| v as f32);
+            Request::Screenshot { ws_id, item_id, width, height, scale }
+        }
         _ => return Err(format!("unknown tool: {name}")),
     };
 
@@ -491,6 +657,14 @@ fn handle(method: &str, params: &Value) -> Result<Value, (i32, String)> {
             let name = params["name"].as_str().ok_or((-32602, "missing name".to_string()))?;
             let args = &params["arguments"];
             match call_tool(name, args) {
+                // A screenshot comes back as an MCP image block, not JSON text.
+                Ok(val) if val.get("png_base64").is_some() => Ok(json!({
+                    "content": [{
+                        "type": "image",
+                        "data": val["png_base64"],
+                        "mimeType": "image/png"
+                    }]
+                })),
                 Ok(val) => Ok(json!({
                     "content": [{ "type": "text", "text": val.to_string() }]
                 })),

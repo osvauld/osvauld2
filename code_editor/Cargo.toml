@@ -1,0 +1,26 @@
+[package]
+name = "code_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Reuse inkjet's vendored tree-sitter-lua grammar (the SAME bundle code_highlight uses for syntax
+# colouring) through its public `Language::config().language` accessor — so there is no second
+# grammar crate and no tree-sitter core/grammar version skew. `tree-sitter` is pinned to the exact
+# version inkjet links (0.23.2) so the `Language` ABI lines up.
+inkjet = { version = "0.11", default-features = false, features = ["language-lua"] }
+tree-sitter = "0.23.2"
+
+# P2: the CRDT block container. The `store` module persists `.lua` files as block-doc snapshots.
+block_doc = { path = "../block_doc" }
+
+# P3: the egui editing widget. `egui` for the surface; `code_highlight` for per-block syntax
+# colouring (the same leaf the shell's read-only code view uses).
+egui = "0.34"
+code_highlight = { path = "../code_highlight" }
+
+[dev-dependencies]
+# `standalone` example — render the editor full-window for fast iteration on feel, without the
+# vault/signup/create-app flow: `cargo run -p code_editor --example standalone`.
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }

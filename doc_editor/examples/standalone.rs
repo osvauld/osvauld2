@@ -41,21 +41,21 @@ impl eframe::App for App {
     }
 }
 
-/// Install Inter + JetBrains Mono and paint the page on the near-black canvas.
+/// Install Noto Sans + JetBrains Mono and paint the page on the near-black canvas.
 fn setup(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let mut add = |name: &str, bytes: &'static [u8]| {
         fonts.font_data.insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
     };
-    add("inter", include_bytes!("../../sthalam/assets/fonts/Inter-Regular.ttf"));
-    add("inter_sb", include_bytes!("../../sthalam/assets/fonts/Inter-SemiBold.ttf"));
+    add("sans", include_bytes!("../../sthalam/assets/fonts/NotoSans-Regular.ttf"));
+    add("sans_sb", include_bytes!("../../sthalam/assets/fonts/NotoSans-SemiBold.ttf"));
     add("jbmono", include_bytes!("../../sthalam/assets/fonts/JetBrainsMono-Regular.ttf"));
     // Prepend ours so egui's bundled faces stay as glyph fallback.
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "inter".to_owned());
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "sans".to_owned());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "jbmono".to_owned());
     fonts
         .families
-        .insert(FontFamily::Name(theme::BOLD_FAMILY.into()), vec!["inter_sb".to_owned(), "inter".to_owned()]);
+        .insert(FontFamily::Name(theme::BOLD_FAMILY.into()), vec!["sans_sb".to_owned(), "sans".to_owned()]);
     ctx.set_fonts(fonts);
 
     ctx.global_style_mut(|s| {

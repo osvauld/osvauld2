@@ -84,6 +84,34 @@ pub enum Request {
     ReadFile { ws_id: String, item_id: String, path: String },
     /// Write (create or overwrite) one source file's text content.
     WriteFile { ws_id: String, item_id: String, path: String, content: String },
+    /// Read a `.lua` file as its blocks (one per top-level construct), with stable IDs — the
+    /// per-block counterpart of [`Request::ReadFile`], so an agent can target a single construct.
+    ReadFileBlocks { ws_id: String, item_id: String, path: String },
+    /// Replace the text of one block of a `.lua` file, identified by its stable block ID (from
+    /// [`Request::ReadFileBlocks`]). Block identity — and any other block — is preserved.
+    SetFileBlockText { ws_id: String, item_id: String, path: String, block: String, text: String },
+    /// Insert a new block into a `.lua` file, right after `after` (or appended when `after` is
+    /// `None`). `kind` is a free structural tag (`statement`, `comment`, `function`); returns the
+    /// new block's id.
+    InsertFileBlock { ws_id: String, item_id: String, path: String, after: Option<String>, kind: String, text: String },
+    /// Delete one block of a `.lua` file by its stable block ID.
+    DeleteFileBlock { ws_id: String, item_id: String, path: String, block: String },
+    /// Read an .app's runtime data CRDT (named top-level containers) as a deep JSON value.
+    AppDataGet { ws_id: String, item_id: String },
+    /// Replace the content of one top-level text container in an .app's runtime data CRDT — the
+    /// same operation the app's own `ui.editor` makes, so an open run pane updates live.
+    AppDataSetText { ws_id: String, item_id: String, name: String, text: String },
+    /// Export a page-declaring .app to PDF. Returns the written file's path.
+    ExportPdf { ws_id: String, item_id: String },
+    /// Render an .app off-screen and return it as base64 PNG. `width`/`height` are logical px
+    /// (default: the app's page, else 900×700); `scale` is px per logical px (default 2).
+    Screenshot {
+        ws_id: String,
+        item_id: String,
+        width: Option<f32>,
+        height: Option<f32>,
+        scale: Option<f32>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

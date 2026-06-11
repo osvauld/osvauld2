@@ -14,7 +14,7 @@ fn lays_out_demo_tree_to_fill_the_cell() {
     let mut placed = Vec::new();
     let offsets = std::collections::HashMap::new();
     let _ = ctx.run_ui(raw, |ui| {
-        placed = layout::layout(ui.ctx(), &demo_tree(), &offsets);
+        placed = layout::layout(ui.ctx(), ui.ctx().content_rect(), &demo_tree(), &offsets);
     });
 
     // root + 3 children + (card title + body + tag-row) + 3 tags = 10 boxes.
@@ -252,7 +252,7 @@ fn scroll_region_reports_range_and_clips_children() {
     let mut offsets = std::collections::HashMap::new();
     offsets.insert("s".to_string(), 40.0); // scrolled down 40pt
     let _ = ctx.run_ui(cell(200.0, 300.0), |ui| {
-        placed = layout::layout(ui.ctx(), &root, &offsets);
+        placed = layout::layout(ui.ctx(), ui.ctx().content_rect(), &root, &offsets);
     });
 
     let region = placed.iter().find(|p| p.scroll.is_some()).expect("scroll region placed");
@@ -361,4 +361,211 @@ fn missing_file_renders_error_card_not_panic() {
     let mut app = EngineApp::from_file("/no/such/osv-engine-missing.lua");
     let frame = app.frame(cell(400.0, 300.0), 1.0);
     assert!(!frame.primitives.is_empty(), "missing-file error card drew something");
+}
+
+// --- New layout capabilities: alignment, margin, absolute, min/max, border ------------------
+
+/// Lay a tree out in a headless 400×300 cell and return the placed boxes.
+fn place(root: &Node) -> Vec<layout::Placed> {
+    let ctx = egui::Context::default();
+    let raw = cell(400.0, 300.0);
+    let mut placed = Vec::new();
+    let offsets = std::collections::HashMap::new();
+    let _ = ctx.run_ui(raw, |ui| {
+        placed = layout::layout(ui.ctx(), ui.ctx().content_rect(), root, &offsets);
+    });
+    placed
+}
+
+#[test]
+fn justify_and_align_center_a_child() {
+    let root = Node::col()
+        .width(Val::Px(400.0))
+        .height(Val::Px(300.0))
+        .justify(node::Align::Center)
+        .align(node::Align::Center)
+        .children(vec![Node::col().width(Val::Px(100.0)).height(Val::Px(50.0))]);
+    let placed = place(&root);
+    let child = placed[1].rect;
+    assert!((child.min.x - 150.0).abs() < 0.5, "centered horizontally, got {}", child.min.x);
+    assert!((child.min.y - 125.0).abs() < 0.5, "centered vertically, got {}", child.min.y);
+}
+
+#[test]
+fn margin_offsets_a_child() {
+    let root = Node::col().width(Val::Px(400.0)).height(Val::Px(300.0)).children(vec![
+        Node::col().width(Val::Px(50.0)).height(Val::Px(50.0)).margin(20.0),
+    ]);
+    let placed = place(&root);
+    assert!((placed[1].rect.min.x - 20.0).abs() < 0.5, "margin moved the child in");
+    assert!((placed[1].rect.min.y - 20.0).abs() < 0.5);
+}
+
+#[test]
+fn absolute_child_places_by_inset() {
+    let mut badge = Node::col().width(Val::Px(40.0)).height(Val::Px(20.0));
+    badge.style.position = node::Position::Absolute;
+    badge.style.inset.top = Val::Px(10.0);
+    badge.style.inset.left = Val::Px(30.0);
+    let root = Node::col()
+        .width(Val::Px(400.0))
+        .height(Val::Px(300.0))
+        .children(vec![Node::col().grow(1.0), badge]);
+    let placed = place(&root);
+    let b = placed.last().unwrap().rect;
+    assert!((b.min.x - 30.0).abs() < 0.5, "absolute left, got {}", b.min.x);
+    assert!((b.min.y - 10.0).abs() < 0.5, "absolute top, got {}", b.min.y);
+    // …and it didn't consume flex space: the grower still fills the column.
+    assert!((placed[1].rect.height() - 300.0).abs() < 1.0, "absolute child is out of flow");
+}
+
+#[test]
+fn max_width_caps_a_child() {
+    let mut child = Node::col().width(Val::Px(500.0)).height(Val::Px(20.0));
+    child.style.max_width = Val::Px(120.0);
+    let root = Node::col().width(Val::Px(400.0)).children(vec![child]);
+    let placed = place(&root);
+    assert!((placed[1].rect.width() - 120.0).abs() < 0.5, "max_width wins over width");
+}
+
+#[test]
+fn border_participates_in_layout() {
+    // A bordered box's child starts inside the border (border-box), not under it.
+    let root = Node::col()
+        .width(Val::Px(200.0))
+        .height(Val::Px(100.0))
+        .border(5.0, egui::Color32::WHITE)
+        .children(vec![Node::col().grow(1.0)]);
+    let placed = place(&root);
+    assert!((placed[1].rect.min.x - 5.0).abs() < 0.5, "child clears the border");
+    assert!((placed[1].rect.width() - 190.0).abs() < 0.5, "content shrinks by both borders");
+}
+
+#[test]
+fn opacity_multiplies_down_the_subtree() {
+    let mut parent = Node::col().opacity(0.5).children(vec![Node::col().opacity(0.5)]);
+    parent.style.width = Val::Px(100.0);
+    let placed = place(&parent);
+    assert!((placed[0].base.opacity - 0.5).abs() < 0.01);
+    assert!((placed[1].base.opacity - 0.25).abs() < 0.01, "child folds in the ancestor product");
+}
+
+#[test]
+fn centered_text_keeps_its_single_line_width() {
+    // Repro of the gallery hero: a fixed-height band, justify+align center, a large title and a
+    // smaller subtitle. The title must lay out at its full unwrapped width (no overlap below).
+    let root = Node::col().width(Val::Pct(100.0)).height(Val::Pct(100.0)).padding(24.0).gap(16.0).children(vec![
+        Node::col()
+            .height(Val::Px(110.0))
+            .justify(crate::node::Align::Center)
+            .align(crate::node::Align::Center)
+            .gap(6.0)
+            .children(vec![
+                Node::text("Style Gallery").font(28.0),
+                Node::text("alignment · borders · shadows · opacity · absolute · colors").font(13.0),
+            ]),
+    ]);
+    let placed = place(&root);
+    let texts: Vec<_> = placed.iter().filter(|p| p.text.is_some()).collect();
+    assert_eq!(texts.len(), 2);
+    for t in &texts {
+        let (_, galley) = t.text.as_ref().unwrap();
+        eprintln!("rect={:?} galley={:?} rows={}", t.rect, galley.size(), galley.rows.len());
+        assert!(
+            galley.size().y <= t.rect.height() + 0.5,
+            "painted galley ({}) must fit the laid-out box ({})",
+            galley.size().y,
+            t.rect.height()
+        );
+    }
+}
+
+// `show()` hosts the app at the Ui's rect, which in the shell sits below a tab strip — clicks
+// arrive in screen coordinates and must hit the screen-space layout (regression: input was
+// translated to app-local coords while rects stayed screen-space, so every click missed).
+#[test]
+fn show_dispatches_clicks_when_hosted_at_an_offset() {
+    let mut app = EngineApp::script(
+        r#"local n = doc:list("clicks")
+           return function()
+             return ui.col{ style = { padding = 0 },
+               ui.button{ "hit me", style = { width = 100, height = 30 },
+                 on_click = function() n:add{ at = 1 } end },
+             }
+           end"#,
+    );
+
+    let ctx = egui::Context::default();
+    let host = egui::Rect::from_min_size(egui::pos2(200.0, 150.0), egui::vec2(400.0, 300.0));
+    let mut run = |events: Vec<egui::Event>| {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(raw, |ui| {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(host));
+            app.show(&mut child);
+        });
+    };
+
+    run(vec![]); // frame 1: lay out
+    run(vec![press(egui::pos2(210.0, 160.0))]); // click inside the button, in screen coords
+    assert_eq!(app.doc().get_movable_list("clicks").len(), 1, "the offset-hosted click dispatched");
+}
+
+// A page-declaring app exports valid single-page PDF bytes (written to /tmp for inspection).
+#[test]
+fn exports_page_app_pdf() {
+    const SANS: &[u8] = include_bytes!("../../sthalam/assets/fonts/NotoSans-Regular.ttf");
+    const SANS_SB: &[u8] = include_bytes!("../../sthalam/assets/fonts/NotoSans-SemiBold.ttf");
+    const MONO: &[u8] = include_bytes!("../../sthalam/assets/fonts/JetBrainsMono-Regular.ttf");
+    let src = r##"
+page = { size = "A4" }
+return function()
+  return ui.col{ style = { padding = 48, gap = 10 },
+    ui.text{ "ACME Corporation", style = { font_size = 26, color = "#1a2b4c" } },
+    ui.text{ "12 Foundry Lane, Kochi", style = { font_size = 11, color = "#666666" } },
+    ui.col{ style = { height = 2, background = "#1a2b4c" } },
+    ui.text{ "Dear reader, this letter was laid out by Taffy and printed by printpdf.",
+             style = { font_size = 13, color = "#222222" } },
+  }
+end
+"##;
+    let mut app = EngineApp::script(src);
+    let page = app.page().expect("page declared");
+    assert!((page.width - 595.28).abs() < 0.1, "A4 portrait width in pt, got {}", page.width);
+    let bytes =
+        app.export_pdf(FontBytes { regular: SANS, bold: SANS_SB, mono: MONO }).expect("export");
+    assert!(bytes.starts_with(b"%PDF"), "not a PDF");
+    assert!(bytes.len() > 5_000, "suspiciously small: {} bytes", bytes.len());
+    std::fs::write("/tmp/app_engine_page.pdf", &bytes).ok();
+}
+
+// Landscape swaps the page dimensions.
+#[test]
+fn page_orientation_landscape() {
+    let app = EngineApp::script("page = { size = \"A4\", orientation = \"landscape\" }\nreturn function() return ui.col{} end");
+    let page = app.page().expect("page declared");
+    assert!(page.width > page.height);
+}
+
+// Headless screenshot: the demo app rendered off-screen comes back as a plausible PNG.
+// Needs a GPU adapter; skips (with a note) where none exists.
+#[test]
+fn screenshots_app_png() {
+    const SANS: &[u8] = include_bytes!("../../sthalam/assets/fonts/NotoSans-Regular.ttf");
+    const SANS_SB: &[u8] = include_bytes!("../../sthalam/assets/fonts/NotoSans-SemiBold.ttf");
+    const MONO: &[u8] = include_bytes!("../../sthalam/assets/fonts/JetBrainsMono-Regular.ttf");
+    let mut app = EngineApp::demo_script();
+    let clear = egui::Color32::from_rgb(0x0a, 0x0b, 0x10);
+    match app.screenshot(800.0, 600.0, 2.0, clear, FontBytes { regular: SANS, bold: SANS_SB, mono: MONO }) {
+        Ok(bytes) => {
+            assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+            assert!(bytes.len() > 10_000, "suspiciously small: {} bytes", bytes.len());
+            std::fs::write("/tmp/app_engine_shot.png", &bytes).ok();
+        }
+        Err(e) if e.contains("adapter") => eprintln!("skipped: {e}"),
+        Err(e) => panic!("{e}"),
+    }
 }
