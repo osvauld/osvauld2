@@ -19,6 +19,8 @@ block_doc = { path = "../block_doc" }
 # colouring (the same leaf the shell's read-only code view uses).
 egui = "0.34"
 code_highlight = { path = "../code_highlight" }
+# The shared caret/selection geometry kernel (selection rects, caret rect, blink).
+text_edit = { path = "../text_edit" }
 
 [dev-dependencies]
 # `standalone` example — render the editor full-window for fast iteration on feel, without the

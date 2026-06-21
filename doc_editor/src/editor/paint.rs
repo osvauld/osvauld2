@@ -128,10 +128,7 @@ impl DocEditor {
             painter.galley(origin, ph, theme::FAINT);
         }
 
-        // Blink is measured from `blink_origin` (last edit/caret-move), so the caret is solid
-        // the instant you type and only blinks once you pause.
-        let solid = ((ui.input(|i| i.time) - self.blink_origin) * 1.4).fract() < 0.6;
-        if solid {
+        if text_edit::caret_on(ui.input(|i| i.time), self.blink_origin) {
             let cr = p.galley.pos_from_cursor(CCursor::new(caret.index));
             // A text-height bar centred on the glyph (egui centres glyphs in the line box, so
             // `cr.center().y` is the glyph centre; full line-box height looked oversized).

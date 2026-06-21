@@ -9,6 +9,8 @@ use eframe::egui;
 use loro::{ExportMode, LoroDoc};
 use osvauld_rpc::{BlockSummary, ItemSummary, MarkSpan, Request, Response, WorkspaceSummary};
 use serde_json::json;
+use table_core::find_row;
+use table_import::Staging;
 use vault::{ItemKind, Vault, WorkspaceItem};
 
 pub fn socket_path() -> String {
@@ -42,6 +44,9 @@ pub fn start(path: impl AsRef<Path>, vault: Vault, ctx: egui::Context) -> Receiv
             Ok(l) => l,
             Err(e) => { eprintln!("bridge: bind failed: {e}"); return; }
         };
+        // Migration staging (open .xlsx → Polars frames) persists across connections, keyed by
+        // handle — the MCP shim dials a fresh connection per call, so handles must outlive one.
+        let mut staging = Staging::new();
         for stream in listener.incoming() {
             let mut stream = match stream { Ok(s) => s, Err(_) => continue };
             let bytes = match osvauld_rpc::read_msg(&mut stream) { Ok(b) => b, Err(_) => continue };
@@ -53,7 +58,7 @@ pub fn start(path: impl AsRef<Path>, vault: Vault, ctx: egui::Context) -> Receiv
                     continue;
                 }
             };
-            let resp = handle(&vault, &refresh_tx, req);
+            let resp = handle(&vault, &mut staging, &refresh_tx, req);
             let _ = osvauld_rpc::write_msg(&mut stream, &serde_json::to_vec(&resp).unwrap());
             // The bridge thread can't draw; wake the UI thread so a write made by an
             // external client (MCP) is merged into open tabs on the next frame.
@@ -63,7 +68,7 @@ pub fn start(path: impl AsRef<Path>, vault: Vault, ctx: egui::Context) -> Receiv
     refresh_rx
 }
 
-fn handle(vault: &Vault, refresh_tx: &Sender<Refresh>, req: Request) -> Response {
+fn handle(vault: &Vault, staging: &mut Staging, refresh_tx: &Sender<Refresh>, req: Request) -> Response {
     match req {
         Request::ListWorkspaces => {
             let list: Vec<WorkspaceSummary> = vault
@@ -271,34 +276,145 @@ fn handle(vault: &Vault, refresh_tx: &Sender<Refresh>, req: Request) -> Response
         Request::AppDataSetText { ws_id, item_id, name, text } => {
             // Whole-container replace, the same op the Lua binding's `text:set` makes; since the
             // data is a CRDT the open run pane merges it like any peer edit.
-            let doc = load_app_state(vault, &ws_id, &item_id);
-            let t = doc.get_text(name.as_str());
-            let len = t.len_unicode();
-            let res: Result<(), loro::LoroError> = (|| {
-                if len > 0 {
-                    t.delete(0, len)?;
+            mutate_app_state(vault, refresh_tx, &ws_id, &item_id, |doc| {
+                let t = doc.get_text(name.as_str());
+                let len = t.len_unicode();
+                (|| -> Result<(), loro::LoroError> {
+                    if len > 0 {
+                        t.delete(0, len)?;
+                    }
+                    t.insert(0, &text)
+                })()
+                .map_err(|e| e.to_string())?;
+                Ok(serde_json::Value::Null)
+            })
+        }
+        Request::AppDataRowAdd { ws_id, item_id, list, fields } => {
+            mutate_app_state(vault, refresh_tx, &ws_id, &item_id, |doc| {
+                let obj =
+                    fields.as_object().ok_or_else(|| "fields must be a JSON object".to_string())?;
+                let l = doc.get_movable_list(list.as_str());
+                // A supplied id must be a unique string — every edit addresses "first row with
+                // this id", so a collision silently edits the wrong row.
+                if let Some(id) = obj.get("id") {
+                    let id = id.as_str().ok_or_else(|| "field 'id' must be a string".to_string())?;
+                    if id.starts_with('#') {
+                        return Err("row ids may not start with '#' (reserved for index addressing)".into());
+                    }
+                    if find_row(&l, id).is_some() {
+                        return Err(format!("duplicate row id '{id}' in list '{list}'"));
+                    }
                 }
-                t.insert(0, &text)
-            })();
-            if let Err(e) = res {
-                return Response::err(e.to_string());
-            }
-            doc.commit();
-            let snapshot = match doc.export(ExportMode::Snapshot) {
-                Ok(s) => s,
-                Err(e) => return Response::err(e.to_string()),
-            };
-            if let Err(e) = vault.put_state(&ws_id, &item_id, &snapshot) {
-                return Response::err(e.to_string());
-            }
-            let _ = refresh_tx.send(Refresh::AppData { ws_id, item_id, snapshot });
-            Response::ok(serde_json::Value::Null)
+                let map = l.push_container(loro::LoroMap::new()).map_err(|e| e.to_string())?;
+                for (k, v) in obj {
+                    set_row_field(&map, k, v)?;
+                }
+                // Same stable-id stamping as the Lua `list:add`; a supplied `id` wins.
+                let id = match map.get("id") {
+                    Some(loro::ValueOrContainer::Value(loro::LoroValue::String(s))) => s.to_string(),
+                    _ => {
+                        let id = table_core::row_id(doc);
+                        map.insert("id", id.as_str()).map_err(|e| e.to_string())?;
+                        id
+                    }
+                };
+                Ok(json!({ "id": id }))
+            })
+        }
+        Request::AppDataRowSet { ws_id, item_id, list, row, fields } => {
+            mutate_app_state(vault, refresh_tx, &ws_id, &item_id, |doc| {
+                let obj =
+                    fields.as_object().ok_or_else(|| "fields must be a JSON object".to_string())?;
+                let l = doc.get_movable_list(list.as_str());
+                let i = find_row(&l, &row).ok_or_else(|| format!("no row '{row}' in list '{list}'"))?;
+                let Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) = l.get(i)
+                else {
+                    return Err(format!("row '{row}' is not a map"));
+                };
+                for (k, v) in obj {
+                    set_row_field(&map, k, v)?;
+                }
+                Ok(serde_json::Value::Null)
+            })
+        }
+        Request::AppDataRowRemove { ws_id, item_id, list, row } => {
+            mutate_app_state(vault, refresh_tx, &ws_id, &item_id, |doc| {
+                let l = doc.get_movable_list(list.as_str());
+                let i = find_row(&l, &row).ok_or_else(|| format!("no row '{row}' in list '{list}'"))?;
+                l.delete(i, 1).map_err(|e| e.to_string())?;
+                Ok(serde_json::Value::Null)
+            })
         }
         Request::ExportPdf { ws_id, item_id } => export_app_pdf(vault, &ws_id, &item_id),
         Request::Screenshot { ws_id, item_id, width, height, scale } => {
             screenshot_app(vault, &ws_id, &item_id, width, height, scale)
         }
+        Request::ImportOpen { path } => match staging.open(&path) {
+            Ok(opened) => Response::ok(json!({
+                "handle": opened.handle,
+                "sheets": opened.sheets.iter().map(|s| json!({
+                    "name": s.name,
+                    "rows": s.rows,
+                    "cols": s.cols,
+                    "columns": s.columns.iter()
+                        .map(|(n, d)| json!({ "name": n, "dtype": d }))
+                        .collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })),
+            Err(e) => Response::err(e.to_string()),
+        },
+        Request::ImportHead { handle, sheet, n } => match staging.head(&handle, sheet.as_deref(), n) {
+            Ok(text) => Response::ok(json!({ "text": text })),
+            Err(e) => Response::err(e.to_string()),
+        },
+        Request::ImportSql { handle, sheet, query } => {
+            match staging.sql(&handle, sheet.as_deref(), &query) {
+                Ok(text) => Response::ok(json!({ "text": text })),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        Request::ImportClose { handle } => Response::ok(json!({ "closed": staging.close(&handle) })),
+        Request::TableSql { ws_id, item_id, query } => table_sql(vault, &ws_id, &item_id, &query),
+        Request::ImportToLayer { handle, sheet, ws_id, name, columns } => {
+            let plan = match parse_column_plan(&columns) {
+                Ok(p) => p,
+                Err(e) => return Response::err(e),
+            };
+            let (snapshot, rows) = match staging.to_layer(&handle, sheet.as_deref(), &plan) {
+                Ok(v) => v,
+                Err(e) => return Response::err(e.to_string()),
+            };
+            match vault.create_item(&ws_id, &name, ItemKind::Table) {
+                Ok(item) => {
+                    if let Err(e) = vault.put_state(&item.ws_id, &item.id, &snapshot) {
+                        return Response::err(e.to_string());
+                    }
+                    let _ = refresh_tx.send(Refresh::Workspace { ws_id });
+                    Response::ok(json!({ "id": item.id, "name": item.name, "rows": rows }))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
     }
+}
+
+/// Parse the agent's import column plan (`[{ source, key?, label?, type? }]`) into the writer's
+/// [`ColumnPlan`]s. `key` defaults to `source`, `label` to `key`, `type` to text.
+fn parse_column_plan(v: &serde_json::Value) -> Result<Vec<table_import::ColumnPlan>, String> {
+    let arr = v.as_array().ok_or("columns must be a JSON array")?;
+    let mut plan = Vec::with_capacity(arr.len());
+    for c in arr {
+        let source = c
+            .get("source")
+            .and_then(|x| x.as_str())
+            .ok_or("each column needs a 'source'")?
+            .to_string();
+        let key = c.get("key").and_then(|x| x.as_str()).unwrap_or(&source).to_string();
+        let label = c.get("label").and_then(|x| x.as_str()).unwrap_or(&key).to_string();
+        let kind = table_core::ColKind::parse(c.get("type").and_then(|x| x.as_str()).unwrap_or("text"));
+        plan.push(table_import::ColumnPlan { source, key, label, kind });
+    }
+    Ok(plan)
 }
 
 /// Render a headless app off-screen and return base64 PNG. A page app frames its page on white
@@ -313,9 +429,16 @@ fn screenshot_app(
     scale: Option<f32>,
 ) -> Response {
     use base64::Engine as _;
-    let (_, mut app) = match headless_app(vault, ws_id, item_id) {
-        Ok(v) => v,
-        Err(e) => return Response::err(e),
+    // A `.table` has no source files — render it as the native stored-schema grid instead.
+    let mut app = match item_kind(vault, ws_id, item_id) {
+        Some(ItemKind::Table) => {
+            let state = vault.get_state(ws_id, item_id).ok().flatten();
+            app_engine::EngineApp::table(state.as_deref(), egui::Color32::from_gray(220), 14.0)
+        }
+        _ => match headless_app(vault, ws_id, item_id) {
+            Ok((_, app)) => app,
+            Err(e) => return Response::err(e),
+        },
     };
     let page = app.page();
     let (w, h) = match (width, height, page) {
@@ -335,6 +458,11 @@ fn screenshot_app(
     }
 }
 
+/// The kind of an item by id (for routing the screenshot render path), or `None` if missing.
+fn item_kind(vault: &Vault, ws_id: &str, item_id: &str) -> Option<ItemKind> {
+    vault.items(ws_id).ok()?.into_iter().find(|i| i.id == item_id).map(|i| i.kind)
+}
+
 /// An .app's runtime data CRDT from its persisted snapshot (empty when never persisted).
 fn load_app_state(vault: &Vault, ws_id: &str, item_id: &str) -> LoroDoc {
     let doc = LoroDoc::new();
@@ -344,9 +472,77 @@ fn load_app_state(vault: &Vault, ws_id: &str, item_id: &str) -> LoroDoc {
     doc
 }
 
+/// Mutate an .app's runtime data CRDT: load → `f` → commit → persist → live-refresh any open
+/// run pane. `f` returns the JSON result or a client-facing error; nothing persists on error.
+fn mutate_app_state(
+    vault: &Vault,
+    refresh_tx: &Sender<Refresh>,
+    ws_id: &str,
+    item_id: &str,
+    f: impl FnOnce(&LoroDoc) -> Result<serde_json::Value, String>,
+) -> Response {
+    let doc = load_app_state(vault, ws_id, item_id);
+    let result = match f(&doc) {
+        Ok(v) => v,
+        Err(e) => return Response::err(e),
+    };
+    doc.commit();
+    let snapshot = match doc.export(ExportMode::Snapshot) {
+        Ok(s) => s,
+        Err(e) => return Response::err(e.to_string()),
+    };
+    if let Err(e) = vault.put_state(ws_id, item_id, &snapshot) {
+        return Response::err(e.to_string());
+    }
+    let _ = refresh_tx.send(Refresh::AppData {
+        ws_id: ws_id.to_string(),
+        item_id: item_id.to_string(),
+        snapshot,
+    });
+    Response::ok(result)
+}
+
+/// Run Polars SQL over a stored `.table` item: load its CRDT, build a frame from its stored schema,
+/// register it (as `t` and under the item's name), execute, and reply with a pretty-printed table.
+/// Read-only profiling — never writes. The live-table counterpart of `import_sql` (staged xlsx).
+fn table_sql(vault: &Vault, ws_id: &str, item_id: &str, query: &str) -> Response {
+    let doc = load_app_state(vault, ws_id, item_id);
+    let Some(spec) = table_core::read_schema(&doc) else {
+        return Response::err(format!("item '{item_id}' has no .table schema"));
+    };
+    let frame = match table_query::frame(&doc, "rows", &spec) {
+        Ok(f) => f,
+        Err(e) => return Response::err(e.to_string()),
+    };
+    // Register under `t` and, if the item's name is a bare identifier, that name too.
+    let name = vault.items(ws_id).ok().into_iter().flatten().find(|i| i.id == item_id).map(|i| i.name);
+    let mut sources = vec![("t".to_string(), frame.clone())];
+    if let Some(n) = name.filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_') && !n.is_empty()) {
+        sources.push((n, frame));
+    }
+    match table_query::sql(sources, query, &[]) {
+        Ok(result) => Response::ok(json!({ "text": result.display() })),
+        Err(e) => Response::err(e.to_string()),
+    }
+}
+
+/// Set one row field from JSON (`null` deletes) — the scalar subset row maps hold.
+fn set_row_field(map: &loro::LoroMap, key: &str, v: &serde_json::Value) -> Result<(), String> {
+    use serde_json::Value as J;
+    let res = match v {
+        J::Null => map.delete(key),
+        J::Bool(b) => map.insert(key, *b),
+        J::Number(n) if n.is_i64() => map.insert(key, n.as_i64().unwrap_or(0)),
+        J::Number(n) => map.insert(key, n.as_f64().unwrap_or(0.0)),
+        J::String(s) => map.insert(key, s.as_str()),
+        _ => return Err(format!("field '{key}' must be a scalar (string/number/bool/null)")),
+    };
+    res.map_err(|e| e.to_string())
+}
+
 /// Build a headless engine from the vault's source tree + runtime state — the same inputs an
 /// open tab uses — plus the item's name. The render paths (PDF, screenshot) start here.
-fn headless_app(vault: &Vault, ws_id: &str, item_id: &str) -> Result<(String, app_host::App), String> {
+fn headless_app(vault: &Vault, ws_id: &str, item_id: &str) -> Result<(String, app_engine::EngineApp), String> {
     let item = vault
         .items(ws_id)
         .unwrap_or_default()
@@ -361,15 +557,20 @@ fn headless_app(vault: &Vault, ws_id: &str, item_id: &str) -> Result<(String, ap
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let state = vault.get_state(ws_id, item_id).ok().flatten();
-    Ok((item.name, app_host::App::from_files(&files, state.as_deref())))
+    // Attach a host data plane so a dashboard app's `data.*` (imported `.table` sources) resolves in
+    // the headless render too (screenshot / PDF), not just an open tab.
+    let data = std::rc::Rc::new(crate::shell::table_data::TableData::new(vault, ws_id));
+    let engine = app_engine::EngineApp::from_files(&files, state.as_deref()).with_data_access(data);
+    Ok((item.name, engine))
 }
 
 /// The shell's faces, so headless renders shape like the live tab.
-fn host_fonts() -> app_host::FontBytes<'static> {
-    app_host::FontBytes {
+fn host_fonts() -> app_engine::FontBytes<'static> {
+    app_engine::FontBytes {
         regular: crate::theme::FONT_SANS,
         bold: crate::theme::FONT_SANS_SB,
         mono: crate::theme::FONT_MONO,
+        fallback: crate::theme::FONT_FALLBACK,
     }
 }
 

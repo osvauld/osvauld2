@@ -20,18 +20,19 @@ const INLINE_RULES: &[(&str, &str)] = &[
 
 impl DocEditor {
     pub(super) fn insert_text(&mut self, doc: &Doc, t: &str) -> bool {
-        let s: String = t.chars().filter(|c| !c.is_control()).collect();
-        if s.is_empty() {
-            return false;
+        if t.chars().all(|c| c.is_control()) {
+            return false; // nothing will insert — leave any selection alone
         }
+        // A cross-block selection needs the structural delete; an in-block one TextField replaces.
         if !self.collapsed() {
-            self.delete_selection(doc);
+            let (start, end) = self.ordered(&doc.block_ids());
+            if start.block != end.block {
+                self.delete_selection(doc);
+            }
         }
-        let c = self.caret();
-        doc.insert_text(c.block, c.index, &s);
-        self.set_caret(Caret { block: c.block, index: c.index + s.chars().count() });
+        let changed = self.in_block(doc, |tf, buf| tf.insert(buf, t));
         self.desired_x = None;
-        true
+        changed
     }
 
     /// Markdown input rules at the start of a paragraph: `# `/`## `/`### ` → heading,
@@ -252,8 +253,7 @@ impl DocEditor {
         }
         let c = self.caret();
         if c.index > 0 {
-            doc.delete_text(c.block, c.index - 1, 1);
-            self.set_caret(Caret { block: c.block, index: c.index - 1 });
+            self.in_block(doc, |tf, buf| tf.backspace(buf));
         } else {
             let kind = doc.kind(c.block);
             if doc.outdent(c.block) {
@@ -288,7 +288,7 @@ impl DocEditor {
         let c = self.caret();
         let len = doc.text_len(c.block);
         if c.index < len {
-            doc.delete_text(c.block, c.index, 1);
+            self.in_block(doc, |tf, buf| tf.delete_forward(buf));
         } else {
             let ids = doc.block_ids();
             let idx = ids.iter().position(|&x| x == c.block).expect("caret block live");

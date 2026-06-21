@@ -9,53 +9,29 @@
 //! Every Lua entry point is fallible and converted to `Result<_, String>`; the engine renders the
 //! message inline rather than crashing the cell.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use egui::Color32;
-use loro::LoroDoc;
-use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
+use egui::{Color32, Vec2};
+use loro::{Frontiers, LoroDoc};
+use mlua::{Function, Lua, Table, Value};
 use rich_text::{Marks, Run};
 use text_edit::TextBuffer;
 
-use crate::node::{Align, Border, BoxShadow, Corners, Direction, Edges, Node, Position, Style, Val};
+use crate::data::QueryState;
+use crate::node::{ChartKind, ChartSeries, ChartSpec, Node, ScrollSpec, Style, Val};
+use crate::table::{self, CellValue, ColKind, Column, TableSpec};
 use crate::PageSpec;
 
 mod crdt;
+mod data;
+mod style;
+mod vm;
 
-/// Memory cap per app VM.
-const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-
-/// Instruction budget per entry into Lua (one `view()` or one handler), counted in hook fires.
-const HOOK_EVERY: u32 = 10_000;
-const MAX_HOOK_FIRES: u64 = 5_000; // ≈ 50M instructions
-
-/// Build a sandboxed VM and its per-entry instruction counter (reset before each Lua entry).
-///
-/// Apps run untrusted (uploaded) code, and this VM is the only sandbox boundary: no `os`/`io`/
-/// `package`/`debug`, no filesystem loaders, a memory cap, and an instruction budget per entry
-/// into Lua so a hostile loop errors instead of hanging the shell.
-fn sandboxed_vm() -> Result<(Lua, Rc<Cell<u64>>), String> {
-    let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE;
-    let lua = Lua::new_with(libs, LuaOptions::default()).map_err(|e| e.to_string())?;
-    lua.set_memory_limit(MEMORY_LIMIT).map_err(|e| e.to_string())?;
-    // The base lib always loads; scrub its filesystem/codegen doors.
-    for global in ["dofile", "loadfile", "load"] {
-        lua.globals().set(global, Value::Nil).map_err(|e| e.to_string())?;
-    }
-    let fires = Rc::new(Cell::new(0_u64));
-    let counter = fires.clone();
-    lua.set_hook(HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |_, _| {
-        let n = counter.get() + 1;
-        counter.set(n);
-        if n > MAX_HOOK_FIRES {
-            Err(mlua::Error::RuntimeError("app exceeded its instruction budget".into()))
-        } else {
-            Ok(VmState::Continue)
-        }
-    });
-    Ok((lua, fires))
-}
+use style::parse_style;
+use vm::sandboxed_vm;
 
 /// Injected before every app: the `ui.*` builders. Each tags a table with its node kind so an
 /// app's view is plain Lua data. A string/number arg is sugar for a one-element table.
@@ -72,6 +48,10 @@ function ui.row(t)    return tagged("row", t)    end
 function ui.text(t)   return tagged("text", t)   end
 function ui.button(t) return tagged("button", t) end
 function ui.editor(t) return tagged("editor", t) end
+function ui.doc(t)    return tagged("doc", t)    end
+function ui.table(t)  return tagged("table", t)  end
+function ui.chart(t)  return tagged("chart", t)  end
+function ui.code(t)   return tagged("code", t)   end
 "#;
 
 /// A loaded app: its Lua VM and the view function setup returned. If setup (or the prelude)
@@ -88,20 +68,113 @@ pub struct Script {
     /// This frame's `on_click` closures, indexed by the id on each `Node`. Rebuilt by every
     /// `view()`; a hit-test resolves to an index that [`Script::dispatch`] calls.
     handlers: Vec<Function>,
+    /// This frame's app-level key handler (`on_key` on any node, last wins), called with a key
+    /// name ("left"/"right") by [`Script::dispatch_key`] when no editor is focused.
+    key_handler: Option<Function>,
     /// The app's CRDT — the same `Rc` the engine owns. Resolves an editor id to its backing
     /// LoroText without round-tripping through Lua.
     doc: Rc<LoroDoc>,
     /// This frame's editable fields. Rebuilt by every `view()`; [`Script::with_buffer`] resolves
     /// an id to its buffer.
     editors: Vec<EditorBinding>,
+    /// User-dragged table sizes, keyed by list name — view state (like scroll), not doc data.
+    /// Overrides the declared `width`/`row_height` on every walk.
+    sizes: RefCell<HashMap<String, TableSizes>>,
+    /// The engine's focused editor id, set before each `view()` — a focused select cell renders
+    /// its dropdown open.
+    focus: RefCell<Option<String>>,
+    /// The open select combobox's UI state, shared with its commit closures.
+    select: Rc<SelectUi>,
+    /// Set for a `.table` view: `view()` builds the grid natively from the doc's stored schema
+    /// instead of running user Lua, reusing the whole dispatch/buffer/finalize/resize machinery.
+    table: Option<TableMode>,
+    /// Per-list cache of filtered+sorted rows, so the O(rows) read→coerce→query pass runs only when
+    /// the doc version or the query changes — not every repaint. The window slices it each frame.
+    row_cache: RefCell<HashMap<String, CachedRows>>,
+    /// Ambient view geometry set before each `view()` (like [`Script::set_focus`]): body viewport
+    /// height + scroll offsets, so the table builder can window to the visible rows.
+    viewport: RefCell<Viewport>,
 }
 
-/// One editable field in the current view: app-given id, backing text container name, and an
-/// optional `on_submit` handler index (fired by Enter while focused).
+/// A table body's filtered+sorted rows, tagged with the doc version and query they were computed
+/// at; reused while both are unchanged. See [`emit_table`].
+struct CachedRows {
+    frontiers: Frontiers,
+    query: u64,
+    rows: Vec<table::Row>,
+}
+
+/// Body viewport height + retained scroll offsets, fed to the row window. Defaults to an infinite
+/// viewport (render everything), so any render that never sets it — headless, PDF, tests — is
+/// unwindowed.
+struct Viewport {
+    height: f32,
+    scroll: HashMap<String, Vec2>,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self { height: f32::INFINITY, scroll: HashMap::new() }
+    }
+}
+
+/// Hash the spec parts that change the cached rows — column identity+kind (coercion), the equality
+/// filter, the order. Row *data* is versioned separately by the doc's frontiers.
+fn query_hash(spec: &TableSpec) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in &spec.columns {
+        c.key.hash(&mut h);
+        c.kind.as_str().hash(&mut h);
+    }
+    for (k, v) in &spec.filter {
+        k.hash(&mut h);
+        v.display().hash(&mut h);
+    }
+    if let Some((k, desc)) = &spec.order {
+        k.hash(&mut h);
+        desc.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A `.table` view's render params: the host text colour (the grid tints its chrome from it) and
+/// base font size. The schema + rows come from the doc itself.
+struct TableMode {
+    color: Color32,
+    font: f32,
+}
+
+/// A select combobox's transient state: the typed filter (scratch — never written to the CRDT)
+/// and a flag the commit closures raise so the engine drops focus (closing the dropdown).
+#[derive(Default)]
+pub(crate) struct SelectUi {
+    query: RefCell<String>,
+    defocus: Cell<bool>,
+}
+
+/// One table's dragged sizes: column widths by key, row heights by stable row id.
+#[derive(Default)]
+pub(crate) struct TableSizes {
+    cols: HashMap<String, f32>,
+    rows: HashMap<String, f32>,
+}
+
+/// One editable field in the current view: app-given id, what backs it, and an optional
+/// `on_submit` handler index (fired by Enter while focused; a cell also fires it on
+/// blur-after-edit — its commit hook).
 struct EditorBinding {
     id: String,
-    name: String,
+    target: Target,
     on_submit: Option<u32>,
+}
+
+/// What an editable field writes to: a LoroText container, one scalar cell in a row map
+/// (typed — number/date cells finalize their text on commit), or a select combobox whose
+/// typing edits the scratch filter query, never the CRDT.
+enum Target {
+    Text(String),
+    Cell { list: String, row: String, key: String, kind: ColKind },
+    Select,
 }
 
 impl Script {
@@ -132,7 +205,7 @@ impl Script {
             }
         }
 
-        Script { lua, fires, view, setup_error, handlers: Vec::new(), doc, editors: Vec::new() }
+        Script { lua, fires, view, setup_error, handlers: Vec::new(), key_handler: None, doc, editors: Vec::new(), sizes: RefCell::default(), focus: RefCell::new(None), select: Rc::default(), table: None, row_cache: RefCell::default(), viewport: RefCell::default() }
     }
 
     /// Load a multi-file app: every `*.lua` file is registered as a `require`-able module
@@ -151,54 +224,8 @@ impl Script {
         let result = (|| -> Result<Function, String> {
             lua.load(UI_PRELUDE).set_name("ui").exec().map_err(|e| format!("engine prelude failed: {e}"))?;
             crdt::install(&lua, doc.clone()).map_err(|e| format!("doc binding failed: {e}"))?;
-
-            // The sandbox has no `package` lib, so `require` is our own shim over the uploaded
-            // files: lazy like `package.preload`, with a loaded-module cache (`false` marks
-            // in-progress, catching require cycles).
-            let modules = lua.create_table().map_err(|e| e.to_string())?;
-            let loaded = lua.create_table().map_err(|e| e.to_string())?;
-            let mut entry = None;
-            for (path, src) in files {
-                if !path.ends_with(".lua") {
-                    continue;
-                }
-                if path == "main.lua" {
-                    entry = Some(src.clone());
-                    continue;
-                }
-                let module = path.trim_end_matches(".lua").replace('/', ".");
-                let func = lua
-                    .load(src)
-                    .set_name(&format!("@{path}"))
-                    .into_function()
-                    .map_err(|e| e.to_string())?;
-                modules.set(module, func).map_err(|e| e.to_string())?;
-            }
-            let require = {
-                let (modules, loaded) = (modules.clone(), loaded.clone());
-                lua.create_function(move |_, name: String| {
-                    match loaded.get::<Value>(name.as_str())? {
-                        Value::Nil => {}
-                        Value::Boolean(false) => {
-                            return Err(mlua::Error::RuntimeError(format!("require cycle on '{name}'")))
-                        }
-                        cached => return Ok(cached),
-                    }
-                    let loader: Function = modules.get(name.as_str()).map_err(|_| {
-                        mlua::Error::RuntimeError(format!("module '{name}' not found in app"))
-                    })?;
-                    loaded.set(name.as_str(), false)?;
-                    let result: Value = loader.call(())?;
-                    // A module that returns nothing still caches as `true`, like Lua's require.
-                    let result = if matches!(result, Value::Nil) { Value::Boolean(true) } else { result };
-                    loaded.set(name.as_str(), &result)?;
-                    Ok(result)
-                })
-                .map_err(|e| e.to_string())?
-            };
-            lua.globals().set("require", require).map_err(|e| e.to_string())?;
-
-            let entry = entry.ok_or_else(|| "app has no main.lua".to_string())?;
+            let entry =
+                vm::install_require(&lua, files)?.ok_or_else(|| "app has no main.lua".to_string())?;
             match lua.load(&entry).set_name("@main.lua").eval::<Value>().map_err(|e| e.to_string())? {
                 Value::Function(f) => Ok(f),
                 other => Err(format!("main.lua must `return function() ... end`, got {}", other.type_name())),
@@ -210,7 +237,7 @@ impl Script {
             Err(e) => setup_error = Some(e),
         }
 
-        Script { lua, fires, view, setup_error, handlers: Vec::new(), doc, editors: Vec::new() }
+        Script { lua, fires, view, setup_error, handlers: Vec::new(), key_handler: None, doc, editors: Vec::new(), sizes: RefCell::default(), focus: RefCell::new(None), select: Rc::default(), table: None, row_cache: RefCell::default(), viewport: RefCell::default() }
     }
 
     /// A script that failed before any Lua ran (e.g. its source couldn't be read). Every `view()`
@@ -222,9 +249,43 @@ impl Script {
             view: None,
             setup_error: Some(error),
             handlers: Vec::new(),
+            key_handler: None,
             doc: Rc::new(LoroDoc::new()),
             editors: Vec::new(),
+            sizes: RefCell::default(),
+            focus: RefCell::new(None),
+            select: Rc::default(),
+            table: None,
+            row_cache: RefCell::default(),
+            viewport: RefCell::default(),
         }
+    }
+
+    /// A native `.table` view over `doc`: no user Lua, the grid is built each frame from the doc's
+    /// stored schema. Carries a VM only so the grid's synthesized check/select handlers (which are
+    /// engine-created Lua closures) work exactly as in `ui.table`. `color` is the host text colour.
+    pub fn table(doc: Rc<LoroDoc>, color: Color32, font: f32) -> Self {
+        let mut s = match sandboxed_vm() {
+            Ok((lua, fires)) => Script {
+                lua,
+                fires,
+                view: None,
+                setup_error: None,
+                handlers: Vec::new(),
+                key_handler: None,
+                doc,
+                editors: Vec::new(),
+                sizes: RefCell::default(),
+                focus: RefCell::new(None),
+                select: Rc::default(),
+                table: None,
+                row_cache: RefCell::default(),
+                viewport: RefCell::default(),
+            },
+            Err(e) => Script::failed(format!("vm setup failed: {e}")),
+        };
+        s.table = Some(TableMode { color, font });
+        s
     }
 
     /// Run the view for one frame and walk its tree into a [`Node`], capturing this frame's
@@ -256,15 +317,125 @@ impl Script {
         if let Some(err) = &self.setup_error {
             return Err(err.clone());
         }
+        if let Some(mode) = &self.table {
+            return Ok(self.table_view(mode.color, mode.font));
+        }
         let view = self.view.as_ref().expect("view present when setup succeeded");
         self.fires.set(0); // fresh instruction budget for this entry
         let tree: Value = view.call(()).map_err(|e| e.to_string())?;
         let doc = self.doc.clone();
-        let mut w = Walk { handlers: Vec::new(), editors: Vec::new(), doc: &doc };
+        let sizes = self.sizes.borrow();
+        let focus = self.focus.borrow().clone();
+        let vp = self.viewport.borrow();
+        let mut w = Walk {
+            handlers: Vec::new(),
+            key_handler: None,
+            editors: Vec::new(),
+            doc: &doc,
+            lua: &self.lua,
+            sizes: &sizes,
+            focus: focus.as_deref(),
+            select: &self.select,
+            viewport_h: vp.height,
+            scroll: &vp.scroll,
+            cache: &self.row_cache,
+        };
         let node = walk(tree, &mut w)?;
         self.handlers = w.handlers;
+        self.key_handler = w.key_handler;
         self.editors = w.editors;
         Ok(node)
+    }
+
+    /// Build the `.table` grid from the doc's stored schema — the native counterpart of running a
+    /// Lua `view`, sharing [`emit_table`] with `ui.table`. An absent schema renders an empty grid;
+    /// rows live in the `"rows"` list.
+    fn table_view(&mut self, color: Color32, font: f32) -> Node {
+        let doc = self.doc.clone();
+        let sizes = self.sizes.borrow();
+        let focus = self.focus.borrow().clone();
+        let vp = self.viewport.borrow();
+        let mut w = Walk {
+            handlers: Vec::new(),
+            key_handler: None,
+            editors: Vec::new(),
+            doc: &doc,
+            lua: &self.lua,
+            sizes: &sizes,
+            focus: focus.as_deref(),
+            select: &self.select,
+            viewport_h: vp.height,
+            scroll: &vp.scroll,
+            cache: &self.row_cache,
+        };
+        let spec = table::read_schema(&doc).unwrap_or_else(|| TableSpec {
+            columns: Vec::new(),
+            filter: Vec::new(),
+            order: None,
+            row_height: None,
+            row_heights: HashMap::new(),
+        });
+        // Fill the host so the body scrolls internally (header pinned) and its `__tbody` offset —
+        // not a page scroll — drives the row window. A natural-height table would scroll the whole
+        // page instead, stranding the window at the top.
+        let base = Style {
+            width: Val::Pct(100.0),
+            height: Val::Pct(100.0),
+            color,
+            font_size: font,
+            ..Style::default()
+        };
+        let node = emit_table(&mut w, spec, Some("rows".to_string()), base, None);
+        self.handlers = w.handlers;
+        self.editors = w.editors;
+        node
+    }
+
+    /// Install (or replace) the `data` global — the World-B host data plane — into this script's
+    /// VM. Called by the engine after load/reload; harmless on a failed script. The binding only
+    /// carries handles, so re-installing it on the live VM is safe.
+    pub fn install_data(&self, access: crate::data::DataAccessRef) -> Result<(), String> {
+        data::install(&self.lua, access).map_err(|e| e.to_string())
+    }
+
+    /// Tell the walk which editor the engine has focused (a focused select cell opens its
+    /// dropdown). Call before `view()`.
+    pub fn set_focus(&self, id: Option<&str>) {
+        *self.focus.borrow_mut() = id.map(str::to_string);
+    }
+
+    /// Set the ambient view geometry for the next `view()` (call before it, like `set_focus`): the
+    /// body viewport height and current scroll offsets, so the table builder windows to the visible
+    /// rows.
+    pub fn set_viewport(&self, height: f32, scroll: &HashMap<String, Vec2>) {
+        let mut vp = self.viewport.borrow_mut();
+        vp.height = height;
+        vp.scroll.clear();
+        vp.scroll.extend(scroll.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+
+    /// Render every row in the next `view()` (headless / PDF / screenshot): an infinite viewport
+    /// disables windowing.
+    pub fn full_viewport(&self) {
+        let mut vp = self.viewport.borrow_mut();
+        vp.height = f32::INFINITY;
+        vp.scroll.clear();
+    }
+
+    /// Whether a select commit asked the engine to drop focus (closing the dropdown); reading
+    /// clears the flag.
+    pub fn take_defocus(&self) -> bool {
+        self.select.defocus.replace(false)
+    }
+
+    /// Record a user drag: table `table`'s column `key` is now `w` px wide (next walk applies it).
+    pub(crate) fn set_col_width(&self, table: &str, key: &str, w: f32) {
+        self.sizes.borrow_mut().entry(table.to_string()).or_default().cols.insert(key.to_string(), w);
+    }
+
+    /// Record a user drag: table `table`'s row `row` is now `h` px tall.
+    pub(crate) fn set_row_height(&self, table: &str, row: &str, h: f32) {
+        self.sizes.borrow_mut().entry(table.to_string()).or_default().rows.insert(row.to_string(), h);
     }
 
     /// Call the `on_click` closure with handler id `id`. A handler error is returned to surface; it
@@ -279,40 +450,160 @@ impl Script {
         }
     }
 
-    /// The backing container name for editor `id` in the current view, if it's a known editor.
-    fn editor_name(&self, id: &str) -> Option<&str> {
-        self.editors.iter().find(|e| e.id == id).map(|e| e.name.as_str())
-    }
-
-    /// Run an editing closure against editor `id`'s live buffer (a [`TextBuffer`] over its backing
-    /// LoroText), committing once after. Returns whether the content changed; `false` (closure not
-    /// run) if `id` isn't an editor in the current view.
-    pub fn with_buffer(&self, id: &str, f: impl FnOnce(&mut dyn TextBuffer)) -> bool {
-        let Some(name) = self.editor_name(id) else {
-            return false;
-        };
-        let mut buf = crdt::LoroTextBuffer::open(self.doc.clone(), name);
-        f(&mut buf);
-        buf.commit();
-        buf.dirty
-    }
-
-    /// Fire editor `id`'s `on_submit` closure (Enter while focused), if it declared one. Returns
-    /// whether a handler ran; a handler error is returned to surface.
-    pub fn submit(&self, id: &str) -> Result<bool, String> {
-        match self.editors.iter().find(|e| e.id == id).and_then(|e| e.on_submit) {
-            Some(handler) => self.dispatch(handler).map(|_| true),
+    /// Call the app's `on_key` handler with a key name (e.g. "left"/"right"). Returns whether a
+    /// handler was registered (so the engine knows the key was consumed and state may have changed).
+    pub fn dispatch_key(&self, key: &str) -> Result<bool, String> {
+        match &self.key_handler {
+            Some(f) => {
+                self.fires.set(0); // fresh instruction budget for this entry
+                f.call::<()>(key).map_err(|e| e.to_string())?;
+                Ok(true)
+            }
             None => Ok(false),
+        }
+    }
+
+    /// Run an editing closure against editor `id`'s live buffer (a [`TextBuffer`] over its
+    /// backing LoroText or table cell), committing once after. Returns whether the content
+    /// changed; `false` (closure not run) if `id` isn't an editor in the current view.
+    pub fn with_buffer(&self, id: &str, f: impl FnOnce(&mut dyn TextBuffer)) -> bool {
+        match self.editors.iter().find(|e| e.id == id).map(|e| &e.target) {
+            Some(Target::Text(name)) => {
+                let mut buf = crdt::LoroTextBuffer::open(self.doc.clone(), name);
+                f(&mut buf);
+                buf.commit();
+                buf.dirty
+            }
+            Some(Target::Cell { list, row, key, .. }) => {
+                let mut buf = crdt::CellBuffer::open(self.doc.clone(), list, row, key);
+                f(&mut buf);
+                buf.commit()
+            }
+            Some(Target::Select) => {
+                let mut buf = QueryBuffer { s: self.select.query.borrow_mut(), dirty: false };
+                f(&mut buf);
+                buf.dirty
+            }
+            None => false,
+        }
+    }
+
+    /// Enter on editor `id`: a typed cell finalizes its text first (number parse / date
+    /// normalize), then any `on_submit` fires — for a select cell that's the query resolver.
+    /// Returns whether anything happened; a handler error is returned to surface.
+    pub fn submit(&self, id: &str) -> Result<bool, String> {
+        let Some(b) = self.editors.iter().find(|e| e.id == id) else { return Ok(false) };
+        let mut acted = false;
+        if let Target::Cell { list, row, key, kind } = &b.target {
+            acted |= self.finalize_cell(list, row, key, *kind);
+        }
+        if let Some(h) = b.on_submit {
+            self.dispatch(h)?;
+            acted = true;
+        }
+        Ok(acted)
+    }
+
+    /// Field `id` lost focus after edits. A cell treats that as its commit — finalize, then fire
+    /// `on_edit`; a select discards its filter query; a plain editor's `on_submit` stays
+    /// Enter-only (its buffer is the document, not a form).
+    pub fn blur(&self, id: &str) -> Result<bool, String> {
+        match self.editors.iter().find(|e| e.id == id) {
+            Some(EditorBinding { target: Target::Cell { list, row, key, kind }, on_submit, .. }) => {
+                let mut acted = self.finalize_cell(list, row, key, *kind);
+                if let Some(h) = on_submit {
+                    self.dispatch(*h)?;
+                    acted = true;
+                }
+                Ok(acted)
+            }
+            Some(EditorBinding { target: Target::Select, .. }) => {
+                self.select.query.borrow_mut().clear();
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Convert a typed cell's committed text to its column type: a number cell's parseable text
+    /// becomes a real number, a date cell's becomes canonical `YYYY-MM-DD`. Unparseable text is
+    /// left as typed (visible and honest, not silently dropped). Returns whether it wrote.
+    fn finalize_cell(&self, list: &str, row: &str, key: &str, kind: ColKind) -> bool {
+        let text = match crdt::cell_string(&self.doc, list, row, key) {
+            Some(t) => t,
+            None => return false,
+        };
+        let trimmed = text.trim();
+        match kind {
+            ColKind::Number => match trimmed.parse::<f64>() {
+                Ok(n) => crdt::set_cell_number(&self.doc, list, row, key, n),
+                Err(_) => false,
+            },
+            ColKind::Date => match table::parse_date(trimmed) {
+                Some(d) => {
+                    let canon = table::format_date(d);
+                    canon != text && crdt::set_cell_text(&self.doc, list, row, key, &canon)
+                }
+                None => false,
+            },
+            // Stored as its canonical string (exact); never as a float.
+            ColKind::Decimal => match table::parse_decimal(trimmed) {
+                Some(canon) => canon != text && crdt::set_cell_text(&self.doc, list, row, key, &canon),
+                None => false,
+            },
+            _ => false,
         }
     }
 }
 
-/// Collectors threaded through one `view()` walk: click closures, editor bindings, and the doc to
-/// read each editor's current content from.
+/// [`TextBuffer`] over the select filter query (a plain string — scratch view state).
+struct QueryBuffer<'a> {
+    s: std::cell::RefMut<'a, String>,
+    dirty: bool,
+}
+
+impl text_edit::TextBuffer for QueryBuffer<'_> {
+    fn char_len(&self) -> usize {
+        self.s.chars().count()
+    }
+
+    fn text(&self) -> String {
+        self.s.clone()
+    }
+
+    fn insert(&mut self, at: usize, t: &str) {
+        let b = crdt::byte_at(&self.s, at);
+        self.s.insert_str(b, t);
+        self.dirty = true;
+    }
+
+    fn delete(&mut self, at: usize, len: usize) {
+        let a = crdt::byte_at(&self.s, at);
+        let b = crdt::byte_at(&self.s, at + len);
+        self.s.replace_range(a..b, "");
+        self.dirty = true;
+    }
+}
+
+/// Collectors threaded through one `view()` walk: click closures, editor bindings, the doc to
+/// read content from, and the VM (tables synthesize cell-edit handlers).
 struct Walk<'a> {
     handlers: Vec<Function>,
+    /// App-level key handler (`on_key`), the last one the walk sees.
+    key_handler: Option<Function>,
     editors: Vec<EditorBinding>,
-    doc: &'a LoroDoc,
+    doc: &'a Rc<LoroDoc>,
+    lua: &'a Lua,
+    sizes: &'a HashMap<String, TableSizes>,
+    /// The engine-focused editor id — the select cell matching it renders its dropdown.
+    focus: Option<&'a str>,
+    select: &'a Rc<SelectUi>,
+    /// Body viewport height (for windowing); `INFINITY` ⇒ render every row.
+    viewport_h: f32,
+    /// Retained scroll offsets by region id — the table body's `y` offset drives its window.
+    scroll: &'a HashMap<String, Vec2>,
+    /// Per-list filtered+sorted row cache, sliced to the visible window each frame.
+    cache: &'a RefCell<HashMap<String, CachedRows>>,
 }
 
 /// Turn one `ui.*` table (or a bare string) into a [`Node`], registering any `on_click`
@@ -328,6 +619,16 @@ fn walk(value: Value, w: &mut Walk) -> Result<Node, String> {
                 // typically carries an `on_click`).
                 "text" | "button" => {
                     let mut node = Node::runs(parse_runs(&t));
+                    node.style = parse_style(style, Style::default());
+                    node
+                }
+                // A syntax-highlighted code block: `source` highlighted by `lang` (default
+                // "rust") via the same `code_highlight` leaf doc_editor uses, emitted as monospace
+                // runs with per-token colours. Whitespace is preserved (galley keeps it verbatim).
+                "code" => {
+                    let source = str_field(&t, "source").unwrap_or_default();
+                    let lang = str_field(&t, "lang").unwrap_or_else(|| "rust".to_string());
+                    let mut node = Node::runs(highlight_runs(&lang, &source));
                     node.style = parse_style(style, Style::default());
                     node
                 }
@@ -353,17 +654,72 @@ fn walk(value: Value, w: &mut Walk) -> Result<Node, String> {
                         }
                         _ => None,
                     };
-                    w.editors.push(EditorBinding { id, name, on_submit });
+                    w.editors.push(EditorBinding { id, target: Target::Text(name), on_submit });
                     node
+                }
+                // An embedded block document (`ui.doc{ id }`): a native doc_editor over a tree in
+                // the app's CRDT. Only the id + box matter here; the engine finds it in the placed
+                // scene by `doc` id and renders/edits it in its own child Ui.
+                "doc" => {
+                    let id = str_field(&t, "id").unwrap_or_else(|| "doc".to_string());
+                    let mut node = Node::doc(id);
+                    node.style = parse_style(style, Style::default());
+                    node
+                }
+                // A typed grid. Two row sources: `rows = doc:list(name)` — the app's own editable
+                // CRDT list (World A) — or `source = data.sql(...)` / `data.table(...)` — a
+                // read-only host-computed result over imported tables (World B), whose rows never
+                // enter Lua. The `source` form wins when present.
+                "table" => {
+                    let base = parse_style(style, Style { width: Val::Pct(100.0), ..Style::default() });
+                    match data::query_ref(&field(&t, "source")) {
+                        Some(qref) => {
+                            let region =
+                                str_field(&t, "id").or_else(|| qref.source.clone()).unwrap_or_else(|| "query".to_string());
+                            emit_query_table(w, qref, &region, base)
+                        }
+                        None => {
+                            let spec = parse_table_spec(&t)?;
+                            let list = crdt::list_name(&field(&t, "rows"));
+                            let on_edit = match field(&t, "on_edit") {
+                                Value::Function(f) => Some(f),
+                                _ => None,
+                            };
+                            emit_table(w, spec, list, base, on_edit)
+                        }
+                    }
+                }
+                // A chart over a host-computed result (`data = data.sql(...)`): `type` (line/bar/
+                // scatter), `x` (the category-label column key), `y` (one key or a list of keys, the
+                // numeric series). Data is resolved host-side into a `ChartSpec`; the engine paints
+                // it with egui_plot. Rows never enter Lua.
+                "chart" => {
+                    let base = parse_style(
+                        style,
+                        Style { width: Val::Pct(100.0), height: Val::Px(240.0), ..Style::default() },
+                    );
+                    match data::query_ref(&field(&t, "data")) {
+                        Some(qref) => emit_chart(&t, qref, base),
+                        None => {
+                            let mut n = Node::text("ui.chart needs data = data.sql(...)");
+                            n.style = base;
+                            n
+                        }
+                    }
                 }
                 "row" | "col" => {
                     let mut node = if tag == "row" { Node::row() } else { Node::col() };
                     node.style = parse_style(style, node.style);
-                    // `scroll = true` (single region, id "") or `scroll = "name"` (a keyed region)
-                    // makes this container scroll its overflowing content vertically.
+                    // `scroll = true` (vertical, id "") / `"x"` / `"y"` / `"both"` pick the axes;
+                    // any other string is a keyed vertical region (`scroll = "name"`).
                     node.scroll = match field(&t, "scroll") {
-                        Value::Boolean(true) => Some(String::new()),
-                        Value::String(s) => Some(lua_str(&s)),
+                        Value::Boolean(true) => Some(ScrollSpec::y("")),
+                        Value::String(s) => Some(match lua_str(&s).as_str() {
+                            "x" => ScrollSpec::x(""),
+                            "y" => ScrollSpec::y(""),
+                            "both" | "xy" => ScrollSpec::both(""),
+                            id => ScrollSpec::y(id),
+                        }),
                         _ => None,
                     };
                     let len = t.raw_len();
@@ -384,6 +740,11 @@ fn walk(value: Value, w: &mut Walk) -> Result<Node, String> {
                 node.on_click = Some(w.handlers.len() as u32);
                 w.handlers.push(f);
             }
+            // Any node may carry an `on_key`: an app-level key handler called with a key name
+            // ("left"/"right") when no editor is focused. The last one the walk sees wins.
+            if let Value::Function(f) = field(&t, "on_key") {
+                w.key_handler = Some(f);
+            }
             // Optional state styles overlaid on the base. Only paint props take effect (layout
             // uses the base).
             let hover = field(&t, "hover");
@@ -401,236 +762,398 @@ fn walk(value: Value, w: &mut Walk) -> Result<Node, String> {
     }
 }
 
-/// Overlay an app's `style` table onto a base [`Style`]. Keys follow CSS names (snake_case),
-/// with the original short forms kept as aliases. Unknown keys are ignored; missing keys keep
-/// the base value.
-fn parse_style(style: Value, mut base: Style) -> Style {
-    let Value::Table(t) = style else {
-        return base;
+/// The focused select cell's dropdown: legal next values (`transitions`-gated against the cell's
+/// current value), filtered by the typed query; each option's click writes the value, fires
+/// `on_edit`, and asks the engine to drop focus. `None` if the VM refuses a closure.
+fn select_popup(
+    w: &mut Walk,
+    list: &str,
+    row: &table::Row,
+    col: &Column,
+    on_edit: &Option<Function>,
+) -> Option<table::SelectPopup> {
+    let current =
+        row.cells.get(&col.key).map(|v| v.display()).unwrap_or_default();
+    let query = w.select.query.borrow().clone();
+    let q = query.to_lowercase();
+    let mut options = Vec::new();
+    for opt in table::legal_options(col, &current) {
+        if !q.is_empty() && !opt.to_lowercase().contains(&q) {
+            continue;
+        }
+        let edit = on_edit
+            .clone()
+            .and_then(|f| crdt::cell_edit_fn(w.lua, f, &row.id, &col.key).ok());
+        let (doc, ui) = (w.doc.clone(), w.select.clone());
+        let (l, r, k, v) = (list.to_string(), row.id.clone(), col.key.clone(), opt.to_string());
+        let commit = w
+            .lua
+            .create_function(move |_, ()| {
+                if crdt::set_cell_text(&doc, &l, &r, &k, &v) {
+                    if let Some(f) = &edit {
+                        f.call::<()>(())?;
+                    }
+                }
+                // Close the box: clear the filter (blur won't always run, e.g. Enter) and
+                // ask the engine to drop focus.
+                ui.query.borrow_mut().clear();
+                ui.defocus.set(true);
+                Ok(())
+            })
+            .ok()?;
+        let idx = w.handlers.len() as u32;
+        w.handlers.push(commit);
+        options.push((opt.to_string(), idx));
+    }
+    // The guard swallows clicks on popup chrome (padding, "no match") so they can't blur
+    // the field or hit what's underneath.
+    let guard = w.lua.create_function(|_, ()| Ok(())).ok()?;
+    let guard_idx = w.handlers.len() as u32;
+    w.handlers.push(guard);
+    Some(table::SelectPopup { query, options, guard: guard_idx })
+}
+
+/// Emit a grid subtree + register its live cell bindings — shared by the Lua `ui.table` widget
+/// (declared `spec`) and the native `.table` view (stored `spec`). `list` names the rows
+/// container; `base` carries the resolved style (the grid tints its chrome from `base.color`);
+/// `on_edit` is the optional user commit hook (always `None` for a bare `.table`). User-dragged
+/// sizes override the declared widths; rows are read, type-coerced (so `Decimal` cells sort
+/// exactly), then filtered + sorted.
+fn emit_table(
+    w: &mut Walk,
+    mut spec: TableSpec,
+    list: Option<String>,
+    base: Style,
+    on_edit: Option<Function>,
+) -> Node {
+    if let Some(sz) = list.as_ref().and_then(|n| w.sizes.get(n)) {
+        for c in &mut spec.columns {
+            if let Some(&px) = sz.cols.get(&c.key) {
+                c.width = Some(px);
+            }
+        }
+        spec.row_heights.extend(sz.rows.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+    // Default row height when none is declared: one line + padding. Windowing and the pinned row
+    // height share these values, so the rendered extent matches the reserved (spacer) extent.
+    let default_h = (base.font_size * 1.4 + 12.0).ceil();
+    // Filtered+sorted rows come from the per-list cache (recomputed only when the doc version or the
+    // query changes), then we slice the visible window; off-screen rows become spacer heights. Each
+    // arm yields the visible rows, their pinned heights, the absolute start index, and the spacers.
+    let (rows, heights, first, lead, trail) = match list.as_ref() {
+        Some(name) => {
+            let frontiers = w.doc.oplog_frontiers();
+            let query = query_hash(&spec);
+            {
+                let mut cache = w.cache.borrow_mut();
+                let stale = cache
+                    .get(name)
+                    .map_or(true, |c| c.frontiers != frontiers || c.query != query);
+                if stale {
+                    let mut rows = table::read_rows(w.doc, name);
+                    table::coerce(&mut rows, &spec);
+                    let rows = table::apply(&spec, rows);
+                    cache.insert(name.clone(), CachedRows { frontiers, query, rows });
+                }
+            }
+            let cache = w.cache.borrow();
+            let all = &cache[name].rows;
+            let offset_y = w.scroll.get(&format!("__tbody:{name}")).map_or(0.0, |v| v.y);
+            // Clone just the visible window (~tens of rows) out of the cache, so the borrow drops
+            // before the `bind` closure below takes `&mut w`.
+            if spec.row_heights.is_empty() {
+                // Uniform fast path: O(1) window, every row the same height.
+                let row_h = spec.row_height.unwrap_or(default_h);
+                let (range, lead, trail) =
+                    table::row_window(all.len(), row_h, offset_y, w.viewport_h);
+                let first = range.start;
+                let vis = all[range].to_vec();
+                let hs = vec![row_h; vis.len()];
+                (vis, hs, first, lead, trail)
+            } else {
+                // Some rows were drag-resized: per-row heights + a cumulative window (O(rows)).
+                let eff: Vec<f32> = all
+                    .iter()
+                    .map(|r| {
+                        spec.row_heights.get(&r.id).copied().or(spec.row_height).unwrap_or(default_h)
+                    })
+                    .collect();
+                let (range, lead, trail) =
+                    table::row_window_variable(&eff, offset_y, w.viewport_h);
+                let first = range.start;
+                let vis = all[range.clone()].to_vec();
+                let hs = eff[range].to_vec();
+                (vis, hs, first, lead, trail)
+            }
+        }
+        None => (Vec::new(), Vec::new(), 0, 0.0, 0.0),
     };
-    // -- flex container -------------------------------------------------------
-    if let Some(d) = str_field(&t, "flex_direction").or_else(|| str_field(&t, "direction")) {
-        base.direction = if d == "row" { Direction::Row } else { Direction::Column };
-    }
-    if bool_field(&t, "flex_wrap") || str_field(&t, "flex_wrap").as_deref() == Some("wrap") {
-        base.wrap = true;
-    }
-    if let Some(a) = align_field(&t, "justify_content").or_else(|| align_field(&t, "justify")) {
-        base.justify_content = Some(a);
-    }
-    if let Some(a) = align_field(&t, "align_items") {
-        base.align_items = Some(a);
-    }
-    if let Some(a) = align_field(&t, "align_self") {
-        base.align_self = Some(a);
-    }
-    if let Some(v) = num(&t, "gap") {
-        base.gap = v;
-    }
-    if let Some(v) = num(&t, "flex_grow").or_else(|| num(&t, "grow")) {
-        base.flex_grow = v;
-    }
-    if let Some(v) = num(&t, "flex_shrink") {
-        base.flex_shrink = v;
-    }
-    // -- box ------------------------------------------------------------------
-    if let Some(v) = dim(&t, "width") {
-        base.width = v;
-    }
-    if let Some(v) = dim(&t, "height") {
-        base.height = v;
-    }
-    if let Some(v) = dim(&t, "min_width") {
-        base.min_width = v;
-    }
-    if let Some(v) = dim(&t, "min_height") {
-        base.min_height = v;
-    }
-    if let Some(v) = dim(&t, "max_width") {
-        base.max_width = v;
-    }
-    if let Some(v) = dim(&t, "max_height") {
-        base.max_height = v;
-    }
-    if let Some(e) = edges(&t, "padding") {
-        base.padding = e;
-    }
-    if let Some(e) = edges(&t, "margin") {
-        base.margin = e;
-    }
-    // -- position -------------------------------------------------------------
-    if let Some(p) = str_field(&t, "position") {
-        base.position = if p == "absolute" { Position::Absolute } else { Position::Relative };
-    }
-    if let Some(e) = edges(&t, "inset") {
-        base.inset = e;
-    }
-    for (key, side) in [("top", 0), ("right", 1), ("bottom", 2), ("left", 3)] {
-        if let Some(v) = dim(&t, key) {
-            match side {
-                0 => base.inset.top = v,
-                1 => base.inset.right = v,
-                2 => base.inset.bottom = v,
-                _ => base.inset.left = v,
+    // Cells are live: a check registers a synthesized flip-by-row-id handler (dispatched like any
+    // on_click); a text/number/decimal/date cell registers an editor binding to its scalar field;
+    // a select cell is a combobox whose dropdown lists the legal options as commit handlers.
+    let mut bind = |row: &table::Row, col: &Column| -> table::CellBind {
+        let Some(name) = list.clone() else { return table::CellBind::None };
+        let row_id = row.id.as_str();
+        let key = col.key.as_str();
+        match col.kind {
+            ColKind::Check if !col.locked => {
+                let f = crdt::toggle_cell_fn(
+                    w.lua,
+                    w.doc.clone(),
+                    name,
+                    row_id.to_string(),
+                    key.to_string(),
+                );
+                match f {
+                    Ok(f) => {
+                        let idx = w.handlers.len() as u32;
+                        w.handlers.push(f);
+                        table::CellBind::Click(idx)
+                    }
+                    Err(_) => table::CellBind::None,
+                }
             }
+            ColKind::Text | ColKind::Number | ColKind::Decimal | ColKind::Date if !col.locked => {
+                let id = format!("__cell:{name}:{row_id}:{key}");
+                let on_submit = on_edit.clone().and_then(|f| {
+                    let f = crdt::cell_edit_fn(w.lua, f, row_id, key).ok()?;
+                    let idx = w.handlers.len() as u32;
+                    w.handlers.push(f);
+                    Some(idx)
+                });
+                w.editors.push(EditorBinding {
+                    id: id.clone(),
+                    target: Target::Cell {
+                        list: name,
+                        row: row_id.to_string(),
+                        key: key.to_string(),
+                        kind: col.kind,
+                    },
+                    on_submit,
+                });
+                table::CellBind::Edit(id)
+            }
+            ColKind::Select if !col.locked => {
+                let id = format!("__cell:{name}:{row_id}:{key}");
+                let focused = w.focus == Some(id.as_str());
+                let popup = if focused { select_popup(w, &name, row, col, &on_edit) } else { None };
+                // Enter resolves a typed query to its first match; without one it's a no-op (no
+                // surprise commit of the first option).
+                let on_submit = popup
+                    .as_ref()
+                    .filter(|p| !p.query.is_empty())
+                    .and_then(|p| p.options.first())
+                    .map(|(_, h)| *h);
+                w.editors.push(EditorBinding { id: id.clone(), target: Target::Select, on_submit });
+                table::CellBind::Select { id, popup }
+            }
+            _ => table::CellBind::None,
         }
-    }
-    // -- paint ------------------------------------------------------------------
-    if let Some(c) = color_field(&t, "background").or_else(|| color_field(&t, "bg")) {
-        base.background = Some(c);
-    }
-    if let Some(c) = corners(&t) {
-        base.corner_radius = c;
-    }
-    if let Some(b) = border_field(&t, "border") {
-        base.border = Some(b);
-    }
-    if let Some(s) = shadow_field(&t, "box_shadow").or_else(|| shadow_field(&t, "shadow")) {
-        base.shadow = Some(s);
-    }
-    if let Some(v) = num(&t, "opacity") {
-        base.opacity = v.clamp(0.0, 1.0);
-    }
-    // -- text -------------------------------------------------------------------
-    if let Some(c) = color_field(&t, "color") {
-        base.color = c;
-    }
-    if let Some(v) = num(&t, "font_size").or_else(|| num(&t, "font")) {
-        base.font_size = v;
-    }
-    base
+    };
+    let region = list.clone().unwrap_or_default();
+    let mut node = table::grid(
+        &spec,
+        &rows,
+        &heights,
+        first,
+        lead,
+        trail,
+        &region,
+        base.color,
+        base.font_size,
+        &mut bind,
+    );
+    node.style = base;
+    node
 }
 
-/// One CSS alignment keyword (`-` and `_` both accepted, `flex-start`/`start` alike).
-fn align_field(t: &Table, key: &str) -> Option<Align> {
-    let s = str_field(t, key)?;
-    match s.replace('_', "-").as_str() {
-        "start" | "flex-start" => Some(Align::Start),
-        "center" => Some(Align::Center),
-        "end" | "flex-end" => Some(Align::End),
-        "stretch" => Some(Align::Stretch),
-        "baseline" => Some(Align::Baseline),
-        "space-between" => Some(Align::SpaceBetween),
-        "space-around" => Some(Align::SpaceAround),
-        "space-evenly" => Some(Align::SpaceEvenly),
-        _ => None,
-    }
+/// Emit a read-only grid over a host-computed query result (World B). The result's schema +
+/// windowed rows come from [`crate::data::DataAccess`] (all columns read-only); rows are sliced to
+/// the visible window each frame (the host owns the result cache, so windowing is a cheap copy and
+/// needs no per-list `row_cache`). A `Pending` result renders a loading placeholder.
+fn emit_query_table(w: &mut Walk, qref: data::QueryRef, region: &str, base: Style) -> Node {
+    let handle = match qref.state {
+        QueryState::Ready(h) => h,
+        QueryState::Pending => return placeholder("computing…", base),
+    };
+    let access = &qref.access;
+    let spec = access.spec(handle);
+    let total = access.len(handle);
+    let row_h = spec.row_height.unwrap_or((base.font_size * 1.4 + 12.0).ceil());
+    let offset_y = w.scroll.get(&format!("__tbody:{region}")).map_or(0.0, |v| v.y);
+    let (range, lead, trail) = table::row_window(total, row_h, offset_y, w.viewport_h);
+    let rows = access.window(handle, range.start, range.len());
+    let heights = vec![row_h; rows.len()];
+    let mut bind = |_: &table::Row, _: &Column| table::CellBind::None; // results are read-only
+    let mut node = table::grid(
+        &spec, &rows, &heights, range.start, lead, trail, region, base.color, base.font_size, &mut bind,
+    );
+    node.style = base;
+    node
 }
 
-/// One length token: `auto`, `50%`, `24`, `24px`, `1.5rem` (1rem = 16px).
-fn parse_val(s: &str) -> Option<Val> {
-    let s = s.trim();
-    if s == "auto" {
-        return Some(Val::Auto);
-    }
-    if let Some(p) = s.strip_suffix('%') {
-        return p.trim().parse().ok().map(Val::Pct);
-    }
-    if let Some(r) = s.strip_suffix("rem") {
-        return r.trim().parse::<f32>().ok().map(|v| Val::Px(v * 16.0));
-    }
-    let s = s.strip_suffix("px").unwrap_or(s);
-    s.trim().parse().ok().map(Val::Px)
-}
-
-/// Per-side values: a number applies to all sides; a string is the CSS 1/2/3/4-value shorthand
-/// (`"10 20"` = vertical horizontal, …), each token a [`parse_val`] length.
-fn edges(t: &Table, key: &str) -> Option<Edges> {
-    match field(t, key) {
-        Value::Integer(i) => Some(Edges::px(i as f32)),
-        Value::Number(n) => Some(Edges::px(n as f32)),
-        Value::String(s) => {
-            let s = lua_str(&s);
-            let v: Vec<Val> = s.split_whitespace().filter_map(parse_val).collect();
-            match v.as_slice() {
-                [a] => Some(Edges::all(*a)),
-                [v, h] => Some(Edges { top: *v, bottom: *v, left: *h, right: *h }),
-                [top, h, bottom] => {
-                    Some(Edges { top: *top, bottom: *bottom, left: *h, right: *h })
-                }
-                [top, right, bottom, left] => {
-                    Some(Edges { top: *top, right: *right, bottom: *bottom, left: *left })
-                }
+/// Resolve a chart leaf from a query result: read the whole result (an aggregate — small) and shape
+/// it into a [`ChartSpec`]. `x` names the category-label column; `y` names one series column or a
+/// list of them. A `Pending` result renders a loading placeholder.
+fn emit_chart(t: &Table, qref: data::QueryRef, base: Style) -> Node {
+    let handle = match qref.state {
+        QueryState::Ready(h) => h,
+        QueryState::Pending => return placeholder("computing…", base),
+    };
+    let access = &qref.access;
+    let total = access.len(handle);
+    let rows = access.window(handle, 0, total);
+    let kind = match str_field(t, "type").as_deref() {
+        Some("bar") => ChartKind::Bar,
+        Some("scatter") => ChartKind::Scatter,
+        _ => ChartKind::Line,
+    };
+    let x = str_field(t, "x");
+    let ys: Vec<String> = match field(t, "y") {
+        Value::String(s) => vec![lua_str(&s)],
+        Value::Table(l) => (1..=l.raw_len())
+            .filter_map(|i| match field_i(&l, i) {
+                Value::String(s) => Some(lua_str(&s)),
                 _ => None,
-            }
-        }
-        _ => None,
-    }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let x_labels: Vec<String> = match &x {
+        Some(xk) => rows.iter().map(|r| r.cells.get(xk).map(|v| v.display()).unwrap_or_default()).collect(),
+        None => (0..rows.len()).map(|i| i.to_string()).collect(),
+    };
+    let series = ys
+        .iter()
+        .map(|yk| ChartSeries {
+            name: yk.clone(),
+            values: rows.iter().map(|r| cell_f64(r.cells.get(yk))).collect(),
+        })
+        .collect();
+    let mut node = Node::chart(ChartSpec { kind, x_labels, series, color: base.color });
+    node.style = base;
+    node
 }
 
-/// `border_radius` (alias `corner`): a number rounds all corners; a string is the CSS 4-value
-/// form (`"12 12 0 0"`, top-left first, clockwise).
-fn corners(t: &Table) -> Option<Corners> {
-    let v = field(t, "border_radius");
-    let v = if matches!(v, Value::Nil) { field(t, "corner") } else { v };
+/// A centred message box in the table/chart's slot (used while a result is `Pending`).
+fn placeholder(msg: &str, base: Style) -> Node {
+    let color = base.color;
+    let font = base.font_size;
+    let mut n = Node::col()
+        .children(vec![Node::text(msg).font(font).color(Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            120,
+        ))])
+        .justify(crate::node::Align::Center)
+        .align(crate::node::Align::Center);
+    n.style = base;
+    n
+}
+
+/// A cell's numeric value as `f64` (for chart series); non-numeric / missing cells → 0.
+fn cell_f64(v: Option<&CellValue>) -> f64 {
     match v {
-        Value::Integer(i) => Some(Corners::same(i as f32)),
-        Value::Number(n) => Some(Corners::same(n as f32)),
-        Value::String(s) => {
-            let s = lua_str(&s);
-            let r: Vec<f32> = s
-                .split_whitespace()
-                .filter_map(|tok| parse_val(tok).and_then(|v| match v {
-                    Val::Px(px) => Some(px),
-                    _ => None,
-                }))
-                .collect();
-            match r.as_slice() {
-                [a] => Some(Corners::same(*a)),
-                [tl, tr, br, bl] => Some(Corners { tl: *tl, tr: *tr, br: *br, bl: *bl }),
-                _ => None,
+        Some(CellValue::Number(n)) => *n,
+        Some(CellValue::Decimal(d)) => d.to_string().parse().unwrap_or(0.0),
+        Some(CellValue::Bool(b)) => {
+            if *b {
+                1.0
+            } else {
+                0.0
             }
         }
+        Some(CellValue::Text(s)) => s.trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Parse a `ui.table` spec: `columns = { { key, label, type, width }, … }` plus the declarative
+/// query (`where` = equality map, `order_by` = key or `{ key, desc = true }`).
+fn parse_table_spec(t: &Table) -> Result<TableSpec, String> {
+    let mut columns = Vec::new();
+    if let Value::Table(cols) = field(t, "columns") {
+        for i in 1..=cols.raw_len() {
+            if let Value::Table(c) = field_i(&cols, i) {
+                let key = str_field(&c, "key").ok_or("a table column needs a key")?;
+                let kind = match str_field(&c, "type").as_deref() {
+                    Some("number") => ColKind::Number,
+                    Some("decimal") => ColKind::Decimal,
+                    Some("check") => ColKind::Check,
+                    Some("select") => ColKind::Select,
+                    Some("date") => ColKind::Date,
+                    _ => ColKind::Text,
+                };
+                let label = str_field(&c, "label").unwrap_or_else(|| key.clone());
+                let locked = bool_field(&c, "locked");
+                // `options = {"open", …}` (select); `transitions = { open = {"doing"} }` gates
+                // each value's successors — a value with no entry may move anywhere.
+                let mut options = Vec::new();
+                if let Value::Table(o) = field(&c, "options") {
+                    for i in 1..=o.raw_len() {
+                        if let Value::String(s) = field_i(&o, i) {
+                            options.push(lua_str(&s));
+                        }
+                    }
+                }
+                let mut transitions = HashMap::new();
+                if let Value::Table(tr) = field(&c, "transitions") {
+                    for pair in tr.pairs::<String, Table>() {
+                        let (from, to) = pair.map_err(|e| e.to_string())?;
+                        let mut next = Vec::new();
+                        for i in 1..=to.raw_len() {
+                            if let Value::String(s) = field_i(&to, i) {
+                                next.push(lua_str(&s));
+                            }
+                        }
+                        transitions.insert(from, next);
+                    }
+                }
+                columns.push(Column {
+                    key,
+                    label,
+                    kind,
+                    width: num(&c, "width"),
+                    locked,
+                    options,
+                    transitions,
+                });
+            }
+        }
+    }
+    if columns.is_empty() {
+        return Err("ui.table needs columns".to_string());
+    }
+    let mut filter = Vec::new();
+    if let Value::Table(wh) = field(t, "where") {
+        for pair in wh.pairs::<String, Value>() {
+            let (k, v) = pair.map_err(|e| e.to_string())?;
+            if let Some(cv) = scalar_cell(&v) {
+                filter.push((k, cv));
+            }
+        }
+    }
+    let order = match field(t, "order_by") {
+        Value::String(s) => Some((lua_str(&s), false)),
+        Value::Table(o) => match field_i(&o, 1) {
+            Value::String(s) => Some((lua_str(&s), bool_field(&o, "desc"))),
+            _ => None,
+        },
+        _ => None,
+    };
+    Ok(TableSpec { columns, filter, order, row_height: num(t, "row_height"), row_heights: HashMap::new() })
+}
+
+/// A Lua scalar as a [`CellValue`] (for `where` comparisons); non-scalars are `None`.
+fn scalar_cell(v: &Value) -> Option<CellValue> {
+    match v {
+        Value::Boolean(b) => Some(CellValue::Bool(*b)),
+        Value::Integer(i) => Some(CellValue::Number(*i as f64)),
+        Value::Number(n) => Some(CellValue::Number(*n)),
+        Value::String(s) => Some(CellValue::Text(lua_str(s))),
         _ => None,
     }
-}
-
-/// CSS-ish `border`: `"1 #3a4151"` / `"2px solid #fff"` — first number is the width, first
-/// parsable colour is the colour, `solid` is noise.
-fn border_field(t: &Table, key: &str) -> Option<Border> {
-    let s = str_field(t, key)?;
-    let mut width = None;
-    let mut color = None;
-    for tok in s.split_whitespace() {
-        if width.is_none() {
-            if let Some(Val::Px(px)) = parse_val(tok) {
-                width = Some(px);
-                continue;
-            }
-        }
-        if color.is_none() {
-            if let Some(c) = parse_color(tok) {
-                color = Some(c);
-            }
-        }
-    }
-    Some(Border { width: width?, color: color? })
-}
-
-/// CSS-ish `box_shadow`: `"0 4 12 #0008"` (offset-x offset-y blur [spread] colour).
-fn shadow_field(t: &Table, key: &str) -> Option<BoxShadow> {
-    let s = str_field(t, key)?;
-    let mut nums = Vec::new();
-    let mut color = None;
-    for tok in s.split_whitespace() {
-        match parse_val(tok) {
-            Some(Val::Px(px)) if nums.len() < 4 => nums.push(px),
-            _ => {
-                if color.is_none() {
-                    color = Some(parse_color(tok)?);
-                }
-            }
-        }
-    }
-    if nums.len() < 2 {
-        return None;
-    }
-    Some(BoxShadow {
-        offset: [nums[0], nums[1]],
-        blur: nums.get(2).copied().unwrap_or(0.0),
-        spread: nums.get(3).copied().unwrap_or(0.0),
-        color: color.unwrap_or(Color32::from_black_alpha(96)),
-    })
 }
 
 // --- small typed field readers (Lua value → Rust) ---------------------------
@@ -660,17 +1183,7 @@ fn str_field(t: &Table, key: &str) -> Option<String> {
 
 fn color_field(t: &Table, key: &str) -> Option<Color32> {
     match field(t, key) {
-        Value::String(s) => parse_color(&lua_str(&s)),
-        _ => None,
-    }
-}
-
-/// A length: a number is pixels; strings go through [`parse_val`] (`"auto"`, `"50%"`, `"1.5rem"`).
-fn dim(t: &Table, key: &str) -> Option<Val> {
-    match field(t, key) {
-        Value::Integer(i) => Some(Val::Px(i as f32)),
-        Value::Number(n) => Some(Val::Px(n as f32)),
-        Value::String(s) => parse_val(&lua_str(&s)),
+        Value::String(s) => style::parse_color(&lua_str(&s)),
         _ => None,
     }
 }
@@ -723,15 +1236,40 @@ fn parse_run(t: &Table) -> Run {
     Run { text: first_string(t), marks, color: color_field(t, "color") }
 }
 
-fn lua_str(s: &mlua::String) -> String {
-    s.to_str().map(|s| s.to_string()).unwrap_or_default()
+/// Highlight `source` as `lang` into monospace [`Run`]s, one per token, each coloured by its
+/// [`code_highlight::HlKind`]. An unknown language falls back to a single uncoloured mono run.
+fn highlight_runs(lang: &str, source: &str) -> Vec<Run> {
+    match code_highlight::highlight(lang, source) {
+        Some(spans) => spans
+            .iter()
+            .filter_map(|s| {
+                let text = source.get(s.range.clone())?.to_string();
+                Some(Run { text, marks: Marks::new().flag("code"), color: Some(hl_color(s.kind)) })
+            })
+            .collect(),
+        None => vec![Run { text: source.to_string(), marks: Marks::new().flag("code"), color: None }],
+    }
 }
 
-/// Parse any CSS color (hex incl. `#rgb`/`#rgba`, `rgb()`, `hsl()`, `oklch()`, named) into a
-/// colour, via `csscolorparser` (CSS Color Level 4).
-fn parse_color(s: &str) -> Option<Color32> {
-    let [r, g, b, a] = csscolorparser::parse(s.trim()).ok()?.to_rgba8();
-    Some(Color32::from_rgba_unmultiplied(r, g, b, a))
+/// A One-Dark-ish palette for syntax tokens, legible on a dark (~#1b1e24) code box.
+fn hl_color(kind: code_highlight::HlKind) -> Color32 {
+    use code_highlight::HlKind::*;
+    match kind {
+        Keyword => Color32::from_rgb(0xc6, 0x78, 0xdd),
+        Function => Color32::from_rgb(0x61, 0xaf, 0xef),
+        Type => Color32::from_rgb(0xe5, 0xc0, 0x7b),
+        Constant | Number => Color32::from_rgb(0xd1, 0x9a, 0x66),
+        String => Color32::from_rgb(0x98, 0xc3, 0x79),
+        Comment => Color32::from_rgb(0x7f, 0x84, 0x8e),
+        Property | Operator | Escape => Color32::from_rgb(0x56, 0xb6, 0xc2),
+        Attribute => Color32::from_rgb(0xe5, 0xc0, 0x7b),
+        Tag => Color32::from_rgb(0xe0, 0x6c, 0x75),
+        Variable | Punctuation | Text => Color32::from_rgb(0xab, 0xb2, 0xbf),
+    }
+}
+
+fn lua_str(s: &mlua::String) -> String {
+    s.to_str().map(|s| s.to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]

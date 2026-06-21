@@ -162,6 +162,8 @@ fn bundled_example_apps_load_and_render() {
         ("gallery.lua", include_str!("../../examples/gallery.lua")),
         ("dashboard.lua", include_str!("../../examples/dashboard.lua")),
         ("settings.lua", include_str!("../../examples/settings.lua")),
+        ("orders.lua", include_str!("../../examples/orders.lua")),
+        ("standup.lua", include_str!("../../examples/standup.lua")),
     ] {
         let mut s = Script::load(src, Rc::new(LoroDoc::new()));
         let root = s.view().unwrap_or_else(|e| panic!("{name} failed to render: {e}"));
@@ -466,4 +468,153 @@ fn memory_bomb_errors_instead_of_oom() {
            end"#,
     );
     assert!(s.view().is_err(), "allocation past the cap errors");
+}
+
+// --- ui.table ----------------------------------------------------------------
+
+#[test]
+fn ui_table_renders_header_divider_and_rows() {
+    let mut s = load(
+        r##"
+        local t = doc:list("orders")
+        if #t == 0 then
+          t:add{ ref = "A-1", qty = 2, paid = true,  status = "open" }
+          t:add{ ref = "A-2", qty = 5, paid = false, status = "done" }
+        end
+        return function()
+          return ui.table{
+            rows = doc:list("orders"),
+            columns = {
+              { key = "ref", label = "Ref", width = 100 },
+              { key = "qty", type = "number", width = 60 },
+              { key = "paid", type = "check", width = 50 },
+              { key = "status", type = "select" },
+            },
+          }
+        end"##,
+    );
+    let root = s.view().expect("view ok");
+    assert_eq!(root.children.len(), 3, "header + divider + body");
+    assert!(root.scroll.as_ref().is_some_and(|s| s.x && !s.y), "outer region scrolls x");
+    let header = &root.children[0];
+    assert_eq!(header.children[0].children[0].plain_text().as_deref(), Some("Ref"));
+    assert_eq!(header.children[1].children[0].plain_text().as_deref(), Some("qty"), "label defaults to key");
+    let body = &root.children[2];
+    assert!(body.scroll.as_ref().is_some_and(|s| s.y && !s.x), "body region scrolls y");
+    assert_eq!(body.children.len(), 2, "two data rows");
+    let row1 = &body.children[0];
+    assert_eq!(row1.children[0].children[0].plain_text().as_deref(), Some("A-1"));
+    assert_eq!(row1.children[1].children[0].plain_text().as_deref(), Some("2"), "whole numbers drop the .0");
+    assert!(row1.style.background.is_none(), "first row unbanded");
+    assert!(body.children[1].style.background.is_some(), "second row banded");
+}
+
+#[test]
+fn table_where_filters_and_order_by_sorts() {
+    let mut s = load(
+        r##"
+        local t = doc:list("tasks")
+        t:add{ name = "a", pts = 1, open = true }
+        t:add{ name = "b", pts = 9, open = true }
+        t:add{ name = "c", pts = 5, open = false }
+        t:add{ name = "d", pts = 5, open = true }
+        return function()
+          return ui.table{
+            rows = doc:list("tasks"),
+            where = { open = true },
+            order_by = { "pts", desc = true },
+            columns = { { key = "name" } },
+          }
+        end"##,
+    );
+    let root = s.view().expect("view ok");
+    let names: Vec<String> = root.children[2]
+        .children
+        .iter()
+        .filter_map(|r| r.children[0].children[0].plain_text())
+        .collect();
+    assert_eq!(names, ["b", "d", "a"], "closed row filtered out; descending by pts");
+}
+
+#[test]
+fn list_add_stamps_a_stable_row_id() {
+    let doc = Rc::new(LoroDoc::new());
+    let _s = Script::load(
+        r#"doc:list("t"):add{ a = 1 }
+           doc:list("t"):add{ id = "mine", a = 2 }
+           return function() return ui.col{} end"#,
+        doc.clone(),
+    );
+    use loro::{Container, LoroValue, ValueOrContainer};
+    let get_id = |i: usize| match doc.get_movable_list("t").get(i) {
+        Some(ValueOrContainer::Container(Container::Map(m))) => match m.get("id") {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    assert!(get_id(0).is_some_and(|id| !id.is_empty()), "auto id stamped at birth");
+    assert_eq!(get_id(1).as_deref(), Some("mine"), "an app-supplied id wins");
+}
+
+// Edits address "first row with this id", so add rejects colliding / non-string / '#'-ids.
+#[test]
+fn list_add_rejects_bad_row_ids() {
+    let doc = Rc::new(LoroDoc::new());
+    let mut s = Script::load(
+        r##"local t = doc:list("t")
+           t:add{ id = "dup", a = 1 }
+           local dup = select(2, pcall(function() t:add{ id = "dup", a = 2 } end))
+           local num = select(2, pcall(function() t:add{ id = 42 } end))
+           local hash = select(2, pcall(function() t:add{ id = "#1" } end))
+           doc:map("out").dup = tostring(dup)
+           doc:map("out").num = tostring(num)
+           doc:map("out").hash = tostring(hash)
+           return function() return ui.col{} end"##,
+        doc.clone(),
+    );
+    assert!(s.view().is_ok(), "guarded adds fail inside pcall, not the script");
+    assert_eq!(doc.get_movable_list("t").len(), 1, "only the first dup row landed");
+    let out = |k: &str| match doc.get_map("out").get(k) {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::String(s))) => s.to_string(),
+        _ => String::new(),
+    };
+    assert!(out("dup").contains("duplicate row id 'dup'"), "got: {}", out("dup"));
+    assert!(out("num").contains("row id must be a string"), "got: {}", out("num"));
+    assert!(out("hash").contains("may not start with '#'"), "got: {}", out("hash"));
+}
+
+#[test]
+fn check_cell_click_flips_the_right_row_under_sort() {
+    let doc = Rc::new(LoroDoc::new());
+    let mut s = Script::load(
+        r##"
+        local t = doc:list("tasks")
+        t:add{ name = "low",  pts = 1, done = false }
+        t:add{ name = "high", pts = 9, done = false }
+        return function()
+          return ui.table{
+            rows = doc:list("tasks"),
+            order_by = { "pts", desc = true },
+            columns = { { key = "name" }, { key = "done", type = "check" } },
+          }
+        end"##,
+        doc.clone(),
+    );
+    let root = s.view().expect("view ok");
+    // Display row 0 is "high" (sorted desc); its check cell carries the toggle handler.
+    let first = &root.children[2].children[0];
+    assert_eq!(first.children[0].children[0].plain_text().as_deref(), Some("high"));
+    let handler = first.children[1].on_click.expect("check cell is clickable");
+    s.dispatch(handler).expect("toggle runs");
+
+    use loro::{Container, LoroValue, ValueOrContainer};
+    let done = |i: usize| match doc.get_movable_list("tasks").get(i) {
+        Some(ValueOrContainer::Container(Container::Map(m))) => {
+            matches!(m.get("done"), Some(ValueOrContainer::Value(LoroValue::Bool(true))))
+        }
+        _ => false,
+    };
+    assert!(!done(0), "'low' (source index 0) untouched");
+    assert!(done(1), "'high' (source index 1) flipped despite sitting first in display order");
 }

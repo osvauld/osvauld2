@@ -318,10 +318,81 @@ pub struct Node {
     /// `Some(id)` ⇒ this text leaf is an **editable field** with that stable id; `None` for
     /// plain text and containers.
     pub editor: Option<String>,
-    /// `Some(id)` ⇒ this container scrolls its content vertically, offset kept across frames keyed
-    /// by `id` (`""` for the common single-scroll case). The box stays its laid-out size; taller
-    /// content is clipped to it and offset by the scroll position.
-    pub scroll: Option<String>,
+    /// `Some(id)` ⇒ this leaf is an embedded **block document** (`ui.doc{ id }`), rendered by a
+    /// native `doc_editor` over a tree inside the app's CRDT. Layout reserves its box; the engine
+    /// paints + edits it in its own child `Ui` keyed by `id`.
+    pub doc: Option<String>,
+    /// `Some(spec)` ⇒ this leaf is a **chart** (`ui.chart`), painted by the engine with `egui_plot`
+    /// into its laid-out box (like `doc`, in its own child `Ui`). The data is resolved host-side.
+    pub chart: Option<ChartSpec>,
+    /// `Some(spec)` ⇒ this container scrolls its overflowing content on the spec's axes, offset
+    /// kept across frames keyed by the spec's id (`""` for the common single-scroll case). The box
+    /// stays its laid-out size; overflow is clipped to it and offset by the scroll position.
+    pub scroll: Option<ScrollSpec>,
+    /// `Some` ⇒ dragging this box's trailing edge resizes part of a table (see [`Resize`]).
+    pub resize: Option<Resize>,
+    /// `true` ⇒ this subtree floats above the page (a dropdown, a picker): laid out in place
+    /// (use `position: absolute`) but painted after everything else, clipped only by the host.
+    pub popup: bool,
+}
+
+/// What dragging a marked box's trailing edge resizes: a header cell's right edge sets its
+/// column's width, a data row's bottom edge sets that row's height. `table` keys the retained
+/// sizes (the list name); `row` is the stable row id.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Resize {
+    Col { table: String, key: String },
+    Row { table: String, row: String },
+}
+
+/// A chart leaf's resolved data (`ui.chart`): the kind plus one or more named y-series, each
+/// aligned with `x_labels`. Built host-side during the walk from a query result — the engine paints
+/// it with `egui_plot`; the values are Rust-side (a small aggregate), never marshalled into Lua.
+/// v1 x-axis is categorical: positions are `0..x_labels.len()`, labels shown on the ticks (covers
+/// segment/month/date dashboards; a true numeric x-axis can come later).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartSpec {
+    pub kind: ChartKind,
+    pub x_labels: Vec<String>,
+    pub series: Vec<ChartSeries>,
+    pub color: Color32,
+}
+
+/// A chart's render style. v1: line / bar / scatter (static, no interaction).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChartKind {
+    Line,
+    Bar,
+    Scatter,
+}
+
+/// One named series of a chart: y values aligned 1:1 with the chart's `x_labels` (x = index).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartSeries {
+    pub name: String,
+    pub values: Vec<f64>,
+}
+
+/// A scroll region declaration: which axes scroll, keyed by a retained-offset id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrollSpec {
+    pub id: String,
+    pub x: bool,
+    pub y: bool,
+}
+
+impl ScrollSpec {
+    pub fn y(id: impl Into<String>) -> Self {
+        ScrollSpec { id: id.into(), x: false, y: true }
+    }
+
+    pub fn x(id: impl Into<String>) -> Self {
+        ScrollSpec { id: id.into(), x: true, y: false }
+    }
+
+    pub fn both(id: impl Into<String>) -> Self {
+        ScrollSpec { id: id.into(), x: true, y: true }
+    }
 }
 
 impl Node {
@@ -334,7 +405,11 @@ impl Node {
             hover: None,
             active: None,
             editor: None,
+            doc: None,
+            chart: None,
             scroll: None,
+            resize: None,
+            popup: false,
         }
     }
 
@@ -363,6 +438,22 @@ impl Node {
     pub fn editor(id: impl Into<String>, runs: Vec<Run>) -> Self {
         let mut node = Node::base(Style::default(), Some(runs));
         node.editor = Some(id.into());
+        node
+    }
+
+    /// An embedded block-document leaf bound to a stable `id`. Carries no text/children — the
+    /// engine renders a native `doc_editor` into its laid-out box.
+    pub fn doc(id: impl Into<String>) -> Self {
+        let mut node = Node::base(Style::default(), None);
+        node.doc = Some(id.into());
+        node
+    }
+
+    /// A chart leaf with resolved data. Carries no text/children — the engine paints it with
+    /// `egui_plot` into its laid-out box.
+    pub fn chart(spec: ChartSpec) -> Self {
+        let mut node = Node::base(Style::default(), None);
+        node.chart = Some(spec);
         node
     }
 

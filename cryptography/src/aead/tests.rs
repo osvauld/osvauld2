@@ -1,5 +1,12 @@
-use super::{decrypt, encrypt, generate_key};
+use super::{decrypt, encrypt};
 use crate::error::CryptoError;
+use rand::{rngs::OsRng, RngCore};
+
+fn generate_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    key
+}
 
 #[test]
 fn round_trip() {

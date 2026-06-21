@@ -9,8 +9,9 @@
 //! identity); the runtime state is the item's separate CRDT, persisted whenever `run` mutates it.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use app_host::App;
+use app_engine::EngineApp as App;
 use code_highlight::HlKind;
 use eframe::egui::{self, Color32, FontFamily, FontId};
 use egui_dock::tab_viewer::OnCloseResponse;
@@ -19,6 +20,7 @@ use vault::{Vault, WorkspaceItem};
 
 use crate::theme;
 use super::atoms::hairline_bottom;
+use super::table_data::TableData;
 
 /// What the .app tab wants persisted this frame.
 #[derive(Default)]
@@ -56,6 +58,10 @@ pub(super) struct AppTab {
     stored: HashMap<String, Vec<u8>>,
     /// Open panes (files + at most one run preview). Only the active pane runs each frame.
     dock: DockState<Pane>,
+    /// The host data plane behind this app's `data` binding (imported `.table` sources). Retained
+    /// across reloads so its caches/generation survive a code edit; the shell forwards external
+    /// `.table` writes to it via [`AppTab::note_source_write`].
+    data: Rc<TableData>,
 }
 
 impl AppTab {
@@ -64,9 +70,16 @@ impl AppTab {
     pub(super) fn load(vault: &Vault, item: &WorkspaceItem) -> Self {
         let (files, stored) = read_tree(vault, item);
         let state = vault.get_state(&item.ws_id, &item.id).ok().flatten();
-        let engine = App::from_files(&files, state.as_deref());
+        let data = Rc::new(TableData::new(vault, &item.ws_id));
+        let engine = App::from_files(&files, state.as_deref()).with_data_access(data.clone());
         let dock = build_dock(&default_paths(&files), &files, &stored, false);
-        AppTab { engine, files, stored, dock }
+        AppTab { engine, files, stored, dock, data }
+    }
+
+    /// Forward an external `.table` write to this app's data plane; it recomputes only if `item_id`
+    /// backs one of its imported sources.
+    pub(super) fn note_source_write(&self, item_id: &str) {
+        self.data.invalidate(item_id);
     }
 
     /// Re-read the source tree and rebuild the engine (after a whole-file external write, e.g. MCP
@@ -79,7 +92,7 @@ impl AppTab {
         self.files = files;
         self.stored = stored;
         let state = vault.get_state(&item.ws_id, &item.id).ok().flatten();
-        self.engine = App::from_files(&self.files, state.as_deref());
+        self.engine = App::from_files(&self.files, state.as_deref()).with_data_access(self.data.clone());
         self.dock = build_dock(&open, &self.files, &self.stored, run);
     }
 
@@ -288,7 +301,7 @@ fn code_view(ui: &mut egui::Ui, item: &WorkspaceItem, tab: &mut AppTab) -> (Vec<
         return (Vec::new(), None);
     }
 
-    let AppTab { engine, files, stored, dock } = tab;
+    let AppTab { engine, files, stored, dock, data: _ } = tab;
     let mut saved = Vec::new();
     let mut runtime = None;
 
@@ -446,10 +459,11 @@ fn export_bar(ui: &mut egui::Ui, engine: &mut App, name: &str) {
             .font(FontId::new(10.5, FontFamily::Monospace))
             .color(theme::ACCENT_SOFT);
         if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
-            let fonts = app_host::FontBytes {
+            let fonts = app_engine::FontBytes {
                 regular: theme::FONT_SANS,
                 bold: theme::FONT_SANS_SB,
                 mono: theme::FONT_MONO,
+                fallback: theme::FONT_FALLBACK,
             };
             let msg = match engine.export_pdf(fonts) {
                 Ok(bytes) => {
@@ -473,7 +487,7 @@ fn export_bar(ui: &mut egui::Ui, engine: &mut App, name: &str) {
 /// Print preview: the app laid out inside a fixed page-sized white sheet (1 px = 1 pt), centered
 /// in a scrollable backdrop instead of filling the pane. The sheet is the print default surface;
 /// the app paints on top of it.
-fn page_preview(ui: &mut egui::Ui, page: app_host::PageSpec, engine: &mut App) -> Option<Vec<u8>> {
+fn page_preview(ui: &mut egui::Ui, page: app_engine::PageSpec, engine: &mut App) -> Option<Vec<u8>> {
     const MARGIN: f32 = 28.0;
     let mut out = None;
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {

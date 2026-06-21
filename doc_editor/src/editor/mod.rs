@@ -32,8 +32,11 @@ use std::sync::Arc;
 
 use egui::{CornerRadius, Event, Galley, Key, Pos2, Rect, Sense, Ui, Vec2};
 use loro::TreeID;
+use loro::cursor::Cursor;
 
-use crate::model::{BlockKind, Doc};
+use text_edit::TextField;
+
+use crate::model::{BlockBuf, BlockKind, Doc};
 use crate::theme;
 
 use selection::Selection;
@@ -119,6 +122,11 @@ pub struct DocEditor {
     blink_origin: f64,
     /// Last frame's caret position, to detect movement and reset the blink.
     last_caret: Option<(TreeID, usize)>,
+    /// Stable Loro cursors for the selection's `(anchor, head)`, snapshot at the end of each
+    /// frame. At the next frame's start they remap the caret through any concurrent remote edit
+    /// (e.g. an agent or peer editing the same block), so text inserted before the caret carries
+    /// it along instead of leaving it at a now-wrong offset. `None` until the first capture.
+    anchored: Option<(Cursor, Cursor)>,
 }
 
 impl DocEditor {
@@ -140,7 +148,7 @@ impl DocEditor {
 
     fn show_frame(&mut self, ui: &mut Ui, doc: &Doc, read_only: bool) -> bool {
         let ids = doc.block_ids();
-        self.resolve_caret(doc, &ids);
+        self.remap_caret(doc, &ids);
         // Drop a stale slash palette if its block vanished (e.g. a remote delete).
         if self.slash.as_ref().is_some_and(|s| !ids.contains(&s.block)) {
             self.slash = None;
@@ -426,7 +434,7 @@ impl DocEditor {
                 doc.commit();
             }
             let ids = doc.block_ids();
-            self.resolve_caret(doc, &ids);
+            self.clamp_caret(doc, &ids);
             layout::layout_all(doc, &ids, ui, width, &mut self.layout_cache).0
         } else {
             placed
@@ -461,15 +469,62 @@ impl DocEditor {
         if self.drag.is_some() {
             self.paint_drag(ui, doc, rect, viewport, &placed);
         }
+
+        // Snapshot stable cursors for the final selection, so next frame can remap the caret
+        // across any remote edit that lands in between.
+        self.capture_anchors(doc);
         changed || undo_redo
     }
 
     // --- Caret bookkeeping ------------------------------------------------------------
 
-    /// Ensure both selection endpoints point at blocks that still exist, with in-range
-    /// offsets (a remote delete relocates an endpoint to the document start rather than
-    /// crashing). Initialises a collapsed caret on the first frame.
-    fn resolve_caret(&mut self, doc: &Doc, ids: &[TreeID]) {
+    /// Run a single-run [`TextField`] op on the caret's block — the shared text_edit kernel
+    /// drives all in-block text editing — then sync the block-anchored caret back. The op sees
+    /// the current selection when both endpoints sit in that block, else a collapsed caret.
+    fn in_block<R>(&mut self, doc: &Doc, op: impl FnOnce(&mut TextField, &mut BlockBuf) -> R) -> R {
+        let c = self.caret();
+        let mut tf = TextField::new();
+        match self.sel.filter(|s| s.anchor.block == c.block) {
+            Some(s) => {
+                tf.set_caret(s.anchor.index);
+                tf.set_head(s.head.index, true);
+            }
+            None => tf.set_caret(c.index),
+        }
+        let mut buf = BlockBuf { doc, id: c.block };
+        let r = op(&mut tf, &mut buf);
+        self.set_caret(Caret { block: c.block, index: tf.caret() });
+        r
+    }
+
+    /// Frame start: remap the caret through the stable cursors captured at the end of the last
+    /// frame, so a concurrent remote edit (peer or agent) that shifted text in the caret's block
+    /// carries the caret **with** the text instead of leaving it at a stale offset. Falls back to
+    /// [`clamp_caret`](Self::clamp_caret)'s behaviour when no cursor exists or it can't be located
+    /// (block gone → document start; index out of range → clamped). Initialises on the first frame.
+    fn remap_caret(&mut self, doc: &Doc, ids: &[TreeID]) {
+        let (anchor_cur, head_cur) = match self.anchored.take() {
+            Some((a, h)) => (Some(a), Some(h)),
+            None => (None, None),
+        };
+        let fix = |loc: Caret, cur: Option<Cursor>| {
+            if !ids.contains(&loc.block) {
+                return Caret { block: ids[0], index: 0 };
+            }
+            // Prefer the cursor's remapped offset; if it can't resolve, keep the stored index.
+            let index = cur.and_then(|c| doc.resolve_cursor(&c)).unwrap_or(loc.index);
+            Caret { block: loc.block, index: index.min(doc.text_len(loc.block)) }
+        };
+        self.sel = Some(match self.sel {
+            Some(s) => Selection { anchor: fix(s.anchor, anchor_cur), head: fix(s.head, head_cur) },
+            None => Selection::caret(Caret { block: ids[0], index: 0 }),
+        });
+    }
+
+    /// After this peer's *own* edits within a frame: the indices we set are already in current
+    /// coordinates, so only repair block existence and clamp offsets — no cursor remap (the
+    /// captured cursors are pre-edit and would fight the index we just set).
+    fn clamp_caret(&mut self, doc: &Doc, ids: &[TreeID]) {
         let fix = |loc: Caret| {
             if ids.contains(&loc.block) {
                 Caret { block: loc.block, index: loc.index.min(doc.text_len(loc.block)) }
@@ -480,6 +535,16 @@ impl DocEditor {
         self.sel = Some(match self.sel {
             Some(s) => Selection { anchor: fix(s.anchor), head: fix(s.head) },
             None => Selection::caret(Caret { block: ids[0], index: 0 }),
+        });
+    }
+
+    /// Snapshot stable Loro cursors for the current selection's endpoints, so the next frame can
+    /// remap the caret across any remote edit that arrives in between. Called once at frame end,
+    /// against the final (committed) state. Re-capturing each frame keeps the cursors anchored to
+    /// live ids, so resolving them stays cheap (no history replay).
+    fn capture_anchors(&mut self, doc: &Doc) {
+        self.anchored = self.sel.and_then(|s| {
+            Some((doc.cursor_at(s.anchor.block, s.anchor.index)?, doc.cursor_at(s.head.block, s.head.index)?))
         });
     }
 

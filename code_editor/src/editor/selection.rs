@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use block_doc::BlockId;
 use egui::text::CCursor;
-use egui::{pos2, Galley, Key, Modifiers, Rect};
+use egui::{Galley, Key, Modifiers};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Caret {
@@ -87,33 +87,6 @@ pub(super) fn move_cursor(
         _ => return None,
     };
     Some(new.index)
-}
-
-/// Rects in galley-local coords covering `[lo, hi)`, one per row. A selection through a
-/// line-ending newline extends a few px past the last glyph so the blank line-end reads as selected.
-pub(super) fn selection_rects(galley: &Galley, lo: usize, hi: usize) -> Vec<Rect> {
-    if lo >= hi {
-        return Vec::new();
-    }
-    let mut rects = Vec::new();
-    let mut start = 0usize;
-    for row in &galley.rows {
-        let row_hi = start + row.glyphs.len();
-        let nl = row.ends_with_newline as usize;
-        let a = lo.max(start);
-        let b = hi.min(row_hi + nl);
-        if a < b {
-            let left = galley.pos_from_cursor(CCursor::new(a)).min.x;
-            let right = if b > row_hi {
-                row.rect().right() + 3.0
-            } else {
-                galley.pos_from_cursor(CCursor::new(b)).min.x
-            };
-            rects.push(Rect::from_min_max(pos2(left, row.pos.y), pos2(right, row.pos.y + row.size.y)));
-        }
-        start = row_hi + nl;
-    }
-    rects
 }
 
 #[cfg(test)]

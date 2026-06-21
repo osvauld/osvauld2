@@ -45,6 +45,8 @@ pub struct FontBytes<'a> {
     pub regular: &'a [u8],
     pub bold: &'a [u8],
     pub mono: &'a [u8],
+    /// Extra glyph-fallback faces (e.g. Indic). Shaping only — not embedded in PDFs yet.
+    pub fallback: &'a [&'a [u8]],
 }
 
 /// The three embedded faces, and the rule mapping an egui family to one of them. Bold rides the

@@ -45,7 +45,7 @@ pub fn export_pdf(doc: &Doc, ui: &Ui, fonts: PdfFonts) -> Vec<u8> {
     let mut pdf = PdfDocument::new("Document");
     let fonts = FontSet::load(
         &mut pdf,
-        FontBytes { regular: fonts.regular, bold: fonts.bold, mono: fonts.mono },
+        FontBytes { regular: fonts.regular, bold: fonts.bold, mono: fonts.mono, fallback: &[] },
     );
 
     // Paginate by block: a block never splits across a page; one that would overflow starts a

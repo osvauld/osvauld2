@@ -6,12 +6,19 @@ license.workspace = true
 
 [dependencies]
 egui = "0.34"
+# Native charts for `ui.chart` (line/bar/scatter). egui_plot 0.35 tracks egui 0.34.x.
+egui_plot = "0.35"
 taffy = "0.10"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 csscolorparser = "0.8"
 loro = "1.12.0"
+table_core = { path = "../table_core" }
 rich_text = { path = "../rich_text" }
 text_edit = { path = "../text_edit" }
+# Syntax highlighting for `ui.code` — same tree-sitter leaf doc_editor uses.
+code_highlight = { path = "../code_highlight" }
+# The native block editor, embedded by `ui.doc` over a tree inside the app's CRDT.
+doc_editor = { path = "../doc_editor" }
 # Shared egui→printpdf emission for page-declaring apps' export.
 pdf_paint = { path = "../pdf_paint" }
 # Off-screen screenshot rasterizing (versions pinned to egui's own wgpu).

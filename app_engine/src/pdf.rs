@@ -24,7 +24,10 @@ impl EngineApp {
         let page = self.page().ok_or("app declares no page")?;
         let root = match &mut self.view {
             ViewSource::Static(node) => node.clone(),
-            ViewSource::Script { script, .. } => script.view()?,
+            ViewSource::Script { script, .. } => {
+                script.full_viewport(); // export every row, never the on-screen window
+                script.view()?
+            }
         };
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(page.width, page.height));
         let scroll = self.scroll.clone();
@@ -76,7 +79,14 @@ pub(crate) fn install_fonts(ctx: &egui::Context, fonts: &FontBytes) {
     add("export_sans", fonts.regular);
     add("export_sans_sb", fonts.bold);
     add("export_mono", fonts.mono);
-    defs.families.entry(FontFamily::Proportional).or_default().insert(0, "export_sans".to_owned());
+    for (i, fb) in fonts.fallback.iter().enumerate() {
+        add(&format!("export_fb{i}"), fb);
+    }
+    let prop = defs.families.entry(FontFamily::Proportional).or_default();
+    prop.insert(0, "export_sans".to_owned());
+    for i in 0..fonts.fallback.len() {
+        prop.insert(1 + i, format!("export_fb{i}"));
+    }
     defs.families.entry(FontFamily::Monospace).or_default().insert(0, "export_mono".to_owned());
     defs.families
         .entry(FontFamily::Name(rich_text::BOLD_FAMILY.into()))

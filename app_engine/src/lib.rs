@@ -1,17 +1,21 @@
 //! Renders uploadable apps as a homegrown declarative UI engine, composited natively into the
 //! egui shell: a Lua script returns a [`Node`] tree, laid out with Taffy and painted with egui
-//! into a [`Frame`] of native meshes (the compositor adds no GPU glue beyond egui's own).
+//! into a [`Frame`] of native meshes (the shell adds no GPU glue beyond egui's own).
 //!
 //! Text shapes via egui's fonts for now (no complex scripts); that swaps to parley/cosmic-text
 //! behind the `layout::shape` seam when it matters.
 
+pub mod data;
 mod layout;
 mod node;
 mod paint;
 mod pdf;
 mod script;
 mod shot;
+mod table;
 
+pub use data::{DataAccess, DataAccessRef, Handle, NamedOp, QueryState};
+pub use node::{ChartKind, ChartSeries, ChartSpec};
 pub use pdf::FontBytes;
 
 use std::collections::HashMap;
@@ -34,8 +38,7 @@ pub struct PageSpec {
 }
 
 /// One frame's drawing from an app: GPU-ready triangles plus their texture uploads and a
-/// repaint signal. Field-for-field the host-side `app_host::Surface`, kept separate so the
-/// engine doesn't depend on the host (the dependency runs the other way).
+/// repaint signal.
 pub struct Frame {
     pub primitives: Vec<egui::ClippedPrimitive>,
     pub textures_delta: egui::TexturesDelta,
@@ -104,6 +107,8 @@ fn engine_ctx() -> egui::Context {
     ctx
 }
 
+pub use table_core::row_id;
+
 /// The doc snapshot file for a source path — the source with `.snapshot` appended.
 fn snapshot_path(source: &Path) -> PathBuf {
     let mut p = source.as_os_str().to_owned();
@@ -135,8 +140,58 @@ pub struct EngineApp {
     fields: HashMap<String, TextField>,
     /// The focused editor's id, if any — where keyboard input is routed.
     focus: Option<String>,
-    /// Retained vertical scroll position (points) per scroll region, keyed by `ui.col{ scroll }`.
-    scroll: HashMap<String, f32>,
+    /// Retained scroll position (points, per axis) per scroll region, keyed by `ui.col{ scroll }`.
+    scroll: HashMap<String, egui::Vec2>,
+    /// An in-progress scrollbar thumb drag: (region id, horizontal axis, grab offset in the thumb).
+    drag_bar: Option<(String, bool, f32)>,
+    /// An in-progress table resize drag: (target, size at press, pointer coord at press).
+    drag_size: Option<(node::Resize, f32, f32)>,
+    /// Whether the focused field has uncommitted-feeling edits this focus session — blur then
+    /// fires a cell's `on_edit` once. (The CRDT already holds the keystrokes; this gates the hook.)
+    focus_dirty: bool,
+    /// Last frame's laid-out scene, reused when only the pointer moved (hover). egui repaints on
+    /// every pointer-move, but an unchanged [`SceneKey`] with no edit or live drag means the layout
+    /// is identical, so `show()` skips view() + Taffy and just repaints.
+    scene: Option<SceneCache>,
+    /// Monotonic count of scene rebuilds; a reused (cached) hover frame does not bump it. Telemetry,
+    /// and lets a test assert that a pointer-only repaint skips the rebuild.
+    scene_rebuilds: u64,
+    /// Live embedded block editors, keyed by `ui.doc{ id }`. Each drives a `doc_editor::Doc` over a
+    /// `uidoc:<id>` tree inside `doc`, so its blocks persist + sync with the rest of the app's CRDT.
+    /// Retained across frames (caret/scroll) and across hot-reloads (the data outlives the code).
+    docs: HashMap<String, DocCell>,
+    /// The host's World-B data plane (`data` Lua binding), if this app was given one. Imported
+    /// `.table` sources resolve through it; its composite version folds into the scene key so an
+    /// external source write triggers a rebuild. `None` = no imported-table access (tests, `.table`,
+    /// static).
+    data: Option<data::DataAccessRef>,
+}
+
+/// A live embedded block document: the native editor's retained UI state plus the `Doc` view over
+/// its tree in the app's shared CRDT.
+struct DocCell {
+    editor: doc_editor::DocEditor,
+    doc: doc_editor::Doc,
+}
+
+/// A cached frame: the laid-out boxes and the key they were built under.
+struct SceneCache {
+    key: SceneKey,
+    placed: Vec<layout::Placed>,
+}
+
+/// Everything that changes the laid-out scene. Equal key (plus no edit/drag in flight) ⇒ last
+/// frame's `placed` still holds; hover and caret are applied at paint time, so they track the
+/// pointer without a rebuild.
+#[derive(PartialEq)]
+struct SceneKey {
+    frontiers: loro::Frontiers,
+    rect: egui::Rect,
+    scroll: HashMap<String, egui::Vec2>,
+    focus: Option<String>,
+    /// Composite version of the app's imported `.table` sources (0 with no data plane). A bump
+    /// (an external source write) differs the key, forcing a rebuild + recompute of `data.sql`.
+    data_version: u64,
 }
 
 impl EngineApp {
@@ -150,6 +205,13 @@ impl EngineApp {
             fields: HashMap::new(),
             focus: None,
             scroll: HashMap::new(),
+            drag_bar: None,
+            drag_size: None,
+            focus_dirty: false,
+            scene: None,
+            scene_rebuilds: 0,
+            docs: HashMap::new(),
+            data: None,
         }
     }
 
@@ -170,6 +232,13 @@ impl EngineApp {
             fields: HashMap::new(),
             focus: None,
             scroll: HashMap::new(),
+            drag_bar: None,
+            drag_size: None,
+            focus_dirty: false,
+            scene: None,
+            scene_rebuilds: 0,
+            docs: HashMap::new(),
+            data: None,
         }
     }
 
@@ -190,6 +259,58 @@ impl EngineApp {
             fields: HashMap::new(),
             focus: None,
             scroll: HashMap::new(),
+            drag_bar: None,
+            drag_size: None,
+            focus_dirty: false,
+            scene: None,
+            scene_rebuilds: 0,
+            docs: HashMap::new(),
+            data: None,
+        }
+    }
+
+    /// Build a `.table` view over a stored CRDT snapshot (schema + `rows`): a grid rendered
+    /// natively from the doc's stored schema, no Lua app. `color` is the host text colour the grid
+    /// tints its chrome from. Writes (cell edits) flow back to the doc like any app's runtime.
+    pub fn table(crdt_snapshot: Option<&[u8]>, color: egui::Color32, font: f32) -> Self {
+        let doc = Rc::new(LoroDoc::new());
+        if let Some(bytes) = crdt_snapshot {
+            let _ = doc.import(bytes);
+        }
+        let script = script::Script::table(doc.clone(), color, font);
+        EngineApp {
+            ctx: engine_ctx(),
+            view: ViewSource::Script { source: Source::Inline, script },
+            doc,
+            data_path: None,
+            fields: HashMap::new(),
+            focus: None,
+            scroll: HashMap::new(),
+            drag_bar: None,
+            drag_size: None,
+            focus_dirty: false,
+            scene: None,
+            scene_rebuilds: 0,
+            docs: HashMap::new(),
+            data: None,
+        }
+    }
+
+    /// Give this app a host data plane (the `data` Lua binding) for reading imported `.table`
+    /// sources. Builder form, used by the host when it opens an app tab. Re-installed across
+    /// hot-reloads so the binding survives a code edit.
+    pub fn with_data_access(mut self, access: data::DataAccessRef) -> Self {
+        self.data = Some(access);
+        self.install_data();
+        self
+    }
+
+    /// Install the held data plane into the current script's VM, if both exist.
+    fn install_data(&self) {
+        if let (Some(access), ViewSource::Script { script, .. }) = (&self.data, &self.view) {
+            if let Err(e) = script.install_data(access.clone()) {
+                eprintln!("app_engine: data binding failed: {e}");
+            }
         }
     }
 
@@ -198,9 +319,12 @@ impl EngineApp {
     pub fn reload_source(&mut self, files: &[(String, String)]) {
         let script = script::Script::load_app(files, self.doc.clone());
         self.view = ViewSource::Script { source: Source::Inline, script };
+        self.install_data();
         self.fields.clear();
         self.focus = None;
+        self.focus_dirty = false;
         self.scroll.clear();
+        self.scene = None;
     }
 
     /// The app's print-page declaration, if it made one. The host renders such an app inside a
@@ -212,133 +336,275 @@ impl EngineApp {
         }
     }
 
-    /// Render one frame into a `Ui`, handling input and returning the CRDT snapshot if
-    /// state changed (so the caller can persist it to vault). Consumes the available rect.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Vec<u8>> {
-        let rect = ui.available_rect_before_wrap();
-        let input = Self::collect_input(ui, rect);
-        let click = click_pos(&input);
-        let edits = collect_edits(&input);
-        let submit = wants_submit(&input);
-
-        // Apply edits to the focused field before resolving the view.
-        let mut edited = false;
-        let mut submitted = false;
-        if let Some(id) = self.focus.clone() {
-            if let ViewSource::Script { script, .. } = &self.view {
-                let mut field = self.fields.get(&id).copied().unwrap_or_default();
-                edited = script.with_buffer(&id, |buf| {
-                    field.clamp(&*buf);
-                    for e in &edits {
-                        apply_edit(&mut field, &mut *buf, e);
-                    }
-                });
-                self.fields.insert(id.clone(), field);
-                if submit {
-                    match script.submit(&id) {
-                        Ok(fired) => submitted = fired,
-                        Err(err) => eprintln!("app_engine: on_submit error: {err}"),
-                    }
-                }
-            }
-        }
-
-        // Hot-reload if this app has a file source.
+    /// Hot-reload the script if a file backs it and its source changed; the same `doc` carries
+    /// over, so editing the code keeps the data. Returns the idle poll interval for file sources.
+    fn hot_reload(&mut self) -> Option<Duration> {
         let doc = self.doc.clone();
-        if let ViewSource::Script { source, script } = &mut self.view {
-            if source.changed() {
-                *script = match source.read() {
-                    Ok(text) => script::Script::load(&text, doc.clone()),
-                    Err(err) => script::Script::failed(err),
-                };
-            }
+        let ViewSource::Script { source, script } = &mut self.view else { return None };
+        let reloaded = source.changed();
+        if reloaded {
+            *script = match source.read() {
+                Ok(text) => script::Script::load(&text, doc),
+                Err(err) => script::Script::failed(err),
+            };
         }
+        let interval = source.poll_interval();
+        if reloaded {
+            self.install_data(); // the new script's VM needs the `data` binding re-installed
+            self.scene = None; // the tree changed though the doc version didn't — drop stale scene
+        }
+        interval
+    }
 
+    /// Route this frame's keyboard to the focused editor *before* the view resolves, so the view
+    /// re-reads the post-edit content this same frame. The field re-clamps against the live
+    /// buffer so the caret survives an external/remote edit (peer, MCP, or a clearing
+    /// `on_submit`). Enter fires `on_submit` after the keys, so a batched `Text`+`Enter` submits
+    /// the just-typed value. Returns (edited, submitted).
+    fn apply_edits(&mut self, edits: &[Edit], submit: bool) -> (bool, bool) {
+        let Some(id) = self.focus.clone() else { return (false, false) };
+        let ViewSource::Script { script, .. } = &self.view else { return (false, false) };
+        let mut field = self.fields.get(&id).copied().unwrap_or_default();
+        let edited = script.with_buffer(&id, |buf| {
+            field.clamp(&*buf);
+            for e in edits {
+                apply_edit(&mut field, &mut *buf, e);
+            }
+        });
+        self.fields.insert(id.clone(), field);
+        self.focus_dirty |= edited;
+        let mut submitted = false;
+        if submit {
+            match script.submit(&id) {
+                Ok(fired) => submitted = fired,
+                Err(err) => eprintln!("app_engine: on_submit error: {err}"),
+            }
+            // Enter already committed; the eventual blur shouldn't re-fire.
+            self.focus_dirty = false;
+        }
+        (edited, submitted)
+    }
+
+    /// Resolve this frame's view tree (the script runs knowing the focused id — a focused select
+    /// cell opens its dropdown). A non-page app gets the web-page scroll root: a natural-height
+    /// root overflows the synthetic region; a `height = "100%"` root fills the host (dashboard
+    /// semantics) and never does.
+    fn resolve_root(&mut self, viewport_h: f32, scroll: &HashMap<String, egui::Vec2>) -> Node {
         let root = match &mut self.view {
             ViewSource::Static(node) => node.clone(),
-            ViewSource::Script { script, .. } => script.view().unwrap_or_else(|err| error_card(&err)),
+            ViewSource::Script { script, .. } => {
+                script.set_focus(self.focus.as_deref());
+                script.set_viewport(viewport_h, scroll);
+                script.view().unwrap_or_else(|err| error_card(&err))
+            }
         };
+        if self.page().is_none() { scroll_root(root) } else { root }
+    }
 
-        let focus_id = self.focus.clone();
-        let focus_field = focus_id.as_ref().and_then(|id| self.fields.get(id)).copied();
-        let scroll = self.scroll.clone();
-
-        let placed = layout::layout(ui.ctx(), rect, &root, &scroll);
-        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
-        let pointer = paint::Pointer { hover, pressed: ui.input(|i| i.pointer.primary_down()) };
-        let focus = focus_id.as_deref().zip(focus_field.as_ref());
-
-        // Allocate the full rect so egui knows we used it, then paint.
-        let (_, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
-        paint::paint(ui, &placed, &pointer, focus);
-
-        // Hit-test clicks.
-        let mut dispatched = false;
-        let mut editor_click = None;
-        let mut drag_to: Option<(String, usize)> = None;
-        let mut wheel: Option<(String, f32, f32)> = None;
-
-        if let Some(p) = click {
-            let extend = ui.input(|i| i.modifiers.shift);
-            if let Some(node) = placed.iter().rev().find(|n| n.editor.is_some() && n.rect.contains(p)) {
-                let idx = node.text.as_ref().map_or(0, |(origin, galley)| text_edit::char_at(galley, p - *origin));
-                editor_click = Some((node.editor.clone().unwrap(), idx, extend));
-            } else if let Some(id) = hit_test(&placed, p) {
-                if let ViewSource::Script { script, .. } = &mut self.view {
-                    if let Err(err) = script.dispatch(id) {
-                        eprintln!("app_engine: on_click error: {err}");
+    /// Apply one frame's sensed interactions to the engine state: drag starts and live updates,
+    /// the click (editor focus / handler dispatch / empty-space blur), the blur commit, selection
+    /// drag, wheel + thumb scrolling, and drag release.
+    fn apply(&mut self, prev_focus: Option<String>, ix: Interactions) -> Applied {
+        if let Some(press) = ix.bar_press {
+            self.drag_bar = Some(press);
+        }
+        if let Some(press) = ix.size_press {
+            self.drag_size = Some(press);
+        }
+        // A held resize handle tracks the pointer (live — the next view() applies it); the
+        // declared sizes become the initial values.
+        if let (Some((target, start, origin)), Some(p)) = (self.drag_size.clone(), ix.pointer) {
+            if let ViewSource::Script { script, .. } = &self.view {
+                match &target {
+                    node::Resize::Col { table, key } => {
+                        script.set_col_width(table, key, (start + p.x - origin).max(40.0))
                     }
-                    dispatched = true;
+                    node::Resize::Row { table, row } => {
+                        script.set_row_height(table, row, (start + p.y - origin).max(22.0))
+                    }
                 }
-            } else {
-                self.focus = None;
             }
         }
 
-        if let Some((id, idx, extend)) = editor_click {
+        // Apply the click: focus + caret on an editor; dispatch a handler (keeping focus); empty
+        // space blurs. A handler error keeps the current view (logged).
+        let mut dispatched = false;
+        if let Some((id, idx, extend)) = ix.editor_click {
             let mut field = self.fields.get(&id).copied().unwrap_or_default();
             field.set_head(idx, extend);
             self.fields.insert(id.clone(), field);
             self.focus = Some(id);
+        } else if let (Some(id), ViewSource::Script { script, .. }) = (ix.hit, &mut self.view) {
+            if let Err(err) = script.dispatch(id) {
+                eprintln!("app_engine: on_click error: {err}");
+            }
+            dispatched = true;
+        } else if ix.miss {
+            self.focus = None;
         }
-
-        if let (Some(fid), Some(h), true) = (&focus_id, hover, ui.input(|i| i.pointer.primary_down())) {
-            if let Some(node) = placed.iter().find(|n| n.editor.as_deref() == Some(fid.as_str())) {
-                if let Some((origin, galley)) = &node.text {
-                    drag_to = Some((fid.clone(), text_edit::char_at(galley, h - *origin)));
-                }
+        // A select commit asked to close its dropdown: drop focus (the blur below clears the query).
+        if let ViewSource::Script { script, .. } = &self.view {
+            if script.take_defocus() {
+                self.focus = None;
             }
         }
-        if let Some((id, idx)) = drag_to {
+
+        // Leaving an edited field commits it: a cell's `on_edit` fires once on blur.
+        let mut blurred = false;
+        if prev_focus != self.focus {
+            if let (Some(old), true, ViewSource::Script { script, .. }) =
+                (&prev_focus, self.focus_dirty, &self.view)
+            {
+                match script.blur(old) {
+                    Ok(fired) => blurred = fired,
+                    Err(err) => eprintln!("app_engine: on_edit error: {err}"),
+                }
+            }
+            self.focus_dirty = false;
+        }
+
+        // A drag extends the focused field's selection (the click above set its anchor).
+        let dragging = ix.drag_to.is_some();
+        if let Some((id, idx)) = ix.drag_to {
             let mut field = self.fields.get(&id).copied().unwrap_or_default();
             field.set_head(idx, true);
             self.fields.insert(id, field);
         }
 
-        let dy = ui.input(|i| i.smooth_scroll_delta.y);
-        if dy != 0.0 {
-            if let Some(node) = hover.and_then(|h| placed.iter().rev().find(|n| n.scroll.is_some() && n.rect.contains(h))) {
-                let (id, max) = node.scroll.clone().unwrap();
-                wheel = Some((id, max, dy));
+        // Apply the wheel to the hovered scroll regions (egui's convention: offset -= delta).
+        let mut scrolled = false;
+        for (id, max, d) in ix.wheel {
+            let off = self.scroll.entry(id).or_default();
+            let new = (*off - d).clamp(egui::Vec2::ZERO, max);
+            scrolled |= new != *off;
+            *off = new;
+        }
+
+        // A held scrollbar thumb tracks the pointer; release ends both drags.
+        if let (Some((id, horizontal, grab)), Some(p)) = (self.drag_bar.clone(), ix.pointer) {
+            if let Some(bar) = ix.bars.iter().find(|b| b.id == id && b.horizontal == horizontal) {
+                let v = bar_drag_offset(bar, p, grab);
+                let off = self.scroll.entry(id).or_default();
+                let new = if horizontal { egui::vec2(v, off.y) } else { egui::vec2(off.x, v) };
+                scrolled |= new != *off;
+                *off = new;
             }
         }
-        if let Some((id, max, dy)) = wheel {
-            let off = self.scroll.entry(id).or_default();
-            *off = (*off - dy).clamp(0.0, max);
+        if !ix.down {
+            self.drag_bar = None;
+            self.drag_size = None;
+        }
+
+        Applied { dispatched, blurred, dragging, scrolled }
+    }
+
+    /// Render one frame into a `Ui`, handling input and returning the CRDT snapshot if
+    /// state changed (so the caller can persist it to vault). Consumes the available rect.
+    /// Pointer positions stay in screen coordinates — layout and hit-testing both run in
+    /// screen space (host-rect origin).
+    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Vec<u8>> {
+        let rect = ui.available_rect_before_wrap();
+        let input = ui.ctx().input(|i| i.raw.clone());
+        let click = click_pos(&input);
+        let edits = collect_edits(&input);
+        let submit = wants_submit(&input);
+        // Arrow keys are app-level navigation only when no editor is focused (otherwise they move
+        // the caret) — neither an engine `ui.editor` (self.focus) nor an embedded `ui.doc` (which
+        // takes egui's own keyboard focus). Resolved against the frame-start focus.
+        let doc_focused = ui.ctx().memory(|m| m.focused().is_some());
+        let nav = (self.focus.is_none() && !doc_focused).then(|| nav_key(&input)).flatten();
+
+        self.hot_reload();
+        let prev_focus = self.focus.clone();
+        let (edited, submitted) = self.apply_edits(&edits, submit);
+        // Window the table to the host height; the body's retained y offset drives which rows
+        // build. Cloned up front (before the `&mut self` view resolve) and reused for layout.
+        let scroll = self.scroll.clone();
+
+        // Rebuild the scene only when something that affects the layout changed. egui repaints on
+        // every pointer-move (for hover), but if the doc version, host rect, scroll, and focus are
+        // unchanged — and no edit or live drag is in flight — last frame's layout is identical, so
+        // we skip view() + Taffy entirely. Hover/caret are applied below at paint time, so they
+        // still track the pointer on a reused scene.
+        let key = SceneKey {
+            frontiers: self.doc.oplog_frontiers(),
+            rect,
+            scroll: scroll.clone(),
+            focus: self.focus.clone(),
+            data_version: self.data.as_ref().map_or(0, |d| d.version()),
+        };
+        let live = edited || submitted || self.drag_bar.is_some() || self.drag_size.is_some();
+        let reuse = !live && self.scene.as_ref().is_some_and(|s| s.key == key);
+        if !reuse {
+            let root = self.resolve_root(rect.height(), &scroll);
+            let placed = layout::layout(ui.ctx(), rect, &root, &scroll);
+            self.scene = Some(SceneCache { key, placed });
+            self.scene_rebuilds += 1;
+        }
+
+        let focus_id = self.focus.clone();
+        let focus_field = focus_id.as_ref().and_then(|id| self.fields.get(id)).copied();
+        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+        let pointer = paint::Pointer { hover, pressed: ui.input(|i| i.pointer.primary_down()) };
+        let focus = focus_id.as_deref().zip(focus_field.as_ref());
+
+        // Allocate the full rect so egui knows we used it, then paint + sense the (possibly reused)
+        // scene. The `placed` borrow ends with `sense`, before `apply` takes `&mut self`.
+        let (_, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
+        let placed = &self.scene.as_ref().expect("scene built this frame").placed;
+        paint::paint(ui, placed, &pointer, focus);
+        let ix =
+            sense(ui, placed, &scroll, click, hover, focus_id.as_deref(), &self.drag_bar, &self.drag_size);
+        // Embedded block docs render in their own child Ui *after* the painted scene (so their
+        // content lands on top of the node's box). Collect (id, rect) before taking `&mut self`.
+        let doc_nodes: Vec<(String, egui::Rect)> =
+            placed.iter().filter_map(|p| p.doc.clone().map(|id| (id, p.rect))).collect();
+        // Charts paint in their own child Ui (egui_plot needs `&mut Ui`), after the scene, like docs.
+        let chart_nodes: Vec<(node::ChartSpec, egui::Rect)> =
+            placed.iter().filter_map(|p| p.chart.clone().map(|c| (c, p.rect))).collect();
+        let acted = self.apply(prev_focus, ix);
+        // App-level arrow navigation: dispatch the `on_key` handler (mutates the doc, e.g. the
+        // slide index), counting as a state change so we persist + the next frame rebuilds.
+        let key_acted = match nav {
+            Some(k) => self.dispatch_nav_key(k),
+            None => false,
+        };
+        // Drive each embedded block editor for the frame; a mutation persists like any edit (and
+        // bumps the doc's frontiers, so next frame's SceneKey differs and the scene rebuilds).
+        let mut doc_edited = false;
+        for (id, doc_rect) in doc_nodes {
+            doc_edited |= self.render_doc(ui, &id, doc_rect);
+        }
+        for (i, (spec, rect)) in chart_nodes.into_iter().enumerate() {
+            paint::paint_chart(ui, i, &spec, rect);
         }
 
         // Return a CRDT snapshot if the state changed so the caller can persist it.
-        if dispatched || edited || submitted {
+        if acted.dispatched || edited || submitted || acted.blurred || key_acted || doc_edited {
             self.doc.export(ExportMode::Snapshot).ok()
         } else {
             None
         }
     }
 
-    /// This frame's `RawInput` for an app embedded in a `Ui` cell. Pointer positions stay in
-    /// screen coordinates — `show` lays out and hit-tests in screen space (host-rect origin).
-    fn collect_input(ui: &egui::Ui, _rect: egui::Rect) -> egui::RawInput {
-        ui.ctx().input(|i| i.raw.clone())
+    /// Render + edit one embedded `ui.doc` into `rect` for this frame, returning whether it
+    /// mutated. The editor and its `Doc` (a tree inside the app's shared CRDT) are created on first
+    /// sight and retained by `id`, so caret/scroll and undo history survive across frames.
+    fn render_doc(&mut self, ui: &mut egui::Ui, id: &str, rect: egui::Rect) -> bool {
+        let shared = (*self.doc).clone(); // reference clone — shares the app's underlying doc
+        let cell = self.docs.entry(id.to_string()).or_insert_with(|| DocCell {
+            editor: doc_editor::DocEditor::new(),
+            doc: doc_editor::Doc::on_tree(shared, &format!("uidoc:{id}")),
+        });
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        // doc_editor fills its own page background over `ui.clip_rect()` and scrolls within it, so
+        // confine both to the node's box (else the dark page bleeds across the whole slide).
+        child.set_clip_rect(rect);
+        let changed = cell.editor.show(&mut child, &cell.doc, false);
+        if changed {
+            cell.doc.commit();
+        }
+        changed
     }
 
     /// Build an engine app from a Lua file loaded at run time (the uploadable-app path),
@@ -369,9 +635,28 @@ impl EngineApp {
             fields: HashMap::new(),
             focus: None,
             scroll: HashMap::new(),
+            drag_bar: None,
+            drag_size: None,
+            focus_dirty: false,
+            scene: None,
+            scene_rebuilds: 0,
+            docs: HashMap::new(),
+            data: None,
         };
         app.save(); // persist any first-run seed the setup wrote
         app
+    }
+
+    /// Dispatch an app-level arrow key ("left"/"right") to the script's `on_key` handler. Returns
+    /// whether a handler ran (the key was consumed and state may have changed).
+    fn dispatch_nav_key(&mut self, key: &str) -> bool {
+        if let ViewSource::Script { script, .. } = &self.view {
+            match script.dispatch_key(key) {
+                Ok(acted) => return acted,
+                Err(err) => eprintln!("on_key handler error: {err}"),
+            }
+        }
+        false
     }
 
     /// Persist the doc to its snapshot file, if this app has one. Best-effort.
@@ -410,147 +695,48 @@ impl EngineApp {
     pub fn frame(&mut self, input: egui::RawInput, pixels_per_point: f32) -> Frame {
         self.ctx.set_pixels_per_point(pixels_per_point);
 
-        // Hot-reload the source first, so this frame's keyboard edits and the view both run
-        // against the new script. The same `doc` carries over, so editing the code keeps the data.
-        let doc = self.doc.clone();
-        let mut poll = None;
-        if let ViewSource::Script { source, script } = &mut self.view {
-            if source.changed() {
-                *script = match source.read() {
-                    Ok(text) => script::Script::load(&text, doc.clone()),
-                    Err(err) => script::Script::failed(err),
-                };
-            }
-            poll = source.poll_interval();
-        }
+        // Hot-reload first, so this frame's keyboard edits and the view both run against the
+        // new script.
+        let poll = self.hot_reload();
 
         // Captured before `input` is moved into `run_ui`.
         let click = click_pos(&input);
         let edits = collect_edits(&input);
         let submit = wants_submit(&input);
 
-        // Apply the focused editor's keyboard *before* resolving the view, so the view re-reads
-        // the post-edit content this same frame. Re-clamp the field against the live buffer each
-        // focused frame, so the caret survives an external/remote edit (peer, MCP, or a clearing
-        // `on_submit`).
-        let mut edited = false;
-        let mut submitted = false;
-        if let Some(id) = self.focus.clone() {
-            if let ViewSource::Script { script, .. } = &self.view {
-                let mut field = self.fields.get(&id).copied().unwrap_or_default();
-                edited = script.with_buffer(&id, |buf| {
-                    field.clamp(&*buf);
-                    for e in &edits {
-                        apply_edit(&mut field, &mut *buf, e);
-                    }
-                });
-                self.fields.insert(id.clone(), field);
-                // Enter fires `on_submit` after the keys, so a batched `Text`+`Enter` submits the
-                // just-typed value.
-                if submit {
-                    match script.submit(&id) {
-                        Ok(fired) => submitted = fired,
-                        Err(err) => eprintln!("app_engine: on_submit error: {err}"),
-                    }
-                }
-            }
-        }
-
-        // Resolve the view tree — now reflecting the edit above.
-        let root = match &mut self.view {
-            ViewSource::Static(node) => node.clone(),
-            ViewSource::Script { script, .. } => script.view().unwrap_or_else(|err| error_card(&err)),
-        };
+        let prev_focus = self.focus.clone();
+        let (edited, submitted) = self.apply_edits(&edits, submit);
+        // Headless render: no viewport, so every row builds (windowing is a live-view optimization).
+        let root = self.resolve_root(f32::INFINITY, &HashMap::new());
 
         // Snapshot the focused field and scroll offsets for the closure below.
         let focus_id = self.focus.clone();
         let focus_field = focus_id.as_ref().and_then(|id| self.fields.get(id)).copied();
         let scroll = self.scroll.clone();
 
-        // Lay out and paint; while we have the geometry, resolve what the pointer hit this frame:
-        // a click (focus / handler), a drag (extend selection), and a wheel (scroll).
-        let mut hit = None;
-        let mut editor_click = None;
-        let mut drag_to: Option<(String, usize)> = None;
-        let mut wheel: Option<(String, f32, f32)> = None;
+        // Lay out, paint, and sense the pointer against the geometry. `run_ui` borrows the
+        // engine's ctx, so the sensed interactions apply after the closure returns.
+        let mut ix = None;
+        let drag_bar = self.drag_bar.clone();
+        let drag_size = self.drag_size.clone();
         let output = self.ctx.run_ui(input, |ui| {
             let placed = layout::layout(ui.ctx(), ui.ctx().content_rect(), &root, &scroll);
             let hover = ui.input(|i| i.pointer.hover_pos());
             let pointer = paint::Pointer { hover, pressed: ui.input(|i| i.pointer.primary_down()) };
             let focus = focus_id.as_deref().zip(focus_field.as_ref());
             paint::paint(ui, &placed, &pointer, focus);
-
-            if let Some(p) = click {
-                let extend = ui.input(|i| i.modifiers.shift);
-                if let Some(node) = placed.iter().rev().find(|n| n.editor.is_some() && n.rect.contains(p)) {
-                    // Click-to-place: the char nearest the click.
-                    let idx =
-                        node.text.as_ref().map_or(0, |(origin, galley)| text_edit::char_at(galley, p - *origin));
-                    editor_click = Some((node.editor.clone().unwrap(), idx, extend));
-                } else {
-                    hit = hit_test(&placed, p);
+            // Charts paint in their own child Ui after the scene (so screenshots/PDF include them).
+            for (i, p) in placed.iter().enumerate() {
+                if let Some(spec) = &p.chart {
+                    paint::paint_chart(ui, i, spec, p.rect);
                 }
             }
-
-            // Drag-to-select: while held and an editor is focused, extend its selection head to
-            // the char under the pointer (even past the box, clamped by the galley). The press
-            // already set the anchor; this grows the range.
-            if let (Some(fid), Some(h), true) = (&focus_id, hover, ui.input(|i| i.pointer.primary_down())) {
-                if let Some(node) = placed.iter().find(|n| n.editor.as_deref() == Some(fid.as_str())) {
-                    if let Some((origin, galley)) = &node.text {
-                        drag_to = Some((fid.clone(), text_edit::char_at(galley, h - *origin)));
-                    }
-                }
-            }
-
-            // Mouse wheel scrolls the innermost scroll region under the pointer.
-            let dy = ui.input(|i| i.smooth_scroll_delta.y);
-            if dy != 0.0 {
-                if let Some(node) =
-                    hover.and_then(|h| placed.iter().rev().find(|n| n.scroll.is_some() && n.rect.contains(h)))
-                {
-                    let (id, max) = node.scroll.clone().unwrap();
-                    wheel = Some((id, max, dy));
-                }
-            }
+            ix = Some(sense(ui, &placed, &scroll, click, hover, focus_id.as_deref(), &drag_bar, &drag_size));
         });
-
-        // Apply the click: focus + caret on an editor; dispatch a handler (keeping focus); empty
-        // space blurs. A handler error keeps the current view (logged).
-        let mut dispatched = false;
-        if let Some((id, idx, extend)) = editor_click {
-            let mut field = self.fields.get(&id).copied().unwrap_or_default();
-            field.set_head(idx, extend);
-            self.fields.insert(id.clone(), field);
-            self.focus = Some(id);
-        } else if let (Some(id), ViewSource::Script { script, .. }) = (hit, &mut self.view) {
-            if let Err(err) = script.dispatch(id) {
-                eprintln!("app_engine: on_click error: {err}");
-            }
-            dispatched = true;
-        } else if click.is_some() {
-            self.focus = None;
-        }
-
-        // A drag extends the focused field's selection (the click above set its anchor).
-        let dragging = drag_to.is_some();
-        if let Some((id, idx)) = drag_to {
-            let mut field = self.fields.get(&id).copied().unwrap_or_default();
-            field.set_head(idx, true);
-            self.fields.insert(id, field);
-        }
-
-        // Apply the wheel to the hovered scroll region (egui's convention: offset -= delta).
-        let mut scrolled = false;
-        if let Some((id, max, dy)) = wheel {
-            let off = self.scroll.entry(id).or_default();
-            let new = (*off - dy).clamp(0.0, max);
-            scrolled = (new - *off).abs() > f32::EPSILON;
-            *off = new;
-        }
+        let acted = ix.map(|ix| self.apply(prev_focus, ix)).unwrap_or_default();
 
         // A handler, a keystroke, or a submit may have mutated the CRDT — persist it.
-        if dispatched || edited || submitted {
+        if acted.dispatched || edited || submitted || acted.blurred {
             self.save();
         }
 
@@ -560,7 +746,17 @@ impl EngineApp {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map_or(Duration::MAX, |v| v.repaint_delay);
-        if dispatched || edited || submitted || dragging || scrolled || click.is_some() || !edits.is_empty() {
+        if acted.dispatched
+            || edited
+            || submitted
+            || acted.blurred
+            || acted.dragging
+            || acted.scrolled
+            || click.is_some()
+            || !edits.is_empty()
+            || self.drag_bar.is_some()
+            || self.drag_size.is_some()
+        {
             repaint_after = Duration::ZERO;
         } else if let Some(interval) = poll {
             repaint_after = repaint_after.min(interval);
@@ -594,6 +790,16 @@ fn wants_submit(input: &egui::RawInput) -> bool {
         .events
         .iter()
         .any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, .. }))
+}
+
+/// An app-level navigation key this frame ("left"/"right"), if any — used only when no editor is
+/// focused, so it never steals arrow keys from caret movement.
+fn nav_key(input: &egui::RawInput) -> Option<&'static str> {
+    input.events.iter().find_map(|e| match e {
+        egui::Event::Key { key: egui::Key::ArrowLeft, pressed: true, .. } => Some("left"),
+        egui::Event::Key { key: egui::Key::ArrowRight, pressed: true, .. } => Some("right"),
+        _ => None,
+    })
 }
 
 /// One keyboard action routed to the focused editor (single-line field for now).
@@ -663,11 +869,307 @@ fn apply_edit(field: &mut TextField, buf: &mut dyn text_edit::TextBuffer, edit: 
     }
 }
 
-/// The handler id of the top-most box under `p` with an `on_click`. Boxes are in paint order
-/// (parents first), so reverse iteration finds the front-most and lets a handler-less child fall
-/// through to a clickable parent.
-fn hit_test(placed: &[layout::Placed], p: egui::Pos2) -> Option<u32> {
-    placed.iter().rev().find(|n| n.on_click.is_some() && n.rect.contains(p)).and_then(|n| n.on_click)
+/// One frame's pointer input resolved against the laid-out boxes — computed by [`sense`] inside
+/// a `Ui`, applied to engine state by [`EngineApp::apply`] (split so `frame` can apply outside
+/// its `run_ui` borrow).
+struct Interactions {
+    bars: Vec<ScrollBar>,
+    /// A scrollbar press this frame: (region id, horizontal, grab offset in the thumb).
+    bar_press: Option<(String, bool, f32)>,
+    /// A resize-band press this frame: (target, size at press, pointer coord at press).
+    size_press: Option<(node::Resize, f32, f32)>,
+    /// A click on an editor: (id, caret char index, shift-extend).
+    editor_click: Option<(String, usize, bool)>,
+    /// A click on an `on_click` handler.
+    hit: Option<u32>,
+    /// The click landed on nothing interactive — blurs the focused field.
+    miss: bool,
+    /// A held drag over the focused editor: (id, selection head char index).
+    drag_to: Option<(String, usize)>,
+    /// Wheel deltas routed per scroll region: (id, max offset, delta).
+    wheel: Vec<(String, egui::Vec2, egui::Vec2)>,
+    down: bool,
+    pointer: Option<egui::Pos2>,
+}
+
+/// What [`EngineApp::apply`] did, for the persistence and repaint decisions upstream.
+#[derive(Default)]
+struct Applied {
+    dispatched: bool,
+    blurred: bool,
+    dragging: bool,
+    scrolled: bool,
+}
+
+/// Resolve this frame's pointer against the laid-out boxes, painting the interaction chrome
+/// (scrollbars, resize feedback) while a `Ui` is at hand. Reads engine state, never writes it.
+fn sense(
+    ui: &egui::Ui,
+    placed: &[layout::Placed],
+    offsets: &HashMap<String, egui::Vec2>,
+    click: Option<egui::Pos2>,
+    hover: Option<egui::Pos2>,
+    focus_id: Option<&str>,
+    drag_bar: &Option<(String, bool, f32)>,
+    drag_size: &Option<(node::Resize, f32, f32)>,
+) -> Interactions {
+    let down = ui.input(|i| i.pointer.primary_down());
+    // Drag tracking uses the unclamped pointer so it survives overshoot.
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+
+    // Scrollbars: a press on a thumb (or its track) starts a drag and never reaches the app;
+    // a track press centres the thumb on the pointer. Painted last so they sit on top.
+    let bars = scroll_bars(placed, offsets);
+    let mut bar_press = None;
+    if let Some(p) = click {
+        if let Some(bar) = bars.iter().find(|b| b.thumb.expand(2.0).contains(p) || b.track.contains(p)) {
+            let (thumb_min, half) = if bar.horizontal {
+                (bar.thumb.left(), bar.thumb.width() / 2.0)
+            } else {
+                (bar.thumb.top(), bar.thumb.height() / 2.0)
+            };
+            let on_thumb = bar.thumb.expand(2.0).contains(p);
+            let grab = if on_thumb { (if bar.horizontal { p.x } else { p.y }) - thumb_min } else { half };
+            bar_press = Some((bar.id.clone(), bar.horizontal, grab));
+        }
+    }
+    paint_bars(ui, &bars, hover, if bar_press.is_some() { &bar_press } else { drag_bar });
+
+    // Table resizing: a press in a grab band starts a drag and never reaches the app (it must
+    // not focus the cell underneath); the cursor flips over the band and stays while dragging.
+    let mut size_press = None;
+    if let Some(p) = click.filter(|_| bar_press.is_none()) {
+        if let Some((target, size)) = size_hit(placed, p) {
+            let origin = if matches!(target, node::Resize::Col { .. }) { p.x } else { p.y };
+            size_press = Some((target, size, origin));
+        }
+    }
+    let band = drag_size
+        .as_ref()
+        .or(size_press.as_ref())
+        .map(|(t, _, _)| t.clone())
+        .or_else(|| hover.and_then(|h| size_hit(placed, h)).map(|(t, _)| t));
+    if let Some(t) = band {
+        ui.ctx().set_cursor_icon(match t {
+            node::Resize::Col { .. } => egui::CursorIcon::ResizeColumn,
+            node::Resize::Row { .. } => egui::CursorIcon::ResizeRow,
+        });
+        paint_resize_band(ui, placed, &t);
+    }
+
+    // Hit-test the click: one topmost-wins pass over editors and handlers together, so a popup
+    // (painted last) shades the editor cells beneath it.
+    let mut editor_click = None;
+    let mut hit = None;
+    let mut miss = false;
+    if let Some(p) = click.filter(|_| bar_press.is_none() && size_press.is_none()) {
+        let extend = ui.input(|i| i.modifiers.shift);
+        match placed
+            .iter()
+            .rev()
+            .find(|n| (n.editor.is_some() || n.on_click.is_some()) && n.rect.contains(p))
+        {
+            Some(node) if node.editor.is_some() => {
+                // Click-to-place: the char nearest the click.
+                let idx =
+                    node.text.as_ref().map_or(0, |(origin, galley)| text_edit::char_at(galley, p - *origin));
+                editor_click = Some((node.editor.clone().unwrap(), idx, extend));
+            }
+            Some(node) => hit = node.on_click,
+            None => miss = true,
+        }
+    }
+
+    // Drag-to-select: while held and an editor is focused, extend its selection head to the
+    // char under the pointer (even past the box, clamped by the galley). The press already set
+    // the anchor; this grows the range.
+    let mut drag_to = None;
+    if drag_bar.is_none() && bar_press.is_none() {
+        if let (Some(fid), Some(h), true) = (focus_id, hover, down) {
+            if let Some(node) = placed.iter().find(|n| n.editor.as_deref() == Some(fid)) {
+                if let Some((origin, galley)) = &node.text {
+                    drag_to = Some((fid.to_string(), text_edit::char_at(galley, h - *origin)));
+                }
+            }
+        }
+    }
+
+    // Mouse wheel scrolls the scroll regions under the pointer (routed per axis).
+    let delta = ui.input(|i| i.smooth_scroll_delta);
+    let wheel = hover.map(|h| wheel_targets(placed, h, delta)).unwrap_or_default();
+
+    Interactions { bars, bar_press, size_press, editor_click, hit, miss, drag_to, wheel, down, pointer }
+}
+
+/// The table-resize handle under `p`, if any: a marked header cell's right edge (column width)
+/// or a marked data row's bottom edge (row height), each a ±4 px grab band. Returns the target
+/// plus the box's current size on the drag axis.
+fn size_hit(placed: &[layout::Placed], p: egui::Pos2) -> Option<(node::Resize, f32)> {
+    placed.iter().rev().find_map(|n| {
+        let target = n.resize.clone()?;
+        if !n.clip.contains(p) {
+            return None;
+        }
+        let (zone, size) = match &target {
+            node::Resize::Col { .. } => (
+                egui::Rect::from_x_y_ranges(n.rect.right() - 4.0..=n.rect.right() + 4.0, n.rect.y_range()),
+                n.rect.width(),
+            ),
+            node::Resize::Row { .. } => (
+                egui::Rect::from_x_y_ranges(n.rect.x_range(), n.rect.bottom() - 4.0..=n.rect.bottom() + 4.0),
+                n.rect.height(),
+            ),
+        };
+        zone.contains(p).then_some((target, size))
+    })
+}
+
+/// Visible feedback for a hovered/dragged resize handle (the grab bands are invisible chrome
+/// otherwise): a line along the column boundary down the whole table, or under the row.
+fn paint_resize_band(ui: &egui::Ui, placed: &[layout::Placed], target: &node::Resize) {
+    let Some(n) = placed.iter().find(|n| n.resize.as_ref() == Some(target)) else { return };
+    let stroke = egui::Stroke::new(1.0, n.base.color.gamma_multiply(0.6));
+    let painter = ui.painter().with_clip_rect(n.clip);
+    match target {
+        node::Resize::Col { table, .. } => {
+            let bottom = placed
+                .iter()
+                .filter(|p| matches!(&p.resize, Some(node::Resize::Row { table: t, .. }) if t == table))
+                .last()
+                .map_or(n.rect.bottom(), |p| p.rect.bottom());
+            let x = n.rect.right();
+            painter.line_segment([egui::pos2(x, n.rect.top()), egui::pos2(x, bottom)], stroke);
+        }
+        node::Resize::Row { .. } => {
+            let y = n.rect.bottom();
+            painter.line_segment([egui::pos2(n.rect.left(), y), egui::pos2(n.rect.right(), y)], stroke);
+        }
+    }
+}
+
+/// Route a wheel delta to the scroll regions under the pointer, per axis: each axis goes to the
+/// innermost region that can actually scroll that way — so a wide table consumes the x while the
+/// page behind it keeps the y.
+fn wheel_targets(
+    placed: &[layout::Placed],
+    p: egui::Pos2,
+    delta: egui::Vec2,
+) -> Vec<(String, egui::Vec2, egui::Vec2)> {
+    let mut out: Vec<(String, egui::Vec2, egui::Vec2)> = Vec::new();
+    let mut route = |d: egui::Vec2, can: fn(&egui::Vec2) -> bool| {
+        if d == egui::Vec2::ZERO {
+            return;
+        }
+        let hit = placed
+            .iter()
+            .rev()
+            .filter(|n| n.rect.contains(p))
+            .filter_map(|n| n.scroll.clone())
+            .find(|(_, max)| can(max));
+        if let Some((id, max)) = hit {
+            match out.iter_mut().find(|(eid, _, _)| *eid == id) {
+                Some(e) => e.2 += d,
+                None => out.push((id, max, d)),
+            }
+        }
+    };
+    route(egui::vec2(delta.x, 0.0), |m| m.x > 0.0);
+    route(egui::vec2(0.0, delta.y), |m| m.y > 0.0);
+    out
+}
+
+/// One visible scrollbar: thumb-drag geometry for a scroll region's overflowing axis.
+struct ScrollBar {
+    id: String,
+    horizontal: bool,
+    track: egui::Rect,
+    thumb: egui::Rect,
+    clip: egui::Rect,
+    max: f32,
+}
+
+const BAR_W: f32 = 6.0;
+const BAR_PAD: f32 = 2.0;
+const THUMB_MIN: f32 = 24.0;
+
+/// Scrollbar geometry for every placed region that overflows: a y bar on the right edge, an
+/// x bar on the bottom edge, thumb sized by the visible fraction and placed by the offset.
+fn scroll_bars(placed: &[layout::Placed], offsets: &HashMap<String, egui::Vec2>) -> Vec<ScrollBar> {
+    let mut out = Vec::new();
+    for n in placed {
+        let Some((id, max)) = &n.scroll else { continue };
+        let off = offsets.get(id).copied().unwrap_or_default();
+        let r = n.rect;
+        if max.y > 0.0 {
+            let track = egui::Rect::from_min_max(
+                egui::pos2(r.right() - BAR_W - BAR_PAD, r.top() + BAR_PAD),
+                egui::pos2(r.right() - BAR_PAD, r.bottom() - BAR_PAD),
+            );
+            let len = (track.height() * r.height() / (r.height() + max.y))
+                .clamp(THUMB_MIN.min(track.height()), track.height());
+            let top = track.top() + (track.height() - len) * (off.y / max.y).clamp(0.0, 1.0);
+            out.push(ScrollBar {
+                id: id.clone(),
+                horizontal: false,
+                track,
+                thumb: egui::Rect::from_min_size(egui::pos2(track.left(), top), egui::vec2(BAR_W, len)),
+                clip: n.clip,
+                max: max.y,
+            });
+        }
+        if max.x > 0.0 {
+            let track = egui::Rect::from_min_max(
+                egui::pos2(r.left() + BAR_PAD, r.bottom() - BAR_W - BAR_PAD),
+                egui::pos2(r.right() - BAR_PAD, r.bottom() - BAR_PAD),
+            );
+            let len = (track.width() * r.width() / (r.width() + max.x))
+                .clamp(THUMB_MIN.min(track.width()), track.width());
+            let left = track.left() + (track.width() - len) * (off.x / max.x).clamp(0.0, 1.0);
+            out.push(ScrollBar {
+                id: id.clone(),
+                horizontal: true,
+                track,
+                thumb: egui::Rect::from_min_size(egui::pos2(left, track.top()), egui::vec2(len, BAR_W)),
+                clip: n.clip,
+                max: max.x,
+            });
+        }
+    }
+    out
+}
+
+/// The offset a thumb drag asks for: map the pointer (minus the grab point) across the track.
+fn bar_drag_offset(bar: &ScrollBar, p: egui::Pos2, grab: f32) -> f32 {
+    let (track_min, track_len, thumb_len, pos) = if bar.horizontal {
+        (bar.track.left(), bar.track.width(), bar.thumb.width(), p.x)
+    } else {
+        (bar.track.top(), bar.track.height(), bar.thumb.height(), p.y)
+    };
+    let span = (track_len - thumb_len).max(1.0);
+    ((pos - grab - track_min) / span * bar.max).clamp(0.0, bar.max)
+}
+
+/// Paint the thumbs (the track stays invisible): the always-on affordance that a region scrolls.
+fn paint_bars(ui: &egui::Ui, bars: &[ScrollBar], hover: Option<egui::Pos2>, drag: &Option<(String, bool, f32)>) {
+    for bar in bars {
+        let active = drag.as_ref().is_some_and(|(id, h, _)| *id == bar.id && *h == bar.horizontal)
+            || hover.is_some_and(|p| bar.thumb.expand(2.0).contains(p));
+        let color = if active {
+            egui::Color32::from_white_alpha(90)
+        } else {
+            egui::Color32::from_white_alpha(36)
+        };
+        ui.painter().with_clip_rect(bar.clip).rect_filled(bar.thumb, BAR_W / 2.0, color);
+    }
+}
+
+/// Wrap a non-page app's root in a host-sized scroll region (reserved id, so an app's own
+/// `scroll = true` region keeps its "" key). Web-page semantics: a natural-height root overflows
+/// and scrolls; an explicit `height = "100%"` root fills the host and never does.
+fn scroll_root(inner: Node) -> Node {
+    let mut wrap = Node::col().width(Val::Pct(100.0)).height(Val::Pct(100.0)).children(vec![inner]);
+    wrap.scroll = Some(crate::node::ScrollSpec::y("__root"));
+    wrap
 }
 
 /// Render a script error as a full-cell card, so a broken app shows *why* instead of nothing.

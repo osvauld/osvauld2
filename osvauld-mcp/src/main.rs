@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
 
@@ -400,6 +402,49 @@ fn tools_list() -> Value {
                 }
             },
             {
+                "name": "app_data_row_add",
+                "description": "Add a row to a top-level list in an .app's runtime data CRDT (the list its Lua opens as doc:list(name), e.g. what a ui.table shows). Fields are a flat JSON object of scalars. The same op the app's Lua list:add makes — an open run pane updates live. A stable `id` is stamped automatically (returned); pass your own `id` field to override.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "list": { "type": "string", "description": "Top-level list container name (a key from app_data_get, e.g. 'orders')" },
+                        "fields": { "type": "object", "description": "Row fields: string/number/bool values (e.g. { \"status\": \"open\", \"qty\": 2 })" }
+                    },
+                    "required": ["ws_id", "item_id", "list", "fields"]
+                }
+            },
+            {
+                "name": "app_data_row_set",
+                "description": "Update fields on one row of a top-level list in an .app's runtime data CRDT, addressed by the row's stable `id` (see it in app_data_get). Only the given fields change; a JSON null deletes that field. Correct under any sort/filter the app's ui.table applies — the id, not the position, picks the row.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "list": { "type": "string", "description": "Top-level list container name" },
+                        "row": { "type": "string", "description": "The row's stable id (its `id` field from app_data_get)" },
+                        "fields": { "type": "object", "description": "Fields to set; null deletes a field" }
+                    },
+                    "required": ["ws_id", "item_id", "list", "row", "fields"]
+                }
+            },
+            {
+                "name": "app_data_row_remove",
+                "description": "Remove one row from a top-level list in an .app's runtime data CRDT, addressed by the row's stable `id`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace ID" },
+                        "item_id": { "type": "string", "description": "Item ID" },
+                        "list": { "type": "string", "description": "Top-level list container name" },
+                        "row": { "type": "string", "description": "The row's stable id" }
+                    },
+                    "required": ["ws_id", "item_id", "list", "row"]
+                }
+            },
+            {
                 "name": "export_pdf",
                 "description": "Export a page-declaring .app (one with `page = { size = 'A4', ... }` in its Lua) to a PDF laid out exactly as its page preview renders. Writes ~/Downloads/<name>.pdf and returns the path. Errors if the app declares no page.",
                 "inputSchema": {
@@ -424,6 +469,95 @@ fn tools_list() -> Value {
                         "scale": { "type": "number", "description": "Pixels per logical px, 0.5-4 (default 2)" }
                     },
                     "required": ["ws_id", "item_id"]
+                }
+            },
+            {
+                "name": "import_open",
+                "description": "Open a spreadsheet (.xlsx) into migration staging — calamine reads it, Polars stages it. Returns a 'handle' plus a per-sheet summary (row/col counts and each column's name + inferred dtype). This is the first step of Excel→osvauld migration: load it, then profile it with import_head / import_sql to design a schema before writing a .table. The file is transient input; close it with import_close when done.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Host filesystem path to the .xlsx file" }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "import_head",
+                "description": "Show the first 'n' rows of a staged sheet as a text table — eyeball the data after import_open.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "handle": { "type": "string", "description": "Staging handle (from import_open)" },
+                        "sheet": { "type": "string", "description": "Sheet name (omit for the first sheet)" },
+                        "n": { "type": "integer", "description": "Number of rows (default 10)" }
+                    },
+                    "required": ["handle"]
+                }
+            },
+            {
+                "name": "import_sql",
+                "description": "Run SQL over a staged sheet to profile it — the sheet is registered as the table 'data', so e.g. SELECT Segment, COUNT(*) FROM data GROUP BY Segment, or DISTINCT/aggregate/null-count queries. The profiling escape hatch for understanding the data before designing a schema.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "handle": { "type": "string", "description": "Staging handle (from import_open)" },
+                        "sheet": { "type": "string", "description": "Sheet name (omit for the first sheet)" },
+                        "query": { "type": "string", "description": "SQL over the table 'data'" }
+                    },
+                    "required": ["handle", "query"]
+                }
+            },
+            {
+                "name": "table_sql",
+                "description": "Run Polars SQL over a STORED .table item to profile live data before designing a dashboard. The table is registered both as 't' and under its item name, so e.g. SELECT segment, SUM(sales) FROM t GROUP BY segment, or DISTINCT/aggregate/null-count queries. Read-only (never writes). Use this to understand a real .table the way import_sql profiles a staged xlsx; then author a dashboard .app whose Lua declares data.use(<table name>) + data.sql(...).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ws_id": { "type": "string", "description": "Workspace id" },
+                        "item_id": { "type": "string", "description": "The .table item id" },
+                        "query": { "type": "string", "description": "SQL over the table 't' (or its name)" }
+                    },
+                    "required": ["ws_id", "item_id", "query"]
+                }
+            },
+            {
+                "name": "import_close",
+                "description": "Drop a staged workbook from migration staging (the .xlsx is transient input, released once profiling is done).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "handle": { "type": "string", "description": "Staging handle (from import_open)" }
+                    },
+                    "required": ["handle"]
+                }
+            },
+            {
+                "name": "import_to_layer",
+                "description": "Materialize a staged sheet into a NEW .table item in a workspace — the final migration step after profiling. You supply 'columns': the schema you designed, an array of { source, key, label, type } where 'source' is a frame column name (from import_open) and 'type' is text | number | decimal | check | select | date. The writer coerces each cell to its type: money MUST be 'decimal' (exact, never float), an Excel-serial date column becomes a real date when typed 'date'. Do value-cleaning (e.g. stripping ordinal suffixes, splitting columns) upstream with import_sql first; this writer only re-types. Returns the new item id and row count.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "handle": { "type": "string", "description": "Staging handle (from import_open)" },
+                        "sheet": { "type": "string", "description": "Sheet name (omit for the first sheet)" },
+                        "ws_id": { "type": "string", "description": "Target workspace ID" },
+                        "name": { "type": "string", "description": "Name for the new .table item" },
+                        "columns": {
+                            "type": "array",
+                            "description": "The designed schema: [{ source, key, label, type }, …]",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "source": { "type": "string", "description": "Frame column name to read from" },
+                                    "key": { "type": "string", "description": "Stored column key (defaults to source)" },
+                                    "label": { "type": "string", "description": "Human header (defaults to key)" },
+                                    "type": { "type": "string", "description": "text | number | decimal | check | select | date" }
+                                },
+                                "required": ["source", "type"]
+                            }
+                        }
+                    },
+                    "required": ["handle", "ws_id", "name", "columns"]
                 }
             }
         ]
@@ -624,6 +758,28 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
             Request::AppDataSetText { ws_id, item_id, name, text }
         }
+        "app_data_row_add" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let list = args["list"].as_str().ok_or("missing list")?.to_string();
+            let fields = args.get("fields").cloned().ok_or("missing fields")?;
+            Request::AppDataRowAdd { ws_id, item_id, list, fields }
+        }
+        "app_data_row_set" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let list = args["list"].as_str().ok_or("missing list")?.to_string();
+            let row = args["row"].as_str().ok_or("missing row")?.to_string();
+            let fields = args.get("fields").cloned().ok_or("missing fields")?;
+            Request::AppDataRowSet { ws_id, item_id, list, row, fields }
+        }
+        "app_data_row_remove" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let list = args["list"].as_str().ok_or("missing list")?.to_string();
+            let row = args["row"].as_str().ok_or("missing row")?.to_string();
+            Request::AppDataRowRemove { ws_id, item_id, list, row }
+        }
         "export_pdf" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
             let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
@@ -636,6 +792,40 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let height = args["height"].as_f64().map(|v| v as f32);
             let scale = args["scale"].as_f64().map(|v| v as f32);
             Request::Screenshot { ws_id, item_id, width, height, scale }
+        }
+        "import_open" => {
+            let path = args["path"].as_str().ok_or("missing path")?.to_string();
+            Request::ImportOpen { path }
+        }
+        "import_head" => {
+            let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
+            let sheet = args["sheet"].as_str().map(|s| s.to_string());
+            let n = args["n"].as_u64().unwrap_or(10) as usize;
+            Request::ImportHead { handle, sheet, n }
+        }
+        "import_sql" => {
+            let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
+            let sheet = args["sheet"].as_str().map(|s| s.to_string());
+            let query = args["query"].as_str().ok_or("missing query")?.to_string();
+            Request::ImportSql { handle, sheet, query }
+        }
+        "import_close" => {
+            let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
+            Request::ImportClose { handle }
+        }
+        "table_sql" => {
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let query = args["query"].as_str().ok_or("missing query")?.to_string();
+            Request::TableSql { ws_id, item_id, query }
+        }
+        "import_to_layer" => {
+            let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
+            let sheet = args["sheet"].as_str().map(|s| s.to_string());
+            let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
+            let name = args["name"].as_str().ok_or("missing name")?.to_string();
+            let columns = args.get("columns").cloned().ok_or("missing columns")?;
+            Request::ImportToLayer { handle, sheet, ws_id, name, columns }
         }
         _ => return Err(format!("unknown tool: {name}")),
     };

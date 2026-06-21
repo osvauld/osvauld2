@@ -291,3 +291,55 @@ fn concurrent_edits_merge() {
     assert_eq!(a.text(a.block_ids()[0]), "AX");
     assert_eq!(b.text(b.block_ids()[0]), "AX");
 }
+
+#[test]
+fn cursor_survives_concurrent_insert_before_it() {
+    // The collaborative-caret bug: my caret sits at offset 5; a peer inserts text *before* it
+    // in the same block. A bare offset would be left stranded at 5 (mid-word); a stable cursor
+    // must follow the text it was anchored beside.
+    let base = {
+        let a = Doc::new();
+        a.insert_text(a.block_ids()[0], 0, "world"); // caret will sit at end, offset 5
+        a.export_snapshot()
+    };
+    let a = Doc::from_snapshot(&base).unwrap();
+    let b = Doc::from_snapshot(&base).unwrap();
+
+    let block = a.block_ids()[0];
+    let cursor = a.cursor_at(block, 5).expect("cursor at end of \"world\"");
+    assert_eq!(a.resolve_cursor(&cursor), Some(5), "resolves to itself before any edit");
+
+    // Peer b inserts "Hello " (6 chars) at the start, then a merges it in.
+    b.insert_text(b.block_ids()[0], 0, "Hello ");
+    a.import(&b.export_snapshot()).unwrap();
+
+    assert_eq!(a.text(block), "Hello world");
+    assert_eq!(
+        a.resolve_cursor(&cursor),
+        Some(11),
+        "caret rode the insertion to stay at the end of \"world\", not stranded at 5"
+    );
+}
+
+#[test]
+fn cursor_relocates_when_its_text_is_deleted() {
+    // If the very text a cursor anchors to is removed by a peer, it must still resolve to a
+    // sane nearby offset rather than dangle.
+    let base = {
+        let a = Doc::new();
+        a.insert_text(a.block_ids()[0], 0, "abcdef");
+        a.export_snapshot()
+    };
+    let a = Doc::from_snapshot(&base).unwrap();
+    let b = Doc::from_snapshot(&base).unwrap();
+
+    let block = a.block_ids()[0];
+    let cursor = a.cursor_at(block, 4).expect("cursor between 'd' and 'e'");
+
+    b.delete_text(b.block_ids()[0], 2, 3); // remove "cde" → "abf"
+    a.import(&b.export_snapshot()).unwrap();
+
+    assert_eq!(a.text(block), "abf");
+    let pos = a.resolve_cursor(&cursor).expect("cursor still resolves after its char was deleted");
+    assert!(pos <= a.text_len(block), "resolved offset stays in range (got {pos})");
+}

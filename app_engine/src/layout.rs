@@ -52,11 +52,19 @@ pub(crate) struct Placed {
     /// `Some(id)` ⇒ an editable field (see `Node::editor`); paint draws its caret/selection when
     /// focused, and a click focuses + places the caret.
     pub editor: Option<String>,
+    /// `Some(id)` ⇒ an embedded block document (see `Node::doc`); the engine renders a native
+    /// doc_editor into `rect` in its own child Ui.
+    pub doc: Option<String>,
+    /// `Some(spec)` ⇒ a chart leaf (see `Node::chart`); the engine paints it with `egui_plot` into
+    /// `rect` in its own child Ui, after the scene.
+    pub chart: Option<crate::node::ChartSpec>,
     /// The clip rect this box paints within — the nearest scroll ancestor's box, else the cell.
     pub clip: Rect,
     /// `Some((id, max_scroll))` ⇒ a scroll region: content offset by `id`'s retained position,
-    /// scrollable over `0..=max_scroll` points.
-    pub scroll: Option<(String, f32)>,
+    /// scrollable over `0..=max_scroll` points per axis (an axis with no overflow has max 0).
+    pub scroll: Option<(String, Vec2)>,
+    /// `Some` ⇒ a table-resize handle (see `Node::resize`); the engine hit-tests its trailing edge.
+    pub resize: Option<crate::node::Resize>,
 }
 
 /// Per-node data Taffy carries for us, used after layout.
@@ -67,7 +75,11 @@ struct Ctx {
     text: Option<TextSpec>,
     on_click: Option<u32>,
     editor: Option<String>,
-    scroll: Option<String>,
+    doc: Option<String>,
+    chart: Option<crate::node::ChartSpec>,
+    scroll: Option<crate::node::ScrollSpec>,
+    resize: Option<crate::node::Resize>,
+    popup: bool,
 }
 
 /// A text leaf's styled runs and base size. Colour is resolved at shape time — per-run for rich
@@ -92,7 +104,7 @@ fn look(style: &Style) -> Look {
 /// Lay `root` out to fill `host` (the rect the engine was handed — a panel, a dock tab body, or the
 /// whole window), returning every box in pre-order (parents first = painter back-to-front).
 /// `offsets` are the retained scroll positions by region id.
-pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &HashMap<String, f32>) -> Vec<Placed> {
+pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &HashMap<String, Vec2>) -> Vec<Placed> {
     let mut tree: TaffyTree<Ctx> = TaffyTree::new();
     let root_id = build(&mut tree, root);
 
@@ -108,18 +120,32 @@ pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &Has
     .expect("taffy layout never fails for a well-formed tree");
 
     let mut out = Vec::new();
-    collect(&tree, root_id, screen.min, screen, 1.0, offsets, ctx, &mut out);
+    let mut popups = Vec::new();
+    collect(&tree, root_id, screen.min, screen, 1.0, offsets, ctx, &mut out, &mut popups);
+    // Popup subtrees collect after everything else — painted on top, hit-tested first — and
+    // clip to the host, not their scroll ancestor, so a dropdown escapes its table body.
+    while let Some((id, origin, opacity)) = popups.pop() {
+        let mut nested = Vec::new();
+        collect(&tree, id, origin, screen, opacity, offsets, ctx, &mut out, &mut nested);
+        popups.extend(nested);
+    }
     out
 }
 
 /// Build a Taffy node (and its subtree) from a view node, attaching the paint/text context.
 fn build(tree: &mut TaffyTree<Ctx>, node: &Node) -> NodeId {
     let mut style = node.style.to_taffy();
-    // `Overflow::Hidden` zeroes the region's automatic minimum size, so it stays at its laid-out
-    // size while taller content overflows (which `collect` clips and offsets). No scrollbar gutter
-    // (unlike `Overflow::Scroll`).
-    if node.scroll.is_some() {
-        style.overflow.y = taffy::Overflow::Hidden;
+    // `Overflow::Hidden` zeroes the region's automatic minimum size on that axis, so it stays at
+    // its laid-out size while larger content overflows (which `collect` clips and offsets). No
+    // scrollbar gutter (unlike `Overflow::Scroll`). Only the scrolling axes — a non-scrolling
+    // axis keeps content-driven sizing (e.g. an x-only table region still grows with its rows).
+    if let Some(s) = &node.scroll {
+        if s.x {
+            style.overflow.x = taffy::Overflow::Hidden;
+        }
+        if s.y {
+            style.overflow.y = taffy::Overflow::Hidden;
+        }
     }
     let ctx = Ctx {
         base: look(&node.style),
@@ -128,7 +154,11 @@ fn build(tree: &mut TaffyTree<Ctx>, node: &Node) -> NodeId {
         text: node.text.as_ref().map(|runs| TextSpec { runs: runs.clone(), size: node.style.font_size }),
         on_click: node.on_click,
         editor: node.editor.clone(),
+        doc: node.doc.clone(),
+        chart: node.chart.clone(),
         scroll: node.scroll.clone(),
+        resize: node.resize.clone(),
+        popup: node.popup,
     };
     if node.children.is_empty() {
         tree.new_leaf_with_context(style, ctx).expect("new leaf")
@@ -136,8 +166,14 @@ fn build(tree: &mut TaffyTree<Ctx>, node: &Node) -> NodeId {
         let kids: Vec<NodeId> = node.children.iter().map(|c| build(tree, c)).collect();
         // A scroll region's children must keep their natural main-axis size; CSS's default
         // `flex-shrink: 1` would compress them so nothing overflows, but that overflow is exactly
-        // what becomes scrollable.
-        if node.scroll.is_some() {
+        // what becomes scrollable. Only when the region scrolls its *main* axis — a cross-axis
+        // region (x-scroll column) must leave children shrinkable (a table's body compresses to
+        // the leftover height and scrolls internally).
+        let scrolls_main = node.scroll.as_ref().is_some_and(|s| match node.style.direction {
+            crate::node::Direction::Column => s.y,
+            crate::node::Direction::Row => s.x,
+        });
+        if scrolls_main {
             for &k in &kids {
                 let mut child_style = tree.style(k).expect("child style").clone();
                 child_style.flex_shrink = 0.0;
@@ -187,9 +223,10 @@ fn collect(
     origin: Pos2,
     clip: Rect,
     opacity: f32,
-    offsets: &HashMap<String, f32>,
+    offsets: &HashMap<String, Vec2>,
     ctx: &egui::Context,
     out: &mut Vec<Placed>,
+    popups: &mut Vec<(NodeId, Pos2, f32)>,
 ) {
     let layout = tree.layout(id).expect("layout was computed");
     let rect = Rect::from_min_size(
@@ -217,7 +254,10 @@ fn collect(
     let active = node_ctx.and_then(|c| c.active).map(fold);
     let on_click = node_ctx.and_then(|c| c.on_click);
     let editor = node_ctx.and_then(|c| c.editor.clone());
+    let doc = node_ctx.and_then(|c| c.doc.clone());
+    let chart = node_ctx.and_then(|c| c.chart.clone());
     let scroll_id = node_ctx.and_then(|c| c.scroll.clone());
+    let resize = node_ctx.and_then(|c| c.resize.clone());
     let text = node_ctx.and_then(|c| c.text.as_ref()).map(|spec| {
         // Re-shape at the final content width so the painted wrapping matches the laid-out box.
         // Content box sits inside padding + border (border-box layout).
@@ -231,29 +271,36 @@ fn collect(
     // A scroll region offsets its children up by the (clamped) scroll position and confines them
     // to its own box; everything else passes parent origin and clip straight down.
     let (child_origin, child_clip, scroll) = match &scroll_id {
-        Some(sid) => {
+        Some(spec) => {
             let pad = layout.padding;
-            let content_bottom = tree
-                .children(id)
-                .expect("children list")
-                .iter()
-                .map(|&c| {
-                    let cl = tree.layout(c).expect("child layout");
-                    cl.location.y + cl.size.height
-                })
-                .fold(0.0_f32, f32::max);
-            let max_scroll = (content_bottom + pad.bottom - rect.height()).max(0.0);
-            let offset = offsets.get(sid).copied().unwrap_or(0.0).clamp(0.0, max_scroll);
-            (rect.min - Vec2::new(0.0, offset), clip.intersect(rect), Some((sid.clone(), max_scroll)))
+            let (mut right, mut bottom) = (0.0_f32, 0.0_f32);
+            for &c in tree.children(id).expect("children list").iter() {
+                let cl = tree.layout(c).expect("child layout");
+                right = right.max(cl.location.x + cl.size.width);
+                bottom = bottom.max(cl.location.y + cl.size.height);
+            }
+            // Only the declared axes scroll; the other axis reports no range.
+            let max_scroll = Vec2::new(
+                if spec.x { (right + pad.right - rect.width()).max(0.0) } else { 0.0 },
+                if spec.y { (bottom + pad.bottom - rect.height()).max(0.0) } else { 0.0 },
+            );
+            let offset =
+                offsets.get(&spec.id).copied().unwrap_or(Vec2::ZERO).clamp(Vec2::ZERO, max_scroll);
+            (rect.min - offset, clip.intersect(rect), Some((spec.id.clone(), max_scroll)))
         }
         None => (rect.min, clip, None),
     };
 
     let child_opacity = base.opacity;
-    out.push(Placed { rect, text, base, hover, active, on_click, editor, clip, scroll });
+    out.push(Placed { rect, text, base, hover, active, on_click, editor, doc, chart, clip, scroll, resize });
 
     for child in tree.children(id).expect("children list") {
-        collect(tree, child, child_origin, child_clip, child_opacity, offsets, ctx, out);
+        // A popup child is deferred (with the origin it would have had) to a top layer.
+        if tree.get_node_context(child).is_some_and(|c| c.popup) {
+            popups.push((child, child_origin, child_opacity));
+        } else {
+            collect(tree, child, child_origin, child_clip, child_opacity, offsets, ctx, out, popups);
+        }
     }
 }
 

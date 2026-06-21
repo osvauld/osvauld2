@@ -7,14 +7,17 @@ license.workspace = true
 [dependencies]
 vault = { path = "../vault" }
 doc_editor = { path = "../doc_editor" }
-identity = { path = "../identity" }
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 zeroize = { workspace = true }
 osvauld-rpc = { path = "../osvauld-rpc" }
 serde_json = { workspace = true }
 # The bridge edits .app runtime CRDTs (app-data MCP tools) directly, no script run involved.
 loro = "1.12.0"
-app_host = { path = "../app_host" }
+table_core = { path = "../table_core" }
+table_import = { path = "../table_import" }
+# Host-side query executor backing the dashboard `data` binding (Polars off the render path).
+table_query = { path = "../table_query" }
+app_engine = { path = "../app_engine" }
 code_highlight = { path = "../code_highlight" }
 code_editor = { path = "../code_editor" }
 egui_dock = "0.19"

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use egui::text::CCursor;
 use egui::{pos2, vec2, Align2, Event, Key, Rect, Sense, Stroke};
 
 use block_doc::BlockDoc;
@@ -34,7 +33,7 @@ pub(super) fn show(editor: &mut Editor, ui: &mut egui::Ui, doc: &BlockDoc, theme
         let response = ui.interact(content_rect, surface_id, Sense::click_and_drag());
         let now = ui.input(|i| i.time);
 
-        let hit = |p: egui::Pos2| selection::from_global(&blocks, galley.cursor_from_pos(p - code_origin).index);
+        let hit = |p: egui::Pos2| selection::from_global(&blocks, text_edit::char_at(&galley, p - code_origin));
         if response.clicked() || response.drag_started() {
             response.request_focus();
             if let Some(p) = response.interact_pointer_pos() {
@@ -156,7 +155,7 @@ pub(super) fn show(editor: &mut Editor, ui: &mut egui::Ui, doc: &BlockDoc, theme
             if !sel.is_empty() {
                 let a = selection::to_global(&blocks, sel.anchor);
                 let h = selection::to_global(&blocks, sel.head);
-                for r in selection::selection_rects(&galley, a.min(h), a.max(h)) {
+                for r in text_edit::selection_rects(&galley, a.min(h), a.max(h)) {
                     painter.rect_filled(r.translate(code_origin.to_vec2()), 0.0, theme.selection);
                 }
             }
@@ -185,10 +184,9 @@ pub(super) fn show(editor: &mut Editor, ui: &mut egui::Ui, doc: &BlockDoc, theme
 
         if response.has_focus() {
             if let Some(sel) = editor.sel {
-                let solid = ((now - editor.blink_origin) * 1.4).fract() < 0.6;
-                if solid {
+                if text_edit::caret_on(now, editor.blink_origin) {
                     let g = selection::to_global(&blocks, sel.head);
-                    let cr = galley.pos_from_cursor(CCursor::new(g));
+                    let cr = text_edit::caret_rect(&galley, g);
                     let x = code_origin.x + cr.min.x;
                     painter.vline(x, (code_origin.y + cr.min.y)..=(code_origin.y + cr.max.y), Stroke::new(2.0, theme.caret));
                 }

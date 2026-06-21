@@ -235,7 +235,8 @@ pub fn caret_rect(galley: &Galley, index: usize) -> Rect {
 
 /// Galley-local rects covering the char range `[a, b)`, one per visual row it spans. X
 /// positions come from `pos_from_cursor`; a selection running off the end of a wrapped row
-/// extends to that row's right edge.
+/// extends to that row's right edge, and one that swallows a row's trailing newline extends a
+/// few px further so the selected line break reads as selected.
 pub fn selection_rects(galley: &Galley, a: usize, b: usize) -> Vec<Rect> {
     let mut rects = Vec::new();
     if a >= b {
@@ -245,17 +246,30 @@ pub fn selection_rects(galley: &Galley, a: usize, b: usize) -> Vec<Rect> {
     for row in &galley.rows {
         let row_start = idx;
         let row_end = idx + row.char_count_excluding_newline();
+        let nl = row.ends_with_newline as usize;
         let sa = a.max(row_start);
-        let sb = b.min(row_end);
+        let sb = b.min(row_end + nl);
         if sa < sb {
             let rr = row.rect();
             let x0 = if a <= row_start { rr.left() } else { galley.pos_from_cursor(CCursor::new(sa)).left() };
-            let x1 = if b >= row_end { rr.right() } else { galley.pos_from_cursor(CCursor::new(sb)).left() };
+            let x1 = if sb > row_end {
+                rr.right() + 3.0
+            } else if b >= row_end {
+                rr.right()
+            } else {
+                galley.pos_from_cursor(CCursor::new(sb)).left()
+            };
             rects.push(Rect::from_min_max(pos2(x0, rr.top()), pos2(x1, rr.bottom())));
         }
         idx = row_start + row.char_count_including_newline();
     }
     rects
+}
+
+/// Caret blink phase: whether the caret is visible at `now`, with `origin` the last caret
+/// move/edit — so the caret snaps solid on input and only blinks once you pause.
+pub fn caret_on(now: f64, origin: f64) -> bool {
+    ((now - origin) * 1.4).fract() < 0.6
 }
 
 /// A ready [`TextBuffer`] over a plain `String` (char-indexed) — for plain fields and tests.

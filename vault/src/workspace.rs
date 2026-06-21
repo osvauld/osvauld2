@@ -2,7 +2,7 @@
 //! virtual desktop in the shell. A workspace is just a namespace in the account store
 //! (`ws/<id>/…`) plus a small sealed metadata record at `ws/<id>/meta`. There is no registry
 //! document: the set of workspaces *is* the set of `meta` keys, found by a prefix scan
-//! (`Store::list_prefixed`). CRDT layers (`data::Layer`) only enter later, for the
+//! (`Store::list_prefixed`). CRDT layers only enter later, for the
 //! collaborative *content* a workspace holds (`.doc` files, members), never for this header.
 
 use std::time::{SystemTime, UNIX_EPOCH};

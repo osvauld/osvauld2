@@ -1,0 +1,16 @@
+[package]
+name = "table_query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Host-side query executor for World B (imported tables → dashboards): build a Polars frame from a
+# `.table` Loro layer, run Polars SQL over one or more sources, and project results back to
+# table_core rows for the native grid/chart. Heavy (Polars) but OFF the render path — app_engine
+# never depends on this; only the host does. See the imported-tables plan + [[migration-dataflow-model]].
+[dependencies]
+table_core = { path = "../table_core" }
+loro = "1.12.0"
+polars = { version = "0.54", default-features = false, features = ["lazy", "sql", "fmt", "pivot", "round_series", "dtype-full"] }
+rust_decimal = "1.42"
+anyhow = "1"

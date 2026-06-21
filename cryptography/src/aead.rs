@@ -6,12 +6,6 @@ use crate::error::CryptoError;
 
 const NONCE_LEN: usize = 12;
 
-pub fn generate_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    key
-}
-
 /// AES-256-GCM seal. Output is `nonce(12) || ciphertext || tag(16)`.
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::Aead)?;

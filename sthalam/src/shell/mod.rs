@@ -14,6 +14,7 @@ mod app_view;
 mod atoms;
 mod doc;
 mod home;
+pub(crate) mod table_data;
 mod workspace;
 
 pub struct Shell {
@@ -27,14 +28,29 @@ pub struct Shell {
 
 enum Tab {
     Home,
-    Workspace { meta: WorkspaceMeta, items: Vec<WorkspaceItem>, loaded: bool },
-    /// Any opened item (.doc, .app, …)
-    Open { item: WorkspaceItem, body: TabBody },
+    Workspace {
+        meta: WorkspaceMeta,
+        items: Vec<WorkspaceItem>,
+        loaded: bool,
+    },
+    Open {
+        item: WorkspaceItem,
+        body: TabBody,
+    },
 }
 
 enum TabBody {
-    Doc { doc: Doc, editor: DocEditor },
-    App { tab: AppTab },
+    Doc {
+        doc: Doc,
+        editor: DocEditor,
+    },
+    App {
+        tab: AppTab,
+    },
+    /// A `.table`: the engine renders a grid natively from the item's stored schema + rows.
+    Table {
+        engine: app_engine::EngineApp,
+    },
 }
 
 enum Action {
@@ -66,7 +82,6 @@ struct ShellViewer<'a> {
     search: &'a mut String,
     creating: &'a mut Option<String>,
     user_menu: bool,
-    /// Key of the currently active (focused) tab, used for styling.
     active_key: Option<String>,
 }
 
@@ -79,7 +94,11 @@ impl TabViewer for ShellViewer<'_> {
 
         match tab {
             Tab::Home => {
-                let color = if is_active { theme::ACCENT } else { theme::FG_3 };
+                let color = if is_active {
+                    theme::ACCENT
+                } else {
+                    theme::FG_3
+                };
                 egui::RichText::new("⌂")
                     .font(FontId::new(14.0, FontFamily::Monospace))
                     .color(color)
@@ -88,32 +107,48 @@ impl TabViewer for ShellViewer<'_> {
             Tab::Workspace { meta, .. } => {
                 use egui::text::{LayoutJob, TextFormat};
                 let mut job = LayoutJob::default();
-                job.append("■ ", 0.0, TextFormat {
-                    font_id: FontId::new(9.0, FontFamily::Monospace),
-                    color: theme::tint(&meta.id),
-                    ..Default::default()
-                });
-                job.append(&atoms::elide(&meta.name, 18), 0.0, TextFormat {
-                    font_id: FontId::new(12.5, FontFamily::Proportional),
-                    color: fg,
-                    ..Default::default()
-                });
+                job.append(
+                    "■ ",
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(9.0, FontFamily::Monospace),
+                        color: theme::tint(&meta.id),
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &atoms::elide(&meta.name, 18),
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(12.5, FontFamily::Proportional),
+                        color: fg,
+                        ..Default::default()
+                    },
+                );
                 egui::WidgetText::LayoutJob(job.into())
             }
             Tab::Open { item, .. } => {
                 use egui::text::{LayoutJob, TextFormat};
                 let badge = format!(".{} ", item.kind.as_str());
                 let mut job = LayoutJob::default();
-                job.append(&badge, 0.0, TextFormat {
-                    font_id: FontId::new(9.5, FontFamily::Monospace),
-                    color: theme::FG_4,
-                    ..Default::default()
-                });
-                job.append(&atoms::elide(&item.name, 18), 0.0, TextFormat {
-                    font_id: FontId::new(12.5, FontFamily::Proportional),
-                    color: fg,
-                    ..Default::default()
-                });
+                job.append(
+                    &badge,
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(9.5, FontFamily::Monospace),
+                        color: theme::FG_4,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    &atoms::elide(&item.name, 18),
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(12.5, FontFamily::Proportional),
+                        color: fg,
+                        ..Default::default()
+                    },
+                );
                 egui::WidgetText::LayoutJob(job.into())
             }
         }
@@ -138,7 +173,11 @@ impl TabViewer for ShellViewer<'_> {
                 self.user_menu,
                 self.action,
             ),
-            Tab::Workspace { meta, items, loaded } => {
+            Tab::Workspace {
+                meta,
+                items,
+                loaded,
+            } => {
                 if !*loaded {
                     *items = self.vault.items(&meta.id).unwrap_or_default();
                     *loaded = true;
@@ -148,7 +187,9 @@ impl TabViewer for ShellViewer<'_> {
             Tab::Open { item, body } => match body {
                 TabBody::Doc { doc, editor } => {
                     if doc::body(ui, item, doc, editor) {
-                        let _ = self.vault.put_state(&item.ws_id, &item.id, &doc.export_snapshot());
+                        let _ = self
+                            .vault
+                            .put_state(&item.ws_id, &item.id, &doc.export_snapshot());
                     }
                 }
                 TabBody::App { tab } => {
@@ -160,20 +201,35 @@ impl TabViewer for ShellViewer<'_> {
                         let _ = self.vault.put_file(&item.ws_id, &item.id, &path, &bytes);
                     }
                 }
+                TabBody::Table { engine } => {
+                    let out = egui::CentralPanel::default()
+                        .frame(egui::Frame::default().fill(theme::BG_PAGE))
+                        .show_inside(ui, |ui| engine.show(ui))
+                        .inner;
+                    if let Some(crdt) = out {
+                        let _ = self.vault.put_state(&item.ws_id, &item.id, &crdt);
+                    }
+                }
             },
         }
     }
 
     /// Paint a 2px accent bar at the top of the active tab button.
     fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
-        if self.active_key.as_deref() != Some(tab_key(tab)) { return; }
-        response.ctx.layer_painter(
-            egui::LayerId::new(egui::Order::Foreground, egui::Id::new("tab_accent_line"))
-        ).hline(
-            response.rect.x_range(),
-            response.rect.top() + 1.0,
-            Stroke::new(2.0, theme::ACCENT),
-        );
+        if self.active_key.as_deref() != Some(tab_key(tab)) {
+            return;
+        }
+        response
+            .ctx
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("tab_accent_line"),
+            ))
+            .hline(
+                response.rect.x_range(),
+                response.rect.top() + 1.0,
+                Stroke::new(2.0, theme::ACCENT),
+            );
     }
 
     fn is_closeable(&self, tab: &Tab) -> bool {
@@ -214,7 +270,9 @@ impl Shell {
         }
 
         // Snapshot the active tab key before DockArea takes a mutable borrow.
-        let active_key = self.dock.find_active_focused()
+        let active_key = self
+            .dock
+            .find_active_focused()
             .map(|(_, tab)| tab_key(tab).to_owned());
 
         let mut action = None;
@@ -229,7 +287,9 @@ impl Shell {
                 user_menu: self.user_menu,
                 active_key,
             };
-            DockArea::new(&mut self.dock).style(style).show_inside(ui, &mut viewer);
+            DockArea::new(&mut self.dock)
+                .style(style)
+                .show_inside(ui, &mut viewer);
         }
         self.apply(action, vault)
     }
@@ -289,17 +349,27 @@ impl Shell {
 
     /// Focus an already-open tab matching `pred`; returns true if one was found.
     fn focus_existing(&mut self, pred: impl Fn(&Tab) -> bool) -> bool {
-        let path = self.dock.iter_all_tabs()
+        let path = self
+            .dock
+            .iter_all_tabs()
             .find_map(|(path, t)| pred(t).then_some(path));
         match path {
-            Some(path) => { let _ = self.dock.set_active_tab(path); true }
+            Some(path) => {
+                let _ = self.dock.set_active_tab(path);
+                true
+            }
             None => false,
         }
     }
 
     fn open_workspace(&mut self, meta: WorkspaceMeta) {
-        if !self.focus_existing(|t| matches!(t, Tab::Workspace { meta: m, .. } if m.id == meta.id)) {
-            self.dock.push_to_focused_leaf(Tab::Workspace { meta, items: Vec::new(), loaded: false });
+        if !self.focus_existing(|t| matches!(t, Tab::Workspace { meta: m, .. } if m.id == meta.id))
+        {
+            self.dock.push_to_focused_leaf(Tab::Workspace {
+                meta,
+                items: Vec::new(),
+                loaded: false,
+            });
         }
         self.user_menu = false;
     }
@@ -316,9 +386,20 @@ impl Shell {
                     .flatten()
                     .and_then(|b| Doc::from_snapshot(&b).ok())
                     .unwrap_or_else(Doc::new);
-                TabBody::Doc { doc, editor: DocEditor::new() }
+                TabBody::Doc {
+                    doc,
+                    editor: DocEditor::new(),
+                }
             }
-            ItemKind::App => TabBody::App { tab: AppTab::load(vault, &item) },
+            ItemKind::App => TabBody::App {
+                tab: AppTab::load(vault, &item),
+            },
+            ItemKind::Table => {
+                let state = vault.get_state(&item.ws_id, &item.id).ok().flatten();
+                TabBody::Table {
+                    engine: app_engine::EngineApp::table(state.as_deref(), theme::FG_1, 14.0),
+                }
+            }
             _ => return,
         };
         self.dock.push_to_focused_leaf(Tab::Open { item, body });
@@ -337,13 +418,24 @@ impl Shell {
     /// Merge a write made by an external client (MCP) into any matching open tab.
     pub fn apply_refresh(&mut self, vault: &Vault, refresh: Refresh) {
         match refresh {
-            Refresh::Doc { ws_id, item_id, snapshot } => self.refresh_doc(vault, &ws_id, &item_id, &snapshot),
+            Refresh::Doc {
+                ws_id,
+                item_id,
+                snapshot,
+            } => self.refresh_doc(vault, &ws_id, &item_id, &snapshot),
             Refresh::App { ws_id, item_id } => self.refresh_app(vault, &ws_id, &item_id),
-            Refresh::Lua { ws_id, item_id, path, snapshot } => self.refresh_lua(vault, &ws_id, &item_id, &path, &snapshot),
+            Refresh::Lua {
+                ws_id,
+                item_id,
+                path,
+                snapshot,
+            } => self.refresh_lua(vault, &ws_id, &item_id, &path, &snapshot),
             Refresh::Workspace { ws_id } => self.refresh_workspace(&ws_id),
-            Refresh::AppData { ws_id, item_id, snapshot } => {
-                self.refresh_app_data(vault, &ws_id, &item_id, &snapshot)
-            }
+            Refresh::AppData {
+                ws_id,
+                item_id,
+                snapshot,
+            } => self.refresh_app_data(vault, &ws_id, &item_id, &snapshot),
         }
     }
 
@@ -351,21 +443,52 @@ impl Shell {
     /// it this frame), persisting the union (the live doc may hold edits the bridge's
     /// read-modify-write didn't see).
     fn refresh_app_data(&mut self, vault: &Vault, ws_id: &str, item_id: &str, snapshot: &[u8]) {
+        // A `.table` write may feed a dashboard app that imported it. Notify every open `.app`
+        // tab's data plane; it bumps + recomputes only if `item_id` backs one of its sources.
         for (_, tab) in self.dock.iter_all_tabs_mut() {
-            if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
-                if item.ws_id == ws_id && item.id == item_id {
+            if let Tab::Open {
+                body: TabBody::App { tab: app },
+                ..
+            } = tab
+            {
+                app.note_source_write(item_id);
+            }
+        }
+        for (_, tab) in self.dock.iter_all_tabs_mut() {
+            let Tab::Open { item, body } = tab else {
+                continue;
+            };
+            if item.ws_id != ws_id || item.id != item_id {
+                continue;
+            }
+            match body {
+                TabBody::App { tab: app } => {
                     if let Some(union) = app.import_runtime(snapshot) {
                         let _ = vault.put_state(ws_id, item_id, &union);
                     }
-                    return;
                 }
+                // A `.table` grid: merge the external write into the live engine (same path),
+                // re-export the union so the durable state holds both sides' edits.
+                TabBody::Table { engine } => {
+                    if engine.import_state(snapshot).is_ok() {
+                        if let Some(union) = engine.export_state() {
+                            let _ = vault.put_state(ws_id, item_id, &union);
+                        }
+                    }
+                }
+                _ => {}
             }
+            return;
         }
     }
 
     fn refresh_doc(&mut self, vault: &Vault, ws_id: &str, item_id: &str, snapshot: &[u8]) {
         for (_, tab) in self.dock.iter_all_tabs_mut() {
-            if let Tab::Open { item, body: TabBody::Doc { doc, .. } } = tab {
+            if let Tab::Open {
+                item,
+                body: TabBody::Doc { doc, .. },
+            } = tab
+            {
                 if item.ws_id == ws_id && item.id == item_id {
                     let _ = doc.import(snapshot);
                     // The bridge already persisted its own snapshot, but the live tab may
@@ -381,7 +504,11 @@ impl Shell {
 
     fn refresh_app(&mut self, vault: &Vault, ws_id: &str, item_id: &str) {
         for (_, tab) in self.dock.iter_all_tabs_mut() {
-            if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
+            if let Tab::Open {
+                item,
+                body: TabBody::App { tab: app },
+            } = tab
+            {
                 if item.ws_id == ws_id && item.id == item_id {
                     app.reload(vault, item);
                     return;
@@ -392,9 +519,20 @@ impl Shell {
 
     /// Merge a per-block `.lua` edit into the open app tab (surgical, keeps the human's live edits),
     /// persisting the union if the live doc absorbed it.
-    fn refresh_lua(&mut self, vault: &Vault, ws_id: &str, item_id: &str, path: &str, snapshot: &[u8]) {
+    fn refresh_lua(
+        &mut self,
+        vault: &Vault,
+        ws_id: &str,
+        item_id: &str,
+        path: &str,
+        snapshot: &[u8],
+    ) {
         for (_, tab) in self.dock.iter_all_tabs_mut() {
-            if let Tab::Open { item, body: TabBody::App { tab: app } } = tab {
+            if let Tab::Open {
+                item,
+                body: TabBody::App { tab: app },
+            } = tab
+            {
                 if item.ws_id == ws_id && item.id == item_id {
                     if let Some(union) = app.merge_lua(path, snapshot) {
                         let _ = vault.put_file(ws_id, item_id, path, &union);

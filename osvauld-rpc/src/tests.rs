@@ -84,3 +84,30 @@ fn framing_length_prefix_is_correct() {
     assert_eq!(&buf[..4], &5u32.to_be_bytes());
     assert_eq!(&buf[4..], b"hello");
 }
+
+#[test]
+fn app_data_row_add_roundtrips() {
+    let req = Request::AppDataRowAdd {
+        ws_id: "ws-abc".to_string(),
+        item_id: "item-123".to_string(),
+        list: "orders".to_string(),
+        fields: serde_json::json!({ "status": "open", "qty": 2, "paid": true }),
+    };
+    let back: Request = roundtrip(&req);
+    assert!(matches!(back, Request::AppDataRowAdd { list, fields, .. }
+        if list == "orders" && fields["qty"] == 2 && fields["paid"] == true));
+}
+
+#[test]
+fn app_data_row_set_roundtrips() {
+    let req = Request::AppDataRowSet {
+        ws_id: "ws-abc".to_string(),
+        item_id: "item-123".to_string(),
+        list: "orders".to_string(),
+        row: "a1b2-0".to_string(),
+        fields: serde_json::json!({ "status": "shipped", "note": null }),
+    };
+    let back: Request = roundtrip(&req);
+    assert!(matches!(back, Request::AppDataRowSet { row, fields, .. }
+        if row == "a1b2-0" && fields["status"] == "shipped" && fields["note"].is_null()));
+}

@@ -4,13 +4,18 @@ use loro::{
     ExportMode, LoroDoc, LoroText, LoroTree, LoroValue, TreeID, TreeParentId, UndoManager,
     ValueOrContainer,
 };
+use loro::cursor::{Cursor, Side};
 
 pub use loro::LoroError;
+pub use loro::cursor::Cursor as TextCursor;
 
 pub type BlockId = TreeID;
 
 pub struct BlockDoc {
     doc: LoroDoc,
+    // which LoroTree in `doc` holds the blocks — `BODY` by default, a custom name when several
+    // block trees share one doc (the embed seam: a doc living inside a host app's CRDT).
+    tree: String,
     // undo/redo need &mut UndoManager while doc's own methods take &self
     undo: RefCell<UndoManager>,
 }
@@ -26,10 +31,23 @@ impl BlockDoc {
 
     /// `setup` runs before the UndoManager exists — seeding/config done there is not undoable.
     pub fn new_with(setup: impl FnOnce(&LoroDoc)) -> Self {
+        Self::new_on(Self::BODY, setup)
+    }
+
+    /// Like [`new_with`](Self::new_with) but on a named tree, so several block trees can live in
+    /// one doc.
+    pub fn new_on(tree: &str, setup: impl FnOnce(&LoroDoc)) -> Self {
         let doc = LoroDoc::new();
         // Must enable before any node is created (fractional indexing for stable sibling order)
-        doc.get_tree(Self::BODY).enable_fractional_index(0);
-        Self::finish(doc, setup)
+        doc.get_tree(tree).enable_fractional_index(0);
+        Self::finish(doc, tree.to_string(), setup)
+    }
+
+    /// Build over an existing (shared) `LoroDoc` on a named tree — the embed seam: the host owns
+    /// the doc (persistence, sync, other containers) and this just operates a block tree inside it.
+    pub fn on_shared(doc: LoroDoc, tree: &str, setup: impl FnOnce(&LoroDoc)) -> Self {
+        doc.get_tree(tree).enable_fractional_index(0);
+        Self::finish(doc, tree.to_string(), setup)
     }
 
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, LoroError> {
@@ -43,12 +61,18 @@ impl BlockDoc {
         let doc = LoroDoc::new();
         doc.import(bytes)?;
         doc.get_tree(Self::BODY).enable_fractional_index(0);
-        Ok(Self::finish(doc, setup))
+        Ok(Self::finish(doc, Self::BODY.to_string(), setup))
     }
 
     /// For `setup` closures: seed one empty block when the doc has none, pre-undo.
     pub fn seed_if_empty(doc: &LoroDoc, kind: &str) {
-        let tree = doc.get_tree(Self::BODY);
+        Self::seed_if_empty_on(doc, Self::BODY, kind)
+    }
+
+    /// Seed an empty block on a named tree when it has none, pre-undo (the embed-seam counterpart
+    /// of [`seed_if_empty`](Self::seed_if_empty)).
+    pub fn seed_if_empty_on(doc: &LoroDoc, tree: &str, kind: &str) {
+        let tree = doc.get_tree(tree);
         if tree.children(TreeParentId::Root).is_none_or(|c| c.is_empty()) {
             let id = tree.create_at(TreeParentId::Root, 0).expect("seed block");
             Self::init_block_raw(&tree, id, kind, "");
@@ -56,12 +80,12 @@ impl BlockDoc {
     }
 
     // UndoManager created after setup+commit so imported/seeded history is not undoable
-    fn finish(doc: LoroDoc, setup: impl FnOnce(&LoroDoc)) -> Self {
+    fn finish(doc: LoroDoc, tree: String, setup: impl FnOnce(&LoroDoc)) -> Self {
         setup(&doc);
         doc.commit();
         let mut undo = UndoManager::new(&doc);
         undo.set_merge_interval(Self::UNDO_MERGE_MS);
-        Self { doc, undo: RefCell::new(undo) }
+        Self { doc, tree, undo: RefCell::new(undo) }
     }
 
     pub fn undo(&self) -> bool {
@@ -180,6 +204,22 @@ impl BlockDoc {
 
     pub fn text_len(&self, id: BlockId) -> usize {
         self.content(id).len_unicode()
+    }
+
+    /// Capture a *stable* cursor anchored at code-point `pos` in block `id`'s text. Unlike a
+    /// bare offset, it tracks the character it sits beside by op-id, so a concurrent remote
+    /// edit that inserts/deletes text earlier in the block carries it along instead of leaving
+    /// it stranded at a now-wrong offset. Resolve it later with [`resolve_cursor`](Self::resolve_cursor).
+    pub fn cursor_at(&self, id: BlockId, pos: usize) -> Option<Cursor> {
+        // Side::Left: a remote insertion at exactly `pos` lands to the cursor's right (the
+        // caret stays before it), the conventional text-caret bias.
+        self.content(id).get_cursor(pos, Side::Left)
+    }
+
+    /// Resolve a cursor from [`cursor_at`](Self::cursor_at) to a live code-point offset in the
+    /// current document state. `None` if it can't be located (e.g. its block was deleted).
+    pub fn resolve_cursor(&self, cursor: &Cursor) -> Option<usize> {
+        self.doc.get_cursor_pos(cursor).ok().map(|r| r.current.pos)
     }
 
     pub fn meta(&self, id: BlockId, key: &str) -> Option<String> {
@@ -323,7 +363,7 @@ impl BlockDoc {
     }
 
     fn tree(&self) -> LoroTree {
-        self.doc.get_tree(Self::BODY)
+        self.doc.get_tree(self.tree.as_str())
     }
 
     fn meta_map(&self, id: BlockId) -> loro::LoroMap {

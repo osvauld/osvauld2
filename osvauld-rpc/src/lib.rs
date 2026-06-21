@@ -101,6 +101,15 @@ pub enum Request {
     /// Replace the content of one top-level text container in an .app's runtime data CRDT — the
     /// same operation the app's own `ui.editor` makes, so an open run pane updates live.
     AppDataSetText { ws_id: String, item_id: String, name: String, text: String },
+    /// Add a row (a JSON object of scalar fields) to a top-level list in an .app's runtime data
+    /// CRDT — the same op the app's Lua `list:add` makes. Stamps a stable `id` unless one is
+    /// supplied; returns `{ id }`.
+    AppDataRowAdd { ws_id: String, item_id: String, list: String, fields: serde_json::Value },
+    /// Set scalar fields (JSON `null` deletes a field) on the row with stable id `row` in a
+    /// top-level list.
+    AppDataRowSet { ws_id: String, item_id: String, list: String, row: String, fields: serde_json::Value },
+    /// Remove the row with stable id `row` from a top-level list.
+    AppDataRowRemove { ws_id: String, item_id: String, list: String, row: String },
     /// Export a page-declaring .app to PDF. Returns the written file's path.
     ExportPdf { ws_id: String, item_id: String },
     /// Render an .app off-screen and return it as base64 PNG. `width`/`height` are logical px
@@ -111,6 +120,30 @@ pub enum Request {
         width: Option<f32>,
         height: Option<f32>,
         scale: Option<f32>,
+    },
+    /// Open an .xlsx into migration staging (calamine → Polars), returning a handle plus a
+    /// per-sheet summary (rows, cols, inferred column dtypes). Dev: `path` is a host filesystem
+    /// path; the eventual model is a user-selected upload buffer (no arbitrary path read).
+    ImportOpen { path: String },
+    /// The first `n` rows of a staged sheet as a text table (omit `sheet` for the first sheet).
+    ImportHead { handle: String, sheet: Option<String>, n: usize },
+    /// Run SQL over a staged sheet (registered as table `data`) — the profiling escape hatch
+    /// (DISTINCT / GROUP BY / COUNT / aggregates) the agent uses to understand the data.
+    ImportSql { handle: String, sheet: Option<String>, query: String },
+    /// Drop a staged workbook (the .xlsx is transient migration input).
+    ImportClose { handle: String },
+    /// Run Polars SQL over a *stored* `.table` item (registered both as `t` and under its item
+    /// name) — the live-table profiling tool the agent uses to design dashboards over real data.
+    TableSql { ws_id: String, item_id: String, query: String },
+    /// Materialize a staged sheet into a new `.table` item in `ws_id`. `columns` is the agent's
+    /// plan — a JSON array of `{ source, key, label, type }` (type = text/number/decimal/check/
+    /// select/date) — typed-coerced into a stored schema + rows. Returns the new item.
+    ImportToLayer {
+        handle: String,
+        sheet: Option<String>,
+        ws_id: String,
+        name: String,
+        columns: serde_json::Value,
     },
 }
 

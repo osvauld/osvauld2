@@ -131,6 +131,15 @@ pub(crate) fn text_name(value: &Value) -> Option<String> {
     }
 }
 
+/// If `value` is a `doc:list(name)` handle, its backing container name — how
+/// `ui.table{ rows = doc:list(name) }` binds.
+pub(crate) fn list_name(value: &Value) -> Option<String> {
+    match value {
+        Value::UserData(ud) => ud.borrow::<LuaList>().ok().map(|l| l.name.clone()),
+        _ => None,
+    }
+}
+
 /// A [`text_edit::TextBuffer`] over a top-level LoroText. Lives here (the consumer), not in
 /// `text_edit`, to keep loro out of the primitive. Char- (code-point-) indexed, matching
 /// `len_unicode` and egui's `CCursor`. Edits set `dirty`; the owner [`commit`](Self::commit)s once.
@@ -236,8 +245,31 @@ impl UserData for LuaList {
         });
 
         m.add_method("add", |_, this, fields: Table| {
-            let map = this.handle().push_container(LoroMap::new()).map_err(err)?;
+            let list = this.handle();
+            // A supplied id must be a unique string — every edit addresses "first row with
+            // this id", so a collision silently edits the wrong row.
+            match fields.get::<Value>("id") {
+                Ok(Value::Nil) | Ok(Value::String(_)) => {}
+                _ => return Err(mlua::Error::RuntimeError("row id must be a string".into())),
+            }
+            if let Ok(Value::String(id)) = fields.get::<Value>("id") {
+                let id = id.to_string_lossy();
+                if id.starts_with('#') {
+                    return Err(mlua::Error::RuntimeError(
+                        "row ids may not start with '#' (reserved for index addressing)".into(),
+                    ));
+                }
+                if table_core::find_row(&list, &id).is_some() {
+                    return Err(mlua::Error::RuntimeError(format!("duplicate row id '{id}'")));
+                }
+            }
+            let map = list.push_container(LoroMap::new()).map_err(err)?;
             fill_map(&map, fields)?;
+            // Stable row id, stamped at birth: queries/edits/relations address rows by id,
+            // never display index. An app-supplied `id` wins.
+            if map.get("id").is_none() {
+                map.insert("id", crate::row_id(&this.doc)).map_err(err)?;
+            }
             this.doc.commit();
             Ok(())
         });
@@ -307,6 +339,145 @@ impl UserData for LuaMap {
 }
 
 // --- value conversion -------------------------------------------------------
+
+/// A handler that flips boolean `key` on the row whose stable id is `row_id` — a check cell's
+/// click. Addresses by id (or the `#index` fallback for unstamped rows), never display position,
+/// so it stays correct under sort/filter.
+pub(crate) fn toggle_cell_fn(
+    lua: &Lua,
+    doc: Rc<LoroDoc>,
+    list: String,
+    row_id: String,
+    key: String,
+) -> LuaResult<mlua::Function> {
+    lua.create_function(move |_, ()| {
+        let l = doc.get_movable_list(list.as_str());
+        if let Some(i) = table_core::find_row(&l, &row_id) {
+            if let Some(ValueOrContainer::Container(Container::Map(m))) = l.get(i) {
+                let cur =
+                    matches!(m.get(&key), Some(ValueOrContainer::Value(LoroValue::Bool(true))));
+                m.insert(&key, !cur).map_err(err)?;
+                doc.commit();
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Wrap an app's `on_edit` so it dispatches like any zero-arg handler, with this cell's
+/// (row id, key) bound.
+pub(crate) fn cell_edit_fn(
+    lua: &Lua,
+    f: mlua::Function,
+    row_id: &str,
+    key: &str,
+) -> LuaResult<mlua::Function> {
+    let (row_id, key) = (row_id.to_string(), key.to_string());
+    lua.create_function(move |_, ()| f.call::<()>((row_id.as_str(), key.as_str())))
+}
+
+/// One scalar cell as an editable buffer: the row map's field, addressed by stable row id (never
+/// display index, so edits stay correct under sort/filter). Opened fresh each frame like
+/// [`LoroTextBuffer`]; edits land in a plain string and commit writes the scalar back once.
+pub(crate) struct CellBuffer {
+    doc: Rc<LoroDoc>,
+    map: Option<LoroMap>,
+    key: String,
+    text: String,
+    dirty: bool,
+}
+
+impl CellBuffer {
+    pub fn open(doc: Rc<LoroDoc>, list: &str, row: &str, key: &str) -> Self {
+        let l = doc.get_movable_list(list);
+        let map = table_core::find_row(&l, row).and_then(|i| match l.get(i) {
+            Some(ValueOrContainer::Container(Container::Map(m))) => Some(m),
+            _ => None,
+        });
+        // A non-string scalar (a number the schema now calls text) edits as its printed form.
+        let text = match map.as_ref().and_then(|m| m.get(key)) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+            Some(ValueOrContainer::Value(LoroValue::I64(n))) => n.to_string(),
+            Some(ValueOrContainer::Value(LoroValue::Double(d))) => d.to_string(),
+            _ => String::new(),
+        };
+        CellBuffer { doc, map, key: key.to_string(), text, dirty: false }
+    }
+
+    /// Write the edited value back, once. Returns whether anything changed.
+    pub fn commit(&self) -> bool {
+        let Some(map) = self.map.as_ref().filter(|_| self.dirty) else { return false };
+        if map.insert(&self.key, self.text.as_str()).is_ok() {
+            self.doc.commit();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub(crate) fn byte_at(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b)
+}
+
+/// The row map with stable id `row` in list `list`, if present.
+fn row_map(doc: &LoroDoc, list: &str, row: &str) -> Option<LoroMap> {
+    let l = doc.get_movable_list(list);
+    table_core::find_row(&l, row).and_then(|i| match l.get(i) {
+        Some(ValueOrContainer::Container(Container::Map(m))) => Some(m),
+        _ => None,
+    })
+}
+
+/// One scalar cell as its display string (`None` if the row is gone or the field unset).
+pub(crate) fn cell_string(doc: &LoroDoc, list: &str, row: &str, key: &str) -> Option<String> {
+    match row_map(doc, list, row)?.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        Some(ValueOrContainer::Value(LoroValue::I64(n))) => Some(n.to_string()),
+        Some(ValueOrContainer::Value(LoroValue::Double(d))) => Some(d.to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn set_cell_number(doc: &LoroDoc, list: &str, row: &str, key: &str, n: f64) -> bool {
+    let Some(m) = row_map(doc, list, row) else { return false };
+    let ok = m.insert(key, n).is_ok();
+    if ok {
+        doc.commit();
+    }
+    ok
+}
+
+pub(crate) fn set_cell_text(doc: &LoroDoc, list: &str, row: &str, key: &str, s: &str) -> bool {
+    let Some(m) = row_map(doc, list, row) else { return false };
+    let ok = m.insert(key, s).is_ok();
+    if ok {
+        doc.commit();
+    }
+    ok
+}
+
+impl text_edit::TextBuffer for CellBuffer {
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    fn insert(&mut self, at: usize, s: &str) {
+        self.text.insert_str(byte_at(&self.text, at), s);
+        self.dirty = true;
+    }
+
+    fn delete(&mut self, at: usize, len: usize) {
+        let a = byte_at(&self.text, at);
+        let b = byte_at(&self.text, at + len);
+        self.text.replace_range(a..b, "");
+        self.dirty = true;
+    }
+}
 
 fn err(e: loro::LoroError) -> mlua::Error {
     mlua::Error::RuntimeError(e.to_string())

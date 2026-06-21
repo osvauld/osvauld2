@@ -84,7 +84,7 @@ impl DocEditor {
         let si = ids.iter().position(|&x| x == start.block).expect("start live");
         let ei = ids.iter().position(|&x| x == end.block).expect("end live");
         if si == ei {
-            doc.delete_text(start.block, start.index, end.index - start.index);
+            self.in_block(doc, |tf, buf| tf.delete_selection(buf));
         } else {
             // Trim the start tail and end head, splice the end's remainder onto the start, then
             // drop every block from the next through the end.

@@ -79,6 +79,7 @@ pub fn apply(ctx: &egui::Context) {
 pub const FONT_SANS: &[u8] = include_bytes!("../assets/fonts/NotoSans-Regular.ttf");
 pub const FONT_SANS_SB: &[u8] = include_bytes!("../assets/fonts/NotoSans-SemiBold.ttf");
 pub const FONT_MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
+pub const FONT_FALLBACK: &[&[u8]] = &[include_bytes!("../assets/fonts/NotoSansMalayalam-Regular.ttf")];
 
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -90,6 +91,7 @@ fn install_fonts(ctx: &egui::Context) {
     };
     add("sans", FONT_SANS);
     add("sans_sb", FONT_SANS_SB);
+    add("sans_ml", include_bytes!("../assets/fonts/NotoSansMalayalam-Regular.ttf"));
     add("jbmono", FONT_MONO);
     add("jbmono_sb", include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"));
     add("vt323", include_bytes!("../assets/fonts/VT323-Regular.ttf"));
@@ -100,6 +102,12 @@ fn install_fonts(ctx: &egui::Context) {
         .entry(FontFamily::Proportional)
         .or_default()
         .insert(0, "sans".to_owned());
+    // Malayalam glyph fallback (no complex shaping yet — conjuncts render decomposed).
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(1, "sans_ml".to_owned());
     fonts
         .families
         .entry(FontFamily::Monospace)

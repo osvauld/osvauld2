@@ -1,0 +1,17 @@
+[package]
+name = "table_import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The migration/staging crate: calamine reads .xlsx, Polars stages + profiles. Heavy deps live
+# here, OFF the live render path — table_core (the lean, loro-only schema vocabulary) never learns
+# Polars exists; this crate points at it. See [[table-data-model]] / [[migration-dataflow-model]].
+[dependencies]
+table_core = { path = "../table_core" }
+calamine = "0.35"
+polars = { version = "0.54", default-features = false, features = ["lazy", "sql", "fmt"] }
+anyhow = "1"
+loro = "1.12.0"
+# from_f64_retain recovers the shortest decimal of an xlsx-stored float (1979.06, not …0599999).
+rust_decimal = "1.42"

@@ -18,7 +18,7 @@
 //! invariant (the caret always has a home). Block identity is the stable `TreeID`; text
 //! positions are Unicode code points, matching egui's `CCursor`.
 
-use block_doc::BlockDoc;
+use block_doc::{BlockDoc, TextCursor};
 use loro::{ExpandType, LoroDoc, LoroError, LoroValue, StyleConfig, StyleConfigMap, TextDelta, TreeID};
 use rich_text::{Marks, Run};
 
@@ -95,9 +95,23 @@ impl Doc {
         Ok(Self { inner: BlockDoc::from_snapshot_with(bytes, Self::setup)? })
     }
 
+    /// A document embedded inside an existing (shared) `LoroDoc`, on its own named tree — the seam
+    /// a host app uses to host a block doc inside its runtime CRDT (so the host's persistence/sync
+    /// carry it). The host keeps the `doc`; this just drives the `tree` block hierarchy within it.
+    pub fn on_tree(doc: LoroDoc, tree: &str) -> Self {
+        let name = tree.to_string();
+        Self { inner: BlockDoc::on_shared(doc, tree, move |d| Self::setup_on(d, &name)) }
+    }
+
     /// Pre-undo setup: register mark styles and seed the first paragraph, so neither the seed
     /// nor imported history is undoable; the first edit is step one.
     fn setup(doc: &LoroDoc) {
+        Self::setup_on(doc, "body");
+    }
+
+    /// As [`setup`](Self::setup) but seeds a named tree — used by [`on_tree`](Self::on_tree) so an
+    /// embedded doc gets its first paragraph in its own tree, not the default `body`.
+    fn setup_on(doc: &LoroDoc, tree: &str) {
         // Register inline-mark styles. Loro's defaults cover bold/italic/underline/link but NOT
         // `strike`/`code`, and marking an unconfigured key errors — so declare the full set
         // (config is runtime, not in the snapshot, so it must run on every new/from_snapshot).
@@ -111,7 +125,7 @@ impl Doc {
         }
         styles.insert("link".into(), StyleConfig { expand: ExpandType::None });
         doc.config_text_style(styles);
-        BlockDoc::seed_if_empty(doc, BlockKind::Paragraph.as_str());
+        BlockDoc::seed_if_empty_on(doc, tree, BlockKind::Paragraph.as_str());
     }
 
     // --- Undo / redo (CRDT-aware) -----------------------------------------------------
@@ -203,6 +217,18 @@ impl Doc {
     /// A block's length in Unicode code points (matches caret offsets).
     pub fn text_len(&self, id: TreeID) -> usize {
         self.inner.text_len(id)
+    }
+
+    /// Capture a stable cursor at code-point `pos` in block `id` — survives concurrent edits
+    /// (the editor anchors its caret/selection here so a remote insert can't strand it). See
+    /// [`BlockDoc::cursor_at`].
+    pub fn cursor_at(&self, id: TreeID, pos: usize) -> Option<TextCursor> {
+        self.inner.cursor_at(id, pos)
+    }
+
+    /// Resolve a cursor from [`cursor_at`](Self::cursor_at) to a live offset in the current state.
+    pub fn resolve_cursor(&self, cursor: &TextCursor) -> Option<usize> {
+        self.inner.resolve_cursor(cursor)
     }
 
     /// A block's text as styled [`Run`]s — the substring spans with their inline marks, in
@@ -363,6 +389,38 @@ impl Doc {
 impl Default for Doc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One block's text as a [`text_edit::TextBuffer`], so in-block editing runs through the shared
+/// [`text_edit::TextField`] kernel; cross-block structure stays the editor's job.
+pub(crate) struct BlockBuf<'a> {
+    pub doc: &'a Doc,
+    pub id: TreeID,
+}
+
+impl text_edit::TextBuffer for BlockBuf<'_> {
+    fn char_len(&self) -> usize {
+        self.doc.text_len(self.id)
+    }
+    fn text(&self) -> String {
+        self.doc.text(self.id)
+    }
+    fn insert(&mut self, at: usize, s: &str) {
+        self.doc.insert_text(self.id, at, s);
+    }
+    fn delete(&mut self, at: usize, len: usize) {
+        self.doc.delete_text(self.id, at, len);
+    }
+    fn mark_covers(&self, a: usize, b: usize, key: &str) -> bool {
+        self.doc.mark_covers(self.id, a, b, key)
+    }
+    fn set_mark(&mut self, a: usize, b: usize, key: &str, on: bool) {
+        if on {
+            self.doc.mark(self.id, a, b, key);
+        } else {
+            self.doc.unmark(self.id, a, b, key);
+        }
     }
 }
 
