@@ -32,8 +32,6 @@ pub(crate) struct Look {
     pub corner_radius: Corners,
     pub border: Option<Border>,
     pub shadow: Option<BoxShadow>,
-    /// Effective opacity: this node's own × every ancestor's (CSS subtree semantics), resolved
-    /// here so paint just multiplies colours by it.
     pub opacity: f32,
 }
 
@@ -104,7 +102,12 @@ fn look(style: &Style) -> Look {
 /// Lay `root` out to fill `host` (the rect the engine was handed — a panel, a dock tab body, or the
 /// whole window), returning every box in pre-order (parents first = painter back-to-front).
 /// `offsets` are the retained scroll positions by region id.
-pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &HashMap<String, Vec2>) -> Vec<Placed> {
+pub(crate) fn layout(
+    ctx: &egui::Context,
+    host: Rect,
+    root: &Node,
+    offsets: &HashMap<String, Vec2>,
+) -> Vec<Placed> {
     let mut tree: TaffyTree<Ctx> = TaffyTree::new();
     let root_id = build(&mut tree, root);
 
@@ -121,12 +124,32 @@ pub(crate) fn layout(ctx: &egui::Context, host: Rect, root: &Node, offsets: &Has
 
     let mut out = Vec::new();
     let mut popups = Vec::new();
-    collect(&tree, root_id, screen.min, screen, 1.0, offsets, ctx, &mut out, &mut popups);
+    collect(
+        &tree,
+        root_id,
+        screen.min,
+        screen,
+        1.0,
+        offsets,
+        ctx,
+        &mut out,
+        &mut popups,
+    );
     // Popup subtrees collect after everything else — painted on top, hit-tested first — and
     // clip to the host, not their scroll ancestor, so a dropdown escapes its table body.
     while let Some((id, origin, opacity)) = popups.pop() {
         let mut nested = Vec::new();
-        collect(&tree, id, origin, screen, opacity, offsets, ctx, &mut out, &mut nested);
+        collect(
+            &tree,
+            id,
+            origin,
+            screen,
+            opacity,
+            offsets,
+            ctx,
+            &mut out,
+            &mut nested,
+        );
         popups.extend(nested);
     }
     out
@@ -151,7 +174,10 @@ fn build(tree: &mut TaffyTree<Ctx>, node: &Node) -> NodeId {
         base: look(&node.style),
         hover: node.hover.as_ref().map(look),
         active: node.active.as_ref().map(look),
-        text: node.text.as_ref().map(|runs| TextSpec { runs: runs.clone(), size: node.style.font_size }),
+        text: node.text.as_ref().map(|runs| TextSpec {
+            runs: runs.clone(),
+            size: node.style.font_size,
+        }),
         on_click: node.on_click,
         editor: node.editor.clone(),
         doc: node.doc.clone(),
@@ -169,10 +195,13 @@ fn build(tree: &mut TaffyTree<Ctx>, node: &Node) -> NodeId {
         // what becomes scrollable. Only when the region scrolls its *main* axis — a cross-axis
         // region (x-scroll column) must leave children shrinkable (a table's body compresses to
         // the leftover height and scrolls internally).
-        let scrolls_main = node.scroll.as_ref().is_some_and(|s| match node.style.direction {
-            crate::node::Direction::Column => s.y,
-            crate::node::Direction::Row => s.x,
-        });
+        let scrolls_main = node
+            .scroll
+            .as_ref()
+            .is_some_and(|s| match node.style.direction {
+                crate::node::Direction::Column => s.y,
+                crate::node::Direction::Row => s.x,
+            });
         if scrolls_main {
             for &k in &kids {
                 let mut child_style = tree.style(k).expect("child style").clone();
@@ -195,10 +224,16 @@ fn measure(
     node_ctx: Option<&mut Ctx>,
 ) -> Size<f32> {
     let Some(node_ctx) = node_ctx else {
-        return Size { width: 0.0, height: 0.0 };
+        return Size {
+            width: 0.0,
+            height: 0.0,
+        };
     };
     let Some(spec) = node_ctx.text.as_ref() else {
-        return Size { width: 0.0, height: 0.0 };
+        return Size {
+            width: 0.0,
+            height: 0.0,
+        };
     };
     // Wrap at the width Taffy fixed, else the offered space: definite → that width, min-content
     // → 0 (longest word, CSS min-content), max-content → unwrapped.
@@ -210,7 +245,10 @@ fn measure(
     let galley = shape_text(ctx, &spec.runs, spec.size, node_ctx.base.color, wrap);
     // Ceil so Taffy's whole-pixel rounding can't hand back a box a hair narrower than the galley
     // (re-shaping at that shaved width would wrap an extra line).
-    Size { width: galley.size().x.ceil(), height: galley.size().y.ceil() }
+    Size {
+        width: galley.size().x.ceil(),
+        height: galley.size().y.ceil(),
+    }
 }
 
 /// Walk the computed layout, turning Taffy's parent-relative boxes into absolute `Placed`s.
@@ -265,7 +303,10 @@ fn collect(
         let bord = layout.border;
         let content_w = (rect.width() - pad.left - pad.right - bord.left - bord.right).max(0.0);
         let galley = shape_text(ctx, &spec.runs, spec.size, base.color, content_w);
-        (rect.min + Vec2::new(pad.left + bord.left, pad.top + bord.top), galley)
+        (
+            rect.min + Vec2::new(pad.left + bord.left, pad.top + bord.top),
+            galley,
+        )
     });
 
     // A scroll region offsets its children up by the (clamped) scroll position and confines them
@@ -281,25 +322,63 @@ fn collect(
             }
             // Only the declared axes scroll; the other axis reports no range.
             let max_scroll = Vec2::new(
-                if spec.x { (right + pad.right - rect.width()).max(0.0) } else { 0.0 },
-                if spec.y { (bottom + pad.bottom - rect.height()).max(0.0) } else { 0.0 },
+                if spec.x {
+                    (right + pad.right - rect.width()).max(0.0)
+                } else {
+                    0.0
+                },
+                if spec.y {
+                    (bottom + pad.bottom - rect.height()).max(0.0)
+                } else {
+                    0.0
+                },
             );
-            let offset =
-                offsets.get(&spec.id).copied().unwrap_or(Vec2::ZERO).clamp(Vec2::ZERO, max_scroll);
-            (rect.min - offset, clip.intersect(rect), Some((spec.id.clone(), max_scroll)))
+            let offset = offsets
+                .get(&spec.id)
+                .copied()
+                .unwrap_or(Vec2::ZERO)
+                .clamp(Vec2::ZERO, max_scroll);
+            (
+                rect.min - offset,
+                clip.intersect(rect),
+                Some((spec.id.clone(), max_scroll)),
+            )
         }
         None => (rect.min, clip, None),
     };
 
     let child_opacity = base.opacity;
-    out.push(Placed { rect, text, base, hover, active, on_click, editor, doc, chart, clip, scroll, resize });
+    out.push(Placed {
+        rect,
+        text,
+        base,
+        hover,
+        active,
+        on_click,
+        editor,
+        doc,
+        chart,
+        clip,
+        scroll,
+        resize,
+    });
 
     for child in tree.children(id).expect("children list") {
         // A popup child is deferred (with the origin it would have had) to a top layer.
         if tree.get_node_context(child).is_some_and(|c| c.popup) {
             popups.push((child, child_origin, child_opacity));
         } else {
-            collect(tree, child, child_origin, child_clip, child_opacity, offsets, ctx, out, popups);
+            collect(
+                tree,
+                child,
+                child_origin,
+                child_clip,
+                child_opacity,
+                offsets,
+                ctx,
+                out,
+                popups,
+            );
         }
     }
 }
@@ -307,10 +386,29 @@ fn collect(
 /// Shape a text leaf's runs into a galley. A single unmarked, uncoloured run stays colour-neutral
 /// (`PLACEHOLDER`, so paint recolours it per state); anything richer bakes per-run colour via
 /// `rich_text`.
-fn shape_text(ctx: &egui::Context, runs: &[Run], size: f32, base_color: Color32, wrap: f32) -> Arc<Galley> {
+fn shape_text(
+    ctx: &egui::Context,
+    runs: &[Run],
+    size: f32,
+    base_color: Color32,
+    wrap: f32,
+) -> Arc<Galley> {
     if runs.len() == 1 && runs[0].marks.is_empty() && runs[0].color.is_none() {
-        ctx.fonts_mut(|f| f.layout(runs[0].text.clone(), FontId::proportional(size), Color32::PLACEHOLDER, wrap))
+        ctx.fonts_mut(|f| {
+            f.layout(
+                runs[0].text.clone(),
+                FontId::proportional(size),
+                Color32::PLACEHOLDER,
+                wrap,
+            )
+        })
     } else {
-        rich_text::galley(ctx, runs, rich_text::Style::new(size, base_color), THEME, wrap)
+        rich_text::galley(
+            ctx,
+            runs,
+            rich_text::Style::new(size, base_color),
+            THEME,
+            wrap,
+        )
     }
 }

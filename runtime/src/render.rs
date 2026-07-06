@@ -7,12 +7,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use vello::kurbo::Affine;
+use vello::peniko::Color;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 use winit::window::Window;
 
-use crate::screen::{Redraw, Screen};
 use crate::text::TextEngine;
-use crate::theme;
 
 /// Supersample factor (vello renders into a target this many times larger than the surface, blit
 /// downsamples). Left at 1 = native res: 2× linear-downsampled blurred edges more than it smoothed.
@@ -28,16 +27,10 @@ pub struct Render {
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
     scene: Scene,
-    /// Physical pixels per logical point; prepended as `Affine::scale` so the scene rasterizes at
-    /// native resolution.
     scale: f64,
-    /// vello renders via compute into this offscreen Rgba8Unorm texture; we blit it to the surface,
-    /// because swapchain images (e.g. Bgra8Unorm on Vulkan) aren't storage-bindable.
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     blitter: wgpu::util::TextureBlitter,
-    text: TextEngine,
-    screen: Box<dyn Screen>,
     /// Startup instant; `now` (seconds since) is the clock passed to screens for time-driven motion.
     start: Instant,
 }
@@ -68,7 +61,7 @@ fn create_targets(
 }
 
 impl Render {
-    pub async fn new(window: Arc<Window>, screen: Box<dyn Screen>) -> Self {
+    pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -128,8 +121,11 @@ impl Render {
         )
         .expect("create vello renderer");
 
-        let (target, target_view) =
-            create_targets(config.width * SUPERSAMPLE, config.height * SUPERSAMPLE, &device);
+        let (target, target_view) = create_targets(
+            config.width * SUPERSAMPLE,
+            config.height * SUPERSAMPLE,
+            &device,
+        );
         // Nearest is exact at 1:1 (crisp). If SUPERSAMPLE > 1, switch to Linear to downsample.
         let blitter = wgpu::util::TextureBlitter::new(&device, format);
         let scale = window.scale_factor();
@@ -150,10 +146,12 @@ impl Render {
             target,
             target_view,
             blitter,
-            text: TextEngine::new(),
-            screen,
             start: Instant::now(),
         }
+    }
+
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.window.set_ime_allowed(allowed);
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -163,8 +161,11 @@ impl Render {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-        let (target, target_view) =
-            create_targets(size.width * SUPERSAMPLE, size.height * SUPERSAMPLE, &self.device);
+        let (target, target_view) = create_targets(
+            size.width * SUPERSAMPLE,
+            size.height * SUPERSAMPLE,
+            &self.device,
+        );
         self.target = target;
         self.target_view = target_view;
     }
@@ -173,30 +174,41 @@ impl Render {
         self.scale = scale;
     }
 
+    /// Physical pixels per logical point — used to convert pointer events to logical coords.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
     /// Ask winit for the next frame — call after rendering to keep the loop alive.
     pub fn request_redraw(&self) {
         self.window.request_redraw();
     }
 
-    /// Draw one frame. Returns whether the active screen still wants frames (animating) so the
-    /// caller can decide to schedule another — or let the loop sleep.
-    pub fn render(&mut self) -> Redraw {
+    pub fn set_cursor(&self, icon: winit::window::CursorIcon) {
+        self.window.set_cursor(icon);
+    }
+
+    /// Draw one frame: clear to `clear`, let `build` populate the scene (it gets the scene, text
+    /// engine, the logical→physical transform, the logical viewport, and the elapsed clock), then
+    /// rasterize offscreen and present. Knows *how* to paint, not *what* — that's `build`.
+    pub fn paint<F>(&mut self, clear: Color, text: &mut TextEngine, build: F)
+    where
+        F: FnOnce(&mut Scene, &mut TextEngine, Affine, (f32, f32), f64),
+    {
         // wgpu 29 returns a status enum (not Result). Use the texture on success/suboptimal;
-        // anything else means reconfigure and retry next frame.
+        // anything else means reconfigure and skip this frame (winit will send another).
         use wgpu::CurrentSurfaceTexture::*;
         let frame = match self.surface.get_current_texture() {
             Success(f) | Suboptimal(f) => f,
             _ => {
                 self.surface.configure(&self.device, &self.config);
-                return Redraw::Animating; // transient surface loss — try again next frame
+                return;
             }
         };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Build *what* to paint: reset, then let the active screen populate the scene. Disjoint
-        // field borrows (screen / scene / text) — allowed in one statement.
         self.scene.reset();
         let t = Affine::scale(self.scale * SUPERSAMPLE as f64);
         // Viewport in logical points = physical / scale (supersample cancels out). Screens lay out
@@ -206,7 +218,7 @@ impl Render {
             (self.config.height as f64 / self.scale) as f32,
         );
         let now = self.start.elapsed().as_secs_f64();
-        let redraw = self.screen.build(&mut self.scene, &mut self.text, t, viewport, now);
+        build(&mut self.scene, text, t, viewport, now);
 
         self.renderer
             .render_to_texture(
@@ -215,7 +227,7 @@ impl Render {
                 &self.scene,
                 &self.target_view,
                 &RenderParams {
-                    base_color: theme::bg_page(),
+                    base_color: clear,
                     width: self.config.width * SUPERSAMPLE,
                     height: self.config.height * SUPERSAMPLE,
                     // Area AA (analytic) has conflation jaggies at vello's alpha; MSAA16 is clean.
@@ -234,6 +246,5 @@ impl Render {
             .copy(&self.device, &mut encoder, &self.target_view, &view);
         self.queue.submit([encoder.finish()]);
         frame.present();
-        redraw
     }
 }

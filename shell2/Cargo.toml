@@ -4,11 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# shell2 is pure UI: it defines the screens (login, …) and their logic, and hands the first one to
+# the runtime. All GPU/window/event-loop/input plumbing lives in `runtime`. vello is a direct dep
+# only because screens still draw with raw scene commands (until the element vocab lands).
 [dependencies]
-winit = "0.30"
-wgpu = "29.0.3"
+runtime = { path = "../runtime" }
 vello = "0.9.0"
-parley = "0.10.0"
-taffy = "0.11"
-pollster = "0.4"
-env_logger = "0.11"
