@@ -89,6 +89,7 @@ impl App for LoginScreen {
         }
         kids.push(
             text_input(&self.passphrase, "passphrase", Msg::Passphrase)
+                .w(PANEL_W)
                 .h(40.0)
                 .px(12.0)
                 .font_size(15.0)
@@ -108,6 +109,7 @@ impl App for LoginScreen {
         kids.push(
             row()
                 .h(44.0)
+                .w(PANEL_W)
                 .center()
                 .radius(6.0)
                 .fill(theme::accent())
@@ -118,7 +120,7 @@ impl App for LoginScreen {
         let panel = col().w(PANEL_W).gap(8.0).children(kids);
 
         // Root fills the window and centers the panel.
-        col().full().center().child(panel)
+        row().full().center().child(panel)
     }
 }
 

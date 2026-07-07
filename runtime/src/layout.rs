@@ -22,8 +22,27 @@ struct Mapped<M> {
     children: Vec<Mapped<M>>,
 }
 
-fn build<M>(el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngine) -> Mapped<M> {
+fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngine) -> Mapped<M> {
     let mut style = el.layout;
+
+    if let Some(spec) = el.content.scroll {
+        if spec.x {
+            style.overflow.x = taffy::style::Overflow::Hidden;
+        }
+
+        if spec.y {
+            style.overflow.y = taffy::style::Overflow::Hidden;
+        }
+        let main_scrolled = match style.flex_direction {
+            FlexDirection::Column | FlexDirection::ColumnReverse => spec.y,
+            FlexDirection::Row | FlexDirection::RowReverse => spec.x,
+        };
+        if main_scrolled {
+            el.children
+                .iter_mut()
+                .for_each(|c| c.layout.flex_shrink = 0.0);
+        }
+    }
     // A text leaf's intrinsic size is its shaped extent — measure once, fix the leaf size. An input
     // is the exception: it's a field with a designed size (explicit `.w()`/`.h()`), so we must NOT
     // shrink it to its (possibly empty) current text.

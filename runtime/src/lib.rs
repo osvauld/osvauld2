@@ -20,7 +20,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::{CursorIcon, Window, WindowId};
 
 pub use el::{col, custom, row, text, text_area, text_input, El};
@@ -70,6 +70,7 @@ struct Runner<A: App> {
     scroll_drag: Option<(Thumb, (f32, f32), Scroll)>,
     modifiers: ModifiersState,
     bar_hits: Vec<Thumb>,
+    debug: bool,
 }
 
 impl<A: App> Runner<A> {
@@ -89,6 +90,7 @@ impl<A: App> Runner<A> {
         let scrolls = &mut self.scrolls;
         let editors = &mut self.editors;
         let text = &mut self.text;
+        let debug = self.debug;
         let render = self.render.as_mut().expect("render present");
         render.paint(clear, text, |scene, text, t, viewport, _now| {
             let mut placed = layout::solve(app.view(), text, viewport);
@@ -137,9 +139,12 @@ impl<A: App> Runner<A> {
                     input_hits.push((p.rect, spec.id, p.pad));
                 }
             }
-            let dragging = self.scroll_drag.map(|(t, _, _)| (t.id, t.axis));
+            let dragging = scroll_drag.map(|(t, _, _)| (t.id, t.axis));
             paint::draw(scene, &placed, editors, text, t, pointer, scrolls);
             paint::scrollbars(scene, bar_hits, t, pointer, dragging);
+            if debug {
+                paint::debug_boxes(scene, &placed, t, pointer, text, viewport);
+            }
         });
         if self.app.animating() {
             self.redraw();
@@ -357,6 +362,13 @@ impl<A: App> ApplicationHandler for Runner<A> {
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
             WindowEvent::RedrawRequested => self.frame(),
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(winit::keyboard::NamedKey::F12)
+                {
+                    self.debug = !self.debug;
+                    self.redraw();
+                    return;
+                }
                 let edited = self.editors.on_key(&event, self.modifiers, &mut self.text);
                 if edited {
                     self.notify_app_text();
@@ -407,6 +419,7 @@ pub fn run<A: App + 'static>(app: A) {
         scroll_hits: Vec::new(),
         scroll_drag: None,
         bar_hits: Vec::new(),
+        debug: false,
     };
     event_loop.run_app(&mut runner).expect("run app");
 }

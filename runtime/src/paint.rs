@@ -8,6 +8,8 @@ use crate::scroll::Scrolls;
 use crate::scroll::Thumb;
 use crate::text::TextEngine;
 use crate::Editors;
+use crate::MONO_FAMILY;
+use vello::kurbo::Line;
 use vello::kurbo::{Affine, Insets, Point, Rect, RoundedRect, Stroke};
 use vello::peniko::{Color, Fill};
 use vello::Scene;
@@ -16,6 +18,11 @@ const SELECTION: Color = Color::from_rgba8(0x8A, 0x86, 0xE5, 0x66);
 const THUMB: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x59);
 const THUMB_HOVER: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x8C);
 const THUMB_DRAG: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xB3);
+const DEBUG_HAIR: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x28);
+const DEBUG_BOX: Color = Color::from_rgba8(0x53, 0xB4, 0xFF, 0xFF);
+const DEBUG_PAD: Color = Color::from_rgba8(0x7B, 0xE0, 0x8A, 0xFF);
+const DEBUG_GUIDE: Color = Color::from_rgba8(0x53, 0xB4, 0xFF, 0x80);
+const DEBUG_CHIP: Color = Color::from_rgba8(0x11, 0x11, 0x18, 0xF2);
 /// Draw `placed` (in paint order) into `scene`. `t` maps logical points to physical pixels.
 /// `pointer` is the cursor in logical points, if inside the window.
 pub(crate) fn draw<M>(
@@ -133,4 +140,80 @@ pub(crate) fn scrollbars(
         let shape = RoundedRect::from_rect(b.rect, b.rect.width().min(b.rect.height()) / 2.0);
         scene.fill(Fill::NonZero, t, color, None, &shape);
     }
+}
+
+pub fn debug_boxes<M>(
+    scene: &mut Scene,
+    placed: &[Placed<M>],
+    t: Affine,
+    pointer: Option<(f32, f32)>,
+    text: &mut TextEngine,
+    viewport: (f32, f32),
+) {
+    for p in placed {
+        scene.stroke(&Stroke::new(1.0), t, DEBUG_HAIR, None, &p.rect);
+    }
+    let dashed = Stroke::new(1.0).with_dashes(0.0, [4.0, 4.0]);
+    let Some((px, py)) = pointer else { return };
+    let pt = Point::new(px as f64, py as f64);
+    let Some(p) = placed.iter().rev().find(|p| p.rect.contains(pt)) else {
+        return;
+    };
+    scene.stroke(&Stroke::new(1.0), t, DEBUG_BOX, None, &p.rect);
+    scene.stroke(&Stroke::new(1.0), t, DEBUG_PAD, None, &p.rect.inset(-p.pad));
+    scene.stroke(
+        &dashed,
+        t,
+        DEBUG_GUIDE,
+        None,
+        &Line::new((p.rect.x0, 0.0), (p.rect.x0, viewport.1 as f64)),
+    );
+
+    scene.stroke(
+        &dashed,
+        t,
+        DEBUG_GUIDE,
+        None,
+        &Line::new((p.rect.x1, 0.0), (p.rect.x1, viewport.1 as f64)),
+    );
+
+    scene.stroke(
+        &dashed,
+        t,
+        DEBUG_GUIDE,
+        None,
+        &Line::new((0.0, p.rect.y1), (viewport.0 as f64, p.rect.y1)),
+    );
+
+    scene.stroke(
+        &dashed,
+        t,
+        DEBUG_GUIDE,
+        None,
+        &Line::new((0.0, p.rect.y0), (viewport.0 as f64, p.rect.y0)),
+    );
+    scene.stroke(
+        &dashed,
+        t,
+        DEBUG_GUIDE,
+        None,
+        &Line::new((0.0, p.rect.y1), (viewport.0 as f64, p.rect.y1)),
+    );
+    let label = format!("{:.0}x{:.0}", p.rect.width(), p.rect.height());
+    let (w, h) = text.measure(&label, MONO_FAMILY, 11.0);
+    let cx = p.rect.x0;
+    let mut cy = p.rect.y0 - (h as f64 + 6.0);
+    if cy < 0.0 {
+        cy = p.rect.y0 + 4.0;
+    }
+    let plate = RoundedRect::new(cx, cy, cx + w as f64 + 12.0, cy + h as f64 + 6.0, 4.0);
+    scene.fill(Fill::NonZero, t, DEBUG_CHIP, None, &plate);
+    text.draw(
+        scene,
+        &label,
+        MONO_FAMILY,
+        11.0,
+        t * Affine::translate((p.rect.x0, p.rect.y0 - 16.0)),
+        DEBUG_BOX,
+    );
 }

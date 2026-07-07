@@ -38,8 +38,8 @@ pub(crate) struct Border {
     pub width: f64,
     pub color: Color,
 }
-/// Visual decoration with hover variants, resolved against pointer-inside at paint time
 
+/// Visual decoration with hover variants, resolved against pointer-inside at paint time
 pub(crate) struct Look {
     pub fill: Option<Color>,
     pub stroke: Option<Border>,
@@ -70,12 +70,20 @@ impl Look {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct ScrollSpec {
+    pub id: &'static str,
+    pub x: bool,
+    pub y: bool,
+}
+
 pub(crate) struct Content<M> {
     pub look: Look,
     pub text: Option<TextSpec>,
     pub custom: Option<CustomFn>,
     pub on_click: Option<M>,
     pub input: Option<InputSpec<M>>,
+    pub scroll: Option<ScrollSpec>,
 }
 
 impl<M> Content<M> {
@@ -86,6 +94,7 @@ impl<M> Content<M> {
             custom: None,
             on_click: None,
             input: None,
+            scroll: None,
         }
     }
 }
@@ -336,6 +345,26 @@ impl<M> El<M> {
     }
     pub fn children(mut self, cs: impl IntoIterator<Item = El<M>>) -> Self {
         self.children.extend(cs);
+        self
+    }
+
+    pub fn scroll_y(mut self, id: &'static str) -> Self {
+        let s = self.content.scroll.get_or_insert(ScrollSpec {
+            id,
+            x: false,
+            y: false,
+        });
+        s.y = true;
+        self
+    }
+
+    pub fn scroll_x(mut self, id: &'static str) -> Self {
+        let s = self.content.scroll.get_or_insert(ScrollSpec {
+            id,
+            y: false,
+            x: false,
+        });
+        s.x = true;
         self
     }
 }
