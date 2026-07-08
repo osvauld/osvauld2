@@ -29,6 +29,8 @@ pub use text::{TextEngine, MONO_FAMILY, PIXEL_FAMILY, UI_FAMILY};
 /// Re-exported so screens can use vello drawing types without a direct dependency.
 pub use vello;
 
+use crate::layout::Placed;
+
 const LINE_STEP: f32 = 30.0;
 /// An application: a tree-of-elements `view` derived from state, plus an `update` that mutates state
 /// in response to messages. The runtime calls `view` to paint and `update` when a click hits an
@@ -93,15 +95,19 @@ impl<A: App> Runner<A> {
         let debug = self.debug;
         let render = self.render.as_mut().expect("render present");
         render.paint(clear, text, |scene, text, t, viewport, _now| {
-            let mut placed = layout::solve(app.view(), text, viewport);
+            let mut placed = layout::solve(app.view(), text, viewport, scrolls);
             hits.clear();
             input_hits.clear();
             input_maps.clear();
             scroll_hits.clear();
             bar_hits.clear();
             for p in placed.iter_mut() {
+                let hit_rect = match p.clip {
+                    Some(c) => c.intersect(p.rect),
+                    None => p.rect,
+                };
                 if let Some(msg) = p.content.on_click.take() {
-                    hits.push((p.rect, msg));
+                    hits.push((hit_rect, msg));
                 }
 
                 if let Some(spec) = &mut p.content.input {
@@ -121,22 +127,37 @@ impl<A: App> Runner<A> {
                             p.pad,
                             scrolls,
                         );
+                    }
+                    input_hits.push((hit_rect, spec.id, p.pad));
+                }
+
+                let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
+                let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
+                let scroll_vals: Option<(&'static str, (f32, f32), (bool, bool))> =
+                    if let Some(input) = &mut p.content.input {
                         let (cw, ch) = editors
-                            .layout_of(spec.id)
+                            .layout_of(input.id)
                             .map(|l| (l.full_width(), l.height()))
                             .unwrap_or((0.0, 0.0));
-                        let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
-                        let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
-                        scroll_hits.push((p.rect, spec.id, (cw, ch), (iw, ih)));
-                        let s = scrolls.get(spec.id);
-                        if let Some(v) = axis_thumb(p.rect, spec.id, Axis::Y, ih, ch, s.y) {
-                            bar_hits.push(v)
-                        };
-                        if let Some(h) = axis_thumb(p.rect, spec.id, Axis::X, iw, cw, s.x) {
-                            bar_hits.push(h)
-                        };
+                        Some((input.id, (cw, ch), (true, true)))
+                    } else if let Some(scroll) = p.content.scroll {
+                        Some((scroll.id, p.content_size, (scroll.x, scroll.y)))
+                    } else {
+                        None
+                    };
+                if let Some((id, content, (ax, ay))) = scroll_vals {
+                    scroll_hits.push((hit_rect, id, content, (iw, ih)));
+                    let s = scrolls.get(id);
+                    if ay {
+                        if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
+                            bar_hits.push(v);
+                        }
                     }
-                    input_hits.push((p.rect, spec.id, p.pad));
+                    if ax {
+                        if let Some(h) = axis_thumb(p.rect, id, Axis::X, iw, content.0, s.x) {
+                            bar_hits.push(h);
+                        }
+                    }
                 }
             }
             let dragging = scroll_drag.map(|(t, _, _)| (t.id, t.axis));

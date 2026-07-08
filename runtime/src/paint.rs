@@ -35,6 +35,15 @@ pub(crate) fn draw<M>(
     scrolls: &mut Scrolls,
 ) {
     for p in placed {
+        let mut clipping = false;
+        if let Some(c) = p.clip {
+            let intersected_rect = c.intersect(p.rect);
+            if intersected_rect.width() <= 0.0 || intersected_rect.height() <= 0.0 {
+                continue;
+            }
+            clipping = true;
+            scene.push_clip_layer(Fill::NonZero, t, &c);
+        }
         let over =
             pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
         let (fill, stroke) = p.content.look.resolve(over);
@@ -98,6 +107,9 @@ pub(crate) fn draw<M>(
                 let origin = t * Affine::translate((p.rect.x0, p.rect.y0));
                 text.draw(scene, &ts.text, ts.family, ts.size, origin, ts.color);
             }
+        }
+        if clipping {
+            scene.pop_layer();
         }
     }
 }
@@ -213,7 +225,7 @@ pub fn debug_boxes<M>(
         &label,
         MONO_FAMILY,
         11.0,
-        t * Affine::translate((p.rect.x0, p.rect.y0 - 16.0)),
+        t * Affine::translate((cx + 6.0, cy + 16.0)),
         DEBUG_BOX,
     );
 }

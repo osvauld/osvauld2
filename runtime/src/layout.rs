@@ -6,6 +6,7 @@ use taffy::prelude::*;
 use vello::kurbo::{Insets, Rect};
 
 use crate::el::{Content, El};
+use crate::scroll::Scrolls;
 use crate::text::TextEngine;
 
 /// One positioned node, ready to paint and hit-test. `rect` is in logical points.
@@ -13,6 +14,8 @@ pub(crate) struct Placed<M> {
     pub rect: Rect,
     pub pad: Insets,
     pub content: Content<M>,
+    pub clip: Option<Rect>,
+    pub content_size: (f32, f32),
 }
 
 /// El props + its Taffy node id + mapped children, retained between build and emit.
@@ -73,18 +76,31 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
     }
 }
 
-fn emit<M>(m: Mapped<M>, tree: &TaffyTree<()>, ox: f32, oy: f32, out: &mut Vec<Placed<M>>) {
+fn emit<M>(
+    m: Mapped<M>,
+    tree: &TaffyTree<()>,
+    ox: f32,
+    oy: f32,
+    out: &mut Vec<Placed<M>>,
+    clip: Option<Rect>,
+    scrolls: &Scrolls,
+) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
     let x = ox + l.location.x;
     let y = oy + l.location.y;
+    let rect = Rect::new(
+        x as f64,
+        y as f64,
+        (x + l.size.width) as f64,
+        (y + l.size.height) as f64,
+    );
+    let scroll_spec = m.content.scroll;
+
+    let content_size = (l.content_size.width, l.content_size.height);
+
     out.push(Placed {
-        rect: Rect::new(
-            x as f64,
-            y as f64,
-            (x + l.size.width) as f64,
-            (y + l.size.height) as f64,
-        ),
+        rect,
         content: m.content,
         pad: Insets::new(
             (l.padding.left + l.border.left) as f64,
@@ -92,15 +108,39 @@ fn emit<M>(m: Mapped<M>, tree: &TaffyTree<()>, ox: f32, oy: f32, out: &mut Vec<P
             (l.padding.right + l.border.right) as f64,
             (l.padding.bottom + l.border.bottom) as f64,
         ),
+        clip,
+        content_size,
     });
+
+    let (mut cx, mut cy) = (x, y);
+    let mut child_clip = clip;
+    if let Some(s) = scroll_spec {
+        let scroll = scrolls.get(s.id);
+        if s.x {
+            cx -= scroll.x;
+        }
+        if s.y {
+            cy -= scroll.y;
+        }
+        child_clip = Some(match clip {
+            Some(c) => c.intersect(rect),
+            None => rect,
+        })
+    }
+
     for c in m.children {
-        emit(c, tree, x, y, out);
+        emit(c, tree, cx, cy, out, child_clip, scrolls);
     }
 }
 
 /// Lay out `root` within `viewport` (logical points); return painted nodes in paint order
 /// (parents before children).
-pub(crate) fn solve<M>(root: El<M>, text: &mut TextEngine, viewport: (f32, f32)) -> Vec<Placed<M>> {
+pub(crate) fn solve<M>(
+    root: El<M>,
+    text: &mut TextEngine,
+    viewport: (f32, f32),
+    scrolls: &Scrolls,
+) -> Vec<Placed<M>> {
     let mut tree = TaffyTree::new();
     let mapped = build(root, &mut tree, text);
     tree.compute_layout(
@@ -112,6 +152,6 @@ pub(crate) fn solve<M>(root: El<M>, text: &mut TextEngine, viewport: (f32, f32))
     )
     .expect("compute_layout");
     let mut out = Vec::new();
-    emit(mapped, &tree, 0.0, 0.0, &mut out);
+    emit(mapped, &tree, 0.0, 0.0, &mut out, None, scrolls);
     out
 }
