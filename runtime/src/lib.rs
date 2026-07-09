@@ -5,12 +5,14 @@
 
 mod editor;
 mod el;
+mod id;
 mod layout;
 mod paint;
 mod render;
 mod scroll;
 mod text;
 
+use crate::id::Id;
 use editor::Editors;
 use scroll::*;
 use std::sync::Arc;
@@ -28,8 +30,6 @@ pub use render::Render;
 pub use text::{TextEngine, MONO_FAMILY, PIXEL_FAMILY, UI_FAMILY};
 /// Re-exported so screens can use vello drawing types without a direct dependency.
 pub use vello;
-
-use crate::layout::Placed;
 
 const LINE_STEP: f32 = 30.0;
 /// An application: a tree-of-elements `view` derived from state, plus an `update` that mutates state
@@ -64,11 +64,11 @@ struct Runner<A: App> {
     hits: Vec<(Rect, A::Msg)>,
     text: TextEngine,
     editors: Editors,
-    input_hits: Vec<(Rect, &'static str, Insets)>,
-    input_maps: Vec<(&'static str, Box<dyn Fn(String) -> A::Msg>)>,
-    scroll_hits: Vec<(Rect, &'static str, (f32, f32), (f32, f32))>,
+    input_hits: Vec<(Rect, Id, Insets)>,
+    input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
+    scroll_hits: Vec<(Rect, Id, (f32, f32), (f32, f32))>,
     scrolls: Scrolls,
-    drag: Option<(Rect, &'static str, Insets)>,
+    drag: Option<(Rect, Id, Insets)>,
     scroll_drag: Option<(Thumb, (f32, f32), Scroll)>,
     modifiers: ModifiersState,
     bar_hits: Vec<Thumb>,
@@ -87,7 +87,7 @@ impl<A: App> Runner<A> {
         let input_hits = &mut self.input_hits;
         let input_maps = &mut self.input_maps;
         let scroll_hits = &mut self.scroll_hits;
-        let scroll_drag = self.scroll_drag;
+        let scroll_drag = &self.scroll_drag;
         let bar_hits = &mut self.bar_hits;
         let scrolls = &mut self.scrolls;
         let editors = &mut self.editors;
@@ -112,11 +112,11 @@ impl<A: App> Runner<A> {
 
                 if let Some(spec) = &mut p.content.input {
                     if let Some(m) = spec.map.take() {
-                        input_maps.push((spec.id, m));
+                        input_maps.push((spec.id.clone(), m));
                     }
                     if let Some(ts) = &p.content.text {
                         editors.sync(
-                            spec.id,
+                            &spec.id,
                             &ts.text,
                             p.rect.width() as f32,
                             p.rect.height() as f32,
@@ -128,25 +128,25 @@ impl<A: App> Runner<A> {
                             scrolls,
                         );
                     }
-                    input_hits.push((hit_rect, spec.id, p.pad));
+                    input_hits.push((hit_rect, spec.id.clone(), p.pad));
                 }
 
                 let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
                 let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
-                let scroll_vals: Option<(&'static str, (f32, f32), (bool, bool))> =
-                    if let Some(input) = &mut p.content.input {
+                let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
+                    if let Some(input) = &p.content.input {
                         let (cw, ch) = editors
-                            .layout_of(input.id)
+                            .layout_of(&input.id)
                             .map(|l| (l.full_width(), l.height()))
                             .unwrap_or((0.0, 0.0));
-                        Some((input.id, (cw, ch), (true, true)))
-                    } else if let Some(scroll) = p.content.scroll {
-                        Some((scroll.id, p.content_size, (scroll.x, scroll.y)))
+                        Some((&input.id, (cw, ch), (true, true)))
+                    } else if let Some(scroll) = &p.content.scroll {
+                        Some((&scroll.id, p.content_size, (scroll.x, scroll.y)))
                     } else {
                         None
                     };
                 if let Some((id, content, (ax, ay))) = scroll_vals {
-                    scroll_hits.push((hit_rect, id, content, (iw, ih)));
+                    scroll_hits.push((hit_rect, id.clone(), content, (iw, ih)));
                     let s = scrolls.get(id);
                     if ay {
                         if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
@@ -160,7 +160,7 @@ impl<A: App> Runner<A> {
                     }
                 }
             }
-            let dragging = scroll_drag.map(|(t, _, _)| (t.id, t.axis));
+            let dragging = scroll_drag.as_ref().map(|(t, _, _)| (&t.id, t.axis));
             paint::draw(scene, &placed, editors, text, t, pointer, scrolls);
             paint::scrollbars(scene, bar_hits, t, pointer, dragging);
             if debug {
@@ -187,23 +187,18 @@ impl<A: App> Runner<A> {
             .rev()
             .find(|thumb| thumb.rect.contains(p))
         {
-            let bar = self.scrolls.get(thumb.id);
+            let bar = self.scrolls.get(&thumb.id);
             self.scroll_drag = Some((thumb.clone(), (px, py), bar));
             self.redraw();
             return;
         }
-        let hit = self
-            .input_hits
-            .iter()
-            .rev()
-            .find(|(r, _, _)| r.contains(p))
-            .map(|&(r, id, padding)| (r, id, padding));
+        let hit = self.input_hits.iter().rev().find(|(r, _, _)| r.contains(p));
         match hit {
             Some((rect, id, pad)) => {
-                self.editors.focus(id);
-                let (lx, ly) = self.local_point(id, rect, pad, px, py);
+                self.editors.focus(id.clone());
+                let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
                 self.editors.click_at(id, lx, ly, &mut self.text);
-                self.drag = Some((rect, id, pad));
+                self.drag = Some((*rect, id.clone(), *pad));
             }
             None => {
                 self.editors.blur();
@@ -235,9 +230,9 @@ impl<A: App> Runner<A> {
 
     fn notify_app_text(&mut self) {
         if let Some(id) = self.editors.focused_id() {
-            let new_text = self.editors.text_of(id).map(|s| s.to_owned());
+            let new_text = self.editors.text_of(&id).map(|s| s.to_owned());
             if let (Some(text), Some((_, map))) =
-                (new_text, self.input_maps.iter().find(|(k, _)| *k == id))
+                (new_text, self.input_maps.iter().find(|(k, _)| k == &id))
             {
                 self.app.update(map(text));
             }
@@ -245,17 +240,17 @@ impl<A: App> Runner<A> {
         self.redraw();
     }
     fn drag_thumb(&mut self, lx: f32, ly: f32) -> bool {
-        if let Some((thumb, (spx, spy), scroll)) = self.scroll_drag {
+        if let Some((thumb, (spx, spy), scroll)) = &self.scroll_drag {
             if let Some(r) = &self.render {
                 r.set_cursor(CursorIcon::Default);
                 let desired = match thumb.axis {
                     Axis::X => scroll.x + (lx - spx) * thumb.gain,
                     Axis::Y => scroll.y + (ly - spy) * thumb.gain,
                 };
-                let cur = self.scrolls.get(thumb.id);
+                let cur = self.scrolls.get(&thumb.id);
                 let cur = cur.get(thumb.axis);
                 self.scrolls.by(
-                    thumb.id,
+                    &thumb.id,
                     thumb.axis,
                     desired - cur,
                     thumb.viewport,
@@ -289,10 +284,10 @@ impl<A: App> Runner<A> {
             });
             r.request_redraw();
         }
-        if let Some((rect, id, pad)) = self.drag {
-            let (lx, ly) = self.local_point(id, rect, pad, lx, ly);
+        if let Some((rect, id, pad)) = &self.drag {
+            let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
             let text = &mut self.text;
-            self.editors.extend_to(id, lx, ly, text);
+            self.editors.extend_to(&id, lx, ly, text);
         }
     }
     fn on_wheel_moved(&mut self, delta: MouseScrollDelta) {
@@ -311,7 +306,7 @@ impl<A: App> Runner<A> {
         let (dh, dv) = if shift { (-dy, 0.0) } else { (-dx, -dy) };
         let (mut rem_h, mut rem_v) = (dh, dv);
         //innermost scroll contenxt under the pointer wins
-        for &(r, id, content, inner) in self.scroll_hits.iter().rev() {
+        for (r, id, content, inner) in self.scroll_hits.iter().rev() {
             if !r.contains(p) {
                 continue;
             }

@@ -28,7 +28,7 @@ struct Mapped<M> {
 fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngine) -> Mapped<M> {
     let mut style = el.layout;
 
-    if let Some(spec) = el.content.scroll {
+    if let Some(spec) = &el.content.scroll {
         if spec.x {
             style.overflow.x = taffy::style::Overflow::Hidden;
         }
@@ -95,10 +95,24 @@ fn emit<M>(
         (x + l.size.width) as f64,
         (y + l.size.height) as f64,
     );
-    let scroll_spec = m.content.scroll;
 
     let content_size = (l.content_size.width, l.content_size.height);
 
+    let (mut cx, mut cy) = (x, y);
+    let mut child_clip = clip;
+    if let Some(s) = &m.content.scroll {
+        let scroll = scrolls.get(&s.id);
+        if s.x {
+            cx -= scroll.x;
+        }
+        if s.y {
+            cy -= scroll.y;
+        }
+        child_clip = Some(match clip {
+            Some(c) => c.intersect(rect),
+            None => rect,
+        })
+    }
     out.push(Placed {
         rect,
         content: m.content,
@@ -111,22 +125,6 @@ fn emit<M>(
         clip,
         content_size,
     });
-
-    let (mut cx, mut cy) = (x, y);
-    let mut child_clip = clip;
-    if let Some(s) = scroll_spec {
-        let scroll = scrolls.get(s.id);
-        if s.x {
-            cx -= scroll.x;
-        }
-        if s.y {
-            cy -= scroll.y;
-        }
-        child_clip = Some(match clip {
-            Some(c) => c.intersect(rect),
-            None => rect,
-        })
-    }
 
     for c in m.children {
         emit(c, tree, cx, cy, out, child_clip, scrolls);

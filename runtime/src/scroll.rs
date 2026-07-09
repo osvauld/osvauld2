@@ -1,13 +1,14 @@
+use crate::id::Id;
 use std::collections::HashMap;
 use vello::kurbo::Rect;
 
 const BAR_W: f64 = 8.0;
 const BAR_GAP: f64 = 2.0;
 const MIN_THUMB: f64 = 24.0;
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Thumb {
     pub rect: Rect,
-    pub id: &'static str, //scroll context fro drag
+    pub id: Id, //scroll context for drag
     pub axis: Axis,
     pub gain: f32, // inverse projection: cursor px -> offset px
     pub viewport: f32,
@@ -16,7 +17,7 @@ pub(crate) struct Thumb {
 
 pub(crate) fn axis_thumb(
     rect: Rect,
-    id: &'static str,
+    id: &Id,
     axis: Axis,
     viewport: f32,
     content: f32,
@@ -51,7 +52,7 @@ pub(crate) fn axis_thumb(
     };
     Some(Thumb {
         rect: r,
-        id,
+        id: id.clone(),
         axis,
         gain,
         viewport,
@@ -84,7 +85,7 @@ impl Scroll {
 }
 
 pub(crate) struct Scrolls {
-    map: HashMap<&'static str, Scroll>,
+    map: HashMap<Id, Scroll>,
 }
 
 impl Scrolls {
@@ -98,14 +99,14 @@ impl Scrolls {
     }
     pub fn keep_in_view(
         &mut self,
-        id: &'static str,
+        id: &Id,
         axis: Axis,
         near: f32,
         far: f32,
         inner: f32,
         content: f32,
     ) {
-        let s = self.map.entry(id).or_default();
+        let s = self.map.entry(id.clone()).or_default();
         let cur = s.get(axis);
         let mut final_scroll: f32 = cur;
         if near < final_scroll {
@@ -116,15 +117,8 @@ impl Scrolls {
         final_scroll = final_scroll.clamp(0.0, (content - inner).max(0.0));
         s.set(axis, final_scroll);
     }
-    pub fn by(
-        &mut self,
-        id: &'static str,
-        axis: Axis,
-        delta: f32,
-        inner: f32,
-        content: f32,
-    ) -> f32 {
-        let s = self.map.entry(id).or_default();
+    pub fn by(&mut self, id: &Id, axis: Axis, delta: f32, inner: f32, content: f32) -> f32 {
+        let s = self.map.entry(id.clone()).or_default();
 
         let cur = s.get(axis);
         let next = (cur + delta).clamp(0.0, (content - inner).max(0.0));

@@ -11,6 +11,7 @@ use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::Scene;
 
+use crate::id::Id;
 /// A text leaf's content + face. The real color is applied at vello draw time.
 pub(crate) struct TextSpec {
     pub text: String,
@@ -27,7 +28,7 @@ pub(crate) type CustomFn =
 /// Marks an `El` as an editable text field. The display text + face live in the element's `text`
 /// (`TextSpec`); this only carries the focus identity and how to message an edit.
 pub(crate) struct InputSpec<M> {
-    pub id: &'static str,
+    pub id: Id,
     pub map: Option<Box<dyn Fn(String) -> M>>,
     pub multiline: bool,
 }
@@ -70,9 +71,9 @@ impl Look {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ScrollSpec {
-    pub id: &'static str,
+    pub id: Id,
     pub x: bool,
     pub y: bool,
 }
@@ -149,13 +150,13 @@ pub fn text<M>(s: impl Into<String>) -> El<M> {
 
 pub fn input<M>(
     value: impl Into<String>,
-    id: &'static str,
+    id: impl Into<Id>,
     map: impl Fn(String) -> M + 'static,
     multiline: bool,
 ) -> El<M> {
     let mut e = text(value);
     e.content.input = Some(InputSpec {
-        id,
+        id: id.into(),
         map: Some(Box::new(map)),
         multiline,
     });
@@ -163,14 +164,14 @@ pub fn input<M>(
 }
 pub fn text_input<M>(
     value: impl Into<String>,
-    id: &'static str,
+    id: impl Into<Id>,
     map: impl Fn(String) -> M + 'static,
 ) -> El<M> {
     input(value, id, map, false)
 }
 pub fn text_area<M>(
     value: impl Into<String>,
-    id: &'static str,
+    id: impl Into<Id>,
     map: impl Fn(String) -> M + 'static,
 ) -> El<M> {
     input(value, id, map, true)
@@ -348,9 +349,9 @@ impl<M> El<M> {
         self
     }
 
-    pub fn scroll_y(mut self, id: &'static str) -> Self {
+    pub fn scroll_y(mut self, id: impl Into<Id>) -> Self {
         let s = self.content.scroll.get_or_insert(ScrollSpec {
-            id,
+            id: id.into(),
             x: false,
             y: false,
         });
@@ -358,9 +359,9 @@ impl<M> El<M> {
         self
     }
 
-    pub fn scroll_x(mut self, id: &'static str) -> Self {
+    pub fn scroll_x(mut self, id: impl Into<Id>) -> Self {
         let s = self.content.scroll.get_or_insert(ScrollSpec {
-            id,
+            id: id.into(),
             y: false,
             x: false,
         });

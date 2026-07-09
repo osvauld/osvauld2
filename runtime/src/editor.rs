@@ -4,13 +4,14 @@
 
 use std::collections::HashMap;
 
+use crate::id::Id;
 use parley::style::StyleProperty;
 use parley::{BoundingBox, LineHeight, PlainEditor};
 use vello::kurbo::Insets;
 use winit::event::{ElementState, KeyEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 
-use crate::scroll::{self, Axis, Scrolls};
+use crate::scroll::{Axis, Scrolls};
 use crate::text::{self, TextEngine};
 
 /// Editable-field state that persists across frames. The view tree is rebuilt every frame, so the
@@ -18,23 +19,17 @@ use crate::text::{self, TextEngine};
 struct Field {
     editor: PlainEditor<[u8; 4]>,
     multiline: bool,
-    id: &'static str,
+    id: Id,
     caret_dirty: bool,
 }
 
 pub(crate) struct Editors {
-    map: HashMap<&'static str, Field>,
-    focused: Option<&'static str>,
+    map: HashMap<Id, Field>,
+    focused: Option<Id>,
 }
 
 impl Field {
-    pub fn new(
-        size: f32,
-        id: &'static str,
-        family: &'static str,
-        value: &str,
-        multiline: bool,
-    ) -> Self {
+    pub fn new(size: f32, id: Id, family: &'static str, value: &str, multiline: bool) -> Self {
         let mut e = PlainEditor::new(size);
         e.edit_styles()
             .insert(StyleProperty::FontFamily(text::resolve_family(family)));
@@ -78,12 +73,12 @@ impl Field {
         if self.multiline {
             let text_h = self.editor.try_layout().map_or(0.0, |l| l.height());
             let inner = height - pad.y0 as f32 - pad.y1 as f32;
-            scrolls.keep_in_view(self.id, Axis::Y, c.y0 as f32, c.y1 as f32, inner, text_h);
+            scrolls.keep_in_view(&self.id, Axis::Y, c.y0 as f32, c.y1 as f32, inner, text_h);
         } else {
             let text_w = self.editor.try_layout().map_or(0.0, |l| l.full_width());
             let inner = width - pad.x0 as f32 - pad.x1 as f32;
             let content = text_w.max(c.x1 as f32); // include the caret's far edge at the eol
-            scrolls.keep_in_view(self.id, Axis::X, c.x0 as f32, c.x1 as f32, inner, content);
+            scrolls.keep_in_view(&self.id, Axis::X, c.x0 as f32, c.x1 as f32, inner, content);
         }
     }
     pub fn on_key(
@@ -168,7 +163,7 @@ impl Editors {
 
     pub fn sync(
         &mut self,
-        id: &'static str,
+        id: &Id,
         value: &str,
         width: f32,
         height: f32,
@@ -181,11 +176,11 @@ impl Editors {
     ) {
         let field = self
             .map
-            .entry(id)
-            .or_insert_with(|| Field::new(size, id, family, value, multiline));
+            .entry(id.clone())
+            .or_insert_with(|| Field::new(size, id.clone(), family, value, multiline));
         field.sync(width, height, pad, text, scrolls);
     }
-    pub fn focus(&mut self, id: &'static str) {
+    pub fn focus(&mut self, id: Id) {
         self.focused = Some(id);
     }
 
@@ -202,7 +197,7 @@ impl Editors {
     }
 
     pub fn is_focused(&self, id: &str) -> bool {
-        self.focused == Some(id)
+        self.focused.as_deref() == Some(id)
     }
 
     pub fn text_of(&self, id: &str) -> Option<&str> {
@@ -229,10 +224,10 @@ impl Editors {
         if event.state != ElementState::Pressed {
             return false;
         }
-        let Some(id) = self.focused else {
+        let Some(id) = self.focused_id() else {
             return false;
         };
-        let Some(e) = self.map.get_mut(id) else {
+        let Some(e) = self.map.get_mut(&id) else {
             return false;
         };
         e.on_key(mods, text, &event.logical_key, &event.text);
@@ -257,13 +252,13 @@ impl Editors {
         }
     }
 
-    pub fn focused_id(&self) -> Option<&'static str> {
-        self.focused
+    pub fn focused_id(&self) -> Option<Id> {
+        self.focused.clone()
     }
 
     pub fn on_ime(&mut self, s: &str, c: Option<(usize, usize)>, text: &mut TextEngine) {
-        if let Some(id) = self.focused {
-            if let Some(field) = self.map.get_mut(id) {
+        if let Some(id) = self.focused_id() {
+            if let Some(field) = self.map.get_mut(&id) {
                 field.caret_dirty = true;
                 let (font_cx, layout_cx) = text.contexts();
                 let mut driver = field.editor.driver(font_cx, layout_cx);
@@ -276,8 +271,8 @@ impl Editors {
         };
     }
     pub fn on_ime_disabled(&mut self, text: &mut TextEngine) {
-        if let Some(id) = self.focused {
-            if let Some(field) = self.map.get_mut(id) {
+        if let Some(id) = self.focused_id() {
+            if let Some(field) = self.map.get_mut(&id) {
                 field.caret_dirty = true;
                 let (font_cx, layout_cx) = text.contexts();
                 let mut driver = field.editor.driver(font_cx, layout_cx);
@@ -287,8 +282,8 @@ impl Editors {
     }
 
     pub fn on_ime_commit(&mut self, s: &str, text: &mut TextEngine) {
-        if let Some(id) = self.focused {
-            if let Some(field) = self.map.get_mut(id) {
+        if let Some(id) = self.focused_id() {
+            if let Some(field) = self.map.get_mut(&id) {
                 let (font_cx, layout_cx) = text.contexts();
                 field
                     .editor

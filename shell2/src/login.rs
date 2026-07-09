@@ -56,6 +56,26 @@ impl LoginScreen {
                     "test4",
                     "did:key:z6MksdLPj7AAt3X5oLrz1FmNQ4ihTwq1Cz3vh6c2ydLeRtKa",
                 ),
+                acc(
+                    "test",
+                    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                ),
+                acc(
+                    "test2",
+                    "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRkAJeSv9JJfA",
+                ),
+                acc(
+                    "test3",
+                    "did:key:z6MkfMqd5W4D1iZjVwq1uFvN3wz1XhfHrYdR6QybxKn8wYqs",
+                ),
+                acc(
+                    "test4",
+                    "did:key:z6MksdLPj7AAt3X5oLrz1FmNQ4ihTwq1Cz3vh6c2ydLeRtKa",
+                ),
+                acc(
+                    "test",
+                    "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+                ),
             ],
             selected: 0,
             passphrase: "".to_string(),
@@ -84,8 +104,9 @@ impl App for LoginScreen {
     fn view(&self) -> El<Msg> {
         // The centered panel: wordmark, account rows, then the quiet links.
         let mut kids: Vec<El<Msg>> = vec![wordmark().mb(18.0)];
+        let mut accounts: Vec<El<Msg>> = Vec::new();
         for (i, a) in self.accounts.iter().enumerate() {
-            kids.push(account_row(i, a, i == self.selected));
+            accounts.push(account_row(i, a, i == self.selected));
         }
         kids.push(
             text_input(&self.passphrase, "passphrase", Msg::Passphrase)
@@ -115,7 +136,13 @@ impl App for LoginScreen {
                 .on_click(Msg::Signup)
                 .child(text("Sign Up").font_size(15.0).color(theme::fg_1())),
         );
-        let panel = col().w(PANEL_W).gap(8.0).children(kids);
+
+        let acc_list = col()
+            .scroll_y("accounts")
+            .h(360.0)
+            .gap(8.0)
+            .children(accounts);
+        let panel = col().w(PANEL_W).gap(8.0).child(acc_list).children(kids);
 
         // Root fills the window and centers the panel.
         col().full().center().child(panel)

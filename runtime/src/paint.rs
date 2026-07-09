@@ -2,6 +2,7 @@
 //! with `hover_*` set uses it when the pointer is inside its rect, else the base look. No stored
 //! hover flags; it falls out of `pointer ∩ rect` each frame (and we only repaint on pointer moves).
 
+use crate::id::Id;
 use crate::layout::Placed;
 use crate::scroll::Axis;
 use crate::scroll::Scrolls;
@@ -59,7 +60,7 @@ pub(crate) fn draw<M>(
         }
         if let Some(ts) = &p.content.text {
             if let Some(spec) = &p.content.input {
-                if let Some(layout) = editors.layout_of(spec.id) {
+                if let Some(layout) = editors.layout_of(&spec.id) {
                     let content = Rect::new(
                         p.rect.x0 + p.pad.x0,
                         p.rect.y0 + p.pad.y0,
@@ -68,7 +69,7 @@ pub(crate) fn draw<M>(
                     );
 
                     scene.push_clip_layer(Fill::NonZero, t, &content);
-                    let s = scrolls.get(spec.id);
+                    let s = scrolls.get(&spec.id);
                     let (scroll_x, scroll_y) = (s.x, s.y);
                     let (ox, oy) = content_offset(
                         p.rect,
@@ -79,7 +80,7 @@ pub(crate) fn draw<M>(
                         spec.multiline,
                     );
                     let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
-                    for (bb, _line) in editors.selection_geometry(spec.id) {
+                    for (bb, _line) in editors.selection_geometry(&spec.id) {
                         let r = Rect::new(
                             p.rect.x0 + ox + bb.x0,
                             p.rect.y0 + oy + bb.y0,
@@ -89,8 +90,8 @@ pub(crate) fn draw<M>(
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
                     text.draw_layout(scene, layout, origin, ts.color);
-                    if editors.is_focused(spec.id) {
-                        if let Some(bb) = editors.cursor_geometry(spec.id, 1.5) {
+                    if editors.is_focused(&spec.id) {
+                        if let Some(bb) = editors.cursor_geometry(&spec.id, 1.5) {
                             let r = Rect::new(
                                 p.rect.x0 + ox + bb.x0,
                                 p.rect.y0 + oy + bb.y0,
@@ -136,10 +137,10 @@ pub(crate) fn scrollbars(
     bars: &[Thumb],
     t: Affine,
     pointer: Option<(f32, f32)>,
-    dragging: Option<(&'static str, Axis)>,
+    dragging: Option<(&Id, Axis)>,
 ) {
     for b in bars {
-        let active = dragging == Some((b.id, b.axis));
+        let active = dragging == Some((&b.id, b.axis));
         let over = dragging.is_none()
             && pointer.is_some_and(|(px, py)| b.rect.contains(Point::new(px as f64, py as f64)));
         let color = if active {
