@@ -52,10 +52,16 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
     if let Some(ts) = &el.content.text {
         if el.content.input.is_none() {
             let (w, h) = text_engine.measure(&ts.text, ts.family, ts.size);
-            style.size = Size {
-                width: length(w),
-                height: length(h),
-            };
+            let pad_x =
+                style.padding.right.into_raw().value() + style.padding.left.into_raw().value();
+            let pad_y =
+                style.padding.top.into_raw().value() + style.padding.bottom.into_raw().value();
+            if style.size.width.is_auto() {
+                style.size.width = length(w + pad_x)
+            }
+            if style.size.height.is_auto() {
+                style.size.height = length(h + pad_y)
+            }
         }
     }
     let children: Vec<Mapped<M>> = el

@@ -7,6 +7,7 @@ use crate::layout::Placed;
 use crate::scroll::Axis;
 use crate::scroll::Scrolls;
 use crate::scroll::Thumb;
+use crate::text;
 use crate::text::TextEngine;
 use crate::Editors;
 use crate::MONO_FAMILY;
@@ -105,7 +106,9 @@ pub(crate) fn draw<M>(
                     scene.pop_layer();
                 }
             } else {
-                let origin = t * Affine::translate((p.rect.x0, p.rect.y0));
+                let (_, th) = text.measure(&ts.text, ts.family, ts.size);
+                let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
+                let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
                 text.draw(scene, &ts.text, ts.family, ts.size, origin, ts.color);
             }
         }

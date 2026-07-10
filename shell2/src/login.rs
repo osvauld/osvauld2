@@ -2,12 +2,23 @@
 //! element vocab. `view` returns the tree; `update` handles selection. No raw scene/layout/input
 //! code here — that all lives in `runtime`. (Port of sthalam's `screens/accounts.rs`.)
 
+use crate::theme;
+use crate::Msg;
 use runtime::{col, custom, row, text, text_area, text_input, App, El, MONO_FAMILY, PIXEL_FAMILY};
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Color, Fill};
 use vello::Scene;
 
-use crate::theme;
+pub enum Event {
+    SignUpRequested,
+}
+#[derive(Clone)]
+pub enum LoginMsg {
+    Select(usize),
+    Passphrase(String),
+    TextArea(String),
+    Signup,
+}
 
 const PANEL_W: f32 = 460.0;
 
@@ -24,15 +35,76 @@ pub struct LoginScreen {
     username: String,
 }
 
-#[derive(Clone)]
-pub enum Msg {
-    Select(usize),
-    Passphrase(String),
-    TextArea(String),
-    Signup,
-}
-
 impl LoginScreen {
+    pub fn update(&mut self, msg: LoginMsg) -> Option<Event> {
+        match msg {
+            LoginMsg::Select(i) => {
+                self.selected = i;
+                None
+            }
+            LoginMsg::Passphrase(pw) => {
+                self.passphrase = pw;
+                None
+            }
+            LoginMsg::TextArea(ta) => {
+                self.text_area = ta;
+                None
+            }
+            LoginMsg::Signup => Some(Event::SignUpRequested),
+        }
+    }
+
+    pub fn view(&self) -> El<Msg> {
+        // The centered panel: wordmark, account rows, then the quiet links.
+        let mut kids: Vec<El<Msg>> = vec![wordmark().mb(18.0)];
+        let mut accounts: Vec<El<Msg>> = Vec::new();
+        for (i, a) in self.accounts.iter().enumerate() {
+            accounts.push(account_row(i, a, i == self.selected));
+        }
+        kids.push(
+            text_input(&self.passphrase, "passphrase", |s| {
+                Msg::Login(LoginMsg::Passphrase(s))
+            })
+            .h(40.0)
+            .px(12.0)
+            .font_size(15.0)
+            .color(theme::fg_1())
+            .stroke(1.0, theme::bd_1()),
+        );
+        kids.push(
+            text_area(&self.text_area, "area", |t| {
+                Msg::Login(LoginMsg::TextArea(t))
+            })
+            .w(PANEL_W)
+            .h(80.0)
+            .px(12.0)
+            .py(12.0)
+            .font_size(15.0)
+            .color(theme::fg_1())
+            .stroke(1.0, theme::bd_1()),
+        );
+        kids.push(
+            row()
+                .h(44.0)
+                .center()
+                .radius(6.0)
+                .fill(theme::accent())
+                .hover_fill(theme::accent_press())
+                .on_click(Msg::Login(LoginMsg::Signup))
+                .child(text("Sign Up").font_size(15.0).color(theme::fg_1())),
+        );
+
+        let acc_list = col()
+            .scroll_y("accounts")
+            .h(360.0)
+            .gap(8.0)
+            .children(accounts);
+        let panel = col().w(PANEL_W).gap(8.0).child(acc_list).children(kids);
+
+        // Root fills the window and centers the panel.
+        col().full().center().child(panel)
+    }
+
     pub fn new() -> Self {
         let acc = |label: &str, did: &str| Account {
             label: label.into(),
@@ -85,70 +157,6 @@ impl LoginScreen {
     }
 }
 
-impl App for LoginScreen {
-    type Msg = Msg;
-
-    fn clear(&self) -> Color {
-        theme::bg_page()
-    }
-
-    fn update(&mut self, msg: Msg) {
-        match msg {
-            Msg::Select(i) => self.selected = i,
-            Msg::Passphrase(pw) => self.passphrase = pw,
-            Msg::TextArea(ta) => self.text_area = ta,
-            Msg::Signup => {}
-        }
-    }
-
-    fn view(&self) -> El<Msg> {
-        // The centered panel: wordmark, account rows, then the quiet links.
-        let mut kids: Vec<El<Msg>> = vec![wordmark().mb(18.0)];
-        let mut accounts: Vec<El<Msg>> = Vec::new();
-        for (i, a) in self.accounts.iter().enumerate() {
-            accounts.push(account_row(i, a, i == self.selected));
-        }
-        kids.push(
-            text_input(&self.passphrase, "passphrase", Msg::Passphrase)
-                .h(40.0)
-                .px(12.0)
-                .font_size(15.0)
-                .color(theme::fg_1())
-                .stroke(1.0, theme::bd_1()),
-        );
-        kids.push(
-            text_area(&self.text_area, "area", Msg::TextArea)
-                .w(PANEL_W)
-                .h(80.0)
-                .px(12.0)
-                .py(12.0)
-                .font_size(15.0)
-                .color(theme::fg_1())
-                .stroke(1.0, theme::bd_1()),
-        );
-        kids.push(
-            row()
-                .h(44.0)
-                .center()
-                .radius(6.0)
-                .fill(theme::accent())
-                .hover_fill(theme::accent_press())
-                .on_click(Msg::Signup)
-                .child(text("Sign Up").font_size(15.0).color(theme::fg_1())),
-        );
-
-        let acc_list = col()
-            .scroll_y("accounts")
-            .h(360.0)
-            .gap(8.0)
-            .children(accounts);
-        let panel = col().w(PANEL_W).gap(8.0).child(acc_list).children(kids);
-
-        // Root fills the window and centers the panel.
-        col().full().center().child(panel)
-    }
-}
-
 /// One account row: identicon, label + short DID, a spacer, and the chevron. Selected → accent wash
 /// + accent border; others a hairline that turns accent on hover.
 fn account_row(i: usize, a: &Account, selected: bool) -> El<Msg> {
@@ -170,7 +178,7 @@ fn account_row(i: usize, a: &Account, selected: bool) -> El<Msg> {
         .align_center()
         .stroke(1.0, edge)
         .hover_stroke(1.0, theme::accent())
-        .on_click(Msg::Select(i))
+        .on_click(Msg::Login(LoginMsg::Select(i)))
         .child(identicon(&a.did))
         .child(
             col()
