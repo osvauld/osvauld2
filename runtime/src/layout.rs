@@ -6,6 +6,7 @@ use taffy::prelude::*;
 use vello::kurbo::{Insets, Rect};
 
 use crate::el::{Content, El};
+use crate::id::Id;
 use crate::scroll::Scrolls;
 use crate::text::TextEngine;
 
@@ -16,6 +17,7 @@ pub(crate) struct Placed<M> {
     pub content: Content<M>,
     pub clip: Option<Rect>,
     pub content_size: (f32, f32),
+    pub scroll_parent: Option<Id>,
 }
 
 /// El props + its Taffy node id + mapped children, retained between build and emit.
@@ -46,9 +48,9 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
                 .for_each(|c| c.layout.flex_shrink = 0.0);
         }
     }
-    // A text leaf's intrinsic size is its shaped extent — measure once, fix the leaf size. An input
-    // is the exception: it's a field with a designed size (explicit `.w()`/`.h()`), so we must NOT
-    // shrink it to its (possibly empty) current text.
+    //A text leaf defaults to its shaped extent (plus padding- border-box); explicit .w()/.h() win.
+    //Padding read as raw lengths: never write percents. Inputs are the exception: designed sized
+    //never text sized.
     if let Some(ts) = &el.content.text {
         if el.content.input.is_none() {
             let (w, h) = text_engine.measure(&ts.text, ts.family, ts.size);
@@ -90,6 +92,7 @@ fn emit<M>(
     out: &mut Vec<Placed<M>>,
     clip: Option<Rect>,
     scrolls: &Scrolls,
+    scroll_parent: Option<Id>,
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
@@ -106,8 +109,10 @@ fn emit<M>(
 
     let (mut cx, mut cy) = (x, y);
     let mut child_clip = clip;
+    let mut parent_scroll = scroll_parent.clone();
     if let Some(s) = &m.content.scroll {
         let scroll = scrolls.get(&s.id);
+        parent_scroll = Some(s.id.clone());
         if s.x {
             cx -= scroll.x;
         }
@@ -119,8 +124,10 @@ fn emit<M>(
             None => rect,
         })
     }
+
     out.push(Placed {
         rect,
+        scroll_parent,
         content: m.content,
         pad: Insets::new(
             (l.padding.left + l.border.left) as f64,
@@ -131,9 +138,17 @@ fn emit<M>(
         clip,
         content_size,
     });
-
     for c in m.children {
-        emit(c, tree, cx, cy, out, child_clip, scrolls);
+        emit(
+            c,
+            tree,
+            cx,
+            cy,
+            out,
+            child_clip,
+            scrolls,
+            parent_scroll.clone(),
+        );
     }
 }
 
@@ -156,6 +171,6 @@ pub(crate) fn solve<M>(
     )
     .expect("compute_layout");
     let mut out = Vec::new();
-    emit(mapped, &tree, 0.0, 0.0, &mut out, None, scrolls);
+    emit(mapped, &tree, 0.0, 0.0, &mut out, None, scrolls, None);
     out
 }

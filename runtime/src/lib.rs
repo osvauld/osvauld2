@@ -15,6 +15,8 @@ mod text;
 use crate::id::Id;
 use editor::Editors;
 use scroll::*;
+use std::collections::HashSet;
+use std::ops::Fn;
 use std::sync::Arc;
 use vello::kurbo::{Insets, Point, Rect};
 use vello::peniko::Color;
@@ -22,7 +24,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::{Key, ModifiersState, NamedKey::*};
 use winit::window::{CursorIcon, Window, WindowId};
 
 pub use el::{col, custom, row, text, text_area, text_input, El};
@@ -66,7 +68,9 @@ struct Runner<A: App> {
     editors: Editors,
     input_hits: Vec<(Rect, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
-    scroll_hits: Vec<(Rect, Id, (f32, f32), (f32, f32))>,
+    scroll_hits: Vec<ScrollHit>,
+    enter_msgs: Vec<(Id, A::Msg)>,
+    esc_msgs: Vec<(Id, A::Msg)>,
     scrolls: Scrolls,
     drag: Option<(Rect, Id, Insets)>,
     scroll_drag: Option<(Thumb, (f32, f32), Scroll)>,
@@ -86,6 +90,8 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let input_hits = &mut self.input_hits;
         let input_maps = &mut self.input_maps;
+        let enter_msgs = &mut self.enter_msgs;
+        let esc_msgs = &mut self.esc_msgs;
         let scroll_hits = &mut self.scroll_hits;
         let scroll_drag = &self.scroll_drag;
         let bar_hits = &mut self.bar_hits;
@@ -93,11 +99,15 @@ impl<A: App> Runner<A> {
         let editors = &mut self.editors;
         let text = &mut self.text;
         let debug = self.debug;
+        let mut needs_redraw = false;
         let render = self.render.as_mut().expect("render present");
         render.paint(clear, text, |scene, text, t, viewport, _now| {
             let mut placed = layout::solve(app.view(), text, viewport, scrolls);
             hits.clear();
             input_hits.clear();
+            esc_msgs.clear();
+            enter_msgs.clear();
+            let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
             input_maps.clear();
             scroll_hits.clear();
             bar_hits.clear();
@@ -129,6 +139,33 @@ impl<A: App> Runner<A> {
                         );
                     }
                     input_hits.push((hit_rect, spec.id.clone(), p.pad));
+                    if spec.autofocus && !prev_inputs.contains(&spec.id) {
+                        editors.focus(spec.id.clone());
+                        editors.caret_to_end(&spec.id, text);
+                        if let Some(scroll_parent) = &p.scroll_parent {
+                            let scroll_hit = scroll_hits.iter().find(|s| s.id == *scroll_parent);
+                            if let Some(scroll_hit) = scroll_hit {
+                                let offset_y = scrolls.get(&scroll_parent).y;
+                                let near = p.rect.y0 - scroll_hit.rect.y0 + offset_y as f64;
+                                let far = p.rect.y1 - scroll_hit.rect.y0 + offset_y as f64;
+                                scrolls.keep_in_view(
+                                    &scroll_parent,
+                                    Axis::Y,
+                                    near as f32,
+                                    far as f32,
+                                    scroll_hit.inner.1,
+                                    scroll_hit.content.1,
+                                );
+                                needs_redraw = true;
+                            }
+                        }
+                    }
+                    if let Some(m) = spec.on_esc.take() {
+                        esc_msgs.push((spec.id.clone(), m));
+                    }
+                    if let Some(m) = spec.on_enter.take() {
+                        enter_msgs.push((spec.id.clone(), m));
+                    }
                 }
 
                 let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
@@ -146,7 +183,14 @@ impl<A: App> Runner<A> {
                         None
                     };
                 if let Some((id, content, (ax, ay))) = scroll_vals {
-                    scroll_hits.push((hit_rect, id.clone(), content, (iw, ih)));
+                    scroll_hits.push(ScrollHit {
+                        hit_rect,
+                        rect: p.rect,
+                        id: id.clone(),
+                        content,
+                        inner: (iw, ih),
+                        parent: p.scroll_parent.clone(),
+                    });
                     let s = scrolls.get(id);
                     if ay {
                         if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
@@ -160,6 +204,8 @@ impl<A: App> Runner<A> {
                     }
                 }
             }
+            let live_inputs: HashSet<Id> = input_maps.iter().map(|(k, _)| k.clone()).collect();
+            editors.sweep(&live_inputs);
             let dragging = scroll_drag.as_ref().map(|(t, _, _)| (&t.id, t.axis));
             paint::draw(scene, &placed, editors, text, t, pointer, scrolls);
             paint::scrollbars(scene, bar_hits, t, pointer, dragging);
@@ -167,7 +213,7 @@ impl<A: App> Runner<A> {
                 paint::debug_boxes(scene, &placed, t, pointer, text, viewport);
             }
         });
-        if self.app.animating() {
+        if self.app.animating() || needs_redraw {
             self.redraw();
         }
     }
@@ -306,16 +352,20 @@ impl<A: App> Runner<A> {
         let (dh, dv) = if shift { (-dy, 0.0) } else { (-dx, -dy) };
         let (mut rem_h, mut rem_v) = (dh, dv);
         //innermost scroll contenxt under the pointer wins
-        for (r, id, content, inner) in self.scroll_hits.iter().rev() {
-            if !r.contains(p) {
+        for s in self.scroll_hits.iter().rev() {
+            if !s.hit_rect.contains(p) {
                 continue;
             }
             //chaining scroll
             if rem_h != 0.0 {
-                rem_h = self.scrolls.by(id, Axis::X, rem_h, inner.0, content.0);
+                rem_h = self
+                    .scrolls
+                    .by(&s.id, Axis::X, rem_h, s.inner.0, s.content.0);
             }
             if rem_v != 0.0 {
-                rem_v = self.scrolls.by(id, Axis::Y, rem_v, inner.1, content.1);
+                rem_v = self
+                    .scrolls
+                    .by(&s.id, Axis::Y, rem_v, s.inner.1, s.content.1);
             }
             if rem_h.abs() < 0.5 && rem_v.abs() < 0.5 {
                 break;
@@ -378,12 +428,39 @@ impl<A: App> ApplicationHandler for Runner<A> {
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
             WindowEvent::RedrawRequested => self.frame(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && event.logical_key == Key::Named(winit::keyboard::NamedKey::F12)
-                {
-                    self.debug = !self.debug;
-                    self.redraw();
-                    return;
+                let pressed = event.state == ElementState::Pressed;
+                let (mut enter_pressed, mut esc_pressed, mut f12_pressed) = (false, false, false);
+                if event.logical_key == Key::Named(Enter) {
+                    enter_pressed = true;
+                } else if event.logical_key == Key::Named(Escape) {
+                    esc_pressed = true;
+                } else if event.logical_key == Key::Named(F12) {
+                    f12_pressed = true;
+                }
+                if pressed {
+                    if let Some(id) = self.editors.focused_id() {
+                        if enter_pressed && !event.repeat {
+                            if !self.editors.is_multiline(&id) {
+                                if let Some((_, m)) = self.enter_msgs.iter().find(|(k, _)| k == &id)
+                                {
+                                    self.app.update(m.clone());
+                                    self.redraw();
+                                    return;
+                                }
+                            }
+                        } else if esc_pressed && !event.repeat {
+                            if let Some((_, m)) = self.esc_msgs.iter().find(|(k, _)| k == &id) {
+                                self.app.update(m.clone());
+                                self.redraw();
+                                return;
+                            }
+                        }
+                    }
+                    if f12_pressed {
+                        self.debug = !self.debug;
+                        self.redraw();
+                        return;
+                    }
                 }
                 let edited = self.editors.on_key(&event, self.modifiers, &mut self.text);
                 if edited {
@@ -435,6 +512,8 @@ pub fn run<A: App + 'static>(app: A) {
         scroll_hits: Vec::new(),
         scroll_drag: None,
         bar_hits: Vec::new(),
+        enter_msgs: Vec::new(),
+        esc_msgs: Vec::new(),
         debug: false,
     };
     event_loop.run_app(&mut runner).expect("run app");

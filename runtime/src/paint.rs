@@ -7,7 +7,6 @@ use crate::layout::Placed;
 use crate::scroll::Axis;
 use crate::scroll::Scrolls;
 use crate::scroll::Thumb;
-use crate::text;
 use crate::text::TextEngine;
 use crate::Editors;
 use crate::MONO_FAMILY;
@@ -229,7 +228,7 @@ pub fn debug_boxes<M>(
         &label,
         MONO_FAMILY,
         11.0,
-        t * Affine::translate((cx + 6.0, cy + 16.0)),
+        t * Affine::translate((cx + 6.0, cy + 6.0)),
         DEBUG_BOX,
     );
 }

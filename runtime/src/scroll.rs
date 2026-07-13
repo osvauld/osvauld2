@@ -15,6 +15,15 @@ pub(crate) struct Thumb {
     pub content: f32,
 }
 
+pub(crate) struct ScrollHit {
+    pub hit_rect: Rect, // rect after clip
+    pub rect: Rect,     //true rect
+    pub id: Id,
+    pub content: (f32, f32),
+    pub inner: (f32, f32),
+    pub parent: Option<Id>,
+}
+
 pub(crate) fn axis_thumb(
     rect: Rect,
     id: &Id,

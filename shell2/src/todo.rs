@@ -40,6 +40,7 @@ impl TodoScreen {
                     done: false,
                 };
                 self.next_id += 1;
+                self.editing = Some(todo.id);
                 self.items.push(todo);
                 None
             }
@@ -102,6 +103,9 @@ impl TodoScreen {
                 })
                 .grow()
                 .h(36.0)
+                .autofocus()
+                .on_enter(crate::Msg::Todo(Msg::Editing(todo_id)))
+                .on_esc(crate::Msg::Todo(Msg::Editing(todo_id)))
                 .px(12.0)
                 .font_size(15.0)
                 .color(if r.done { theme::fg_4() } else { theme::fg_1() })

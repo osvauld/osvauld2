@@ -31,6 +31,9 @@ pub(crate) struct InputSpec<M> {
     pub id: Id,
     pub map: Option<Box<dyn Fn(String) -> M>>,
     pub multiline: bool,
+    pub autofocus: bool,
+    pub on_enter: Option<M>,
+    pub on_esc: Option<M>,
 }
 
 // A stroked outline: width (logical px) + color. Distinct from kurbo's `Stroke`
@@ -159,6 +162,9 @@ pub fn input<M>(
         id: id.into(),
         map: Some(Box::new(map)),
         multiline,
+        autofocus: false,
+        on_enter: None,
+        on_esc: None,
     });
     e
 }
@@ -366,6 +372,25 @@ impl<M> El<M> {
             x: false,
         });
         s.x = true;
+        self
+    }
+    pub fn autofocus(mut self) -> Self {
+        if let Some(spec) = &mut self.content.input {
+            spec.autofocus = true;
+        }
+        self
+    }
+    pub fn on_enter(mut self, m: M) -> Self {
+        if let Some(spec) = &mut self.content.input {
+            spec.on_enter = Some(m)
+        }
+        self
+    }
+
+    pub fn on_esc(mut self, m: M) -> Self {
+        if let Some(spec) = &mut self.content.input {
+            spec.on_esc = Some(m)
+        }
         self
     }
 }

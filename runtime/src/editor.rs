@@ -2,7 +2,7 @@
 //! sight), plus which id holds keyboard focus. This is the behavior layer — it reads `InputSpec`
 //! and `Placed` from the description layer (`el`/`layout`), never the reverse. Owned by the `Runner`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::id::Id;
 use parley::style::StyleProperty;
@@ -241,6 +241,15 @@ impl Editors {
             field.caret_dirty = true;
         }
     }
+
+    pub fn caret_to_end(&mut self, id: &str, text: &mut TextEngine) {
+        if let Some(field) = self.map.get_mut(id) {
+            let (font_cx, layout_cx) = text.contexts();
+            field.editor.driver(font_cx, layout_cx).move_to_text_end();
+            field.caret_dirty = true;
+        }
+    }
+
     pub fn extend_to(&mut self, id: &str, x: f32, y: f32, text: &mut TextEngine) {
         if let Some(field) = self.map.get_mut(id) {
             let (font_cx, layout_cx) = text.contexts();
@@ -292,5 +301,13 @@ impl Editors {
                 field.caret_dirty = true;
             }
         };
+    }
+    pub fn sweep(&mut self, live: &HashSet<Id>) {
+        self.map.retain(|k, _| live.contains(k));
+        if let Some(focused) = &self.focused {
+            if !live.contains(focused) {
+                self.focused = None;
+            }
+        }
     }
 }
