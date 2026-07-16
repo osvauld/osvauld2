@@ -1,8 +1,9 @@
 use crate::theme;
+use runtime::{col, row, text, text_input, El};
+
 pub enum Event {
     BackRequested,
 }
-use runtime::{col, row, text, text_input, El};
 struct Todo {
     id: u64,
     text: String,
@@ -20,7 +21,7 @@ pub enum Msg {
     Delete(u64),
     Done(u64),
     Back,
-    Editing(u64),
+    ToggleEdit(u64),
 }
 
 impl TodoScreen {
@@ -64,7 +65,7 @@ impl TodoScreen {
                 None
             }
             Msg::Back => Some(Event::BackRequested),
-            Msg::Editing(id) => {
+            Msg::ToggleEdit(id) => {
                 if let Some(editing) = self.editing {
                     if editing == id {
                         self.editing = None;
@@ -77,7 +78,7 @@ impl TodoScreen {
         }
     }
 
-    pub fn view(&self) -> El<crate::Msg> {
+    pub fn view(&self) -> El<Msg> {
         let add_todo = row()
             .h(36.0)
             .px(14.0)
@@ -85,31 +86,25 @@ impl TodoScreen {
             .radius(6.0)
             .fill(theme::accent())
             .hover_fill(theme::accent_press())
-            .on_click(crate::Msg::Todo(Msg::New))
+            .on_click(Msg::New)
             .child(text("Add todo"));
         let mut todos = Vec::new();
 
         for r in &self.items {
             let id = format!("todo:{}", r.id);
             let todo_id = r.id;
-            let editing = if let Some(editing) = self.editing {
-                r.id == editing
-            } else {
-                false
-            };
+            let editing = self.editing == Some(r.id);
             let t_row = if editing {
-                text_input(&r.text, id, move |s| {
-                    crate::Msg::Todo(Msg::Update(s, todo_id))
-                })
-                .grow()
-                .h(36.0)
-                .autofocus()
-                .on_enter(crate::Msg::Todo(Msg::Editing(todo_id)))
-                .on_esc(crate::Msg::Todo(Msg::Editing(todo_id)))
-                .px(12.0)
-                .font_size(15.0)
-                .color(if r.done { theme::fg_4() } else { theme::fg_1() })
-                .stroke(1.0, theme::bd_1())
+                text_input(&r.text, id, move |s| Msg::Update(s, todo_id))
+                    .grow()
+                    .h(36.0)
+                    .autofocus()
+                    .on_enter(Msg::ToggleEdit(todo_id))
+                    .on_esc(Msg::ToggleEdit(todo_id))
+                    .px(12.0)
+                    .font_size(15.0)
+                    .color(if r.done { theme::fg_4() } else { theme::fg_1() })
+                    .stroke(1.0, theme::bd_1())
             } else {
                 text(&r.text)
                     .grow()
@@ -119,20 +114,20 @@ impl TodoScreen {
                     .color(if r.done { theme::fg_4() } else { theme::fg_1() })
                     .stroke(1.0, theme::bd_1())
             };
-            let checkbox = checkbox(r.done, crate::Msg::Todo(Msg::Done(r.id)));
+            let checkbox = checkbox(r.done, Msg::Done(r.id));
             let del = col()
                 .size(24.0, 24.0)
                 .center()
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
-                .on_click(crate::Msg::Todo(Msg::Delete(r.id)))
+                .on_click(Msg::Delete(r.id))
                 .child(text("x").font_size(14.0).color(theme::fg_4()));
             let edit = col()
                 .size(24.0, 24.0)
                 .center()
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
-                .on_click(crate::Msg::Todo(Msg::Editing(r.id)))
+                .on_click(Msg::ToggleEdit(r.id))
                 .child(text("E").font_size(14.0))
                 .fill(if editing {
                     theme::fg_4()
@@ -161,7 +156,7 @@ impl TodoScreen {
             .w(40.0)
             .h(20.0)
             .center()
-            .on_click(crate::Msg::Todo(Msg::Back))
+            .on_click(Msg::Back)
             .child(text("back"))
             .fill(theme::accent_press());
         col()

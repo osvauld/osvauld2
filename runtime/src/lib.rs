@@ -103,11 +103,11 @@ impl<A: App> Runner<A> {
         let render = self.render.as_mut().expect("render present");
         render.paint(clear, text, |scene, text, t, viewport, _now| {
             let mut placed = layout::solve(app.view(), text, viewport, scrolls);
+            let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
             hits.clear();
             input_hits.clear();
             esc_msgs.clear();
             enter_msgs.clear();
-            let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
             input_maps.clear();
             scroll_hits.clear();
             bar_hits.clear();

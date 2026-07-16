@@ -3,7 +3,6 @@
 //! code here — that all lives in `runtime`. (Port of sthalam's `screens/accounts.rs`.)
 
 use crate::theme;
-use crate::Msg;
 use runtime::{col, custom, row, text, text_area, text_input, App, El, MONO_FAMILY, PIXEL_FAMILY};
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Color, Fill};
@@ -54,34 +53,30 @@ impl LoginScreen {
         }
     }
 
-    pub fn view(&self) -> El<Msg> {
+    pub fn view(&self) -> El<LoginMsg> {
         // The centered panel: wordmark, account rows, then the quiet links.
-        let mut kids: Vec<El<Msg>> = vec![wordmark().mb(18.0)];
-        let mut accounts: Vec<El<Msg>> = Vec::new();
+        let mut kids: Vec<El<LoginMsg>> = vec![wordmark().mb(18.0)];
+        let mut accounts: Vec<El<LoginMsg>> = Vec::new();
         for (i, a) in self.accounts.iter().enumerate() {
             accounts.push(account_row(i, a, i == self.selected));
         }
         kids.push(
-            text_input(&self.passphrase, "passphrase", |s| {
-                Msg::Login(LoginMsg::Passphrase(s))
-            })
-            .h(40.0)
-            .px(12.0)
-            .font_size(15.0)
-            .color(theme::fg_1())
-            .stroke(1.0, theme::bd_1()),
+            text_input(&self.passphrase, "passphrase", |s| LoginMsg::Passphrase(s))
+                .h(40.0)
+                .px(12.0)
+                .font_size(15.0)
+                .color(theme::fg_1())
+                .stroke(1.0, theme::bd_1()),
         );
         kids.push(
-            text_area(&self.text_area, "area", |t| {
-                Msg::Login(LoginMsg::TextArea(t))
-            })
-            .w(PANEL_W)
-            .h(80.0)
-            .px(12.0)
-            .py(12.0)
-            .font_size(15.0)
-            .color(theme::fg_1())
-            .stroke(1.0, theme::bd_1()),
+            text_area(&self.text_area, "area", |t| LoginMsg::TextArea(t))
+                .w(PANEL_W)
+                .h(80.0)
+                .px(12.0)
+                .py(12.0)
+                .font_size(15.0)
+                .color(theme::fg_1())
+                .stroke(1.0, theme::bd_1()),
         );
         kids.push(
             row()
@@ -90,7 +85,7 @@ impl LoginScreen {
                 .radius(6.0)
                 .fill(theme::accent())
                 .hover_fill(theme::accent_press())
-                .on_click(Msg::Login(LoginMsg::Signup))
+                .on_click(LoginMsg::Signup)
                 .child(text("Sign Up").font_size(15.0).color(theme::fg_1())),
         );
 
@@ -159,7 +154,7 @@ impl LoginScreen {
 
 /// One account row: identicon, label + short DID, a spacer, and the chevron. Selected → accent wash
 /// + accent border; others a hairline that turns accent on hover.
-fn account_row(i: usize, a: &Account, selected: bool) -> El<Msg> {
+fn account_row(i: usize, a: &Account, selected: bool) -> El<LoginMsg> {
     let edge = if selected {
         theme::accent()
     } else {
@@ -178,7 +173,7 @@ fn account_row(i: usize, a: &Account, selected: bool) -> El<Msg> {
         .align_center()
         .stroke(1.0, edge)
         .hover_stroke(1.0, theme::accent())
-        .on_click(Msg::Login(LoginMsg::Select(i)))
+        .on_click(LoginMsg::Select(i))
         .child(identicon(&a.did))
         .child(
             col()
@@ -204,7 +199,7 @@ fn account_row(i: usize, a: &Account, selected: bool) -> El<Msg> {
 }
 
 /// The "sthalam" wordmark in the VT323 pixel face, drawn twice for the offset accent shadow.
-fn wordmark() -> El<Msg> {
+fn wordmark() -> El<LoginMsg> {
     custom(|scene, text, rect, t| {
         let o = 2.0;
         let (w, _) = text.measure("sthalam", PIXEL_FAMILY, 56.0);
@@ -230,7 +225,7 @@ fn wordmark() -> El<Msg> {
 }
 
 /// A deterministic 5×5 mirrored pixel avatar, seeded from the DID (FNV-1a), drawn into its rect.
-fn identicon(did: &str) -> El<Msg> {
+fn identicon(did: &str) -> El<LoginMsg> {
     let seed = did.to_owned();
     custom(move |scene, _text, rect, t| draw_identicon(scene, rect, t, &seed)).size(40.0, 40.0)
 }

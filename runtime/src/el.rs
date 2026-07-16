@@ -6,6 +6,7 @@
 //! NOTE: this mirrors `app_engine`'s `Node` design but is its own type — app_engine still depends on
 //! egui, so importing it here would contaminate `runtime`. Converging the two is a later refactor.
 
+use std::rc::Rc;
 use taffy::prelude::*; // Style, Display, FlexDirection, length(), auto(), Size, Rect (geometry), …
 use vello::kurbo::Affine;
 use vello::peniko::Color;
@@ -392,5 +393,72 @@ impl<M> El<M> {
             spec.on_esc = Some(m)
         }
         self
+    }
+    pub fn map<B: 'static>(self, f: impl Fn(M) -> B + 'static) -> El<B>
+    where
+        M: 'static,
+    {
+        self.map_rc(Rc::new(f))
+    }
+    fn map_rc<B: 'static>(self, f: Rc<dyn Fn(M) -> B>) -> El<B>
+    where
+        M: 'static,
+    {
+        let El {
+            layout,
+            content,
+            children,
+        } = self;
+        let Content {
+            look,
+            text,
+            custom,
+            on_click,
+            input,
+            scroll,
+        } = content;
+        let on_click = on_click.map(|m| f(m));
+        let input = match input {
+            Some(InputSpec {
+                id,
+                map,
+                multiline,
+                on_enter,
+                on_esc,
+                autofocus,
+            }) => {
+                let r_f = Rc::clone(&f);
+                let new_map = map.map(|g| Box::new(move |s| r_f(g(s))) as Box<dyn Fn(String) -> B>);
+
+                Some(InputSpec {
+                    id,
+                    multiline,
+                    autofocus,
+                    on_enter: on_enter.map(|e| f(e)),
+                    on_esc: on_esc.map(|e| f(e)),
+                    map: new_map,
+                })
+            }
+            None => None,
+        };
+
+        let content = Content {
+            look,
+            text,
+            custom,
+            on_click,
+            input,
+            scroll,
+        };
+
+        let mut converted_children: Vec<El<B>> = Vec::new();
+        for child in children {
+            converted_children.push(child.map_rc(Rc::clone(&f)));
+        }
+        El {
+            layout,
+            content,
+            children: converted_children,
+        }
     }
 }

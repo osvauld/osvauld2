@@ -44,8 +44,8 @@ impl App for Shell {
 
     fn view(&self) -> El<Msg> {
         match self.screen {
-            Screen::Login => self.login.view(),
-            Screen::Todo => self.todo.view(),
+            Screen::Login => self.login.view().map(Msg::Login),
+            Screen::Todo => self.todo.view().map(Msg::Todo),
         }
     }
     fn update(&mut self, msg: Msg) {
