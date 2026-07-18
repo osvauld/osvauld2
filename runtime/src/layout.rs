@@ -7,7 +7,8 @@ use vello::kurbo::{Insets, Rect};
 
 use crate::el::{Content, El};
 use crate::id::Id;
-use crate::scroll::Scrolls;
+use crate::scroll::Scroll;
+use crate::state::Store;
 use crate::text::TextEngine;
 
 /// One positioned node, ready to paint and hit-test. `rect` is in logical points.
@@ -91,7 +92,7 @@ fn emit<M>(
     oy: f32,
     out: &mut Vec<Placed<M>>,
     clip: Option<Rect>,
-    scrolls: &Scrolls,
+    store: &Store,
     scroll_parent: Option<Id>,
 ) {
     let l = tree.layout(m.node).expect("layout");
@@ -111,7 +112,7 @@ fn emit<M>(
     let mut child_clip = clip;
     let mut parent_scroll = scroll_parent.clone();
     if let Some(s) = &m.content.scroll {
-        let scroll = scrolls.get(&s.id);
+        let scroll = store.get::<Scroll>(&s.id).copied().unwrap_or_default();
         parent_scroll = Some(s.id.clone());
         if s.x {
             cx -= scroll.x;
@@ -146,7 +147,7 @@ fn emit<M>(
             cy,
             out,
             child_clip,
-            scrolls,
+            store,
             parent_scroll.clone(),
         );
     }
@@ -158,7 +159,7 @@ pub(crate) fn solve<M>(
     root: El<M>,
     text: &mut TextEngine,
     viewport: (f32, f32),
-    scrolls: &Scrolls,
+    store: &Store,
 ) -> Vec<Placed<M>> {
     let mut tree = TaffyTree::new();
     let mapped = build(root, &mut tree, text);
@@ -171,6 +172,6 @@ pub(crate) fn solve<M>(
     )
     .expect("compute_layout");
     let mut out = Vec::new();
-    emit(mapped, &tree, 0.0, 0.0, &mut out, None, scrolls, None);
+    emit(mapped, &tree, 0.0, 0.0, &mut out, None, store, None);
     out
 }

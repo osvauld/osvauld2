@@ -2,13 +2,15 @@
 //! with `hover_*` set uses it when the pointer is inside its rect, else the base look. No stored
 //! hover flags; it falls out of `pointer ∩ rect` each frame (and we only repaint on pointer moves).
 
+use crate::editor::Field;
+use crate::editor::Focus;
 use crate::id::Id;
 use crate::layout::Placed;
 use crate::scroll::Axis;
-use crate::scroll::Scrolls;
+use crate::scroll::Scroll;
 use crate::scroll::Thumb;
+use crate::state::Store;
 use crate::text::TextEngine;
-use crate::Editors;
 use crate::MONO_FAMILY;
 use vello::kurbo::Line;
 use vello::kurbo::{Affine, Insets, Point, Rect, RoundedRect, Stroke};
@@ -29,11 +31,11 @@ const DEBUG_CHIP: Color = Color::from_rgba8(0x11, 0x11, 0x18, 0xF2);
 pub(crate) fn draw<M>(
     scene: &mut Scene,
     placed: &[Placed<M>],
-    editors: &Editors,
     text: &mut TextEngine,
     t: Affine,
     pointer: Option<(f32, f32)>,
-    scrolls: &mut Scrolls,
+    store: &Store,
+    focus: &Focus,
 ) {
     for p in placed {
         let mut clipping = false;
@@ -60,7 +62,11 @@ pub(crate) fn draw<M>(
         }
         if let Some(ts) = &p.content.text {
             if let Some(spec) = &p.content.input {
-                if let Some(layout) = editors.layout_of(&spec.id) {
+                let field_layout = store
+                    .get::<Field>(&spec.id)
+                    .and_then(|f| f.layout_of().map(|l| (f, l)));
+
+                if let Some((field, layout)) = field_layout {
                     let content = Rect::new(
                         p.rect.x0 + p.pad.x0,
                         p.rect.y0 + p.pad.y0,
@@ -69,7 +75,7 @@ pub(crate) fn draw<M>(
                     );
 
                     scene.push_clip_layer(Fill::NonZero, t, &content);
-                    let s = scrolls.get(&spec.id);
+                    let s = store.get::<Scroll>(&spec.id).copied().unwrap_or_default();
                     let (scroll_x, scroll_y) = (s.x, s.y);
                     let (ox, oy) = content_offset(
                         p.rect,
@@ -80,7 +86,7 @@ pub(crate) fn draw<M>(
                         spec.multiline,
                     );
                     let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
-                    for (bb, _line) in editors.selection_geometry(&spec.id) {
+                    for (bb, _line) in field.selection_geometry() {
                         let r = Rect::new(
                             p.rect.x0 + ox + bb.x0,
                             p.rect.y0 + oy + bb.y0,
@@ -90,8 +96,11 @@ pub(crate) fn draw<M>(
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
                     text.draw_layout(scene, layout, origin, ts.color);
-                    if editors.is_focused(&spec.id) {
-                        if let Some(bb) = editors.cursor_geometry(&spec.id, 1.5) {
+                    if focus.is_focused(&spec.id) {
+                        if let Some(bb) = store
+                            .get::<Field>(&spec.id)
+                            .and_then(|f| f.cursor_geometry(1.5))
+                        {
                             let r = Rect::new(
                                 p.rect.x0 + ox + bb.x0,
                                 p.rect.y0 + oy + bb.y0,

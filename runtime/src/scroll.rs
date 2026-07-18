@@ -1,5 +1,4 @@
-use crate::id::Id;
-use std::collections::HashMap;
+use crate::{editor::KeepInView, id::Id};
 use vello::kurbo::Rect;
 
 const BAR_W: f64 = 8.0;
@@ -91,48 +90,23 @@ impl Scroll {
             Axis::Y => self.y = v,
         };
     }
-}
 
-pub(crate) struct Scrolls {
-    map: HashMap<Id, Scroll>,
-}
-
-impl Scrolls {
-    pub fn new() -> Self {
-        Scrolls {
-            map: HashMap::new(),
-        }
-    }
-    pub fn get(&self, id: &str) -> Scroll {
-        self.map.get(id).copied().unwrap_or_default()
-    }
-    pub fn keep_in_view(
-        &mut self,
-        id: &Id,
-        axis: Axis,
-        near: f32,
-        far: f32,
-        inner: f32,
-        content: f32,
-    ) {
-        let s = self.map.entry(id.clone()).or_default();
-        let cur = s.get(axis);
+    pub fn keep_in_view(&mut self, view: KeepInView) {
+        let cur = self.get(view.axis);
         let mut final_scroll: f32 = cur;
-        if near < final_scroll {
-            final_scroll = near
-        } else if far > final_scroll + inner {
-            final_scroll = far - inner
+        if view.near < final_scroll {
+            final_scroll = view.near
+        } else if view.far > final_scroll + view.inner {
+            final_scroll = view.far - view.inner
         }
-        final_scroll = final_scroll.clamp(0.0, (content - inner).max(0.0));
-        s.set(axis, final_scroll);
+        final_scroll = final_scroll.clamp(0.0, (view.content - view.inner).max(0.0));
+        self.set(view.axis, final_scroll);
     }
-    pub fn by(&mut self, id: &Id, axis: Axis, delta: f32, inner: f32, content: f32) -> f32 {
-        let s = self.map.entry(id.clone()).or_default();
-
-        let cur = s.get(axis);
+    pub fn by(&mut self, axis: Axis, delta: f32, inner: f32, content: f32) -> f32 {
+        let cur = self.get(axis);
         let next = (cur + delta).clamp(0.0, (content - inner).max(0.0));
 
-        s.set(axis, next);
+        self.set(axis, next);
         delta - (next - cur)
     }
 }

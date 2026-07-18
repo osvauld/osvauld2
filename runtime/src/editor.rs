@@ -2,30 +2,31 @@
 //! sight), plus which id holds keyboard focus. This is the behavior layer — it reads `InputSpec`
 //! and `Placed` from the description layer (`el`/`layout`), never the reverse. Owned by the `Runner`.
 
-use std::collections::{HashMap, HashSet};
-
 use crate::id::Id;
+use crate::state::Store;
 use parley::style::StyleProperty;
 use parley::{BoundingBox, LineHeight, PlainEditor};
 use vello::kurbo::Insets;
-use winit::event::{ElementState, KeyEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
 
-use crate::scroll::{Axis, Scrolls};
+use crate::scroll::{Axis, Scroll};
 use crate::text::{self, TextEngine};
 
 /// Editable-field state that persists across frames. The view tree is rebuilt every frame, so the
 /// caret/buffer can't live on it — they live here, keyed by the input's stable `id`.
-struct Field {
+pub(crate) struct Field {
     editor: PlainEditor<[u8; 4]>,
     multiline: bool,
     id: Id,
     caret_dirty: bool,
 }
 
-pub(crate) struct Editors {
-    map: HashMap<Id, Field>,
-    focused: Option<Id>,
+pub(crate) struct KeepInView {
+    pub axis: Axis,
+    pub near: f32,
+    pub far: f32,
+    pub inner: f32,
+    pub content: f32,
 }
 
 impl Field {
@@ -51,8 +52,7 @@ impl Field {
         height: f32,
         pad: Insets,
         text: &mut TextEngine,
-        scrolls: &mut Scrolls,
-    ) {
+    ) -> Option<KeepInView> {
         let w = if self.multiline {
             Some(width - pad.x0 as f32 - pad.x1 as f32)
         } else {
@@ -62,23 +62,34 @@ impl Field {
         let (font_cx, layout_cx) = text.contexts();
         self.editor.refresh_layout(font_cx, layout_cx);
         if self.caret_dirty {
-            self.scroll_to_caret(width, height, pad, scrolls);
-            self.caret_dirty = false;
+            return self.scroll_request(width, height, pad);
         }
+        None
     }
-    fn scroll_to_caret(&mut self, width: f32, height: f32, pad: Insets, scrolls: &mut Scrolls) {
-        let Some(c) = self.editor.cursor_geometry(1.5) else {
-            return;
-        };
+    fn scroll_request(&mut self, width: f32, height: f32, pad: Insets) -> Option<KeepInView> {
+        let c = self.editor.cursor_geometry(1.5)?;
         if self.multiline {
             let text_h = self.editor.try_layout().map_or(0.0, |l| l.height());
             let inner = height - pad.y0 as f32 - pad.y1 as f32;
-            scrolls.keep_in_view(&self.id, Axis::Y, c.y0 as f32, c.y1 as f32, inner, text_h);
+            return Some(KeepInView {
+                inner,
+                content: text_h,
+                axis: Axis::Y,
+                near: c.y0 as f32,
+                far: c.y1 as f32,
+            });
         } else {
             let text_w = self.editor.try_layout().map_or(0.0, |l| l.full_width());
             let inner = width - pad.x0 as f32 - pad.x1 as f32;
             let content = text_w.max(c.x1 as f32); // include the caret's far edge at the eol
-            scrolls.keep_in_view(&self.id, Axis::X, c.x0 as f32, c.x1 as f32, inner, content);
+
+            return Some(KeepInView {
+                inner,
+                content,
+                axis: Axis::X,
+                near: c.x0 as f32,
+                far: c.x1 as f32,
+            });
         }
     }
     pub fn on_key(
@@ -87,7 +98,7 @@ impl Field {
         text: &mut TextEngine,
         key: &Key,
         event_txt: &Option<SmolStr>,
-    ) -> () {
+    ) {
         let multiline = self.multiline;
         let shift = mods.shift_key();
         let word = mods.control_key();
@@ -151,163 +162,125 @@ impl Field {
 
         self.caret_dirty = true;
     }
-}
+    pub fn click_at(&mut self, x: f32, y: f32, text: &mut TextEngine) {
+        let (font_cx, layout_cx) = text.contexts();
+        self.editor.driver(font_cx, layout_cx).move_to_point(x, y);
+        self.caret_dirty = true;
+    }
 
-impl Editors {
-    pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            focused: None,
+    pub fn caret_to_end(&mut self, text: &mut TextEngine) {
+        let (font_cx, layout_cx) = text.contexts();
+        self.editor.driver(font_cx, layout_cx).move_to_text_end();
+        self.caret_dirty = true;
+    }
+
+    pub fn extend_to(&mut self, x: f32, y: f32, text: &mut TextEngine) {
+        let (font_cx, layout_cx) = text.contexts();
+        self.editor
+            .driver(font_cx, layout_cx)
+            .extend_selection_to_point(x, y);
+        self.caret_dirty = true;
+    }
+
+    pub fn layout_of(&self) -> Option<&parley::Layout<[u8; 4]>> {
+        self.editor.try_layout()
+    }
+
+    pub fn selection_geometry(&self) -> Vec<(BoundingBox, usize)> {
+        self.editor.selection_geometry()
+    }
+
+    pub fn text_of(&self) -> &str {
+        self.editor.raw_text()
+    }
+
+    pub fn cursor_geometry(&self, size: f32) -> Option<BoundingBox> {
+        self.editor.cursor_geometry(size)
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        self.multiline
+    }
+
+    pub fn on_ime(&mut self, s: &str, c: Option<(usize, usize)>, text: &mut TextEngine) {
+        self.caret_dirty = true;
+        let (font_cx, layout_cx) = text.contexts();
+        let mut driver = self.editor.driver(font_cx, layout_cx);
+        if s.is_empty() {
+            driver.clear_compose();
+        } else {
+            driver.set_compose(s, c);
         }
     }
-
-    pub fn sync(
-        &mut self,
-        id: &Id,
-        value: &str,
-        width: f32,
-        height: f32,
-        family: &'static str,
-        size: f32,
-        multiline: bool,
-        text: &mut TextEngine,
-        pad: Insets,
-        scrolls: &mut Scrolls,
-    ) {
-        let field = self
-            .map
-            .entry(id.clone())
-            .or_insert_with(|| Field::new(size, id.clone(), family, value, multiline));
-        field.sync(width, height, pad, text, scrolls);
+    pub fn on_ime_disabled(&mut self, text: &mut TextEngine) {
+        self.caret_dirty = true;
+        let (font_cx, layout_cx) = text.contexts();
+        let mut driver = self.editor.driver(font_cx, layout_cx);
+        driver.clear_compose();
     }
-    pub fn focus(&mut self, id: Id) {
+
+    pub fn on_ime_commit(&mut self, s: &str, text: &mut TextEngine) {
+        let (font_cx, layout_cx) = text.contexts();
+        self.editor
+            .driver(font_cx, layout_cx)
+            .insert_or_replace_selection(s);
+        self.caret_dirty = true;
+    }
+}
+
+pub(crate) struct Focus {
+    focused: Option<Id>,
+}
+
+impl Focus {
+    pub fn focused_field<'s>(&self, store: &'s mut Store) -> Option<&'s mut Field> {
+        let id = self.focused.as_ref()?;
+        store.get_mut::<Field>(id)
+    }
+    pub fn new() -> Self {
+        Self { focused: None }
+    }
+    pub fn set(&mut self, id: Id) {
         self.focused = Some(id);
     }
-
-    pub fn layout_of(&self, id: &str) -> Option<&parley::Layout<[u8; 4]>> {
-        self.map.get(id).and_then(|f| f.editor.try_layout())
-    }
-
     pub fn blur(&mut self) {
         self.focused = None;
     }
-
-    pub fn is_multiline(&self, id: &str) -> bool {
-        self.map.get(id).map(|f| f.multiline).unwrap_or(false)
+    pub fn get(&self) -> Option<&Id> {
+        self.focused.as_ref()
     }
 
     pub fn is_focused(&self, id: &str) -> bool {
         self.focused.as_deref() == Some(id)
     }
-
-    pub fn text_of(&self, id: &str) -> Option<&str> {
-        self.map.get(id).map(|e| e.editor.raw_text())
-    }
-
-    pub fn cursor_geometry(&self, id: &str, size: f32) -> Option<BoundingBox> {
-        self.map
-            .get(id)
-            .and_then(|e| e.editor.cursor_geometry(size))
-    }
-    pub fn selection_geometry(&self, id: &str) -> Vec<(BoundingBox, usize)> {
-        self.map
-            .get(id)
-            .map(|e| e.editor.selection_geometry())
-            .unwrap_or_default()
-    }
-    pub fn on_key(
-        &mut self,
-        event: &KeyEvent,
-        mods: ModifiersState,
-        text: &mut TextEngine,
-    ) -> bool {
-        if event.state != ElementState::Pressed {
-            return false;
-        }
-        let Some(id) = self.focused_id() else {
-            return false;
-        };
-        let Some(e) = self.map.get_mut(&id) else {
-            return false;
-        };
-        e.on_key(mods, text, &event.logical_key, &event.text);
-        true
-    }
-
-    pub fn click_at(&mut self, id: &str, x: f32, y: f32, text: &mut TextEngine) {
-        if let Some(field) = self.map.get_mut(id) {
-            let (font_cx, layout_cx) = text.contexts();
-            field.editor.driver(font_cx, layout_cx).move_to_point(x, y);
-            field.caret_dirty = true;
-        }
-    }
-
-    pub fn caret_to_end(&mut self, id: &str, text: &mut TextEngine) {
-        if let Some(field) = self.map.get_mut(id) {
-            let (font_cx, layout_cx) = text.contexts();
-            field.editor.driver(font_cx, layout_cx).move_to_text_end();
-            field.caret_dirty = true;
-        }
-    }
-
-    pub fn extend_to(&mut self, id: &str, x: f32, y: f32, text: &mut TextEngine) {
-        if let Some(field) = self.map.get_mut(id) {
-            let (font_cx, layout_cx) = text.contexts();
-            field
-                .editor
-                .driver(font_cx, layout_cx)
-                .extend_selection_to_point(x, y);
-            field.caret_dirty = true;
-        }
-    }
-
-    pub fn focused_id(&self) -> Option<Id> {
-        self.focused.clone()
-    }
-
-    pub fn on_ime(&mut self, s: &str, c: Option<(usize, usize)>, text: &mut TextEngine) {
-        if let Some(id) = self.focused_id() {
-            if let Some(field) = self.map.get_mut(&id) {
-                field.caret_dirty = true;
-                let (font_cx, layout_cx) = text.contexts();
-                let mut driver = field.editor.driver(font_cx, layout_cx);
-                if s.is_empty() {
-                    driver.clear_compose();
-                } else {
-                    driver.set_compose(s, c);
-                }
-            }
-        };
-    }
-    pub fn on_ime_disabled(&mut self, text: &mut TextEngine) {
-        if let Some(id) = self.focused_id() {
-            if let Some(field) = self.map.get_mut(&id) {
-                field.caret_dirty = true;
-                let (font_cx, layout_cx) = text.contexts();
-                let mut driver = field.editor.driver(font_cx, layout_cx);
-                driver.clear_compose();
-            }
-        }
-    }
-
-    pub fn on_ime_commit(&mut self, s: &str, text: &mut TextEngine) {
-        if let Some(id) = self.focused_id() {
-            if let Some(field) = self.map.get_mut(&id) {
-                let (font_cx, layout_cx) = text.contexts();
-                field
-                    .editor
-                    .driver(font_cx, layout_cx)
-                    .insert_or_replace_selection(s);
-                field.caret_dirty = true;
-            }
-        };
-    }
-    pub fn sweep(&mut self, live: &HashSet<Id>) {
-        self.map.retain(|k, _| live.contains(k));
-        if let Some(focused) = &self.focused {
-            if !live.contains(focused) {
+    pub fn clear_if_gone(&mut self, store: &Store) {
+        if let Some(id) = &self.focused {
+            if store.get::<Field>(id).is_none() {
                 self.focused = None;
             }
         }
+    }
+}
+
+pub fn sync(
+    id: &Id,
+    value: &str,
+    width: f32,
+    height: f32,
+    family: &'static str,
+    size: f32,
+    multiline: bool,
+    text: &mut TextEngine,
+    pad: Insets,
+    store: &mut Store,
+) {
+    let field = store.get_or_with::<Field>(id, || {
+        Field::new(size, id.clone(), family, value, multiline)
+    });
+    let content_dim = field.sync(width, height, pad, text);
+    if let Some(view) = content_dim {
+        field.caret_dirty = false;
+        let scroll = store.get_or::<Scroll>(id);
+        scroll.keep_in_view(view);
     }
 }

@@ -10,10 +10,12 @@ mod layout;
 mod paint;
 mod render;
 mod scroll;
+mod state;
 mod text;
 
+use crate::editor::{Focus, KeepInView};
 use crate::id::Id;
-use editor::Editors;
+use editor::Field;
 use scroll::*;
 use std::collections::HashSet;
 use std::ops::Fn;
@@ -29,8 +31,8 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use el::{col, custom, row, text, text_area, text_input, El};
 pub use render::Render;
+use state::Store;
 pub use text::{TextEngine, MONO_FAMILY, PIXEL_FAMILY, UI_FAMILY};
-/// Re-exported so screens can use vello drawing types without a direct dependency.
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -65,18 +67,18 @@ struct Runner<A: App> {
     pointer: Option<(f32, f32)>,
     hits: Vec<(Rect, A::Msg)>,
     text: TextEngine,
-    editors: Editors,
+    focused: Focus,
     input_hits: Vec<(Rect, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
     scroll_hits: Vec<ScrollHit>,
     enter_msgs: Vec<(Id, A::Msg)>,
     esc_msgs: Vec<(Id, A::Msg)>,
-    scrolls: Scrolls,
     drag: Option<(Rect, Id, Insets)>,
     scroll_drag: Option<(Thumb, (f32, f32), Scroll)>,
     modifiers: ModifiersState,
     bar_hits: Vec<Thumb>,
     debug: bool,
+    store: Store,
 }
 
 impl<A: App> Runner<A> {
@@ -95,14 +97,14 @@ impl<A: App> Runner<A> {
         let scroll_hits = &mut self.scroll_hits;
         let scroll_drag = &self.scroll_drag;
         let bar_hits = &mut self.bar_hits;
-        let scrolls = &mut self.scrolls;
-        let editors = &mut self.editors;
+        let store = &mut self.store;
+        let focused = &mut self.focused;
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
         let render = self.render.as_mut().expect("render present");
         render.paint(clear, text, |scene, text, t, viewport, _now| {
-            let mut placed = layout::solve(app.view(), text, viewport, scrolls);
+            let mut placed = layout::solve(app.view(), text, viewport, store);
             let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
             hits.clear();
             input_hits.clear();
@@ -125,7 +127,7 @@ impl<A: App> Runner<A> {
                         input_maps.push((spec.id.clone(), m));
                     }
                     if let Some(ts) = &p.content.text {
-                        editors.sync(
+                        editor::sync(
                             &spec.id,
                             &ts.text,
                             p.rect.width() as f32,
@@ -135,27 +137,32 @@ impl<A: App> Runner<A> {
                             spec.multiline,
                             text,
                             p.pad,
-                            scrolls,
+                            store,
                         );
                     }
                     input_hits.push((hit_rect, spec.id.clone(), p.pad));
                     if spec.autofocus && !prev_inputs.contains(&spec.id) {
-                        editors.focus(spec.id.clone());
-                        editors.caret_to_end(&spec.id, text);
+                        focused.set(spec.id.clone());
+                        let field = focused.focused_field(store);
+                        if let Some(field) = field {
+                            field.caret_to_end(text);
+                        }
+
                         if let Some(scroll_parent) = &p.scroll_parent {
                             let scroll_hit = scroll_hits.iter().find(|s| s.id == *scroll_parent);
                             if let Some(scroll_hit) = scroll_hit {
-                                let offset_y = scrolls.get(&scroll_parent).y;
+                                let scroll = store.get_or::<Scroll>(&scroll_parent);
+                                let offset_y = scroll.y;
                                 let near = p.rect.y0 - scroll_hit.rect.y0 + offset_y as f64;
                                 let far = p.rect.y1 - scroll_hit.rect.y0 + offset_y as f64;
-                                scrolls.keep_in_view(
-                                    &scroll_parent,
-                                    Axis::Y,
-                                    near as f32,
-                                    far as f32,
-                                    scroll_hit.inner.1,
-                                    scroll_hit.content.1,
-                                );
+                                let view = KeepInView {
+                                    axis: Axis::Y,
+                                    near: near as f32,
+                                    far: far as f32,
+                                    inner: scroll_hit.inner.1,
+                                    content: scroll_hit.content.1,
+                                };
+                                scroll.keep_in_view(view);
                                 needs_redraw = true;
                             }
                         }
@@ -172,8 +179,9 @@ impl<A: App> Runner<A> {
                 let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
                 let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
                     if let Some(input) = &p.content.input {
-                        let (cw, ch) = editors
-                            .layout_of(&input.id)
+                        let (cw, ch) = store
+                            .get::<Field>(&Id::from(input.id.clone()))
+                            .and_then(|f| f.layout_of())
                             .map(|l| (l.full_width(), l.height()))
                             .unwrap_or((0.0, 0.0));
                         Some((&input.id, (cw, ch), (true, true)))
@@ -191,7 +199,7 @@ impl<A: App> Runner<A> {
                         inner: (iw, ih),
                         parent: p.scroll_parent.clone(),
                     });
-                    let s = scrolls.get(id);
+                    let s = store.get_or::<Scroll>(id);
                     if ay {
                         if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
                             bar_hits.push(v);
@@ -204,10 +212,10 @@ impl<A: App> Runner<A> {
                     }
                 }
             }
-            let live_inputs: HashSet<Id> = input_maps.iter().map(|(k, _)| k.clone()).collect();
-            editors.sweep(&live_inputs);
+            store.sweep();
+            focused.clear_if_gone(store);
             let dragging = scroll_drag.as_ref().map(|(t, _, _)| (&t.id, t.axis));
-            paint::draw(scene, &placed, editors, text, t, pointer, scrolls);
+            paint::draw(scene, &placed, text, t, pointer, store, &focused);
             paint::scrollbars(scene, bar_hits, t, pointer, dragging);
             if debug {
                 paint::debug_boxes(scene, &placed, t, pointer, text, viewport);
@@ -233,7 +241,11 @@ impl<A: App> Runner<A> {
             .rev()
             .find(|thumb| thumb.rect.contains(p))
         {
-            let bar = self.scrolls.get(&thumb.id);
+            let bar = self
+                .store
+                .get::<Scroll>(&thumb.id)
+                .copied()
+                .unwrap_or_default();
             self.scroll_drag = Some((thumb.clone(), (px, py), bar));
             self.redraw();
             return;
@@ -241,13 +253,16 @@ impl<A: App> Runner<A> {
         let hit = self.input_hits.iter().rev().find(|(r, _, _)| r.contains(p));
         match hit {
             Some((rect, id, pad)) => {
-                self.editors.focus(id.clone());
-                let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
-                self.editors.click_at(id, lx, ly, &mut self.text);
+                self.focused.set(id.clone());
                 self.drag = Some((*rect, id.clone(), *pad));
+                let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
+                let field = self.store.get_mut::<Field>(id);
+                if let Some(field) = field {
+                    field.click_at(lx, ly, &mut self.text);
+                }
             }
             None => {
-                self.editors.blur();
+                self.focused.blur();
                 self.drag = None
             }
         }
@@ -260,13 +275,21 @@ impl<A: App> Runner<A> {
     }
 
     fn local_point(&self, id: &str, rect: Rect, pad: Insets, px: f32, py: f32) -> (f32, f32) {
-        let line_h = self
-            .editors
-            .layout_of(id)
+        let field = self.store.get::<Field>(&Id::from(id));
+        let line_h = field
+            .and_then(|f| f.layout_of())
             .map(|l| l.height())
             .unwrap_or(0.0);
-        let scroll = self.scrolls.get(id);
-        let multiline = self.editors.is_multiline(id);
+        let scroll = self
+            .store
+            .get::<Scroll>(&Id::from(id))
+            .copied()
+            .unwrap_or_default();
+        let multiline = self
+            .store
+            .get::<Field>(&Id::from(id))
+            .map(|f| f.is_multiline())
+            .unwrap_or(false);
 
         let (ox, oy) = paint::content_offset(rect, pad, line_h, scroll.x, scroll.y, multiline);
         let lx = (px as f64 - rect.x0 - ox) as f32;
@@ -275,14 +298,17 @@ impl<A: App> Runner<A> {
     }
 
     fn notify_app_text(&mut self) {
-        if let Some(id) = self.editors.focused_id() {
-            let new_text = self.editors.text_of(&id).map(|s| s.to_owned());
-            if let (Some(text), Some((_, map))) =
-                (new_text, self.input_maps.iter().find(|(k, _)| k == &id))
-            {
-                self.app.update(map(text));
+        let focused_id = self.focused.get();
+        if let Some(focused_id) = focused_id {
+            let new_text = self.store.get::<Field>(focused_id).map(|f| f.text_of());
+            if let (Some(text), Some((_, map))) = (
+                new_text,
+                self.input_maps.iter().find(|(k, _)| k == focused_id),
+            ) {
+                self.app.update(map(text.to_owned()));
             }
         }
+
         self.redraw();
     }
     fn drag_thumb(&mut self, lx: f32, ly: f32) -> bool {
@@ -293,10 +319,9 @@ impl<A: App> Runner<A> {
                     Axis::X => scroll.x + (lx - spx) * thumb.gain,
                     Axis::Y => scroll.y + (ly - spy) * thumb.gain,
                 };
-                let cur = self.scrolls.get(&thumb.id);
+                let cur = self.store.get_or::<Scroll>(&thumb.id);
                 let cur = cur.get(thumb.axis);
-                self.scrolls.by(
-                    &thumb.id,
+                self.store.get_or::<Scroll>(&thumb.id).by(
                     thumb.axis,
                     desired - cur,
                     thumb.viewport,
@@ -333,7 +358,10 @@ impl<A: App> Runner<A> {
         if let Some((rect, id, pad)) = &self.drag {
             let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
             let text = &mut self.text;
-            self.editors.extend_to(&id, lx, ly, text);
+            let field = self.store.get_mut::<Field>(id);
+            if let Some(field) = field {
+                field.extend_to(lx, ly, text);
+            }
         }
     }
     fn on_wheel_moved(&mut self, delta: MouseScrollDelta) {
@@ -358,14 +386,16 @@ impl<A: App> Runner<A> {
             }
             //chaining scroll
             if rem_h != 0.0 {
-                rem_h = self
-                    .scrolls
-                    .by(&s.id, Axis::X, rem_h, s.inner.0, s.content.0);
+                rem_h =
+                    self.store
+                        .get_or::<Scroll>(&s.id)
+                        .by(Axis::X, rem_h, s.inner.0, s.content.0);
             }
             if rem_v != 0.0 {
-                rem_v = self
-                    .scrolls
-                    .by(&s.id, Axis::Y, rem_v, s.inner.1, s.content.1);
+                rem_v =
+                    self.store
+                        .get_or::<Scroll>(&s.id)
+                        .by(Axis::Y, rem_v, s.inner.1, s.content.1);
             }
             if rem_h.abs() < 0.5 && rem_v.abs() < 0.5 {
                 break;
@@ -438,10 +468,15 @@ impl<A: App> ApplicationHandler for Runner<A> {
                     f12_pressed = true;
                 }
                 if pressed {
-                    if let Some(id) = self.editors.focused_id() {
+                    if let Some(id) = self.focused.get() {
                         if enter_pressed && !event.repeat {
-                            if !self.editors.is_multiline(&id) {
-                                if let Some((_, m)) = self.enter_msgs.iter().find(|(k, _)| k == &id)
+                            if !self
+                                .store
+                                .get::<Field>(&id)
+                                .map(|f| f.is_multiline())
+                                .unwrap_or(false)
+                            {
+                                if let Some((_, m)) = self.enter_msgs.iter().find(|(k, _)| k == id)
                                 {
                                     self.app.update(m.clone());
                                     self.redraw();
@@ -449,7 +484,7 @@ impl<A: App> ApplicationHandler for Runner<A> {
                                 }
                             }
                         } else if esc_pressed && !event.repeat {
-                            if let Some((_, m)) = self.esc_msgs.iter().find(|(k, _)| k == &id) {
+                            if let Some((_, m)) = self.esc_msgs.iter().find(|(k, _)| k == id) {
                                 self.app.update(m.clone());
                                 self.redraw();
                                 return;
@@ -462,8 +497,23 @@ impl<A: App> ApplicationHandler for Runner<A> {
                         return;
                     }
                 }
-                let edited = self.editors.on_key(&event, self.modifiers, &mut self.text);
-                if edited {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+
+                let handled = self
+                    .focused
+                    .focused_field(&mut self.store)
+                    .map(|f| {
+                        f.on_key(
+                            self.modifiers,
+                            &mut self.text,
+                            &event.logical_key,
+                            &event.text,
+                        )
+                    })
+                    .is_some();
+                if handled {
                     self.notify_app_text();
                 }
             }
@@ -474,15 +524,21 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 match ime {
                     Ime::Enabled => {}
                     Ime::Preedit(s, cur) => {
-                        self.editors.on_ime(&s, cur, &mut self.text);
-                        self.redraw();
+                        if let Some(field) = self.focused.focused_field(&mut self.store) {
+                            field.on_ime(&s, cur, &mut self.text);
+                            self.redraw();
+                        }
                     }
                     Ime::Commit(s) => {
-                        self.editors.on_ime_commit(&s, &mut self.text);
-                        self.notify_app_text();
+                        if let Some(field) = self.focused.focused_field(&mut self.store) {
+                            field.on_ime_commit(&s, &mut self.text);
+                            self.notify_app_text();
+                        }
                     }
                     Ime::Disabled => {
-                        self.editors.on_ime_disabled(&mut self.text);
+                        if let Some(field) = self.focused.focused_field(&mut self.store) {
+                            field.on_ime_disabled(&mut self.text);
+                        }
                     }
                 };
             }
@@ -502,19 +558,19 @@ pub fn run<A: App + 'static>(app: A) {
         render: None,
         pointer: None,
         hits: Vec::new(),
-        editors: Editors::new(),
+        focused: Focus::new(),
         input_hits: Vec::new(),
         text: TextEngine::new(),
         input_maps: Vec::new(),
         drag: None,
         modifiers: ModifiersState::empty(),
-        scrolls: Scrolls::new(),
         scroll_hits: Vec::new(),
         scroll_drag: None,
         bar_hits: Vec::new(),
         enter_msgs: Vec::new(),
         esc_msgs: Vec::new(),
         debug: false,
+        store: Store::new(),
     };
     event_loop.run_app(&mut runner).expect("run app");
 }
