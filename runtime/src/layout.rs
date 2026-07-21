@@ -5,7 +5,7 @@
 use taffy::prelude::*;
 use vello::kurbo::{Insets, Rect};
 
-use crate::el::{Content, El};
+use crate::el::{Appearance, Behaviour, El};
 use crate::id::Id;
 use crate::scroll::Scroll;
 use crate::state::Store;
@@ -15,7 +15,8 @@ use crate::text::TextEngine;
 pub(crate) struct Placed<M> {
     pub rect: Rect,
     pub pad: Insets,
-    pub content: Content<M>,
+    pub behaviour: Behaviour<M>,
+    pub appearance: Appearance,
     pub clip: Option<Rect>,
     pub content_size: (f32, f32),
     pub scroll_parent: Option<Id>,
@@ -24,14 +25,15 @@ pub(crate) struct Placed<M> {
 /// El props + its Taffy node id + mapped children, retained between build and emit.
 struct Mapped<M> {
     node: NodeId,
-    content: Content<M>,
+    appearance: Appearance,
+    behaviour: Behaviour<M>,
     children: Vec<Mapped<M>>,
 }
 
 fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngine) -> Mapped<M> {
     let mut style = el.layout;
 
-    if let Some(spec) = &el.content.scroll {
+    if let Some(spec) = &el.behaviour.scroll {
         if spec.x {
             style.overflow.x = taffy::style::Overflow::Hidden;
         }
@@ -52,8 +54,8 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
     //A text leaf defaults to its shaped extent (plus padding- border-box); explicit .w()/.h() win.
     //Padding read as raw lengths: never write percents. Inputs are the exception: designed sized
     //never text sized.
-    if let Some(ts) = &el.content.text {
-        if el.content.input.is_none() {
+    if let Some(ts) = &el.appearance.text {
+        if el.behaviour.input.is_none() {
             let (w, h) = text_engine.measure(&ts.text, ts.family, ts.size);
             let pad_x =
                 style.padding.right.into_raw().value() + style.padding.left.into_raw().value();
@@ -80,7 +82,8 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
     };
     Mapped {
         node,
-        content: el.content,
+        appearance: el.appearance,
+        behaviour: el.behaviour,
         children,
     }
 }
@@ -111,7 +114,7 @@ fn emit<M>(
     let (mut cx, mut cy) = (x, y);
     let mut child_clip = clip;
     let mut parent_scroll = scroll_parent.clone();
-    if let Some(s) = &m.content.scroll {
+    if let Some(s) = &m.behaviour.scroll {
         let scroll = store.get::<Scroll>(&s.id).copied().unwrap_or_default();
         parent_scroll = Some(s.id.clone());
         if s.x {
@@ -129,7 +132,8 @@ fn emit<M>(
     out.push(Placed {
         rect,
         scroll_parent,
-        content: m.content,
+        appearance: m.appearance,
+        behaviour: m.behaviour,
         pad: Insets::new(
             (l.padding.left + l.border.left) as f64,
             (l.padding.top + l.border.top) as f64,

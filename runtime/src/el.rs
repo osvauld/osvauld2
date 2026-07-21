@@ -12,6 +12,7 @@ use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::Scene;
 
+use crate::drag::DragEvent;
 use crate::id::Id;
 /// A text leaf's content + face. The real color is applied at vello draw time.
 pub(crate) struct TextSpec {
@@ -45,6 +46,7 @@ pub(crate) struct Border {
 }
 
 /// Visual decoration with hover variants, resolved against pointer-inside at paint time
+#[derive(Default)]
 pub(crate) struct Look {
     pub fill: Option<Color>,
     pub stroke: Option<Border>,
@@ -54,15 +56,6 @@ pub(crate) struct Look {
 }
 
 impl Look {
-    fn new() -> Self {
-        Self {
-            fill: None,
-            stroke: None,
-            radius: 0.0,
-            hover_fill: None,
-            hover_stroke: None,
-        }
-    }
     pub(crate) fn resolve(&self, over: bool) -> (Option<Color>, Option<Border>) {
         if over {
             (
@@ -82,42 +75,27 @@ pub struct ScrollSpec {
     pub y: bool,
 }
 
-pub(crate) struct Content<M> {
+#[derive(Default)]
+pub(crate) struct Appearance {
     pub look: Look,
     pub text: Option<TextSpec>,
     pub custom: Option<CustomFn>,
+}
+
+pub(crate) struct Behaviour<M> {
     pub on_click: Option<M>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
+    pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
 }
 
-impl<M> Content<M> {
-    fn new() -> Self {
+impl<M> Default for Behaviour<M> {
+    fn default() -> Self {
         Self {
-            look: Look::new(),
-            text: None,
-            custom: None,
             on_click: None,
             input: None,
             scroll: None,
-        }
-    }
-}
-
-/// One node of the view tree. Layout style + paint decoration + optional text/custom content +
-/// optional click message + children. Built via the free fns below and the chained setters.
-pub struct El<M> {
-    pub(crate) layout: Style,
-    pub(crate) content: Content<M>,
-    pub(crate) children: Vec<El<M>>,
-}
-
-impl<M> El<M> {
-    fn new(layout: Style) -> Self {
-        El {
-            layout,
-            content: Content::new(),
-            children: Vec::new(),
+            on_drag: None,
         }
     }
 }
@@ -143,7 +121,7 @@ pub fn row<M>() -> El<M> {
 /// A single-line text leaf (default face = UI sans, 15px, white; override with `.font/.font_size/.color`).
 pub fn text<M>(s: impl Into<String>) -> El<M> {
     let mut e = El::new(Style::default());
-    e.content.text = Some(TextSpec {
+    e.appearance.text = Some(TextSpec {
         text: s.into(),
         family: crate::UI_FAMILY,
         size: 15.0,
@@ -159,7 +137,7 @@ pub fn input<M>(
     multiline: bool,
 ) -> El<M> {
     let mut e = text(value);
-    e.content.input = Some(InputSpec {
+    e.behaviour.input = Some(InputSpec {
         id: id.into(),
         map: Some(Box::new(map)),
         multiline,
@@ -190,11 +168,27 @@ pub fn custom<M>(
     f: impl Fn(&mut Scene, &mut crate::text::TextEngine, vello::kurbo::Rect, Affine) + 'static,
 ) -> El<M> {
     let mut e = El::new(Style::default());
-    e.content.custom = Some(Box::new(f));
+    e.appearance.custom = Some(Box::new(f));
     e
 }
 
+/// One node of the view tree. Layout style + paint decoration + optional text/custom content +
+/// optional click message + children. Built via the free fns below and the chained setters.
+pub struct El<M> {
+    pub(crate) layout: Style,
+    pub(crate) appearance: Appearance,
+    pub(crate) behaviour: Behaviour<M>,
+    pub(crate) children: Vec<El<M>>,
+}
 impl<M> El<M> {
+    fn new(layout: Style) -> Self {
+        El {
+            layout,
+            behaviour: Behaviour::default(),
+            appearance: Appearance::default(),
+            children: Vec::new(),
+        }
+    }
     // ── layout ──────────────────────────────────────────────────────────
     /// Gap between children (both axes; only the main axis matters for a single-direction flex).
     pub fn gap(mut self, g: f32) -> Self {
@@ -302,41 +296,41 @@ impl<M> El<M> {
 
     // ── decoration ──────────────────────────────────────────────────────
     pub fn fill(mut self, c: Color) -> Self {
-        self.content.look.fill = Some(c);
+        self.appearance.look.fill = Some(c);
         self
     }
     pub fn stroke(mut self, w: f64, c: Color) -> Self {
-        self.content.look.stroke = Some(Border { width: w, color: c });
+        self.appearance.look.stroke = Some(Border { width: w, color: c });
         self
     }
     pub fn radius(mut self, r: f64) -> Self {
-        self.content.look.radius = r;
+        self.appearance.look.radius = r;
         self
     }
     pub fn hover_fill(mut self, c: Color) -> Self {
-        self.content.look.hover_fill = Some(c);
+        self.appearance.look.hover_fill = Some(c);
         self
     }
     pub fn hover_stroke(mut self, w: f64, c: Color) -> Self {
-        self.content.look.hover_stroke = Some(Border { width: w, color: c });
+        self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
         self
     }
 
     // ── text styling (no-ops on non-text elements) ──────────────────────
     pub fn font(mut self, family: &'static str) -> Self {
-        if let Some(t) = &mut self.content.text {
+        if let Some(t) = &mut self.appearance.text {
             t.family = family;
         }
         self
     }
     pub fn font_size(mut self, sz: f32) -> Self {
-        if let Some(t) = &mut self.content.text {
+        if let Some(t) = &mut self.appearance.text {
             t.size = sz;
         }
         self
     }
     pub fn color(mut self, c: Color) -> Self {
-        if let Some(t) = &mut self.content.text {
+        if let Some(t) = &mut self.appearance.text {
             t.color = c;
         }
         self
@@ -344,7 +338,12 @@ impl<M> El<M> {
 
     // ── interaction + nesting ───────────────────────────────────────────
     pub fn on_click(mut self, m: M) -> Self {
-        self.content.on_click = Some(m);
+        self.behaviour.on_click = Some(m);
+        self
+    }
+
+    pub fn on_drag(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
+        self.behaviour.on_drag = Some((id.into(), Box::new(map)));
         self
     }
     pub fn child(mut self, c: El<M>) -> Self {
@@ -357,7 +356,7 @@ impl<M> El<M> {
     }
 
     pub fn scroll_y(mut self, id: impl Into<Id>) -> Self {
-        let s = self.content.scroll.get_or_insert(ScrollSpec {
+        let s = self.behaviour.scroll.get_or_insert(ScrollSpec {
             id: id.into(),
             x: false,
             y: false,
@@ -367,7 +366,7 @@ impl<M> El<M> {
     }
 
     pub fn scroll_x(mut self, id: impl Into<Id>) -> Self {
-        let s = self.content.scroll.get_or_insert(ScrollSpec {
+        let s = self.behaviour.scroll.get_or_insert(ScrollSpec {
             id: id.into(),
             y: false,
             x: false,
@@ -376,20 +375,20 @@ impl<M> El<M> {
         self
     }
     pub fn autofocus(mut self) -> Self {
-        if let Some(spec) = &mut self.content.input {
+        if let Some(spec) = &mut self.behaviour.input {
             spec.autofocus = true;
         }
         self
     }
     pub fn on_enter(mut self, m: M) -> Self {
-        if let Some(spec) = &mut self.content.input {
+        if let Some(spec) = &mut self.behaviour.input {
             spec.on_enter = Some(m)
         }
         self
     }
 
     pub fn on_esc(mut self, m: M) -> Self {
-        if let Some(spec) = &mut self.content.input {
+        if let Some(spec) = &mut self.behaviour.input {
             spec.on_esc = Some(m)
         }
         self
@@ -406,17 +405,23 @@ impl<M> El<M> {
     {
         let El {
             layout,
-            content,
+            appearance,
+            behaviour,
             children,
         } = self;
-        let Content {
-            look,
-            text,
-            custom,
+        let Behaviour {
             on_click,
             input,
             scroll,
-        } = content;
+            on_drag,
+        } = behaviour;
+        let r_f = Rc::clone(&f);
+        let new_drag = on_drag.map(|(id, d)| {
+            (
+                id,
+                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DragEvent) -> B>,
+            )
+        });
         let on_click = on_click.map(|m| f(m));
         let input = match input {
             Some(InputSpec {
@@ -442,22 +447,20 @@ impl<M> El<M> {
             None => None,
         };
 
-        let content = Content {
-            look,
-            text,
-            custom,
+        let behaviour = Behaviour {
             on_click,
             input,
             scroll,
+            on_drag: new_drag,
         };
-
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {
             converted_children.push(child.map_rc(Rc::clone(&f)));
         }
         El {
             layout,
-            content,
+            appearance,
+            behaviour,
             children: converted_children,
         }
     }

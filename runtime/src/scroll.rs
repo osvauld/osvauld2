@@ -20,7 +20,6 @@ pub(crate) struct ScrollHit {
     pub id: Id,
     pub content: (f32, f32),
     pub inner: (f32, f32),
-    pub parent: Option<Id>,
 }
 
 pub(crate) fn axis_thumb(
@@ -78,7 +77,7 @@ pub enum Axis {
     Y,
 }
 impl Scroll {
-    pub fn get(&self, axis: Axis) -> f32 {
+    pub fn get(&self, axis: &Axis) -> f32 {
         match axis {
             Axis::X => self.x,
             Axis::Y => self.y,
@@ -92,7 +91,7 @@ impl Scroll {
     }
 
     pub fn keep_in_view(&mut self, view: KeepInView) {
-        let cur = self.get(view.axis);
+        let cur = self.get(&view.axis);
         let mut final_scroll: f32 = cur;
         if view.near < final_scroll {
             final_scroll = view.near
@@ -103,7 +102,7 @@ impl Scroll {
         self.set(view.axis, final_scroll);
     }
     pub fn by(&mut self, axis: Axis, delta: f32, inner: f32, content: f32) -> f32 {
-        let cur = self.get(axis);
+        let cur = self.get(&axis);
         let next = (cur + delta).clamp(0.0, (content - inner).max(0.0));
 
         self.set(axis, next);

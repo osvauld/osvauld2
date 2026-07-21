@@ -17,7 +17,6 @@ use crate::text::{self, TextEngine};
 pub(crate) struct Field {
     editor: PlainEditor<[u8; 4]>,
     multiline: bool,
-    id: Id,
     caret_dirty: bool,
 }
 
@@ -30,7 +29,7 @@ pub(crate) struct KeepInView {
 }
 
 impl Field {
-    pub fn new(size: f32, id: Id, family: &'static str, value: &str, multiline: bool) -> Self {
+    pub fn new(size: f32, family: &'static str, value: &str, multiline: bool) -> Self {
         let mut e = PlainEditor::new(size);
         e.edit_styles()
             .insert(StyleProperty::FontFamily(text::resolve_family(family)));
@@ -41,7 +40,6 @@ impl Field {
         Field {
             editor: e,
             multiline: multiline,
-            id,
             caret_dirty: true,
         }
     }
@@ -274,9 +272,7 @@ pub fn sync(
     pad: Insets,
     store: &mut Store,
 ) {
-    let field = store.get_or_with::<Field>(id, || {
-        Field::new(size, id.clone(), family, value, multiline)
-    });
+    let field = store.get_or_with::<Field>(id, || Field::new(size, family, value, multiline));
     let content_dim = field.sync(width, height, pad, text);
     if let Some(view) = content_dim {
         field.caret_dirty = false;

@@ -1,5 +1,5 @@
 use crate::theme;
-use runtime::{col, row, text, text_input, El};
+use runtime::{col, row, text, text_input, DragEvent, DragPhase, El};
 
 pub enum Event {
     BackRequested,
@@ -13,6 +13,7 @@ pub struct TodoScreen {
     items: Vec<Todo>,
     next_id: u64,
     editing: Option<u64>,
+    dragging: Option<(u64, usize)>,
 }
 #[derive(Clone)]
 pub enum Msg {
@@ -22,6 +23,7 @@ pub enum Msg {
     Done(u64),
     Back,
     ToggleEdit(u64),
+    Reorder(u64, DragEvent),
 }
 
 impl TodoScreen {
@@ -30,6 +32,7 @@ impl TodoScreen {
             items: vec![],
             next_id: 0,
             editing: None,
+            dragging: None,
         }
     }
     pub fn update(&mut self, msg: Msg) -> Option<Event> {
@@ -75,6 +78,31 @@ impl TodoScreen {
                 self.editing = Some(id);
                 None
             }
+            Msg::Reorder(id, event) => match event.phase {
+                DragPhase::Start => {
+                    let home = self.items.iter().position(|t| t.id == id).unwrap_or(0);
+                    self.dragging = Some((id, home));
+                    None
+                }
+                DragPhase::Move => {
+                    if let Some((id, home)) = self.dragging {
+                        let slots = (event.delta.1 / 56.0).round() as i32;
+                        let desired =
+                            (home as i32 + slots).clamp(0, self.items.len() as i32 - 1) as usize;
+                        if let Some(cur) = self.items.iter().position(|t| t.id == id) {
+                            if cur != desired {
+                                let item = self.items.remove(cur);
+                                self.items.insert(desired, item);
+                            }
+                        }
+                    }
+                    None
+                }
+                DragPhase::End => {
+                    self.dragging = None;
+                    None
+                }
+            },
         }
     }
 
@@ -93,6 +121,13 @@ impl TodoScreen {
         for r in &self.items {
             let id = format!("todo:{}", r.id);
             let todo_id = r.id;
+            let grip = col()
+                .size(24.0, 48.0)
+                .center()
+                .on_drag(format!("todorow:{}", r.id), move |e| {
+                    Msg::Reorder(todo_id, e)
+                })
+                .child(text("::").color(theme::fg_4()));
             let editing = self.editing == Some(r.id);
             let t_row = if editing {
                 text_input(&r.text, id, move |s| Msg::Update(s, todo_id))
@@ -140,6 +175,7 @@ impl TodoScreen {
                 .px(14.0)
                 .stroke(1.0, theme::accent())
                 .center()
+                .child(grip)
                 .child(t_row)
                 .child(del)
                 .child(edit)

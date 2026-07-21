@@ -3,6 +3,7 @@
 //! Elm/Iced shape) and calls [`run`]; everything GPU/winit/vello/layout is internal here. The
 //! headless `app_engine` does not depend on this crate.
 
+mod drag;
 mod editor;
 mod el;
 mod id;
@@ -12,7 +13,6 @@ mod render;
 mod scroll;
 mod state;
 mod text;
-
 use crate::editor::{Focus, KeepInView};
 use crate::id::Id;
 use editor::Field;
@@ -24,11 +24,12 @@ use vello::kurbo::{Insets, Point, Rect};
 use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey::*};
 use winit::window::{CursorIcon, Window, WindowId};
 
+pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{col, custom, row, text, text_area, text_input, El};
 pub use render::Render;
 use state::Store;
@@ -59,6 +60,39 @@ pub trait App {
     }
 }
 
+struct DragCapture {
+    id: Id,
+    origin: (f32, f32), // grabbed elements top-left frozen at press
+    start: (f32, f32),  // cursor-in-element-local at press
+}
+#[derive(Clone)]
+enum Capture {
+    App {
+        id: Id,
+        origin: (f32, f32),
+        start: (f32, f32),
+    },
+    Thumb {
+        thumb: Thumb,
+        scroll: Scroll,
+        press_point: (f32, f32),
+    },
+    Text {
+        id: Id,
+        rect: Rect,
+        pad: Insets,
+    },
+}
+impl Capture {
+    fn thumb(&self) -> Option<&Thumb> {
+        if let Capture::Thumb { thumb, .. } = self {
+            Some(thumb)
+        } else {
+            None
+        }
+    }
+}
+
 /// Drives one `App`: holds the GPU `Render`, the live pointer (logical coords), and the last frame's
 /// clickable regions for hit-testing.
 struct Runner<A: App> {
@@ -70,15 +104,15 @@ struct Runner<A: App> {
     focused: Focus,
     input_hits: Vec<(Rect, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
+    drag_hits: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> A::Msg>)>,
     scroll_hits: Vec<ScrollHit>,
     enter_msgs: Vec<(Id, A::Msg)>,
     esc_msgs: Vec<(Id, A::Msg)>,
-    drag: Option<(Rect, Id, Insets)>,
-    scroll_drag: Option<(Thumb, (f32, f32), Scroll)>,
     modifiers: ModifiersState,
     bar_hits: Vec<Thumb>,
     debug: bool,
     store: Store,
+    drag: Option<Capture>,
 }
 
 impl<A: App> Runner<A> {
@@ -95,7 +129,7 @@ impl<A: App> Runner<A> {
         let enter_msgs = &mut self.enter_msgs;
         let esc_msgs = &mut self.esc_msgs;
         let scroll_hits = &mut self.scroll_hits;
-        let scroll_drag = &self.scroll_drag;
+        let drag_hits = &mut self.drag_hits;
         let bar_hits = &mut self.bar_hits;
         let store = &mut self.store;
         let focused = &mut self.focused;
@@ -112,21 +146,25 @@ impl<A: App> Runner<A> {
             enter_msgs.clear();
             input_maps.clear();
             scroll_hits.clear();
+            drag_hits.clear();
             bar_hits.clear();
             for p in placed.iter_mut() {
                 let hit_rect = match p.clip {
                     Some(c) => c.intersect(p.rect),
                     None => p.rect,
                 };
-                if let Some(msg) = p.content.on_click.take() {
+                if let Some(msg) = p.behaviour.on_click.take() {
                     hits.push((hit_rect, msg));
                 }
+                if let Some((id, handler)) = p.behaviour.on_drag.take() {
+                    drag_hits.push((hit_rect, id, handler));
+                }
 
-                if let Some(spec) = &mut p.content.input {
+                if let Some(spec) = &mut p.behaviour.input {
                     if let Some(m) = spec.map.take() {
                         input_maps.push((spec.id.clone(), m));
                     }
-                    if let Some(ts) = &p.content.text {
+                    if let Some(ts) = &p.appearance.text {
                         editor::sync(
                             &spec.id,
                             &ts.text,
@@ -178,14 +216,14 @@ impl<A: App> Runner<A> {
                 let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
                 let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
                 let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
-                    if let Some(input) = &p.content.input {
+                    if let Some(input) = &p.behaviour.input {
                         let (cw, ch) = store
                             .get::<Field>(&Id::from(input.id.clone()))
                             .and_then(|f| f.layout_of())
                             .map(|l| (l.full_width(), l.height()))
                             .unwrap_or((0.0, 0.0));
                         Some((&input.id, (cw, ch), (true, true)))
-                    } else if let Some(scroll) = &p.content.scroll {
+                    } else if let Some(scroll) = &p.behaviour.scroll {
                         Some((&scroll.id, p.content_size, (scroll.x, scroll.y)))
                     } else {
                         None
@@ -197,7 +235,6 @@ impl<A: App> Runner<A> {
                         id: id.clone(),
                         content,
                         inner: (iw, ih),
-                        parent: p.scroll_parent.clone(),
                     });
                     let s = store.get_or::<Scroll>(id);
                     if ay {
@@ -214,7 +251,11 @@ impl<A: App> Runner<A> {
             }
             store.sweep();
             focused.clear_if_gone(store);
-            let dragging = scroll_drag.as_ref().map(|(t, _, _)| (&t.id, t.axis));
+            let dragging = self
+                .drag
+                .as_ref()
+                .and_then(Capture::thumb)
+                .map(|t| (&t.id, t.axis));
             paint::draw(scene, &placed, text, t, pointer, store, &focused);
             paint::scrollbars(scene, bar_hits, t, pointer, dragging);
             if debug {
@@ -246,7 +287,33 @@ impl<A: App> Runner<A> {
                 .get::<Scroll>(&thumb.id)
                 .copied()
                 .unwrap_or_default();
-            self.scroll_drag = Some((thumb.clone(), (px, py), bar));
+            self.drag = Some(Capture::Thumb {
+                thumb: thumb.clone(),
+                press_point: (px, py),
+                scroll: bar,
+            });
+            self.redraw();
+            return;
+        }
+        if let Some((rect, id, handler)) =
+            self.drag_hits.iter().rev().find(|(r, _, _)| r.contains(p))
+        {
+            let origin = (rect.x0 as f32, rect.y0 as f32);
+            let start = (px - origin.0, py - origin.1);
+            let event = DragEvent {
+                phase: DragPhase::Start,
+                pos: start,
+                delta: (0.0, 0.0),
+                mods: self.mods(),
+            };
+
+            self.drag = Some(Capture::App {
+                id: id.clone(),
+                origin,
+                start,
+            });
+
+            self.app.update(handler(event));
             self.redraw();
             return;
         }
@@ -254,16 +321,19 @@ impl<A: App> Runner<A> {
         match hit {
             Some((rect, id, pad)) => {
                 self.focused.set(id.clone());
-                self.drag = Some((*rect, id.clone(), *pad));
                 let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
                 let field = self.store.get_mut::<Field>(id);
                 if let Some(field) = field {
                     field.click_at(lx, ly, &mut self.text);
                 }
+                self.drag = Some(Capture::Text {
+                    id: id.clone(),
+                    rect: *rect,
+                    pad: *pad,
+                });
             }
             None => {
                 self.focused.blur();
-                self.drag = None
             }
         }
         if let Some((_, msg)) = self.hits.iter().rev().find(|(r, _)| r.contains(p)) {
@@ -297,6 +367,15 @@ impl<A: App> Runner<A> {
         (lx, ly)
     }
 
+    fn mods(&self) -> Mods {
+        Mods {
+            shift: self.modifiers.shift_key(),
+            ctrl: self.modifiers.control_key(),
+            alt: self.modifiers.alt_key(),
+            super_: self.modifiers.super_key(),
+        }
+    }
+
     fn notify_app_text(&mut self) {
         let focused_id = self.focused.get();
         if let Some(focused_id) = focused_id {
@@ -311,27 +390,72 @@ impl<A: App> Runner<A> {
 
         self.redraw();
     }
-    fn drag_thumb(&mut self, lx: f32, ly: f32) -> bool {
-        if let Some((thumb, (spx, spy), scroll)) = &self.scroll_drag {
-            if let Some(r) = &self.render {
-                r.set_cursor(CursorIcon::Default);
-                let desired = match thumb.axis {
-                    Axis::X => scroll.x + (lx - spx) * thumb.gain,
-                    Axis::Y => scroll.y + (ly - spy) * thumb.gain,
-                };
-                let cur = self.store.get_or::<Scroll>(&thumb.id);
-                let cur = cur.get(thumb.axis);
-                self.store.get_or::<Scroll>(&thumb.id).by(
-                    thumb.axis,
-                    desired - cur,
-                    thumb.viewport,
-                    thumb.content,
-                );
-                r.request_redraw();
-            }
-            return true;
+    fn drag_thumb(
+        &mut self,
+        lx: f32,
+        ly: f32,
+        thumb: &Thumb,
+        scroll: &Scroll,
+        (spx, spy): &(f32, f32),
+    ) {
+        if let Some(r) = &self.render {
+            r.set_cursor(CursorIcon::Default);
+            let desired = match thumb.axis {
+                Axis::X => scroll.x + (lx - spx) * thumb.gain,
+                Axis::Y => scroll.y + (ly - spy) * thumb.gain,
+            };
+            let cur = self.store.get_or::<Scroll>(&thumb.id);
+            let cur = cur.get(&thumb.axis);
+            self.store.get_or::<Scroll>(&thumb.id).by(
+                thumb.axis,
+                desired - cur,
+                thumb.viewport,
+                thumb.content,
+            );
+            r.request_redraw();
         }
-        false
+    }
+    fn on_drag_move(&mut self, px: f32, py: f32, id: Id, origin: &(f32, f32), start: &(f32, f32)) {
+        let pos = (px - origin.0, py - origin.1);
+        let mods = self.mods();
+        let delta = (pos.0 - start.0, pos.1 - start.1);
+        let event = DragEvent {
+            pos,
+            delta,
+            mods,
+            phase: DragPhase::Move,
+        };
+        if let Some((_, _, handler)) = self.drag_hits.iter().find(|(_, id, _)| *id == id.clone()) {
+            self.app.update(handler(event));
+            self.redraw();
+        }
+    }
+
+    fn on_cursor_release(&mut self) {
+        if let Some(cap) = self.drag.take() {
+            match cap {
+                Capture::App { id, origin, start } => {
+                    if let Some((px, py)) = self.pointer {
+                        let pos = (px - origin.0, py - origin.1);
+                        let delta = (pos.0 - start.0, pos.1 - start.1);
+                        let event = DragEvent {
+                            pos,
+                            delta,
+                            mods: self.mods(),
+                            phase: DragPhase::End,
+                        };
+                        if let Some((_, _, handler)) =
+                            self.drag_hits.iter().find(|(_, hid, _)| *hid == id)
+                        {
+                            self.app.update(handler(event));
+                        }
+                    }
+                }
+                // scrollbar + text selection have no "End" message — take() already cleared them
+                Capture::Thumb { .. } | Capture::Text { .. } => {}
+            }
+        }
+        self.redraw();
     }
 
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -341,10 +465,29 @@ impl<A: App> Runner<A> {
         let ly = (y / scale) as f32;
         self.pointer = Some((lx, ly));
         let p = vello::kurbo::Point::new(lx as f64, ly as f64);
+        let drag = self.drag.clone();
         //if its a scroll drag event return after scroll drag processed.
-        if self.drag_thumb(lx, ly) {
-            return;
+        if let Some(drag) = &drag {
+            match drag {
+                Capture::Thumb {
+                    thumb,
+                    scroll,
+                    press_point,
+                } => self.drag_thumb(lx, ly, thumb, scroll, press_point),
+                Capture::App { id, origin, start } => {
+                    self.on_drag_move(lx, ly, id.clone(), &origin, &start)
+                }
+                Capture::Text { id, rect, pad } => {
+                    let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
+                    let text = &mut self.text;
+                    let field = self.store.get_mut::<Field>(id);
+                    if let Some(field) = field {
+                        field.extend_to(lx, ly, text);
+                    }
+                }
+            };
         }
+
         let over_input = self.input_hits.iter().any(|(r, _, _)| r.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
         if let Some(r) = &self.render {
@@ -354,14 +497,6 @@ impl<A: App> Runner<A> {
                 CursorIcon::Default
             });
             r.request_redraw();
-        }
-        if let Some((rect, id, pad)) = &self.drag {
-            let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
-            let text = &mut self.text;
-            let field = self.store.get_mut::<Field>(id);
-            if let Some(field) = field {
-                field.extend_to(lx, ly, text);
-            }
         }
     }
     fn on_wheel_moved(&mut self, delta: MouseScrollDelta) {
@@ -402,6 +537,66 @@ impl<A: App> Runner<A> {
             }
         }
         self.redraw();
+    }
+
+    fn handle_input(&mut self, event: KeyEvent) {
+        let pressed = event.state == ElementState::Pressed;
+        let (mut enter_pressed, mut esc_pressed, mut f12_pressed) = (false, false, false);
+        if event.logical_key == Key::Named(Enter) {
+            enter_pressed = true;
+        } else if event.logical_key == Key::Named(Escape) {
+            esc_pressed = true;
+        } else if event.logical_key == Key::Named(F12) {
+            f12_pressed = true;
+        }
+        if pressed {
+            if let Some(id) = self.focused.get() {
+                if enter_pressed && !event.repeat {
+                    if !self
+                        .store
+                        .get::<Field>(&id)
+                        .map(|f| f.is_multiline())
+                        .unwrap_or(false)
+                    {
+                        if let Some((_, m)) = self.enter_msgs.iter().find(|(k, _)| k == id) {
+                            self.app.update(m.clone());
+                            self.redraw();
+                            return;
+                        }
+                    }
+                } else if esc_pressed && !event.repeat {
+                    if let Some((_, m)) = self.esc_msgs.iter().find(|(k, _)| k == id) {
+                        self.app.update(m.clone());
+                        self.redraw();
+                        return;
+                    }
+                }
+            }
+            if f12_pressed {
+                self.debug = !self.debug;
+                self.redraw();
+                return;
+            }
+        }
+        if event.state != ElementState::Pressed {
+            return;
+        }
+
+        let handled = self
+            .focused
+            .focused_field(&mut self.store)
+            .map(|f| {
+                f.on_key(
+                    self.modifiers,
+                    &mut self.text,
+                    &event.logical_key,
+                    &event.text,
+                )
+            })
+            .is_some();
+        if handled {
+            self.notify_app_text();
+        }
     }
 }
 
@@ -451,71 +646,12 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.drag = None;
-                self.scroll_drag = None;
-                self.redraw();
+                self.on_cursor_release();
             }
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
             WindowEvent::RedrawRequested => self.frame(),
             WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-                let (mut enter_pressed, mut esc_pressed, mut f12_pressed) = (false, false, false);
-                if event.logical_key == Key::Named(Enter) {
-                    enter_pressed = true;
-                } else if event.logical_key == Key::Named(Escape) {
-                    esc_pressed = true;
-                } else if event.logical_key == Key::Named(F12) {
-                    f12_pressed = true;
-                }
-                if pressed {
-                    if let Some(id) = self.focused.get() {
-                        if enter_pressed && !event.repeat {
-                            if !self
-                                .store
-                                .get::<Field>(&id)
-                                .map(|f| f.is_multiline())
-                                .unwrap_or(false)
-                            {
-                                if let Some((_, m)) = self.enter_msgs.iter().find(|(k, _)| k == id)
-                                {
-                                    self.app.update(m.clone());
-                                    self.redraw();
-                                    return;
-                                }
-                            }
-                        } else if esc_pressed && !event.repeat {
-                            if let Some((_, m)) = self.esc_msgs.iter().find(|(k, _)| k == id) {
-                                self.app.update(m.clone());
-                                self.redraw();
-                                return;
-                            }
-                        }
-                    }
-                    if f12_pressed {
-                        self.debug = !self.debug;
-                        self.redraw();
-                        return;
-                    }
-                }
-                if event.state != ElementState::Pressed {
-                    return;
-                }
-
-                let handled = self
-                    .focused
-                    .focused_field(&mut self.store)
-                    .map(|f| {
-                        f.on_key(
-                            self.modifiers,
-                            &mut self.text,
-                            &event.logical_key,
-                            &event.text,
-                        )
-                    })
-                    .is_some();
-                if handled {
-                    self.notify_app_text();
-                }
+                self.handle_input(event);
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
@@ -562,15 +698,15 @@ pub fn run<A: App + 'static>(app: A) {
         input_hits: Vec::new(),
         text: TextEngine::new(),
         input_maps: Vec::new(),
-        drag: None,
+        drag_hits: Vec::new(),
         modifiers: ModifiersState::empty(),
         scroll_hits: Vec::new(),
-        scroll_drag: None,
         bar_hits: Vec::new(),
         enter_msgs: Vec::new(),
         esc_msgs: Vec::new(),
         debug: false,
         store: Store::new(),
+        drag: None,
     };
     event_loop.run_app(&mut runner).expect("run app");
 }

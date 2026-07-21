@@ -49,19 +49,19 @@ pub(crate) fn draw<M>(
         }
         let over =
             pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
-        let (fill, stroke) = p.content.look.resolve(over);
-        let shape = RoundedRect::from_rect(p.rect, p.content.look.radius);
+        let (fill, stroke) = p.appearance.look.resolve(over);
+        let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius);
         if let Some(c) = fill {
             scene.fill(Fill::NonZero, t, c, None, &shape);
         }
         if let Some(b) = stroke {
             scene.stroke(&Stroke::new(b.width), t, b.color, None, &shape);
         }
-        if let Some(custom) = &p.content.custom {
+        if let Some(custom) = &p.appearance.custom {
             custom(scene, text, p.rect, t);
         }
-        if let Some(ts) = &p.content.text {
-            if let Some(spec) = &p.content.input {
+        if let Some(ts) = &p.appearance.text {
+            if let Some(spec) = &p.behaviour.input {
                 let field_layout = store
                     .get::<Field>(&spec.id)
                     .and_then(|f| f.layout_of().map(|l| (f, l)));
