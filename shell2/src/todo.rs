@@ -194,6 +194,13 @@ impl TodoScreen {
             .center()
             .on_click(Msg::Back)
             .child(text("back"))
+            .overlay(
+                col()
+                    .gap(4.0)
+                    .pad(8.0)
+                    .fill(theme::bd_1())
+                    .child(text("floating!")),
+            )
             .fill(theme::accent_press());
         col()
             .full()

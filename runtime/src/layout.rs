@@ -89,7 +89,7 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
 }
 
 fn emit<M>(
-    m: Mapped<M>,
+    mut m: Mapped<M>,
     tree: &TaffyTree<()>,
     ox: f32,
     oy: f32,
@@ -97,6 +97,7 @@ fn emit<M>(
     clip: Option<Rect>,
     store: &Store,
     scroll_parent: Option<Id>,
+    overlays: &mut Vec<(Rect, Box<El<M>>)>,
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
@@ -110,7 +111,6 @@ fn emit<M>(
     );
 
     let content_size = (l.content_size.width, l.content_size.height);
-
     let (mut cx, mut cy) = (x, y);
     let mut child_clip = clip;
     let mut parent_scroll = scroll_parent.clone();
@@ -128,12 +128,17 @@ fn emit<M>(
             None => rect,
         })
     }
-
+    let overlay = m.behaviour.overlay.take();
+    if let Some(overlay) = overlay {
+        overlays.push((rect, overlay));
+    }
+    let behaviour = m.behaviour;
+    let appearance = m.appearance;
     out.push(Placed {
         rect,
         scroll_parent,
-        appearance: m.appearance,
-        behaviour: m.behaviour,
+        appearance,
+        behaviour,
         pad: Insets::new(
             (l.padding.left + l.border.left) as f64,
             (l.padding.top + l.border.top) as f64,
@@ -153,6 +158,7 @@ fn emit<M>(
             child_clip,
             store,
             parent_scroll.clone(),
+            overlays,
         );
     }
 }
@@ -176,6 +182,43 @@ pub(crate) fn solve<M>(
     )
     .expect("compute_layout");
     let mut out = Vec::new();
-    emit(mapped, &tree, 0.0, 0.0, &mut out, None, store, None);
+    let mut overlays = Vec::new();
+    emit(
+        mapped,
+        &tree,
+        0.0,
+        0.0,
+        &mut out,
+        None,
+        store,
+        None,
+        &mut overlays,
+    );
+
+    let mut new_overlays = Vec::new();
+    for overlay in overlays {
+        let mut tree = TaffyTree::new();
+        let mapped = build(*overlay.1, &mut tree, text);
+        tree.compute_layout(
+            mapped.node,
+            Size {
+                width: AvailableSpace::Definite(viewport.0),
+                height: AvailableSpace::Definite(viewport.1),
+            },
+        )
+        .expect("compute_layout");
+
+        emit(
+            mapped,
+            &tree,
+            overlay.0.x0 as f32,
+            overlay.0.y1 as f32,
+            &mut out,
+            None,
+            store,
+            None,
+            &mut new_overlays,
+        );
+    }
     out
 }

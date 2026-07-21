@@ -87,6 +87,7 @@ pub(crate) struct Behaviour<M> {
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
+    pub overlay: Option<Box<El<M>>>,
 }
 
 impl<M> Default for Behaviour<M> {
@@ -96,6 +97,7 @@ impl<M> Default for Behaviour<M> {
             input: None,
             scroll: None,
             on_drag: None,
+            overlay: None,
         }
     }
 }
@@ -393,6 +395,11 @@ impl<M> El<M> {
         }
         self
     }
+
+    pub fn overlay(mut self, panel: El<M>) -> Self {
+        self.behaviour.overlay = Some(Box::new(panel));
+        self
+    }
     pub fn map<B: 'static>(self, f: impl Fn(M) -> B + 'static) -> El<B>
     where
         M: 'static,
@@ -414,6 +421,7 @@ impl<M> El<M> {
             input,
             scroll,
             on_drag,
+            overlay,
         } = behaviour;
         let r_f = Rc::clone(&f);
         let new_drag = on_drag.map(|(id, d)| {
@@ -446,12 +454,14 @@ impl<M> El<M> {
             }
             None => None,
         };
+        let new_overlay = overlay.map(|o| Box::new((*o).map_rc(Rc::clone(&f))));
 
         let behaviour = Behaviour {
             on_click,
             input,
             scroll,
             on_drag: new_drag,
+            overlay: new_overlay,
         };
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {

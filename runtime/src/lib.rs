@@ -60,11 +60,6 @@ pub trait App {
     }
 }
 
-struct DragCapture {
-    id: Id,
-    origin: (f32, f32), // grabbed elements top-left frozen at press
-    start: (f32, f32),  // cursor-in-element-local at press
-}
 #[derive(Clone)]
 enum Capture {
     App {
@@ -90,6 +85,9 @@ impl Capture {
         } else {
             None
         }
+    }
+    fn is_grab(&self) -> bool {
+        matches!(self, Capture::App { .. } | Capture::Thumb { .. })
     }
 }
 
@@ -399,7 +397,6 @@ impl<A: App> Runner<A> {
         (spx, spy): &(f32, f32),
     ) {
         if let Some(r) = &self.render {
-            r.set_cursor(CursorIcon::Default);
             let desired = match thumb.axis {
                 Axis::X => scroll.x + (lx - spx) * thumb.gain,
                 Axis::Y => scroll.y + (ly - spy) * thumb.gain,
@@ -415,7 +412,14 @@ impl<A: App> Runner<A> {
             r.request_redraw();
         }
     }
-    fn on_drag_move(&mut self, px: f32, py: f32, id: Id, origin: &(f32, f32), start: &(f32, f32)) {
+    fn on_drag_move(
+        &mut self,
+        px: f32,
+        py: f32,
+        handle_id: Id,
+        origin: &(f32, f32),
+        start: &(f32, f32),
+    ) {
         let pos = (px - origin.0, py - origin.1);
         let mods = self.mods();
         let delta = (pos.0 - start.0, pos.1 - start.1);
@@ -425,7 +429,11 @@ impl<A: App> Runner<A> {
             mods,
             phase: DragPhase::Move,
         };
-        if let Some((_, _, handler)) = self.drag_hits.iter().find(|(_, id, _)| *id == id.clone()) {
+        if let Some((_, _, handler)) = self
+            .drag_hits
+            .iter()
+            .find(|(_, id, _)| *id == handle_id.clone())
+        {
             self.app.update(handler(event));
             self.redraw();
         }
@@ -491,7 +499,11 @@ impl<A: App> Runner<A> {
         let over_input = self.input_hits.iter().any(|(r, _, _)| r.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
         if let Some(r) = &self.render {
-            r.set_cursor(if over_input {
+            r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
+                CursorIcon::Grabbing
+            } else if self.drag_hits.iter().any(|(r, _, _)| r.contains(p)) {
+                CursorIcon::Grab
+            } else if over_input {
                 CursorIcon::Text
             } else {
                 CursorIcon::Default
