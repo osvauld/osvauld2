@@ -18,6 +18,11 @@ and so are presence/permits/iroh sync.
 - **Where the code is today (verified):** ids (`id.rs`), keyed state store
   (`state.rs`), scroll containers (`scroll.rs` + wheel), drag v1 (`drag.rs`, ~20 LOC),
   Field/Focus (`editor.rs`), single-style text (`text.rs`). Roughly a third into M0.
+- **Progress (2026-07-21, W1):** §2.2 drag phases + capture unification and §2.3
+  scroll/clip **done**; §2.4 overlay **core done** (anchored panel floats, paint-last +
+  hit-first, proven by smoke test). *Not "ahead"* — the start snapshot under-counted
+  in-flight drag, and the animation system (see W1) is new scope the pre-done drag/scroll
+  pays for. On-plan. This week's detailed breakdown lives in `w1.md`.
 
 ---
 
@@ -27,39 +32,44 @@ Remaining seams from §2. Exit test: shell2 login rebuilt with zero `custom()` h
 (except identicon/wordmark) + a scrollable, overlay-using demo screen (dropdown + modal
 + image + rich text) driven by a headless snapshot test.
 
-### W1 — Event backbone + scroll correctness (§2.2, §2.3)
-- Land drag **phases** (Start/Move/End, element-local coords + mods, pointer capture
-  press→release) as `on_drag(fn(DragEvent) -> M)`. Column-resize as the smoke consumer.
-- `on_key` for focused element/island (app-level fallback stays in `App`);
-  `on_hover_enter/exit` as messages (hover paint already exists).
-- Fix scroll **hit-testing to respect clip** — a scrolled-out button must not catch
-  clicks (the app_engine sharp edge). Draggable scrollbar thumb swallows the click.
-- **Done when:** demo with resizable column + nested scroll + hover states; clicks
-  correct under clip; drag captured across the whole gesture.
+> **Recalibrated 2026-07-21.** W1's original scope (drag phases §2.2 + scroll-clip §2.3)
+> is **done**, so the week list shifts up: this week (W1) now finishes overlay and stands
+> up the animation system; rich text and the rest move earlier. The pre-done drag/scroll
+> absorbs the animation scope, so M0 still closes W4.
 
-### W2 — Overlay layer (§2.4)
-- `.overlay(anchor)` subtrees laid out against the anchor's computed rect (flip/clamp at
-  window edges), painted last, hit-tested first, click-away dismiss contract.
-- Prove it with a dropdown + a modal on the one mechanism.
-- **Done when:** dropdown positions/flips/dismisses; modal traps click-away; both
-  assertable from a rect/tree dump.
+### W1 — Overlay finish + animation system (§2.4, §2.7 timer) — *current, detail in `w1.md`*
+- **Done already (was W1):** drag phases + capture unification (§2.2), scroll hit-clip +
+  draggable thumb (§2.3). **Done already (was W2):** overlay core — anchored panel floats,
+  paint-last / hit-first, smoke-tested.
+- **Overlay finish:** catcher rect + click-away **dismiss message** (gates the M2
+  combobox — must land), flip/clamp at window edges, `Point` anchor (cut line).
+- **Animation system** (promoted from §2.7's caret-blink footnote to a real slice):
+  `EventLoopProxy` wakeup + timer wheel; **retained** transition progress in the `Store`
+  keyed by id (hover flips stateless→stateful); paint interpolates `Look` by progress;
+  button hover then press as first consumers. Replaces all-or-nothing `animating()`.
+- **Done when:** dropdown flips + dismisses; modal traps click-away; a button fades on
+  hover (proves the timer wheel); all assertable from a rect/tree dump.
 
-### W3 — Rich text leaf (§2.5)
+### W2 — Rich text leaf (§2.5)
 - `rich(runs)` over parley `RangedBuilder`: family/size/weight/style/color/underline/
   strike/bg/mono per run. Real `FontWeight` bold (no fake-bold). Serves table cells,
   labels, code spans, doc reader later.
 - **Done when:** a multi-style line renders correctly; layout runs snapshot green.
 
-### W4 — Focus/clipboard/shortcuts + IME + wakeup/timers + M0 close-out (§2.6–2.11)
+### W3 — Focus/clipboard/shortcuts + IME (§2.6, §2.8)
 - Tab/Shift-Tab traversal + focus ring; `arboard` clipboard into the editor driver
   (Cmd/Ctrl C/X/V); one modifier-aware shortcut router; `set_ime_cursor_area` at caret.
-- `EventLoopProxy<UserEvent>` wakeup + timer wheel (caret blink), replacing
-  all-or-nothing `animating()`. **Stub-grade** this week: dirty-gate `SceneKey` scaffold
+- **Done when:** tab-order traversal + copy/paste + shortcuts work; IME candidates land
+  at the caret.
+
+### W4 — M0 close-out: wakeup/timers remainder + stubs + exit test (§2.7, §2.9–2.11)
+- Finish §2.7 (timer wheel already stood up in W1 for animations — wire remaining
+  external-wakeup consumers). **Stub-grade** this week: dirty-gate `SceneKey` scaffold
   (§2.10), a11y role/label seam behind a flag (§2.11), minimal `img(src)` (§2.9).
 - **M0 exit test:** rebuild shell2 login clean + build the demo screen; headless
   snapshot test passes.
-- **Overloaded week — see cut lines.** Images/a11y/dirty-gate are seams, not features;
-  keep them stubs if the week runs hot.
+- **De-risked** vs. the original W4: pulling the timer wheel into W1 took the biggest
+  item off this week. Images/a11y/dirty-gate stay stubs if it still runs hot.
 
 ---
 

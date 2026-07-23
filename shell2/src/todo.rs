@@ -1,5 +1,8 @@
 use crate::theme;
-use runtime::{col, row, text, text_input, DragEvent, DragPhase, El};
+use runtime::{
+    col, row, text, text_input, Anchor, DragEvent, DragPhase, El, Placement, PlacementAlign,
+    PlacementSide,
+};
 
 pub enum Event {
     BackRequested,
@@ -14,6 +17,8 @@ pub struct TodoScreen {
     next_id: u64,
     editing: Option<u64>,
     dragging: Option<(u64, usize)>,
+    open_menu: bool,
+    menu_at: Option<(f32, f32)>,
 }
 #[derive(Clone)]
 pub enum Msg {
@@ -24,6 +29,9 @@ pub enum Msg {
     Back,
     ToggleEdit(u64),
     Reorder(u64, DragEvent),
+    ToggleOverlay,
+    MenuAt((f32, f32)),
+    CloseMenu,
 }
 
 impl TodoScreen {
@@ -33,6 +41,8 @@ impl TodoScreen {
             next_id: 0,
             editing: None,
             dragging: None,
+            open_menu: false,
+            menu_at: None,
         }
     }
     pub fn update(&mut self, msg: Msg) -> Option<Event> {
@@ -103,6 +113,18 @@ impl TodoScreen {
                     None
                 }
             },
+            Msg::ToggleOverlay => {
+                self.open_menu = !self.open_menu;
+                None
+            }
+            Msg::MenuAt((x, y)) => {
+                self.menu_at = Some((x, y));
+                None
+            }
+            Msg::CloseMenu => {
+                self.menu_at = None;
+                None
+            }
         }
     }
 
@@ -188,27 +210,76 @@ impl TodoScreen {
             .h(400.0)
             .gap(8.0)
             .children(todos);
-        let back = col()
-            .w(40.0)
-            .h(20.0)
+
+        let overlay = col()
+            .w(80.0)
+            .h(80.0)
+            .center()
+            .on_click(Msg::ToggleOverlay)
+            .child(text("overlay"))
+            .fill(theme::accent_press());
+        let mut back = col()
+            .w(80.0)
+            .h(200.0)
             .center()
             .on_click(Msg::Back)
             .child(text("back"))
-            .overlay(
-                col()
-                    .gap(4.0)
-                    .pad(8.0)
-                    .fill(theme::bd_1())
-                    .child(text("floating!")),
-            )
             .fill(theme::accent_press());
-        col()
+
+        let menu = col()
+            .gap(4.0)
+            .pad(8.0)
+            .w(100.0)
+            .h(200.0)
+            .fill(theme::bd_1())
+            .child(text("floating!"))
+            .child(text("second"))
+            .child(text("floating2!"))
+            .child(text("second2"));
+
+        let menu2 = col()
+            .gap(4.0)
+            .pad(8.0)
+            .w(100.0)
+            .h(200.0)
+            .fill(theme::bd_1())
+            .child(text("floating!"))
+            .child(text("second"))
+            .child(text("floating2!"))
+            .child(text("second2"));
+        if self.open_menu {
+            back = back.overlay(
+                menu,
+                Some(Msg::ToggleOverlay),
+                Placement {
+                    side: PlacementSide::Left,
+                    align: PlacementAlign::Start,
+                },
+                Anchor::Element,
+            );
+        }
+        let mut root = col()
             .full()
             .center()
             .gap(8.0)
+            .on_right_click(|p| Msg::MenuAt(p))
             .child(panel)
             .child(add_todo)
-            .child(back)
+            .child(overlay)
+            .child(back);
+
+        if let Some((x, y)) = self.menu_at {
+            root = root.overlay(
+                menu2,
+                Some(Msg::CloseMenu),
+                Placement {
+                    side: PlacementSide::Top,
+                    align: PlacementAlign::Start,
+                },
+                Anchor::Point(x, y),
+            );
+        }
+        root
     }
 }
 pub fn checkbox<M>(checked: bool, msg: M) -> El<M> {

@@ -81,13 +81,112 @@ pub(crate) struct Appearance {
     pub text: Option<TextSpec>,
     pub custom: Option<CustomFn>,
 }
+pub struct Overlay<M> {
+    pub panel: Box<El<M>>,
+    pub dismiss: Option<M>,
+    pub placement: Placement,
+    pub anchor: Anchor,
+}
+pub enum Anchor {
+    Element,
+    Point(f32, f32),
+}
+
+pub struct Placement {
+    pub side: PlacementSide,
+    pub align: PlacementAlign,
+}
+impl Placement {
+    pub fn resolve(
+        &self,
+        anchor: vello::kurbo::Rect,
+        panel: (f32, f32),
+        viewport: (f32, f32),
+    ) -> (f32, f32) {
+        let (mut x, mut y) = (anchor.x0 as f32, anchor.y1 as f32);
+        match self.side {
+            PlacementSide::Bottom => y = anchor.y1 as f32,
+            PlacementSide::Top => y = anchor.y0 as f32 - panel.1,
+            PlacementSide::Left => x = anchor.x0 as f32 - panel.0,
+            PlacementSide::Right => x = anchor.x1 as f32,
+        }
+        let vertical = matches!(self.side, PlacementSide::Top | PlacementSide::Bottom);
+        match self.align {
+            PlacementAlign::Start => {
+                if vertical {
+                    x = anchor.x0 as f32
+                } else {
+                    y = anchor.y0 as f32
+                }
+            }
+            PlacementAlign::Center => {
+                if vertical {
+                    x = (anchor.x0 + anchor.x1) as f32 / 2.0 - panel.0 / 2.0
+                } else {
+                    y = (anchor.y0 + anchor.y1) as f32 / 2.0 - panel.1 / 2.0
+                }
+            }
+            PlacementAlign::End => {
+                if vertical {
+                    x = anchor.x1 as f32 - panel.0
+                } else {
+                    y = anchor.y1 as f32 - panel.1
+                }
+            }
+        }
+        if vertical {
+            match self.side {
+                PlacementSide::Top => {
+                    if y < 0.0 {
+                        y = anchor.y1 as f32
+                    }
+                }
+                PlacementSide::Bottom => {
+                    if y + panel.1 > viewport.1 {
+                        y = anchor.y0 as f32 - panel.1
+                    }
+                }
+                _ => {}
+            }
+            x = x.clamp(0.0, viewport.0 - panel.0);
+        } else {
+            match self.side {
+                PlacementSide::Left => {
+                    if x < 0.0 {
+                        x = anchor.x1 as f32
+                    }
+                }
+                PlacementSide::Right => {
+                    if x + panel.0 > viewport.0 {
+                        x = anchor.x0 as f32 - panel.0
+                    }
+                }
+                _ => {}
+            }
+            y = y.clamp(0.0, viewport.1 - panel.1)
+        }
+        (x, y)
+    }
+}
+pub enum PlacementSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+pub enum PlacementAlign {
+    Start,
+    Center,
+    End,
+}
 
 pub(crate) struct Behaviour<M> {
     pub on_click: Option<M>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
-    pub overlay: Option<Box<El<M>>>,
+    pub overlay: Option<Overlay<M>>,
+    pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
 }
 
 impl<M> Default for Behaviour<M> {
@@ -98,6 +197,7 @@ impl<M> Default for Behaviour<M> {
             scroll: None,
             on_drag: None,
             overlay: None,
+            on_right_click: None,
         }
     }
 }
@@ -348,6 +448,11 @@ impl<M> El<M> {
         self.behaviour.on_drag = Some((id.into(), Box::new(map)));
         self
     }
+
+    pub fn on_right_click(mut self, ctx: impl Fn((f32, f32)) -> M + 'static) -> Self {
+        self.behaviour.on_right_click = Some(Box::new(ctx));
+        self
+    }
     pub fn child(mut self, c: El<M>) -> Self {
         self.children.push(c);
         self
@@ -396,8 +501,19 @@ impl<M> El<M> {
         self
     }
 
-    pub fn overlay(mut self, panel: El<M>) -> Self {
-        self.behaviour.overlay = Some(Box::new(panel));
+    pub fn overlay(
+        mut self,
+        panel: El<M>,
+        m: Option<M>,
+        placement: Placement,
+        anchor: Anchor,
+    ) -> Self {
+        self.behaviour.overlay = Some(Overlay {
+            panel: Box::new(panel),
+            dismiss: m,
+            placement,
+            anchor,
+        });
         self
     }
     pub fn map<B: 'static>(self, f: impl Fn(M) -> B + 'static) -> El<B>
@@ -422,6 +538,7 @@ impl<M> El<M> {
             scroll,
             on_drag,
             overlay,
+            on_right_click,
         } = behaviour;
         let r_f = Rc::clone(&f);
         let new_drag = on_drag.map(|(id, d)| {
@@ -431,6 +548,10 @@ impl<M> El<M> {
             )
         });
         let on_click = on_click.map(|m| f(m));
+
+        let rc = Rc::clone(&f);
+        let on_right_click =
+            on_right_click.map(|m| Box::new(move |s| rc(m(s))) as Box<dyn Fn((f32, f32)) -> B>);
         let input = match input {
             Some(InputSpec {
                 id,
@@ -454,7 +575,12 @@ impl<M> El<M> {
             }
             None => None,
         };
-        let new_overlay = overlay.map(|o| Box::new((*o).map_rc(Rc::clone(&f))));
+        let new_overlay = overlay.map(|o| Overlay {
+            panel: Box::new((*o.panel).map_rc(Rc::clone(&f))),
+            dismiss: o.dismiss.map(|d| f(d)),
+            placement: o.placement,
+            anchor: o.anchor,
+        });
 
         let behaviour = Behaviour {
             on_click,
@@ -462,6 +588,7 @@ impl<M> El<M> {
             scroll,
             on_drag: new_drag,
             overlay: new_overlay,
+            on_right_click,
         };
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {

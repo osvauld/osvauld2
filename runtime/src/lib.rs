@@ -30,7 +30,10 @@ use winit::keyboard::{Key, ModifiersState, NamedKey::*};
 use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
-pub use el::{col, custom, row, text, text_area, text_input, El};
+pub use el::{
+    col, custom, row, text, text_area, text_input, Anchor, El, Placement, PlacementAlign,
+    PlacementSide,
+};
 pub use render::Render;
 use state::Store;
 pub use text::{TextEngine, MONO_FAMILY, PIXEL_FAMILY, UI_FAMILY};
@@ -102,6 +105,7 @@ struct Runner<A: App> {
     focused: Focus,
     input_hits: Vec<(Rect, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
+    context_hits: Vec<(Rect, Box<dyn Fn((f32, f32)) -> A::Msg>)>,
     drag_hits: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> A::Msg>)>,
     scroll_hits: Vec<ScrollHit>,
     enter_msgs: Vec<(Id, A::Msg)>,
@@ -129,6 +133,7 @@ impl<A: App> Runner<A> {
         let scroll_hits = &mut self.scroll_hits;
         let drag_hits = &mut self.drag_hits;
         let bar_hits = &mut self.bar_hits;
+        let context_hits = &mut self.context_hits;
         let store = &mut self.store;
         let focused = &mut self.focused;
         let text = &mut self.text;
@@ -146,6 +151,7 @@ impl<A: App> Runner<A> {
             scroll_hits.clear();
             drag_hits.clear();
             bar_hits.clear();
+            context_hits.clear();
             for p in placed.iter_mut() {
                 let hit_rect = match p.clip {
                     Some(c) => c.intersect(p.rect),
@@ -156,6 +162,9 @@ impl<A: App> Runner<A> {
                 }
                 if let Some((id, handler)) = p.behaviour.on_drag.take() {
                     drag_hits.push((hit_rect, id, handler));
+                }
+                if let Some(h) = p.behaviour.on_right_click.take() {
+                    context_hits.push((hit_rect, h));
                 }
 
                 if let Some(spec) = &mut p.behaviour.input {
@@ -340,6 +349,16 @@ impl<A: App> Runner<A> {
         }
 
         self.redraw();
+    }
+
+    fn right_click(&mut self) {
+        let Some((px, py)) = self.pointer else { return };
+        let p = vello::kurbo::Point::new(px as f64, py as f64);
+        if let Some((_, handler)) = self.context_hits.iter().rev().find(|(r, _)| r.contains(p)) {
+            let msg = handler((px, py));
+            self.app.update(msg);
+            self.redraw();
+        }
     }
 
     fn local_point(&self, id: &str, rect: Rect, pad: Insets, px: f32, py: f32) -> (f32, f32) {
@@ -654,6 +673,11 @@ impl<A: App> ApplicationHandler for Runner<A> {
                 ..
             } => self.click(),
             WindowEvent::MouseInput {
+                button: MouseButton::Right,
+                state: ElementState::Pressed,
+                ..
+            } => self.right_click(),
+            WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
@@ -714,6 +738,7 @@ pub fn run<A: App + 'static>(app: A) {
         modifiers: ModifiersState::empty(),
         scroll_hits: Vec::new(),
         bar_hits: Vec::new(),
+        context_hits: Vec::new(),
         enter_msgs: Vec::new(),
         esc_msgs: Vec::new(),
         debug: false,

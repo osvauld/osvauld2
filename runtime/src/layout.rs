@@ -5,7 +5,8 @@
 use taffy::prelude::*;
 use vello::kurbo::{Insets, Rect};
 
-use crate::el::{Appearance, Behaviour, El};
+use crate::col;
+use crate::el::{Anchor, Appearance, Behaviour, El, Overlay};
 use crate::id::Id;
 use crate::scroll::Scroll;
 use crate::state::Store;
@@ -97,7 +98,7 @@ fn emit<M>(
     clip: Option<Rect>,
     store: &Store,
     scroll_parent: Option<Id>,
-    overlays: &mut Vec<(Rect, Box<El<M>>)>,
+    overlays: &mut Vec<(Rect, Overlay<M>)>,
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
@@ -130,6 +131,10 @@ fn emit<M>(
     }
     let overlay = m.behaviour.overlay.take();
     if let Some(overlay) = overlay {
+        let rect = match overlay.anchor {
+            Anchor::Element => rect,
+            Anchor::Point(x, y) => Rect::new(x as f64, y as f64, x as f64, y as f64),
+        };
         overlays.push((rect, overlay));
     }
     let behaviour = m.behaviour;
@@ -196,9 +201,9 @@ pub(crate) fn solve<M>(
     );
 
     let mut new_overlays = Vec::new();
-    for overlay in overlays {
+    for (rect, overlay) in overlays {
         let mut tree = TaffyTree::new();
-        let mapped = build(*overlay.1, &mut tree, text);
+        let mapped = build(*overlay.panel, &mut tree, text);
         tree.compute_layout(
             mapped.node,
             Size {
@@ -207,12 +212,43 @@ pub(crate) fn solve<M>(
             },
         )
         .expect("compute_layout");
+        let pl = tree.layout(mapped.node).expect("layout");
+
+        let (ox, oy) = overlay
+            .placement
+            .resolve(rect, (pl.size.width, pl.size.height), viewport);
+        if let Some(msg) = overlay.dismiss {
+            let mut capture_tree = TaffyTree::new();
+
+            let dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
+            let mapped = build(dismiss_panel, &mut capture_tree, text);
+            let _ = capture_tree.compute_layout(
+                mapped.node,
+                Size {
+                    width: AvailableSpace::Definite(viewport.0),
+                    height: AvailableSpace::Definite(viewport.1),
+                },
+            );
+
+            let mut overlays = Vec::new();
+            emit(
+                mapped,
+                &capture_tree,
+                0.0,
+                0.0,
+                &mut out,
+                None,
+                store,
+                None,
+                &mut overlays,
+            );
+        }
 
         emit(
             mapped,
             &tree,
-            overlay.0.x0 as f32,
-            overlay.0.y1 as f32,
+            ox,
+            oy,
             &mut out,
             None,
             store,
