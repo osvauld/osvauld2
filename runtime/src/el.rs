@@ -12,6 +12,7 @@ use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::Scene;
 
+use crate::anim::{Driver, Easing, Transition};
 use crate::drag::DragEvent;
 use crate::id::Id;
 /// A text leaf's content + face. The real color is applied at vello draw time.
@@ -65,6 +66,45 @@ impl Look {
         } else {
             (self.fill, self.stroke)
         }
+    }
+    pub(crate) fn resolve_t(&self, t: f32) -> (Option<Color>, Option<Border>) {
+        let (fill_a, stroke_a) = self.resolve(false);
+        let (fill_b, stroke_b) = self.resolve(true);
+        (
+            lerp_opt_color(fill_a, fill_b, t),
+            lerp_opt_border(stroke_a, stroke_b, t),
+        )
+    }
+}
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let [ar, ag, ab, aa] = a.components;
+    let [br, bg, bb, ba] = b.components;
+    let l = |x: f32, y: f32| x + (y - x) * t;
+    Color::new([l(ar, br), l(ag, bg), l(ab, bb), l(aa, ba)])
+}
+fn lerp_opt_color(a: Option<Color>, b: Option<Color>, t: f32) -> Option<Color> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(lerp_color(a, b, t)),
+        (None, Some(b)) => Some(b.multiply_alpha(t)),
+        (Some(a), None) => Some(a.multiply_alpha(1.0 - t)),
+        (None, None) => None,
+    }
+}
+fn lerp_opt_border(a: Option<Border>, b: Option<Border>, t: f32) -> Option<Border> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(Border {
+            width: a.width + (b.width - a.width) * t as f64, // f64 — cast t
+            color: lerp_color(a.color, b.color, t),
+        }),
+        (None, Some(b)) => Some(Border {
+            width: b.width,
+            color: b.color.multiply_alpha(t),
+        }),
+        (Some(a), None) => Some(Border {
+            width: a.width,
+            color: a.color.multiply_alpha(1.0 - t),
+        }),
+        (None, None) => None,
     }
 }
 
@@ -180,6 +220,14 @@ pub enum PlacementAlign {
     End,
 }
 
+pub(crate) struct TransitionSpec<M> {
+    pub id: Id,
+    pub driver: Driver,
+    pub duration: f32,
+    pub easing: Easing,
+    pub on_done: Option<M>,
+}
+
 pub(crate) struct Behaviour<M> {
     pub on_click: Option<M>,
     pub input: Option<InputSpec<M>>,
@@ -187,6 +235,8 @@ pub(crate) struct Behaviour<M> {
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
+    pub transition: Option<TransitionSpec<M>>,
+    pub offset: (f32, f32), // for animation
 }
 
 impl<M> Default for Behaviour<M> {
@@ -198,6 +248,8 @@ impl<M> Default for Behaviour<M> {
             on_drag: None,
             overlay: None,
             on_right_click: None,
+            transition: None,
+            offset: (0.0, 0.0),
         }
     }
 }
@@ -417,6 +469,31 @@ impl<M> El<M> {
         self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
         self
     }
+    pub fn transition(mut self, id: impl Into<Id>, ms: f32) -> Self {
+        self.behaviour.transition = Some(TransitionSpec {
+            id: id.into(),
+            driver: Driver::Hover,
+            duration: ms / 1000.0,
+            easing: Easing::EaseOut,
+            on_done: None,
+        });
+        self
+    }
+    pub fn transtion_to(mut self, id: impl Into<Id>, ms: f32, target: f32) -> Self {
+        self.behaviour.transition = Some(TransitionSpec {
+            id: id.into(),
+            driver: Driver::Value(target),
+            duration: ms / 1000.0,
+            easing: Easing::EaseOut,
+            on_done: None,
+        });
+        self
+    }
+
+    pub fn offset(mut self, offset: (f32, f32)) -> Self {
+        self.behaviour.offset = offset;
+        self
+    }
 
     // ── text styling (no-ops on non-text elements) ──────────────────────
     pub fn font(mut self, family: &'static str) -> Self {
@@ -539,6 +616,8 @@ impl<M> El<M> {
             on_drag,
             overlay,
             on_right_click,
+            transition,
+            offset,
         } = behaviour;
         let r_f = Rc::clone(&f);
         let new_drag = on_drag.map(|(id, d)| {
@@ -582,6 +661,14 @@ impl<M> El<M> {
             anchor: o.anchor,
         });
 
+        let new_transition = transition.map(|ts| TransitionSpec {
+            id: ts.id,
+            duration: ts.duration,
+            driver: ts.driver,
+            easing: ts.easing,
+            on_done: ts.on_done.map(|m| f(m)),
+        });
+
         let behaviour = Behaviour {
             on_click,
             input,
@@ -589,6 +676,8 @@ impl<M> El<M> {
             on_drag: new_drag,
             overlay: new_overlay,
             on_right_click,
+            transition: new_transition,
+            offset,
         };
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {

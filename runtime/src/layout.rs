@@ -102,8 +102,9 @@ fn emit<M>(
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
-    let x = ox + l.location.x;
-    let y = oy + l.location.y;
+    let (dx, dy) = m.behaviour.offset;
+    let x = ox + l.location.x + dx;
+    let y = oy + l.location.y + dy;
     let rect = Rect::new(
         x as f64,
         y as f64,

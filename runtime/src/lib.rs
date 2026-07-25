@@ -3,6 +3,7 @@
 //! Elm/Iced shape) and calls [`run`]; everything GPU/winit/vello/layout is internal here. The
 //! headless `app_engine` does not depend on this crate.
 
+mod anim;
 mod drag;
 mod editor;
 mod el;
@@ -13,6 +14,7 @@ mod render;
 mod scroll;
 mod state;
 mod text;
+use crate::anim::{Driver, Transition};
 use crate::editor::{Focus, KeepInView};
 use crate::id::Id;
 use editor::Field;
@@ -20,8 +22,10 @@ use scroll::*;
 use std::collections::HashSet;
 use std::ops::Fn;
 use std::sync::Arc;
+use std::time::Instant;
 use vello::kurbo::{Insets, Point, Rect};
 use vello::peniko::Color;
+use vello::Scene;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -55,11 +59,6 @@ pub trait App {
     /// Canvas clear color — the page background. Default opaque black.
     fn clear(&self) -> Color {
         Color::from_rgba8(0, 0, 0, 0xFF)
-    }
-
-    /// Whether the screen needs continuous frames (animation). Default false → idle until input.
-    fn animating(&self) -> bool {
-        false
     }
 }
 
@@ -115,14 +114,23 @@ struct Runner<A: App> {
     debug: bool,
     store: Store,
     drag: Option<Capture>,
+    scene: Scene,
+    start: Instant,
+    last_frame: Option<f64>,
 }
 
 impl<A: App> Runner<A> {
     fn frame(&mut self) {
-        if self.render.is_none() {
+        let Some(render) = self.render.as_ref() else {
             return;
-        }
+        };
+        let now = self.start.elapsed().as_secs_f64();
+        let dt = self.last_frame.map_or(0.0, |last| (now - last).min(0.1)) as f32;
+        self.last_frame = Some(now);
+        let viewport = render.viewport();
+        let t = render.transform();
         let clear = self.app.clear();
+        self.scene.reset();
         let app = &self.app;
         let pointer = self.pointer;
         let hits = &mut self.hits;
@@ -139,137 +147,158 @@ impl<A: App> Runner<A> {
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
-        let render = self.render.as_mut().expect("render present");
-        render.paint(clear, text, |scene, text, t, viewport, _now| {
-            let mut placed = layout::solve(app.view(), text, viewport, store);
-            let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
-            hits.clear();
-            input_hits.clear();
-            esc_msgs.clear();
-            enter_msgs.clear();
-            input_maps.clear();
-            scroll_hits.clear();
-            drag_hits.clear();
-            bar_hits.clear();
-            context_hits.clear();
-            for p in placed.iter_mut() {
-                let hit_rect = match p.clip {
-                    Some(c) => c.intersect(p.rect),
-                    None => p.rect,
+        let mut any_in_flight = false;
+        let mut placed = layout::solve(app.view(), text, viewport, store);
+        let prev_inputs: HashSet<Id> = input_maps.iter().map(|(id, _)| id.clone()).collect();
+        hits.clear();
+        input_hits.clear();
+        esc_msgs.clear();
+        enter_msgs.clear();
+        input_maps.clear();
+        scroll_hits.clear();
+        drag_hits.clear();
+        bar_hits.clear();
+        context_hits.clear();
+        for p in placed.iter_mut() {
+            let hit_rect = match p.clip {
+                Some(c) => c.intersect(p.rect),
+                None => p.rect,
+            };
+            if let Some(spec) = &p.behaviour.transition {
+                let target = match spec.driver {
+                    Driver::Hover => {
+                        let over = pointer.is_some_and(|(px, py)| {
+                            hit_rect.contains(Point::new(px as f64, py as f64))
+                        });
+                        if over {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    Driver::Value(v) => v,
                 };
-                if let Some(msg) = p.behaviour.on_click.take() {
-                    hits.push((hit_rect, msg));
+                let tr = store
+                    .get_or_with::<Transition>(&spec.id, || Transition::new(target, spec.duration));
+                tr.target = target;
+                tr.tick(dt);
+                if tr.in_flight() {
+                    any_in_flight = true
                 }
-                if let Some((id, handler)) = p.behaviour.on_drag.take() {
-                    drag_hits.push((hit_rect, id, handler));
-                }
-                if let Some(h) = p.behaviour.on_right_click.take() {
-                    context_hits.push((hit_rect, h));
-                }
+            }
+            if let Some(msg) = p.behaviour.on_click.take() {
+                hits.push((hit_rect, msg));
+            }
+            if let Some((id, handler)) = p.behaviour.on_drag.take() {
+                drag_hits.push((hit_rect, id, handler));
+            }
+            if let Some(h) = p.behaviour.on_right_click.take() {
+                context_hits.push((hit_rect, h));
+            }
 
-                if let Some(spec) = &mut p.behaviour.input {
-                    if let Some(m) = spec.map.take() {
-                        input_maps.push((spec.id.clone(), m));
+            if let Some(spec) = &mut p.behaviour.input {
+                if let Some(m) = spec.map.take() {
+                    input_maps.push((spec.id.clone(), m));
+                }
+                if let Some(ts) = &p.appearance.text {
+                    editor::sync(
+                        &spec.id,
+                        &ts.text,
+                        p.rect.width() as f32,
+                        p.rect.height() as f32,
+                        ts.family,
+                        ts.size,
+                        spec.multiline,
+                        text,
+                        p.pad,
+                        store,
+                    );
+                }
+                input_hits.push((hit_rect, spec.id.clone(), p.pad));
+                if spec.autofocus && !prev_inputs.contains(&spec.id) {
+                    focused.set(spec.id.clone());
+                    let field = focused.focused_field(store);
+                    if let Some(field) = field {
+                        field.caret_to_end(text);
                     }
-                    if let Some(ts) = &p.appearance.text {
-                        editor::sync(
-                            &spec.id,
-                            &ts.text,
-                            p.rect.width() as f32,
-                            p.rect.height() as f32,
-                            ts.family,
-                            ts.size,
-                            spec.multiline,
-                            text,
-                            p.pad,
-                            store,
-                        );
-                    }
-                    input_hits.push((hit_rect, spec.id.clone(), p.pad));
-                    if spec.autofocus && !prev_inputs.contains(&spec.id) {
-                        focused.set(spec.id.clone());
-                        let field = focused.focused_field(store);
-                        if let Some(field) = field {
-                            field.caret_to_end(text);
-                        }
 
-                        if let Some(scroll_parent) = &p.scroll_parent {
-                            let scroll_hit = scroll_hits.iter().find(|s| s.id == *scroll_parent);
-                            if let Some(scroll_hit) = scroll_hit {
-                                let scroll = store.get_or::<Scroll>(&scroll_parent);
-                                let offset_y = scroll.y;
-                                let near = p.rect.y0 - scroll_hit.rect.y0 + offset_y as f64;
-                                let far = p.rect.y1 - scroll_hit.rect.y0 + offset_y as f64;
-                                let view = KeepInView {
-                                    axis: Axis::Y,
-                                    near: near as f32,
-                                    far: far as f32,
-                                    inner: scroll_hit.inner.1,
-                                    content: scroll_hit.content.1,
-                                };
-                                scroll.keep_in_view(view);
-                                needs_redraw = true;
-                            }
+                    if let Some(scroll_parent) = &p.scroll_parent {
+                        let scroll_hit = scroll_hits.iter().find(|s| s.id == *scroll_parent);
+                        if let Some(scroll_hit) = scroll_hit {
+                            let scroll = store.get_or::<Scroll>(&scroll_parent);
+                            let offset_y = scroll.y;
+                            let near = p.rect.y0 - scroll_hit.rect.y0 + offset_y as f64;
+                            let far = p.rect.y1 - scroll_hit.rect.y0 + offset_y as f64;
+                            let view = KeepInView {
+                                axis: Axis::Y,
+                                near: near as f32,
+                                far: far as f32,
+                                inner: scroll_hit.inner.1,
+                                content: scroll_hit.content.1,
+                            };
+                            scroll.keep_in_view(view);
+                            needs_redraw = true;
                         }
-                    }
-                    if let Some(m) = spec.on_esc.take() {
-                        esc_msgs.push((spec.id.clone(), m));
-                    }
-                    if let Some(m) = spec.on_enter.take() {
-                        enter_msgs.push((spec.id.clone(), m));
                     }
                 }
+                if let Some(m) = spec.on_esc.take() {
+                    esc_msgs.push((spec.id.clone(), m));
+                }
+                if let Some(m) = spec.on_enter.take() {
+                    enter_msgs.push((spec.id.clone(), m));
+                }
+            }
 
-                let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
-                let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
-                let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
-                    if let Some(input) = &p.behaviour.input {
-                        let (cw, ch) = store
-                            .get::<Field>(&Id::from(input.id.clone()))
-                            .and_then(|f| f.layout_of())
-                            .map(|l| (l.full_width(), l.height()))
-                            .unwrap_or((0.0, 0.0));
-                        Some((&input.id, (cw, ch), (true, true)))
-                    } else if let Some(scroll) = &p.behaviour.scroll {
-                        Some((&scroll.id, p.content_size, (scroll.x, scroll.y)))
-                    } else {
-                        None
-                    };
-                if let Some((id, content, (ax, ay))) = scroll_vals {
-                    scroll_hits.push(ScrollHit {
-                        hit_rect,
-                        rect: p.rect,
-                        id: id.clone(),
-                        content,
-                        inner: (iw, ih),
-                    });
-                    let s = store.get_or::<Scroll>(id);
-                    if ay {
-                        if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
-                            bar_hits.push(v);
-                        }
+            let iw = p.rect.width() as f32 - (p.pad.x0 + p.pad.x1) as f32;
+            let ih = p.rect.height() as f32 - (p.pad.y0 + p.pad.y1) as f32;
+            let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
+                if let Some(input) = &p.behaviour.input {
+                    let (cw, ch) = store
+                        .get::<Field>(&Id::from(input.id.clone()))
+                        .and_then(|f| f.layout_of())
+                        .map(|l| (l.full_width(), l.height()))
+                        .unwrap_or((0.0, 0.0));
+                    Some((&input.id, (cw, ch), (true, true)))
+                } else if let Some(scroll) = &p.behaviour.scroll {
+                    Some((&scroll.id, p.content_size, (scroll.x, scroll.y)))
+                } else {
+                    None
+                };
+            if let Some((id, content, (ax, ay))) = scroll_vals {
+                scroll_hits.push(ScrollHit {
+                    hit_rect,
+                    rect: p.rect,
+                    id: id.clone(),
+                    content,
+                    inner: (iw, ih),
+                });
+                let s = store.get_or::<Scroll>(id);
+                if ay {
+                    if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
+                        bar_hits.push(v);
                     }
-                    if ax {
-                        if let Some(h) = axis_thumb(p.rect, id, Axis::X, iw, content.0, s.x) {
-                            bar_hits.push(h);
-                        }
+                }
+                if ax {
+                    if let Some(h) = axis_thumb(p.rect, id, Axis::X, iw, content.0, s.x) {
+                        bar_hits.push(h);
                     }
                 }
             }
-            store.sweep();
-            focused.clear_if_gone(store);
-            let dragging = self
-                .drag
-                .as_ref()
-                .and_then(Capture::thumb)
-                .map(|t| (&t.id, t.axis));
-            paint::draw(scene, &placed, text, t, pointer, store, &focused);
-            paint::scrollbars(scene, bar_hits, t, pointer, dragging);
-            if debug {
-                paint::debug_boxes(scene, &placed, t, pointer, text, viewport);
-            }
-        });
-        if self.app.animating() || needs_redraw {
+        }
+        store.sweep();
+        focused.clear_if_gone(store);
+        let dragging = self
+            .drag
+            .as_ref()
+            .and_then(Capture::thumb)
+            .map(|t| (&t.id, t.axis));
+        paint::draw(&mut self.scene, &placed, text, t, pointer, store, &focused);
+        paint::scrollbars(&mut self.scene, bar_hits, t, pointer, dragging);
+        if debug {
+            paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
+        }
+        self.render.as_mut().unwrap().present(clear, &self.scene);
+        if any_in_flight || needs_redraw {
             self.redraw();
         }
     }
@@ -744,6 +773,9 @@ pub fn run<A: App + 'static>(app: A) {
         debug: false,
         store: Store::new(),
         drag: None,
+        scene: Scene::new(),
+        start: Instant::now(),
+        last_frame: None,
     };
     event_loop.run_app(&mut runner).expect("run app");
 }

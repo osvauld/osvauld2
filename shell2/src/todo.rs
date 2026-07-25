@@ -137,7 +137,8 @@ impl TodoScreen {
             .fill(theme::accent())
             .hover_fill(theme::accent_press())
             .on_click(Msg::New)
-            .child(text("Add todo"));
+            .child(text("Add todo"))
+            .transition("todo:add", 150.0);
         let mut todos = Vec::new();
 
         for r in &self.items {

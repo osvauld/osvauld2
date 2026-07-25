@@ -2,6 +2,7 @@
 //! with `hover_*` set uses it when the pointer is inside its rect, else the base look. No stored
 //! hover flags; it falls out of `pointer ∩ rect` each frame (and we only repaint on pointer moves).
 
+use crate::anim::Transition;
 use crate::editor::Field;
 use crate::editor::Focus;
 use crate::id::Id;
@@ -47,9 +48,18 @@ pub(crate) fn draw<M>(
             clipping = true;
             scene.push_clip_layer(Fill::NonZero, t, &c);
         }
-        let over =
-            pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
-        let (fill, stroke) = p.appearance.look.resolve(over);
+        let (fill, stroke) = if let Some(spec) = &p.behaviour.transition {
+            let progress = store
+                .get::<Transition>(&spec.id)
+                .map(|tr| tr.progress)
+                .unwrap_or(0.0);
+            let eased = spec.easing.apply(progress);
+            p.appearance.look.resolve_t(eased)
+        } else {
+            let over =
+                pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
+            p.appearance.look.resolve(over)
+        };
         let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius);
         if let Some(c) = fill {
             scene.fill(Fill::NonZero, t, c, None, &shape);

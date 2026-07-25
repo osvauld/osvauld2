@@ -4,14 +4,13 @@
 //! `Screen`.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 use winit::window::Window;
 
-use crate::text::TextEngine;
+use wgpu::CurrentSurfaceTexture::*;
 
 /// Supersample factor (vello renders into a target this many times larger than the surface, blit
 /// downsamples). Left at 1 = native res: 2× linear-downsampled blurred edges more than it smoothed.
@@ -26,13 +25,10 @@ pub struct Render {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
-    scene: Scene,
     scale: f64,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     blitter: wgpu::util::TextureBlitter,
-    /// Startup instant; `now` (seconds since) is the clock passed to screens for time-driven motion.
-    start: Instant,
 }
 
 /// vello's compute output target: an Rgba8Unorm texture that's both storage-writable (vello) and
@@ -141,12 +137,10 @@ impl Render {
             queue,
             config,
             renderer,
-            scene: Scene::new(),
             scale,
             target,
             target_view,
             blitter,
-            start: Instant::now(),
         }
     }
 
@@ -188,16 +182,21 @@ impl Render {
         self.window.set_cursor(icon);
     }
 
+    pub fn viewport(&self) -> (f32, f32) {
+        (
+            (self.config.width as f64 / self.scale) as f32,
+            (self.config.height as f64 / self.scale) as f32,
+        )
+    }
+
+    pub fn transform(&self) -> Affine {
+        Affine::scale(self.scale * SUPERSAMPLE as f64)
+    }
+
     /// Draw one frame: clear to `clear`, let `build` populate the scene (it gets the scene, text
     /// engine, the logical→physical transform, the logical viewport, and the elapsed clock), then
     /// rasterize offscreen and present. Knows *how* to paint, not *what* — that's `build`.
-    pub fn paint<F>(&mut self, clear: Color, text: &mut TextEngine, build: F)
-    where
-        F: FnOnce(&mut Scene, &mut TextEngine, Affine, (f32, f32), f64),
-    {
-        // wgpu 29 returns a status enum (not Result). Use the texture on success/suboptimal;
-        // anything else means reconfigure and skip this frame (winit will send another).
-        use wgpu::CurrentSurfaceTexture::*;
+    pub fn present(&mut self, clear: Color, scene: &Scene) {
         let frame = match self.surface.get_current_texture() {
             Success(f) | Suboptimal(f) => f,
             _ => {
@@ -209,22 +208,11 @@ impl Render {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.scene.reset();
-        let t = Affine::scale(self.scale * SUPERSAMPLE as f64);
-        // Viewport in logical points = physical / scale (supersample cancels out). Screens lay out
-        // within this; `t` scales their logical coords to the physical target.
-        let viewport = (
-            (self.config.width as f64 / self.scale) as f32,
-            (self.config.height as f64 / self.scale) as f32,
-        );
-        let now = self.start.elapsed().as_secs_f64();
-        build(&mut self.scene, text, t, viewport, now);
-
         self.renderer
             .render_to_texture(
                 &self.device,
                 &self.queue,
-                &self.scene,
+                scene,
                 &self.target_view,
                 &RenderParams {
                     base_color: clear,
