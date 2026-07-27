@@ -32,6 +32,7 @@ pub enum Msg {
     ToggleOverlay,
     MenuAt((f32, f32)),
     CloseMenu,
+    Foo,
 }
 
 impl TodoScreen {
@@ -125,6 +126,10 @@ impl TodoScreen {
                 self.menu_at = None;
                 None
             }
+            Msg::Foo => {
+                eprint!("landed");
+                None
+            }
         }
     }
 
@@ -138,7 +143,7 @@ impl TodoScreen {
             .hover_fill(theme::accent_press())
             .on_click(Msg::New)
             .child(text("Add todo"))
-            .transition("todo:add", 150.0);
+            .slide_in("todo:id", (200.0, 0.0), 500.0);
         let mut todos = Vec::new();
 
         for r in &self.items {
@@ -153,7 +158,7 @@ impl TodoScreen {
                 .child(text("::").color(theme::fg_4()));
             let editing = self.editing == Some(r.id);
             let t_row = if editing {
-                text_input(&r.text, id, move |s| Msg::Update(s, todo_id))
+                text_input(&r.text, id.clone(), move |s| Msg::Update(s, todo_id))
                     .grow()
                     .h(36.0)
                     .autofocus()
@@ -179,7 +184,8 @@ impl TodoScreen {
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
                 .on_click(Msg::Delete(r.id))
-                .child(text("x").font_size(14.0).color(theme::fg_4()));
+                .child(text("x").font_size(14.0).color(theme::fg_4()))
+                .exit(format!("todo_fadel:{}", todo_id).as_str());
             let edit = col()
                 .size(24.0, 24.0)
                 .center()
@@ -202,7 +208,8 @@ impl TodoScreen {
                 .child(t_row)
                 .child(del)
                 .child(edit)
-                .child(checkbox);
+                .child(checkbox)
+                .fade_in(format!("todo_fadel:{}", todo_id), 500.0);
             todos.push(k);
         }
 
@@ -247,7 +254,9 @@ impl TodoScreen {
             .child(text("floating!"))
             .child(text("second"))
             .child(text("floating2!"))
-            .child(text("second2"));
+            .child(text("second2"))
+            .fade_in("menu2", 400.0)
+            .exit("menu2");
         if self.open_menu {
             back = back.overlay(
                 menu,

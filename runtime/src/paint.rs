@@ -48,29 +48,33 @@ pub(crate) fn draw<M>(
             clipping = true;
             scene.push_clip_layer(Fill::NonZero, t, &c);
         }
-        let (fill, stroke) = if let Some(spec) = &p.behaviour.transition {
+        let t_e = if let Some(spec) = &p.behaviour.tint {
             let progress = store
                 .get::<Transition>(&spec.id)
-                .map(|tr| tr.progress)
+                .map(|t| t.progress)
                 .unwrap_or(0.0);
-            let eased = spec.easing.apply(progress);
-            p.appearance.look.resolve_t(eased)
+            spec.easing.apply(progress)
         } else {
             let over =
                 pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
-            p.appearance.look.resolve(over)
+            let t = if over { 1.0 } else { 0.0 };
+            t
         };
+        let (fill, stroke) = p.appearance.look.resolve_t(t_e);
         let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius);
-        if let Some(c) = fill {
+        if let Some(mut c) = fill {
+            c = c.multiply_alpha(p.alpha);
             scene.fill(Fill::NonZero, t, c, None, &shape);
         }
-        if let Some(b) = stroke {
+        if let Some(mut b) = stroke {
+            b.color = b.color.multiply_alpha(p.alpha);
             scene.stroke(&Stroke::new(b.width), t, b.color, None, &shape);
         }
         if let Some(custom) = &p.appearance.custom {
             custom(scene, text, p.rect, t);
         }
         if let Some(ts) = &p.appearance.text {
+            let text_color = ts.color.multiply_alpha(p.alpha);
             if let Some(spec) = &p.behaviour.input {
                 let field_layout = store
                     .get::<Field>(&spec.id)
@@ -105,7 +109,7 @@ pub(crate) fn draw<M>(
                         );
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
-                    text.draw_layout(scene, layout, origin, ts.color);
+                    text.draw_layout(scene, layout, origin, text_color);
                     if focus.is_focused(&spec.id) {
                         if let Some(bb) = store
                             .get::<Field>(&spec.id)
@@ -117,7 +121,7 @@ pub(crate) fn draw<M>(
                                 p.rect.x0 + ox + bb.x1,
                                 p.rect.y0 + oy + bb.y1,
                             );
-                            scene.fill(Fill::NonZero, t, ts.color, None, &r);
+                            scene.fill(Fill::NonZero, t, text_color, None, &r);
                         }
                     }
 
@@ -127,7 +131,7 @@ pub(crate) fn draw<M>(
                 let (_, th) = text.measure(&ts.text, ts.family, ts.size);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
                 let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
-                text.draw(scene, &ts.text, ts.family, ts.size, origin, ts.color);
+                text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color);
             }
         }
         if clipping {

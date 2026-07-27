@@ -5,6 +5,7 @@
 use taffy::prelude::*;
 use vello::kurbo::{Insets, Rect};
 
+use crate::anim::Transition;
 use crate::col;
 use crate::el::{Anchor, Appearance, Behaviour, El, Overlay};
 use crate::id::Id;
@@ -21,6 +22,7 @@ pub(crate) struct Placed<M> {
     pub clip: Option<Rect>,
     pub content_size: (f32, f32),
     pub scroll_parent: Option<Id>,
+    pub alpha: f32,
 }
 
 /// El props + its Taffy node id + mapped children, retained between build and emit.
@@ -99,10 +101,20 @@ fn emit<M>(
     store: &Store,
     scroll_parent: Option<Id>,
     overlays: &mut Vec<(Rect, Overlay<M>)>,
+    alpha: f32,
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
-    let (dx, dy) = m.behaviour.offset;
+    let (mut dx, mut dy) = m.behaviour.offset;
+    if let Some((spec, (sx, sy))) = &m.behaviour.slide {
+        let p = store
+            .get::<Transition>(&spec.id)
+            .map(|t| t.progress)
+            .unwrap_or(0.0);
+        let e = spec.easing.apply(p);
+        dx += (1.0 - e) * sx;
+        dy += (1.0 - e) * sy;
+    }
     let x = ox + l.location.x + dx;
     let y = oy + l.location.y + dy;
     let rect = Rect::new(
@@ -138,6 +150,15 @@ fn emit<M>(
         };
         overlays.push((rect, overlay));
     }
+    let mut opacity = m.behaviour.opacity;
+    if let Some(spec) = &m.behaviour.fade {
+        let p = store
+            .get::<Transition>(&spec.id)
+            .map(|t| t.progress)
+            .unwrap_or(0.0);
+        opacity *= spec.easing.apply(p)
+    }
+    let node_alpha = opacity * alpha;
     let behaviour = m.behaviour;
     let appearance = m.appearance;
     out.push(Placed {
@@ -153,7 +174,9 @@ fn emit<M>(
         ),
         clip,
         content_size,
+        alpha: node_alpha,
     });
+
     for c in m.children {
         emit(
             c,
@@ -165,6 +188,7 @@ fn emit<M>(
             store,
             parent_scroll.clone(),
             overlays,
+            node_alpha,
         );
     }
 }
@@ -199,11 +223,14 @@ pub(crate) fn solve<M>(
         store,
         None,
         &mut overlays,
+        1.0,
     );
 
     let mut new_overlays = Vec::new();
     for (rect, overlay) in overlays {
         let mut tree = TaffyTree::new();
+
+        let fade_id = overlay.panel.behaviour.fade.as_ref().map(|f| f.id.clone());
         let mapped = build(*overlay.panel, &mut tree, text);
         tree.compute_layout(
             mapped.node,
@@ -220,9 +247,14 @@ pub(crate) fn solve<M>(
             .resolve(rect, (pl.size.width, pl.size.height), viewport);
         if let Some(msg) = overlay.dismiss {
             let mut capture_tree = TaffyTree::new();
+            let mut dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
+            if let Some(fade_id) = fade_id {
+                dismiss_panel = dismiss_panel.exit(fade_id);
+            }
 
-            let dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
             let mapped = build(dismiss_panel, &mut capture_tree, text);
+            let opacity = mapped.behaviour.opacity;
+
             let _ = capture_tree.compute_layout(
                 mapped.node,
                 Size {
@@ -242,8 +274,10 @@ pub(crate) fn solve<M>(
                 store,
                 None,
                 &mut overlays,
+                opacity,
             );
         }
+        let opacity = mapped.behaviour.opacity;
 
         emit(
             mapped,
@@ -255,6 +289,7 @@ pub(crate) fn solve<M>(
             store,
             None,
             &mut new_overlays,
+            opacity,
         );
     }
     out

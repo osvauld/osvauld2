@@ -1,0 +1,13 @@
+[package]
+name = "app_host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Hosts sandboxed Luau apps on the new runtime. An app's `view()` walks directly into
+# `runtime::El<LuaMsg>` — same builders shell2 uses, no parallel node type. `app_engine`
+# stays untouched as reference; this is the ground-up rewrite.
+[dependencies]
+mlua = { version = "0.10", features = ["luau"] }
+loro = "1.12.0"
+runtime = { path = "../runtime" }

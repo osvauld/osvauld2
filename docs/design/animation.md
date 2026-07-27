@@ -1,4 +1,10 @@
-# Animation system + subtree transform — design (rev 2, 2026-07-23)
+# Animation system + subtree transform — design (rev 3, 2026-07-26)
+
+> **As-built (rev 3):** Phases 0–D shipped, but **exit diverged from this doc** — we built
+> neither v1 (declare-until-done) nor v2 (tombstone) but a third approach, **deferred-message
+> (Option B)**, and split the single `TransitionSpec` into **property-keyed bindings**. See
+> **§14 — As-built** for the real shape and what's still open. §11's v1/v2 are kept as the
+> design survey that led there.
 
 Expands w1.md §4/§5 into a build plan. Companion: `w1.md` (the week), `runtime-rebuild-plan.md`
 (the why). Rev 2 adds §1: three runtime restructures that make the rest *simpler to build* —
@@ -279,6 +285,9 @@ A page transition is §11's enter/exit at screen scale, in lockstep:
 
 ## 11. Tier 2 — enter/exit (two levels)
 
+> **Superseded by §14.** What shipped is **deferred-message exit (Option B)** — neither v1 nor
+> v2 below. The v1/v2 survey here is the reasoning trail that led to it; read §14 for as-built.
+
 The hard half is **exit**: the app drops an element from `view()`, but it must keep painting for
 the exit duration. Survey — how the immediate-mode world actually handles this:
 
@@ -392,10 +401,16 @@ ghost("todo:5", Msg::GhostGone)   // layout-inert marker: "replay this id's snap
 - [ ] R3: `PaintItem` stream **replacing** per-node clip; `.opacity(a)` group layers
       (alpha-multiply stepping stone allowed)
 
-### Phase D — enter presets + exit v1 (consumer: overlay open/close)
-- [ ] overlay close: `Open/Closing/Gone` + `.transition_to(…, 0.0, …)` + `on_done`
-- [ ] `Enter::Fade` / `SlideFrom*` presets bound to §8; overlay open becomes `.enter`
-- [ ] caret blink lands in W4 (blink_epoch + `WaitUntil` tier) — not this doc's checklist
+### Phase D — enter/exit (as-built: deferred-message, §14) ✓
+- [x] property-keyed bindings: `slide`/`fade`/`tint` slots replace the single `TransitionSpec`;
+      paint always `resolve_t` (hover + fade coexist)
+- [x] `on_done` edge-trigger + dispatch after present
+- [x] exit via `exiting` map + `drive` target-0 override + held message (Option B) — todo delete
+- [x] overlay dismiss fade: backdrop `.exit(panel_id)` read from the panel's own fade binding
+- [ ] `.enter`/`Enter::Fade` preset **enums** (today: `.fade_in`/`.slide_in` builders, no bundle layer)
+- [ ] `.exit()` bool self-fade form; `.exit_as(Type)` asymmetric exit
+- [ ] stale-`exiting` cleanup (element removed by another path mid-fade)
+- caret blink still W4 (blink_epoch + `WaitUntil` tier) — not this doc's checklist
 
 ### Phase E — retain placed, hits become queries (R2; independent, any time after 0)
 - [ ] `placed` lives on `Runner`; `click`/`right_click`/drag/enter/esc query it
@@ -424,3 +439,74 @@ ghost("todo:5", Msg::GhostGone)   // layout-inert marker: "replay this id's snap
 
 **Never cut:** 0 → A → B — the W1 exit criterion, and W4's caret blink builds on the same
 clock + wake policy.
+
+## 14. As-built (rev 3, 2026-07-26) — property-keyed bindings + deferred-message exit
+
+Phases 0–C landed as designed. Phase D diverged twice — both simplifications found while building.
+
+### 14.1 Property-keyed bindings (replaces the single `TransitionSpec`)
+
+One `transition: Option<TransitionSpec>` per element meant one timeline drove *everything*: an
+element couldn't fade in **and** hover-tint (paint branched — a transition present locked hover
+out), and couldn't compose two drivers. Fix: split the slot by **property**.
+
+```rust
+struct Binding<M> { id, driver, duration, easing, on_done }   // a timeline handle
+
+// on Behaviour<M>, replacing `transition`:
+slide: Option<(Binding<M>, (f32, f32))>   // + from-offset payload
+fade:  Option<Binding<M>>
+tint:  Option<Binding<M>>
+```
+
+- Each property binds its **own** timeline; two properties share one by sharing an `id`.
+- Builders: `.tint(id, ms)` (Hover), `.slide_in(id, xy, ms)` / `.fade_in(id, ms)` (Value 1.0).
+- Paint no longer branches: **always `resolve_t(t)`**, with `t` = tint's eased progress if the
+  slot is set, else `over as 0/1` (instant hover = a snapping timeline). Hover + fade coexist.
+- `drive()` in the placed loop ticks every slot uniformly; attach `on_done` to **Value**
+  timelines only (a Hover binding "lands" on every pointer settle).
+
+This separates the primitive §2 implied but merged: a *timeline* is a scalar; a *binding* is
+"property P reads timeline T." Three collisions (hover+enter, hover+color, asymmetric enter/exit)
+all dissolve once timeline and binding are distinct.
+
+### 14.2 Exit = deferred-message (Option B) — neither v1 nor v2
+
+The question §11 missed: *who keeps the corpse alive while it fades?* v1 = the **app** (Open/
+Closing/Gone). v2 = the **runtime paint list** (tombstone). Option B = **the app keeps declaring
+it for free, because the runtime simply hasn't delivered the message yet.**
+
+- `.exit(id)` on the clickable element names the timeline to reverse (the row's fade id —
+  cross-element, since the `×` button owns no timeline). `exit: Option<Id>` on Behaviour.
+- Runtime state `exiting: HashMap<Id, Msg>` (retained). The per-frame binding **can't** hold the
+  pending msg — `view()` rebuilds it every frame — so the id keys retained state instead.
+- Click on an exit element → routed to `exit_hits`; on hit → `exiting.insert(id, msg)`. The
+  message is **held, not dispatched.**
+- App state unchanged (msg undelivered) → `view()` still emits the element → its timeline keeps
+  ticking. `drive()` forces `target = 0` for ids in `exiting` → fades out (enter reversed, same
+  scalar to 0).
+- On landing → `exiting.remove(id)` → deliver the held msg (reuses the `on_done` → `done_msgs`
+  → `app.update` path) → app removes → next frame swept.
+
+The app's `update()` is the **same one-line delete** it'd write with no animation. No state
+machine, no corpse in the `Vec`, zero exit boilerplate.
+
+**Overlay dismiss is free:** the runtime already builds the dismiss backdrop, so it stamps
+`.exit(panel_id)` on it (`panel_id` read from the panel's own `fade` binding). Dismiss fades the
+panel, then delivers the dismiss message. The app writes only `.fade_in` on the panel.
+
+### 14.3 What Option B does *not* cover — and what's still open
+
+Option B covers exits triggered by **runtime-seen input** (click, dismiss). It does **not** cover
+**data-driven** removal — a row that vanishes because a *server sync* deleted it, no click. That
+still needs **v2 (tombstone) + Phase E (retained placed)**, deferred until sync exists.
+
+Still open:
+
+- **Phase E** — retain `placed` on `Runner`, hits become queries (R2). Not started.
+- **Phase F** — tombstone/ghost for data-driven exit + zero-corpse list delete. Needs E; deferred to sync.
+- **Pages** (§10) — screen transitions. Not started.
+- **Loops** (§9) — caret blink (W4). Not started.
+- `.enter` / `Enter::Fade` **preset enums** — today only `.fade_in` / `.slide_in` builders; no named-bundle layer over §8.
+- `.exit()` **bool self-fade** (reads own fade id) + `.exit_as(Type)` **asymmetric exit** — only explicit `.exit(id)` built.
+- **stale-`exiting` cleanup** — if the app removes an element by another path mid-fade, its `exiting` entry strands (could misfire on a reused id); one-line retain-after-sweep fixes it.

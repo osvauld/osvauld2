@@ -12,7 +12,7 @@ use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::Scene;
 
-use crate::anim::{Driver, Easing, Transition};
+use crate::anim::{Driver, Easing};
 use crate::drag::DragEvent;
 use crate::id::Id;
 /// A text leaf's content + face. The real color is applied at vello draw time.
@@ -220,7 +220,7 @@ pub enum PlacementAlign {
     End,
 }
 
-pub(crate) struct TransitionSpec<M> {
+pub(crate) struct Binding<M> {
     pub id: Id,
     pub driver: Driver,
     pub duration: f32,
@@ -235,8 +235,12 @@ pub(crate) struct Behaviour<M> {
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
-    pub transition: Option<TransitionSpec<M>>,
     pub offset: (f32, f32), // for animation
+    pub opacity: f32,
+    pub slide: Option<(Binding<M>, (f32, f32))>,
+    pub fade: Option<Binding<M>>,
+    pub tint: Option<Binding<M>>,
+    pub exit: Option<Id>,
 }
 
 impl<M> Default for Behaviour<M> {
@@ -248,8 +252,12 @@ impl<M> Default for Behaviour<M> {
             on_drag: None,
             overlay: None,
             on_right_click: None,
-            transition: None,
             offset: (0.0, 0.0),
+            opacity: 1.0,
+            slide: None,
+            fade: None,
+            tint: None,
+            exit: None,
         }
     }
 }
@@ -469,8 +477,8 @@ impl<M> El<M> {
         self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
         self
     }
-    pub fn transition(mut self, id: impl Into<Id>, ms: f32) -> Self {
-        self.behaviour.transition = Some(TransitionSpec {
+    pub fn tint(mut self, id: impl Into<Id>, ms: f32) -> Self {
+        self.behaviour.tint = Some(Binding {
             id: id.into(),
             driver: Driver::Hover,
             duration: ms / 1000.0,
@@ -479,10 +487,28 @@ impl<M> El<M> {
         });
         self
     }
-    pub fn transtion_to(mut self, id: impl Into<Id>, ms: f32, target: f32) -> Self {
-        self.behaviour.transition = Some(TransitionSpec {
+    pub fn offset(mut self, offset: (f32, f32)) -> Self {
+        self.behaviour.offset = offset;
+        self
+    }
+
+    pub fn slide_in(mut self, id: impl Into<Id>, (dx, dy): (f32, f32), ms: f32) -> Self {
+        self.behaviour.slide = Some((
+            Binding {
+                id: id.into(),
+                driver: Driver::Value(1.0),
+                duration: ms / 1000.0,
+                easing: Easing::EaseOut,
+                on_done: None,
+            },
+            (dx, dy),
+        ));
+        self
+    }
+    pub fn fade_in(mut self, id: impl Into<Id>, ms: f32) -> Self {
+        self.behaviour.fade = Some(Binding {
             id: id.into(),
-            driver: Driver::Value(target),
+            driver: Driver::Value(1.0),
             duration: ms / 1000.0,
             easing: Easing::EaseOut,
             on_done: None,
@@ -490,8 +516,13 @@ impl<M> El<M> {
         self
     }
 
-    pub fn offset(mut self, offset: (f32, f32)) -> Self {
-        self.behaviour.offset = offset;
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.behaviour.opacity = opacity;
+        self
+    }
+
+    pub fn exit(mut self, id: impl Into<Id>) -> Self {
+        self.behaviour.exit = Some(id.into());
         self
     }
 
@@ -616,8 +647,12 @@ impl<M> El<M> {
             on_drag,
             overlay,
             on_right_click,
-            transition,
             offset,
+            opacity,
+            slide,
+            fade,
+            tint,
+            exit,
         } = behaviour;
         let r_f = Rc::clone(&f);
         let new_drag = on_drag.map(|(id, d)| {
@@ -661,12 +696,32 @@ impl<M> El<M> {
             anchor: o.anchor,
         });
 
-        let new_transition = transition.map(|ts| TransitionSpec {
-            id: ts.id,
-            duration: ts.duration,
-            driver: ts.driver,
-            easing: ts.easing,
-            on_done: ts.on_done.map(|m| f(m)),
+        let new_slide = slide.map(|(binding, (dx, dy))| {
+            (
+                Binding {
+                    id: binding.id,
+                    driver: binding.driver,
+                    easing: binding.easing,
+                    on_done: binding.on_done.map(|m| f(m)),
+                    duration: binding.duration,
+                },
+                (dx, dy),
+            )
+        });
+        let new_fade = fade.map(|fa| Binding {
+            id: fa.id,
+            driver: fa.driver,
+            duration: fa.duration,
+            easing: fa.easing,
+            on_done: fa.on_done.map(|o| f(o)),
+        });
+
+        let new_tint = tint.map(|t| Binding {
+            id: t.id,
+            driver: t.driver,
+            duration: t.duration,
+            easing: t.easing,
+            on_done: t.on_done.map(|o| f(o)),
         });
 
         let behaviour = Behaviour {
@@ -676,8 +731,12 @@ impl<M> El<M> {
             on_drag: new_drag,
             overlay: new_overlay,
             on_right_click,
-            transition: new_transition,
             offset,
+            opacity,
+            slide: new_slide,
+            fade: new_fade,
+            tint: new_tint,
+            exit,
         };
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {

@@ -16,10 +16,11 @@ mod state;
 mod text;
 use crate::anim::{Driver, Transition};
 use crate::editor::{Focus, KeepInView};
+use crate::el::Binding;
 use crate::id::Id;
 use editor::Field;
 use scroll::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Fn;
 use std::sync::Arc;
 use std::time::Instant;
@@ -117,6 +118,8 @@ struct Runner<A: App> {
     scene: Scene,
     start: Instant,
     last_frame: Option<f64>,
+    exiting: HashMap<Id, A::Msg>, // element id which are existing; deliver msg when each hits zero
+    exit_hits: Vec<(Rect, Id, A::Msg)>,
 }
 
 impl<A: App> Runner<A> {
@@ -124,6 +127,7 @@ impl<A: App> Runner<A> {
         let Some(render) = self.render.as_ref() else {
             return;
         };
+        let mut done_msgs = Vec::new();
         let now = self.start.elapsed().as_secs_f64();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).min(0.1)) as f32;
         self.last_frame = Some(now);
@@ -136,6 +140,7 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let input_hits = &mut self.input_hits;
         let input_maps = &mut self.input_maps;
+        let exit_hits = &mut self.exit_hits;
         let enter_msgs = &mut self.enter_msgs;
         let esc_msgs = &mut self.esc_msgs;
         let scroll_hits = &mut self.scroll_hits;
@@ -158,36 +163,45 @@ impl<A: App> Runner<A> {
         scroll_hits.clear();
         drag_hits.clear();
         bar_hits.clear();
+        exit_hits.clear();
         context_hits.clear();
         for p in placed.iter_mut() {
             let hit_rect = match p.clip {
                 Some(c) => c.intersect(p.rect),
                 None => p.rect,
             };
-            if let Some(spec) = &p.behaviour.transition {
-                let target = match spec.driver {
-                    Driver::Hover => {
-                        let over = pointer.is_some_and(|(px, py)| {
-                            hit_rect.contains(Point::new(px as f64, py as f64))
-                        });
-                        if over {
-                            1.0
-                        } else {
-                            0.0
+
+            let over =
+                pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
+            let slide_binding = p.behaviour.slide.as_ref().map(|(b, _)| b);
+            let tint_binding = p.behaviour.tint.as_ref();
+            let fade_binding = p.behaviour.fade.as_ref();
+
+            for b in [slide_binding, tint_binding, fade_binding] {
+                if let Some(b) = b {
+                    let is_exiting = self.exiting.contains_key(&b.id);
+                    let (fl, landed) = Self::drive(b, store, dt, over, is_exiting);
+                    if fl {
+                        any_in_flight = true;
+                    }
+                    if landed {
+                        if let Some(msg) = self.exiting.remove(&b.id) {
+                            //exit finished deliver the
+                            //held msg
+                            done_msgs.push(msg)
+                        } else if let Some(m) = &b.on_done {
+                            done_msgs.push(m.clone())
                         }
                     }
-                    Driver::Value(v) => v,
-                };
-                let tr = store
-                    .get_or_with::<Transition>(&spec.id, || Transition::new(target, spec.duration));
-                tr.target = target;
-                tr.tick(dt);
-                if tr.in_flight() {
-                    any_in_flight = true
                 }
             }
+
             if let Some(msg) = p.behaviour.on_click.take() {
-                hits.push((hit_rect, msg));
+                if let Some(exit_id) = &p.behaviour.exit {
+                    exit_hits.push((p.rect, exit_id.clone(), msg));
+                } else {
+                    hits.push((hit_rect, msg));
+                }
             }
             if let Some((id, handler)) = p.behaviour.on_drag.take() {
                 drag_hits.push((hit_rect, id, handler));
@@ -298,9 +312,40 @@ impl<A: App> Runner<A> {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
         self.render.as_mut().unwrap().present(clear, &self.scene);
-        if any_in_flight || needs_redraw {
+        let dispatched = !done_msgs.is_empty();
+        for m in done_msgs {
+            self.app.update(m);
+        }
+        if any_in_flight || needs_redraw || dispatched {
             self.redraw();
         }
+    }
+    fn drive<M>(
+        b: &Binding<M>,
+        store: &mut Store,
+        dt: f32,
+        over: bool,
+        is_exiting: bool,
+    ) -> (bool, bool) {
+        let target = if is_exiting {
+            0.0
+        } else {
+            match b.driver {
+                Driver::Hover => {
+                    if over {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Driver::Value(f) => f,
+            }
+        };
+        let tr = store.get_or_with(&b.id, || Transition::new(target, b.duration));
+        tr.target = target;
+        let was = tr.in_flight();
+        tr.tick(dt);
+        (tr.in_flight(), was && !tr.in_flight())
     }
 
     fn redraw(&self) {
@@ -375,6 +420,9 @@ impl<A: App> Runner<A> {
         if let Some((_, msg)) = self.hits.iter().rev().find(|(r, _)| r.contains(p)) {
             let msg = msg.clone();
             self.app.update(msg);
+        }
+        if let Some((_, id, msg)) = self.exit_hits.iter().rev().find(|(r, _, _)| r.contains(p)) {
+            self.exiting.insert(id.clone(), msg.clone());
         }
 
         self.redraw();
@@ -776,6 +824,8 @@ pub fn run<A: App + 'static>(app: A) {
         scene: Scene::new(),
         start: Instant::now(),
         last_frame: None,
+        exiting: HashMap::new(),
+        exit_hits: Vec::new(),
     };
     event_loop.run_app(&mut runner).expect("run app");
 }
