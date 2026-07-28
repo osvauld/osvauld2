@@ -3403,6 +3403,7 @@ dependencies = [
 name = "shell2"
 version = "0.1.0"
 dependencies = [
+ "app_host",
  "runtime",
  "vello",
 ]

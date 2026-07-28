@@ -9,4 +9,5 @@ license.workspace = true
 # only because screens still draw with raw scene commands (until the element vocab lands).
 [dependencies]
 runtime = { path = "../runtime" }
+app_host = { path = "../app_host" }
 vello = "0.9.0"
