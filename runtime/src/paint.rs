@@ -10,7 +10,7 @@ use crate::layout::Placed;
 use crate::scroll::Axis;
 use crate::scroll::Scroll;
 use crate::scroll::Thumb;
-use crate::state::Store;
+use crate::state::{Slot, Store};
 use crate::text::TextEngine;
 use crate::MONO_FAMILY;
 use vello::kurbo::Line;
@@ -48,9 +48,9 @@ pub(crate) fn draw<M>(
             clipping = true;
             scene.push_clip_layer(Fill::NonZero, t, &c);
         }
-        let t_e = if let Some(spec) = &p.behaviour.tint {
+        let t_e = if let Some(spec) = &p.behaviour.tint && let Some(id) = &p.id {
             let progress = store
-                .get::<Transition>(&spec.id)
+                .get::<Transition>(id, Slot::Tint)
                 .map(|t| t.progress)
                 .unwrap_or(0.0);
             spec.easing.apply(progress)
@@ -77,7 +77,7 @@ pub(crate) fn draw<M>(
             let text_color = ts.color.multiply_alpha(p.alpha);
             if let Some(spec) = &p.behaviour.input {
                 let field_layout = store
-                    .get::<Field>(&spec.id)
+                    .get::<Field>(&spec.id, Slot::Editor)
                     .and_then(|f| f.layout_of().map(|l| (f, l)));
 
                 if let Some((field, layout)) = field_layout {
@@ -89,7 +89,10 @@ pub(crate) fn draw<M>(
                     );
 
                     scene.push_clip_layer(Fill::NonZero, t, &content);
-                    let s = store.get::<Scroll>(&spec.id).copied().unwrap_or_default();
+                    let s = store
+                        .get::<Scroll>(&spec.id, Slot::Scroll)
+                        .copied()
+                        .unwrap_or_default();
                     let (scroll_x, scroll_y) = (s.x, s.y);
                     let (ox, oy) = content_offset(
                         p.rect,
@@ -112,7 +115,7 @@ pub(crate) fn draw<M>(
                     text.draw_layout(scene, layout, origin, text_color);
                     if focus.is_focused(&spec.id) {
                         if let Some(bb) = store
-                            .get::<Field>(&spec.id)
+                            .get::<Field>(&spec.id, Slot::Editor)
                             .and_then(|f| f.cursor_geometry(1.5))
                         {
                             let r = Rect::new(

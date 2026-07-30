@@ -3,7 +3,7 @@
 //! and `Placed` from the description layer (`el`/`layout`), never the reverse. Owned by the `Runner`.
 
 use crate::id::Id;
-use crate::state::Store;
+use crate::state::{Slot, Store};
 use parley::style::StyleProperty;
 use parley::{BoundingBox, LineHeight, PlainEditor};
 use vello::kurbo::Insets;
@@ -192,6 +192,11 @@ impl Field {
         self.editor.raw_text()
     }
 
+    pub fn set_text(&mut self, value: &str) {
+        self.editor.set_text(value);
+        self.caret_dirty = true;
+    }
+
     pub fn cursor_geometry(&self, size: f32) -> Option<BoundingBox> {
         self.editor.cursor_geometry(size)
     }
@@ -233,7 +238,7 @@ pub(crate) struct Focus {
 impl Focus {
     pub fn focused_field<'s>(&self, store: &'s mut Store) -> Option<&'s mut Field> {
         let id = self.focused.as_ref()?;
-        store.get_mut::<Field>(id)
+        store.get_mut::<Field>(id, Slot::Editor)
     }
     pub fn new() -> Self {
         Self { focused: None }
@@ -253,7 +258,7 @@ impl Focus {
     }
     pub fn clear_if_gone(&mut self, store: &Store) {
         if let Some(id) = &self.focused {
-            if store.get::<Field>(id).is_none() {
+            if store.get::<Field>(id, Slot::Editor).is_none() {
                 self.focused = None;
             }
         }
@@ -272,11 +277,16 @@ pub fn sync(
     pad: Insets,
     store: &mut Store,
 ) {
-    let field = store.get_or_with::<Field>(id, || Field::new(size, family, value, multiline));
+    let field = store.get_or_with::<Field>(id, Slot::Editor, || {
+        Field::new(size, family, value, multiline)
+    });
+    if field.text_of() != value {
+        field.set_text(value);
+    }
     let content_dim = field.sync(width, height, pad, text);
     if let Some(view) = content_dim {
         field.caret_dirty = false;
-        let scroll = store.get_or::<Scroll>(id);
+        let scroll = store.get_or::<Scroll>(id, Slot::Scroll);
         scroll.keep_in_view(view);
     }
 }

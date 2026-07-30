@@ -20,20 +20,11 @@ pub enum Screen {
     Login,
     Todo,
 }
-const APP: &str = r#"
-local count = 0
-return function()
-return ui.col{
-ui.text{"count: "  ..count},
-ui.row{
-ui.button{"+", on_click = function() count = count+1 end},
-ui.button{"-", on_click = function() count = count-1 end},
-}
-}
-end
-"#;
 fn main() {
-    runtime::run(app_host::LuaApp::new(APP).unwrap());
+    // runtime::run(
+    //     app_host::LuaApp::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test.lua")).unwrap(),
+    // );
+    runtime::run(Shell::new());
 }
 struct Shell {
     screen: Screen,

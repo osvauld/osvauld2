@@ -18,15 +18,16 @@ use crate::anim::{Driver, Transition};
 use crate::editor::{Focus, KeepInView};
 use crate::el::Binding;
 use crate::id::Id;
+use crate::state::Slot;
 use editor::Field;
 use scroll::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Fn;
 use std::sync::Arc;
 use std::time::Instant;
+use vello::Scene;
 use vello::kurbo::{Insets, Point, Rect};
 use vello::peniko::Color;
-use vello::Scene;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -36,12 +37,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    col, custom, row, text, text_area, text_input, Anchor, El, Placement, PlacementAlign,
-    PlacementSide,
+    Anchor, El, Placement, PlacementAlign, PlacementSide, col, custom, row, text, text_area,
+    text_input,
 };
 pub use render::Render;
 use state::Store;
-pub use text::{TextEngine, MONO_FAMILY, PIXEL_FAMILY, UI_FAMILY};
+pub use text::{MONO_FAMILY, PIXEL_FAMILY, TextEngine, UI_FAMILY};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -61,6 +62,7 @@ pub trait App {
     fn clear(&self) -> Color {
         Color::from_rgba8(0, 0, 0, 0xFF)
     }
+    fn reload(&mut self) {}
 }
 
 #[derive(Clone)]
@@ -107,6 +109,7 @@ struct Runner<A: App> {
     input_maps: Vec<(Id, Box<dyn Fn(String) -> A::Msg>)>,
     context_hits: Vec<(Rect, Box<dyn Fn((f32, f32)) -> A::Msg>)>,
     drag_hits: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> A::Msg>)>,
+    drop_hits: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> A::Msg>)>,
     scroll_hits: Vec<ScrollHit>,
     enter_msgs: Vec<(Id, A::Msg)>,
     esc_msgs: Vec<(Id, A::Msg)>,
@@ -118,8 +121,6 @@ struct Runner<A: App> {
     scene: Scene,
     start: Instant,
     last_frame: Option<f64>,
-    exiting: HashMap<Id, A::Msg>, // element id which are existing; deliver msg when each hits zero
-    exit_hits: Vec<(Rect, Id, A::Msg)>,
 }
 
 impl<A: App> Runner<A> {
@@ -140,11 +141,11 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let input_hits = &mut self.input_hits;
         let input_maps = &mut self.input_maps;
-        let exit_hits = &mut self.exit_hits;
         let enter_msgs = &mut self.enter_msgs;
         let esc_msgs = &mut self.esc_msgs;
         let scroll_hits = &mut self.scroll_hits;
         let drag_hits = &mut self.drag_hits;
+        let drop_hits = &mut self.drop_hits;
         let bar_hits = &mut self.bar_hits;
         let context_hits = &mut self.context_hits;
         let store = &mut self.store;
@@ -162,8 +163,8 @@ impl<A: App> Runner<A> {
         input_maps.clear();
         scroll_hits.clear();
         drag_hits.clear();
+        drop_hits.clear();
         bar_hits.clear();
-        exit_hits.clear();
         context_hits.clear();
         for p in placed.iter_mut() {
             let hit_rect = match p.clip {
@@ -173,38 +174,36 @@ impl<A: App> Runner<A> {
 
             let over =
                 pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
-            let slide_binding = p.behaviour.slide.as_ref().map(|(b, _)| b);
-            let tint_binding = p.behaviour.tint.as_ref();
-            let fade_binding = p.behaviour.fade.as_ref();
+            let slide_binding = (p.behaviour.slide.as_ref().map(|(b, _)| b), Slot::Slide);
+            let tint_binding = (p.behaviour.tint.as_ref(), Slot::Tint);
+            let fade_binding = (p.behaviour.fade.as_ref(), Slot::Fade);
 
-            for b in [slide_binding, tint_binding, fade_binding] {
-                if let Some(b) = b {
-                    let is_exiting = self.exiting.contains_key(&b.id);
-                    let (fl, landed) = Self::drive(b, store, dt, over, is_exiting);
+            for (b, s) in [slide_binding, tint_binding, fade_binding] {
+                if let Some(b) = b
+                    && let Some(id) = &p.id
+                {
+                    let (fl, landed) = Self::drive(b, s, store, dt, over, id);
                     if fl {
                         any_in_flight = true;
                     }
-                    if landed {
-                        if let Some(msg) = self.exiting.remove(&b.id) {
-                            //exit finished deliver the
-                            //held msg
-                            done_msgs.push(msg)
-                        } else if let Some(m) = &b.on_done {
-                            done_msgs.push(m.clone())
-                        }
+                    if let Some(v) = landed
+                        && let Some((at, m)) = &b.on_done
+                        && *at == v
+                    {
+                        done_msgs.push(m.clone())
                     }
                 }
             }
 
             if let Some(msg) = p.behaviour.on_click.take() {
-                if let Some(exit_id) = &p.behaviour.exit {
-                    exit_hits.push((p.rect, exit_id.clone(), msg));
-                } else {
-                    hits.push((hit_rect, msg));
-                }
+                hits.push((hit_rect, msg));
             }
             if let Some((id, handler)) = p.behaviour.on_drag.take() {
                 drag_hits.push((hit_rect, id, handler));
+            }
+
+            if let Some((id, handler)) = p.behaviour.on_drop.take() {
+                drop_hits.push((hit_rect, id, handler));
             }
             if let Some(h) = p.behaviour.on_right_click.take() {
                 context_hits.push((hit_rect, h));
@@ -239,7 +238,7 @@ impl<A: App> Runner<A> {
                     if let Some(scroll_parent) = &p.scroll_parent {
                         let scroll_hit = scroll_hits.iter().find(|s| s.id == *scroll_parent);
                         if let Some(scroll_hit) = scroll_hit {
-                            let scroll = store.get_or::<Scroll>(&scroll_parent);
+                            let scroll = store.get_or::<Scroll>(&scroll_parent, Slot::Scroll);
                             let offset_y = scroll.y;
                             let near = p.rect.y0 - scroll_hit.rect.y0 + offset_y as f64;
                             let far = p.rect.y1 - scroll_hit.rect.y0 + offset_y as f64;
@@ -268,13 +267,15 @@ impl<A: App> Runner<A> {
             let scroll_vals: Option<(&Id, (f32, f32), (bool, bool))> =
                 if let Some(input) = &p.behaviour.input {
                     let (cw, ch) = store
-                        .get::<Field>(&Id::from(input.id.clone()))
+                        .get::<Field>(&Id::from(input.id.clone()), Slot::Editor)
                         .and_then(|f| f.layout_of())
                         .map(|l| (l.full_width(), l.height()))
                         .unwrap_or((0.0, 0.0));
                     Some((&input.id, (cw, ch), (true, true)))
-                } else if let Some(scroll) = &p.behaviour.scroll {
-                    Some((&scroll.id, p.content_size, (scroll.x, scroll.y)))
+                } else if let Some(scroll) = &p.behaviour.scroll
+                    && let Some(id) = &p.id
+                {
+                    Some((id, p.content_size, (scroll.x, scroll.y)))
                 } else {
                     None
                 };
@@ -286,7 +287,7 @@ impl<A: App> Runner<A> {
                     content,
                     inner: (iw, ih),
                 });
-                let s = store.get_or::<Scroll>(id);
+                let s = store.get_or::<Scroll>(id, Slot::Scroll);
                 if ay {
                     if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
                         bar_hits.push(v);
@@ -322,30 +323,27 @@ impl<A: App> Runner<A> {
     }
     fn drive<M>(
         b: &Binding<M>,
+        s: Slot,
         store: &mut Store,
         dt: f32,
         over: bool,
-        is_exiting: bool,
-    ) -> (bool, bool) {
-        let target = if is_exiting {
-            0.0
-        } else {
-            match b.driver {
-                Driver::Hover => {
-                    if over {
-                        1.0
-                    } else {
-                        0.0
-                    }
+        id: &Id,
+    ) -> (bool, Option<f32>) {
+        let target = match b.driver {
+            Driver::Hover => {
+                if over {
+                    1.0
+                } else {
+                    0.0
                 }
-                Driver::Value(f) => f,
             }
+            Driver::Value(f) => f,
         };
-        let tr = store.get_or_with(&b.id, || Transition::new(target, b.duration));
+        let tr = store.get_or_with(id, s, || Transition::new(target, b.duration));
         tr.target = target;
         let was = tr.in_flight();
         tr.tick(dt);
-        (tr.in_flight(), was && !tr.in_flight())
+        (tr.in_flight(), (was && !tr.in_flight()).then_some(target))
     }
 
     fn redraw(&self) {
@@ -365,7 +363,7 @@ impl<A: App> Runner<A> {
         {
             let bar = self
                 .store
-                .get::<Scroll>(&thumb.id)
+                .get::<Scroll>(&thumb.id, Slot::Scroll)
                 .copied()
                 .unwrap_or_default();
             self.drag = Some(Capture::Thumb {
@@ -403,7 +401,7 @@ impl<A: App> Runner<A> {
             Some((rect, id, pad)) => {
                 self.focused.set(id.clone());
                 let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
-                let field = self.store.get_mut::<Field>(id);
+                let field = self.store.get_mut::<Field>(id, Slot::Editor);
                 if let Some(field) = field {
                     field.click_at(lx, ly, &mut self.text);
                 }
@@ -421,9 +419,6 @@ impl<A: App> Runner<A> {
             let msg = msg.clone();
             self.app.update(msg);
         }
-        if let Some((_, id, msg)) = self.exit_hits.iter().rev().find(|(r, _, _)| r.contains(p)) {
-            self.exiting.insert(id.clone(), msg.clone());
-        }
 
         self.redraw();
     }
@@ -439,19 +434,19 @@ impl<A: App> Runner<A> {
     }
 
     fn local_point(&self, id: &str, rect: Rect, pad: Insets, px: f32, py: f32) -> (f32, f32) {
-        let field = self.store.get::<Field>(&Id::from(id));
+        let field = self.store.get::<Field>(&Id::from(id), Slot::Editor);
         let line_h = field
             .and_then(|f| f.layout_of())
             .map(|l| l.height())
             .unwrap_or(0.0);
         let scroll = self
             .store
-            .get::<Scroll>(&Id::from(id))
+            .get::<Scroll>(&Id::from(id), Slot::Scroll)
             .copied()
             .unwrap_or_default();
         let multiline = self
             .store
-            .get::<Field>(&Id::from(id))
+            .get::<Field>(&Id::from(id), Slot::Editor)
             .map(|f| f.is_multiline())
             .unwrap_or(false);
 
@@ -473,7 +468,10 @@ impl<A: App> Runner<A> {
     fn notify_app_text(&mut self) {
         let focused_id = self.focused.get();
         if let Some(focused_id) = focused_id {
-            let new_text = self.store.get::<Field>(focused_id).map(|f| f.text_of());
+            let new_text = self
+                .store
+                .get::<Field>(focused_id, Slot::Editor)
+                .map(|f| f.text_of());
             if let (Some(text), Some((_, map))) = (
                 new_text,
                 self.input_maps.iter().find(|(k, _)| k == focused_id),
@@ -497,9 +495,9 @@ impl<A: App> Runner<A> {
                 Axis::X => scroll.x + (lx - spx) * thumb.gain,
                 Axis::Y => scroll.y + (ly - spy) * thumb.gain,
             };
-            let cur = self.store.get_or::<Scroll>(&thumb.id);
+            let cur = self.store.get_or::<Scroll>(&thumb.id, Slot::Scroll);
             let cur = cur.get(&thumb.axis);
-            self.store.get_or::<Scroll>(&thumb.id).by(
+            self.store.get_or::<Scroll>(&thumb.id, Slot::Scroll).by(
                 thumb.axis,
                 desired - cur,
                 thumb.viewport,
@@ -553,6 +551,15 @@ impl<A: App> Runner<A> {
                         {
                             self.app.update(handler(event));
                         }
+
+                        if let Some((_, _, handler)) = self
+                            .drop_hits
+                            .iter()
+                            .rev()
+                            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+                        {
+                            self.app.update(handler(event));
+                        }
                     }
                 }
                 // scrollbar + text selection have no "End" message — take() already cleared them
@@ -584,7 +591,7 @@ impl<A: App> Runner<A> {
                 Capture::Text { id, rect, pad } => {
                     let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
                     let text = &mut self.text;
-                    let field = self.store.get_mut::<Field>(id);
+                    let field = self.store.get_mut::<Field>(id, Slot::Editor);
                     if let Some(field) = field {
                         field.extend_to(lx, ly, text);
                     }
@@ -629,16 +636,20 @@ impl<A: App> Runner<A> {
             }
             //chaining scroll
             if rem_h != 0.0 {
-                rem_h =
-                    self.store
-                        .get_or::<Scroll>(&s.id)
-                        .by(Axis::X, rem_h, s.inner.0, s.content.0);
+                rem_h = self.store.get_or::<Scroll>(&s.id, Slot::Scroll).by(
+                    Axis::X,
+                    rem_h,
+                    s.inner.0,
+                    s.content.0,
+                );
             }
             if rem_v != 0.0 {
-                rem_v =
-                    self.store
-                        .get_or::<Scroll>(&s.id)
-                        .by(Axis::Y, rem_v, s.inner.1, s.content.1);
+                rem_v = self.store.get_or::<Scroll>(&s.id, Slot::Scroll).by(
+                    Axis::Y,
+                    rem_v,
+                    s.inner.1,
+                    s.content.1,
+                );
             }
             if rem_h.abs() < 0.5 && rem_v.abs() < 0.5 {
                 break;
@@ -649,20 +660,23 @@ impl<A: App> Runner<A> {
 
     fn handle_input(&mut self, event: KeyEvent) {
         let pressed = event.state == ElementState::Pressed;
-        let (mut enter_pressed, mut esc_pressed, mut f12_pressed) = (false, false, false);
+        let (mut enter_pressed, mut esc_pressed, mut f12_pressed, mut f5_pressed) =
+            (false, false, false, false);
         if event.logical_key == Key::Named(Enter) {
             enter_pressed = true;
         } else if event.logical_key == Key::Named(Escape) {
             esc_pressed = true;
         } else if event.logical_key == Key::Named(F12) {
             f12_pressed = true;
+        } else if event.logical_key == Key::Named(F5) {
+            f5_pressed = true;
         }
         if pressed {
             if let Some(id) = self.focused.get() {
                 if enter_pressed && !event.repeat {
                     if !self
                         .store
-                        .get::<Field>(&id)
+                        .get::<Field>(&id, Slot::Editor)
                         .map(|f| f.is_multiline())
                         .unwrap_or(false)
                     {
@@ -684,6 +698,10 @@ impl<A: App> Runner<A> {
                 self.debug = !self.debug;
                 self.redraw();
                 return;
+            }
+            if f5_pressed {
+                self.app.reload();
+                self.redraw();
             }
         }
         if event.state != ElementState::Pressed {
@@ -812,6 +830,7 @@ pub fn run<A: App + 'static>(app: A) {
         text: TextEngine::new(),
         input_maps: Vec::new(),
         drag_hits: Vec::new(),
+        drop_hits: Vec::new(),
         modifiers: ModifiersState::empty(),
         scroll_hits: Vec::new(),
         bar_hits: Vec::new(),
@@ -824,8 +843,6 @@ pub fn run<A: App + 'static>(app: A) {
         scene: Scene::new(),
         start: Instant::now(),
         last_frame: None,
-        exiting: HashMap::new(),
-        exit_hits: Vec::new(),
     };
     event_loop.run_app(&mut runner).expect("run app");
 }

@@ -90,7 +90,8 @@ impl LoginScreen {
         );
 
         let acc_list = col()
-            .scroll_y("accounts")
+            .id("accounts")
+            .scroll_y()
             .h(360.0)
             .gap(8.0)
             .children(accounts);

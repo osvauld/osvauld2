@@ -1,7 +1,7 @@
 use crate::theme;
 use runtime::{
-    col, row, text, text_input, Anchor, DragEvent, DragPhase, El, Placement, PlacementAlign,
-    PlacementSide,
+    Anchor, DragEvent, DragPhase, El, Placement, PlacementAlign, PlacementSide, col, row, text,
+    text_input,
 };
 
 pub enum Event {
@@ -19,18 +19,22 @@ pub struct TodoScreen {
     dragging: Option<(u64, usize)>,
     open_menu: bool,
     menu_at: Option<(f32, f32)>,
+    leaving: Option<u64>, // row fading out; removed for real when the fade lands
+    menu_closing: bool,
 }
 #[derive(Clone)]
 pub enum Msg {
     New,
     Update(String, u64),
     Delete(u64),
+    Removed(u64),
     Done(u64),
     Back,
     ToggleEdit(u64),
     Reorder(u64, DragEvent),
     ToggleOverlay,
     MenuAt((f32, f32)),
+    CloseMenuRequest,
     CloseMenu,
     Foo,
 }
@@ -44,6 +48,8 @@ impl TodoScreen {
             dragging: None,
             open_menu: false,
             menu_at: None,
+            leaving: None,
+            menu_closing: false,
         }
     }
     pub fn update(&mut self, msg: Msg) -> Option<Event> {
@@ -67,7 +73,15 @@ impl TodoScreen {
                 None
             }
             Msg::Delete(id) => {
-                self.items.retain(|t| t.id != id);
+                self.leaving = Some(id);
+                None
+            }
+            // the fade settles at both ends; only act on the one we asked for
+            Msg::Removed(id) => {
+                if self.leaving == Some(id) {
+                    self.items.retain(|t| t.id != id);
+                    self.leaving = None;
+                }
                 None
             }
 
@@ -122,8 +136,13 @@ impl TodoScreen {
                 self.menu_at = Some((x, y));
                 None
             }
+            Msg::CloseMenuRequest => {
+                self.menu_closing = true;
+                None
+            }
             Msg::CloseMenu => {
                 self.menu_at = None;
+                self.menu_closing = false;
                 None
             }
             Msg::Foo => {
@@ -143,7 +162,8 @@ impl TodoScreen {
             .hover_fill(theme::accent_press())
             .on_click(Msg::New)
             .child(text("Add todo"))
-            .slide_in("todo:id", (200.0, 0.0), 500.0);
+            .id("add_todo")
+            .slide_in((200.0, 0.0), 500.0);
         let mut todos = Vec::new();
 
         for r in &self.items {
@@ -184,8 +204,7 @@ impl TodoScreen {
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
                 .on_click(Msg::Delete(r.id))
-                .child(text("x").font_size(14.0).color(theme::fg_4()))
-                .exit(format!("todo_fadel:{}", todo_id).as_str());
+                .child(text("x").font_size(14.0).color(theme::fg_4()));
             let edit = col()
                 .size(24.0, 24.0)
                 .center()
@@ -209,12 +228,16 @@ impl TodoScreen {
                 .child(del)
                 .child(edit)
                 .child(checkbox)
-                .fade_in(format!("todo_fadel:{}", todo_id), 500.0);
+                .id(id)
+                .fade(if self.leaving == Some(r.id) { 0.0 } else { 1.0 }, 500.0)
+                .on_faded_out(Msg::Removed(r.id));
+
             todos.push(k);
         }
 
         let panel = col()
-            .scroll_y("todo:list")
+            .id("col:list")
+            .scroll_y()
             .h(400.0)
             .gap(8.0)
             .children(todos);
@@ -255,8 +278,10 @@ impl TodoScreen {
             .child(text("second"))
             .child(text("floating2!"))
             .child(text("second2"))
-            .fade_in("menu2", 400.0)
-            .exit("menu2");
+            .id("menu2")
+            .fade(if self.menu_closing { 0.0 } else { 1.0 }, 500.0)
+            .on_faded_out(Msg::CloseMenu);
+
         if self.open_menu {
             back = back.overlay(
                 menu,
@@ -281,7 +306,7 @@ impl TodoScreen {
         if let Some((x, y)) = self.menu_at {
             root = root.overlay(
                 menu2,
-                Some(Msg::CloseMenu),
+                Some(Msg::CloseMenuRequest),
                 Placement {
                     side: PlacementSide::Top,
                     align: PlacementAlign::Start,

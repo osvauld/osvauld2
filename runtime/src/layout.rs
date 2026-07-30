@@ -10,11 +10,12 @@ use crate::col;
 use crate::el::{Anchor, Appearance, Behaviour, El, Overlay};
 use crate::id::Id;
 use crate::scroll::Scroll;
-use crate::state::Store;
+use crate::state::{Slot, Store};
 use crate::text::TextEngine;
 
 /// One positioned node, ready to paint and hit-test. `rect` is in logical points.
 pub(crate) struct Placed<M> {
+    pub id: Option<Id>,
     pub rect: Rect,
     pub pad: Insets,
     pub behaviour: Behaviour<M>,
@@ -27,6 +28,7 @@ pub(crate) struct Placed<M> {
 
 /// El props + its Taffy node id + mapped children, retained between build and emit.
 struct Mapped<M> {
+    id: Option<Id>,
     node: NodeId,
     appearance: Appearance,
     behaviour: Behaviour<M>,
@@ -84,6 +86,7 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
         tree.new_with_children(style, &ids).expect("node")
     };
     Mapped {
+        id: el.id,
         node,
         appearance: el.appearance,
         behaviour: el.behaviour,
@@ -106,9 +109,9 @@ fn emit<M>(
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
     let (mut dx, mut dy) = m.behaviour.offset;
-    if let Some((spec, (sx, sy))) = &m.behaviour.slide {
+    if let Some((spec, (sx, sy))) = &m.behaviour.slide && let Some(id) = &m.id {
         let p = store
-            .get::<Transition>(&spec.id)
+            .get::<Transition>(id, Slot::Slide)
             .map(|t| t.progress)
             .unwrap_or(0.0);
         let e = spec.easing.apply(p);
@@ -128,9 +131,12 @@ fn emit<M>(
     let (mut cx, mut cy) = (x, y);
     let mut child_clip = clip;
     let mut parent_scroll = scroll_parent.clone();
-    if let Some(s) = &m.behaviour.scroll {
-        let scroll = store.get::<Scroll>(&s.id).copied().unwrap_or_default();
-        parent_scroll = Some(s.id.clone());
+    if let Some(s) = &m.behaviour.scroll && let Some(id) = &m.id {
+        let scroll = store
+            .get::<Scroll>(id, Slot::Scroll)
+            .copied()
+            .unwrap_or_default();
+        parent_scroll = Some(id.clone());
         if s.x {
             cx -= scroll.x;
         }
@@ -151,9 +157,9 @@ fn emit<M>(
         overlays.push((rect, overlay));
     }
     let mut opacity = m.behaviour.opacity;
-    if let Some(spec) = &m.behaviour.fade {
+    if let Some(spec) = &m.behaviour.fade && let Some(id) = &m.id {
         let p = store
-            .get::<Transition>(&spec.id)
+            .get::<Transition>(id, Slot::Fade)
             .map(|t| t.progress)
             .unwrap_or(0.0);
         opacity *= spec.easing.apply(p)
@@ -162,6 +168,7 @@ fn emit<M>(
     let behaviour = m.behaviour;
     let appearance = m.appearance;
     out.push(Placed {
+        id: m.id,
         rect,
         scroll_parent,
         appearance,
@@ -230,7 +237,6 @@ pub(crate) fn solve<M>(
     for (rect, overlay) in overlays {
         let mut tree = TaffyTree::new();
 
-        let fade_id = overlay.panel.behaviour.fade.as_ref().map(|f| f.id.clone());
         let mapped = build(*overlay.panel, &mut tree, text);
         tree.compute_layout(
             mapped.node,
@@ -247,11 +253,7 @@ pub(crate) fn solve<M>(
             .resolve(rect, (pl.size.width, pl.size.height), viewport);
         if let Some(msg) = overlay.dismiss {
             let mut capture_tree = TaffyTree::new();
-            let mut dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
-            if let Some(fade_id) = fade_id {
-                dismiss_panel = dismiss_panel.exit(fade_id);
-            }
-
+            let dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
             let mapped = build(dismiss_panel, &mut capture_tree, text);
             let opacity = mapped.behaviour.opacity;
 

@@ -8,9 +8,9 @@
 
 use std::rc::Rc;
 use taffy::prelude::*; // Style, Display, FlexDirection, length(), auto(), Size, Rect (geometry), …
+use vello::Scene;
 use vello::kurbo::Affine;
 use vello::peniko::Color;
-use vello::Scene;
 
 use crate::anim::{Driver, Easing};
 use crate::drag::DragEvent;
@@ -110,7 +110,6 @@ fn lerp_opt_border(a: Option<Border>, b: Option<Border>, t: f32) -> Option<Borde
 
 #[derive(Clone)]
 pub struct ScrollSpec {
-    pub id: Id,
     pub x: bool,
     pub y: bool,
 }
@@ -221,11 +220,10 @@ pub enum PlacementAlign {
 }
 
 pub(crate) struct Binding<M> {
-    pub id: Id,
     pub driver: Driver,
     pub duration: f32,
     pub easing: Easing,
-    pub on_done: Option<M>,
+    pub on_done: Option<(f32, M)>, // fire M when the transition settles at this value
 }
 
 pub(crate) struct Behaviour<M> {
@@ -233,6 +231,7 @@ pub(crate) struct Behaviour<M> {
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
+    pub on_drop: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
@@ -240,7 +239,6 @@ pub(crate) struct Behaviour<M> {
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
-    pub exit: Option<Id>,
 }
 
 impl<M> Default for Behaviour<M> {
@@ -257,7 +255,7 @@ impl<M> Default for Behaviour<M> {
             slide: None,
             fade: None,
             tint: None,
-            exit: None,
+            on_drop: None,
         }
     }
 }
@@ -337,6 +335,7 @@ pub fn custom<M>(
 /// One node of the view tree. Layout style + paint decoration + optional text/custom content +
 /// optional click message + children. Built via the free fns below and the chained setters.
 pub struct El<M> {
+    pub(crate) id: Option<Id>,
     pub(crate) layout: Style,
     pub(crate) appearance: Appearance,
     pub(crate) behaviour: Behaviour<M>,
@@ -345,11 +344,17 @@ pub struct El<M> {
 impl<M> El<M> {
     fn new(layout: Style) -> Self {
         El {
+            id: None,
             layout,
             behaviour: Behaviour::default(),
             appearance: Appearance::default(),
             children: Vec::new(),
         }
+    }
+
+    pub fn id(mut self, id: impl Into<Id>) -> Self {
+        self.id = Some(id.into());
+        self
     }
     // ── layout ──────────────────────────────────────────────────────────
     /// Gap between children (both axes; only the main axis matters for a single-direction flex).
@@ -477,9 +482,8 @@ impl<M> El<M> {
         self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
         self
     }
-    pub fn tint(mut self, id: impl Into<Id>, ms: f32) -> Self {
+    pub fn tint(mut self, ms: f32) -> Self {
         self.behaviour.tint = Some(Binding {
-            id: id.into(),
             driver: Driver::Hover,
             duration: ms / 1000.0,
             easing: Easing::EaseOut,
@@ -492,10 +496,9 @@ impl<M> El<M> {
         self
     }
 
-    pub fn slide_in(mut self, id: impl Into<Id>, (dx, dy): (f32, f32), ms: f32) -> Self {
+    pub fn slide_in(mut self, (dx, dy): (f32, f32), ms: f32) -> Self {
         self.behaviour.slide = Some((
             Binding {
-                id: id.into(),
                 driver: Driver::Value(1.0),
                 duration: ms / 1000.0,
                 easing: Easing::EaseOut,
@@ -505,24 +508,31 @@ impl<M> El<M> {
         ));
         self
     }
-    pub fn fade_in(mut self, id: impl Into<Id>, ms: f32) -> Self {
+    /// Drive this element's opacity toward `to` (0..1). The app sets the target from its own
+    /// state; the runtime owns the tween.
+    pub fn fade(mut self, to: f32, ms: f32) -> Self {
         self.behaviour.fade = Some(Binding {
-            id: id.into(),
-            driver: Driver::Value(1.0),
+            driver: Driver::Value(to),
             duration: ms / 1000.0,
             easing: Easing::EaseOut,
             on_done: None,
         });
         self
     }
+    pub fn fade_in(self, ms: f32) -> Self {
+        self.fade(1.0, ms)
+    }
 
-    pub fn opacity(mut self, opacity: f32) -> Self {
-        self.behaviour.opacity = opacity;
+    /// Fires whenever the fade settles — on arrival at 0
+    pub fn on_faded_out(mut self, m: M) -> Self {
+        if let Some(b) = &mut self.behaviour.fade {
+            b.on_done = Some((0.0, m));
+        }
         self
     }
 
-    pub fn exit(mut self, id: impl Into<Id>) -> Self {
-        self.behaviour.exit = Some(id.into());
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.behaviour.opacity = opacity;
         self
     }
 
@@ -557,6 +567,11 @@ impl<M> El<M> {
         self
     }
 
+    pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
+        self.behaviour.on_drop = Some((id.into(), Box::new(map)));
+        self
+    }
+
     pub fn on_right_click(mut self, ctx: impl Fn((f32, f32)) -> M + 'static) -> Self {
         self.behaviour.on_right_click = Some(Box::new(ctx));
         self
@@ -570,22 +585,20 @@ impl<M> El<M> {
         self
     }
 
-    pub fn scroll_y(mut self, id: impl Into<Id>) -> Self {
-        let s = self.behaviour.scroll.get_or_insert(ScrollSpec {
-            id: id.into(),
-            x: false,
-            y: false,
-        });
+    pub fn scroll_y(mut self) -> Self {
+        let s = self
+            .behaviour
+            .scroll
+            .get_or_insert(ScrollSpec { x: false, y: false });
         s.y = true;
         self
     }
 
-    pub fn scroll_x(mut self, id: impl Into<Id>) -> Self {
-        let s = self.behaviour.scroll.get_or_insert(ScrollSpec {
-            id: id.into(),
-            y: false,
-            x: false,
-        });
+    pub fn scroll_x(mut self) -> Self {
+        let s = self
+            .behaviour
+            .scroll
+            .get_or_insert(ScrollSpec { y: false, x: false });
         s.x = true;
         self
     }
@@ -639,12 +652,14 @@ impl<M> El<M> {
             appearance,
             behaviour,
             children,
+            id,
         } = self;
         let Behaviour {
             on_click,
             input,
             scroll,
             on_drag,
+            on_drop,
             overlay,
             on_right_click,
             offset,
@@ -652,10 +667,17 @@ impl<M> El<M> {
             slide,
             fade,
             tint,
-            exit,
         } = behaviour;
         let r_f = Rc::clone(&f);
         let new_drag = on_drag.map(|(id, d)| {
+            (
+                id,
+                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DragEvent) -> B>,
+            )
+        });
+
+        let r_f = Rc::clone(&f);
+        let new_drop = on_drop.map(|(id, d)| {
             (
                 id,
                 Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DragEvent) -> B>,
@@ -699,29 +721,26 @@ impl<M> El<M> {
         let new_slide = slide.map(|(binding, (dx, dy))| {
             (
                 Binding {
-                    id: binding.id,
                     driver: binding.driver,
                     easing: binding.easing,
-                    on_done: binding.on_done.map(|m| f(m)),
+                    on_done: binding.on_done.map(|(t, m)| (t, f(m))),
                     duration: binding.duration,
                 },
                 (dx, dy),
             )
         });
         let new_fade = fade.map(|fa| Binding {
-            id: fa.id,
             driver: fa.driver,
             duration: fa.duration,
             easing: fa.easing,
-            on_done: fa.on_done.map(|o| f(o)),
+            on_done: fa.on_done.map(|(t, m)| (t, f(m))),
         });
 
         let new_tint = tint.map(|t| Binding {
-            id: t.id,
             driver: t.driver,
             duration: t.duration,
             easing: t.easing,
-            on_done: t.on_done.map(|o| f(o)),
+            on_done: t.on_done.map(|(t, m)| (t, f(m))),
         });
 
         let behaviour = Behaviour {
@@ -729,6 +748,7 @@ impl<M> El<M> {
             input,
             scroll,
             on_drag: new_drag,
+            on_drop: new_drop,
             overlay: new_overlay,
             on_right_click,
             offset,
@@ -736,7 +756,6 @@ impl<M> El<M> {
             slide: new_slide,
             fade: new_fade,
             tint: new_tint,
-            exit,
         };
         let mut converted_children: Vec<El<B>> = Vec::new();
         for child in children {
@@ -747,6 +766,7 @@ impl<M> El<M> {
             appearance,
             behaviour,
             children: converted_children,
+            id,
         }
     }
 }
