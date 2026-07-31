@@ -15,6 +15,7 @@ use vello::peniko::Color;
 use crate::anim::{Driver, Easing};
 use crate::drag::DragEvent;
 use crate::id::Id;
+use crate::state::Slot;
 /// A text leaf's content + face. The real color is applied at vello draw time.
 pub(crate) struct TextSpec {
     pub text: String,
@@ -31,7 +32,6 @@ pub(crate) type CustomFn =
 /// Marks an `El` as an editable text field. The display text + face live in the element's `text`
 /// (`TextSpec`); this only carries the focus identity and how to message an edit.
 pub(crate) struct InputSpec<M> {
-    pub id: Id,
     pub map: Option<Box<dyn Fn(String) -> M>>,
     pub multiline: bool,
     pub autofocus: bool,
@@ -42,7 +42,7 @@ pub(crate) struct InputSpec<M> {
 // A stroked outline: width (logical px) + color. Distinct from kurbo's `Stroke`
 #[derive(Clone, Copy)]
 pub(crate) struct Border {
-    pub width: f64,
+    pub width: f32,
     pub color: Color,
 }
 
@@ -51,7 +51,7 @@ pub(crate) struct Border {
 pub(crate) struct Look {
     pub fill: Option<Color>,
     pub stroke: Option<Border>,
-    pub radius: f64,
+    pub radius: f32,
     pub hover_fill: Option<Color>,
     pub hover_stroke: Option<Border>,
 }
@@ -93,7 +93,7 @@ fn lerp_opt_color(a: Option<Color>, b: Option<Color>, t: f32) -> Option<Color> {
 fn lerp_opt_border(a: Option<Border>, b: Option<Border>, t: f32) -> Option<Border> {
     match (a, b) {
         (Some(a), Some(b)) => Some(Border {
-            width: a.width + (b.width - a.width) * t as f64, // f64 — cast t
+            width: a.width + (b.width - a.width) * t,
             color: lerp_color(a.color, b.color, t),
         }),
         (None, Some(b)) => Some(Border {
@@ -240,6 +240,18 @@ pub(crate) struct Behaviour<M> {
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
 }
+impl<M> Behaviour<M> {
+    /// Every store-backed transition on this node, paired with the slot it lives under.
+    pub fn bindings(&self) -> impl Iterator<Item = (&Binding<M>, Slot)> {
+        [
+            self.slide.as_ref().map(|(b, _)| (b, Slot::Slide)),
+            self.tint.as_ref().map(|b| (b, Slot::Tint)),
+            self.fade.as_ref().map(|b| (b, Slot::Fade)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
 
 impl<M> Default for Behaviour<M> {
     fn default() -> Self {
@@ -297,8 +309,8 @@ pub fn input<M>(
     multiline: bool,
 ) -> El<M> {
     let mut e = text(value);
+    e.id = Some(id.into());
     e.behaviour.input = Some(InputSpec {
-        id: id.into(),
         map: Some(Box::new(map)),
         multiline,
         autofocus: false,
@@ -466,11 +478,11 @@ impl<M> El<M> {
         self.appearance.look.fill = Some(c);
         self
     }
-    pub fn stroke(mut self, w: f64, c: Color) -> Self {
+    pub fn stroke(mut self, w: f32, c: Color) -> Self {
         self.appearance.look.stroke = Some(Border { width: w, color: c });
         self
     }
-    pub fn radius(mut self, r: f64) -> Self {
+    pub fn radius(mut self, r: f32) -> Self {
         self.appearance.look.radius = r;
         self
     }
@@ -478,7 +490,7 @@ impl<M> El<M> {
         self.appearance.look.hover_fill = Some(c);
         self
     }
-    pub fn hover_stroke(mut self, w: f64, c: Color) -> Self {
+    pub fn hover_stroke(mut self, w: f32, c: Color) -> Self {
         self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
         self
     }
@@ -690,7 +702,6 @@ impl<M> El<M> {
             on_right_click.map(|m| Box::new(move |s| rc(m(s))) as Box<dyn Fn((f32, f32)) -> B>);
         let input = match input {
             Some(InputSpec {
-                id,
                 map,
                 multiline,
                 on_enter,
@@ -701,7 +712,6 @@ impl<M> El<M> {
                 let new_map = map.map(|g| Box::new(move |s| r_f(g(s))) as Box<dyn Fn(String) -> B>);
 
                 Some(InputSpec {
-                    id,
                     multiline,
                     autofocus,
                     on_enter: on_enter.map(|e| f(e)),

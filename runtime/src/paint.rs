@@ -2,6 +2,7 @@
 //! with `hover_*` set uses it when the pointer is inside its rect, else the base look. No stored
 //! hover flags; it falls out of `pointer ∩ rect` each frame (and we only repaint on pointer moves).
 
+use crate::MONO_FAMILY;
 use crate::anim::Transition;
 use crate::editor::Field;
 use crate::editor::Focus;
@@ -12,11 +13,10 @@ use crate::scroll::Scroll;
 use crate::scroll::Thumb;
 use crate::state::{Slot, Store};
 use crate::text::TextEngine;
-use crate::MONO_FAMILY;
+use vello::Scene;
 use vello::kurbo::Line;
 use vello::kurbo::{Affine, Insets, Point, Rect, RoundedRect, Stroke};
 use vello::peniko::{Color, Fill};
-use vello::Scene;
 
 const SELECTION: Color = Color::from_rgba8(0x8A, 0x86, 0xE5, 0x66);
 const THUMB: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x59);
@@ -48,7 +48,9 @@ pub(crate) fn draw<M>(
             clipping = true;
             scene.push_clip_layer(Fill::NonZero, t, &c);
         }
-        let t_e = if let Some(spec) = &p.behaviour.tint && let Some(id) = &p.id {
+        let t_e = if let Some(spec) = &p.behaviour.tint
+            && let Some(id) = &p.id
+        {
             let progress = store
                 .get::<Transition>(id, Slot::Tint)
                 .map(|t| t.progress)
@@ -61,23 +63,25 @@ pub(crate) fn draw<M>(
             t
         };
         let (fill, stroke) = p.appearance.look.resolve_t(t_e);
-        let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius);
+        let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius as f64);
         if let Some(mut c) = fill {
             c = c.multiply_alpha(p.alpha);
             scene.fill(Fill::NonZero, t, c, None, &shape);
         }
         if let Some(mut b) = stroke {
             b.color = b.color.multiply_alpha(p.alpha);
-            scene.stroke(&Stroke::new(b.width), t, b.color, None, &shape);
+            scene.stroke(&Stroke::new(b.width as f64), t, b.color, None, &shape);
         }
         if let Some(custom) = &p.appearance.custom {
             custom(scene, text, p.rect, t);
         }
         if let Some(ts) = &p.appearance.text {
             let text_color = ts.color.multiply_alpha(p.alpha);
-            if let Some(spec) = &p.behaviour.input {
+            if let Some(spec) = &p.behaviour.input
+                && let Some(id) = &p.id
+            {
                 let field_layout = store
-                    .get::<Field>(&spec.id, Slot::Editor)
+                    .get::<Field>(id, Slot::Editor)
                     .and_then(|f| f.layout_of().map(|l| (f, l)));
 
                 if let Some((field, layout)) = field_layout {
@@ -90,7 +94,7 @@ pub(crate) fn draw<M>(
 
                     scene.push_clip_layer(Fill::NonZero, t, &content);
                     let s = store
-                        .get::<Scroll>(&spec.id, Slot::Scroll)
+                        .get::<Scroll>(id, Slot::Scroll)
                         .copied()
                         .unwrap_or_default();
                     let (scroll_x, scroll_y) = (s.x, s.y);
@@ -113,9 +117,9 @@ pub(crate) fn draw<M>(
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
                     text.draw_layout(scene, layout, origin, text_color);
-                    if focus.is_focused(&spec.id) {
+                    if focus.is_focused(id.clone()) {
                         if let Some(bb) = store
-                            .get::<Field>(&spec.id, Slot::Editor)
+                            .get::<Field>(id, Slot::Editor)
                             .and_then(|f| f.cursor_geometry(1.5))
                         {
                             let r = Rect::new(

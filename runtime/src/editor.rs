@@ -253,8 +253,8 @@ impl Focus {
         self.focused.as_ref()
     }
 
-    pub fn is_focused(&self, id: &str) -> bool {
-        self.focused.as_deref() == Some(id)
+    pub fn is_focused(&self, id: Id) -> bool {
+        self.focused == Some(id)
     }
     pub fn clear_if_gone(&mut self, store: &Store) {
         if let Some(id) = &self.focused {

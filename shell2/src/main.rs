@@ -21,10 +21,10 @@ pub enum Screen {
     Todo,
 }
 fn main() {
-    // runtime::run(
-    //     app_host::LuaApp::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test.lua")).unwrap(),
-    // );
-    runtime::run(Shell::new());
+    runtime::run(
+        app_host::LuaApp::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test.lua")).unwrap(),
+    );
+    // runtime::run(Shell::new());
 }
 struct Shell {
     screen: Screen,

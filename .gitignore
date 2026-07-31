@@ -1,4 +1,9 @@
-/target
+# no leading slash: matches per-crate target/ dirs too, not just the workspace root
+target/
 
 # Engine app local data snapshots (dev-grade persistence; real store is the encrypted vault)
 *.lua.snapshot
+
+# Local machine / editor state
+.claude/settings.local.json
+.DS_Store

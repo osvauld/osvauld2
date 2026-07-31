@@ -92,8 +92,10 @@ return function()
 			}),
 			ui.button({
 				h = 40,
+				w = 100,
 				pad = 12,
 				center = true,
+				radius = 24,
 				fill = "#3b82f6",
 				ui.text({ "add3", color = "white" }),
 				on_click = function()
@@ -109,11 +111,12 @@ return function()
 
 		local card = ui.row({
 			id = "card:" .. t.id,
+			gap = 8,
+			center = true,
+
 			on_drag = function(x, y)
 				update({ kind = "drag", id = t.id })
 			end,
-			gap = 8,
-			center = true,
 			ui.button({
 				w = 24,
 				h = 24,

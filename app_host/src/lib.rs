@@ -4,14 +4,15 @@
 //! walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update loop
 //! is unchanged — dispatch just calls the closure the index points at.
 
-use mlua::{Error, Function, Lua, Table};
+mod props;
+use mlua::{Function, Lua, Table};
 use runtime::vello::peniko::Color;
-use runtime::{col, row, text, text_input, DragEvent, El};
+use runtime::{El, col, row, text, text_input};
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
@@ -21,7 +22,8 @@ pub enum LuaMsg {
 }
 
 pub struct LuaApp {
-    vm: Lua,
+    vm: Lua, // never read, but every `Function` below borrows from it — dropping it invalidates them
+
     view_fn: Option<Function>,        //the closure the source returns
     handlers: RefCell<Vec<Function>>, // refilled every frame
     path: Option<PathBuf>,
@@ -63,7 +65,10 @@ impl LuaApp {
                     error: error,
                 })
             }
-            Err(e) => Err(mlua::Error::runtime("failed to read file")),
+            Err(e) => Err(mlua::Error::runtime(format!(
+                "failed to read {}: {e}",
+                path.display()
+            ))),
         }
     }
 }
@@ -90,10 +95,16 @@ impl runtime::App for LuaApp {
     fn update(&mut self, msg: LuaMsg) {
         let handlers = self.handlers.borrow();
 
+        // A message can outlive the frame that minted its index (queued click, landed animation),
+        // so a stale index is expected — drop it rather than panicking.
+        let (LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPos(i, _, _)) = msg;
+        let Some(h) = handlers.get(i as usize) else {
+            return;
+        };
         let result = match msg {
-            LuaMsg::Call(i) => handlers[i as usize].call::<()>(()),
-            LuaMsg::CallStr(i, s) => handlers[i as usize].call::<()>(s),
-            LuaMsg::CallPos(i, x, y) => handlers[i as usize].call::<()>((x, y)),
+            LuaMsg::Call(_) => h.call::<()>(()),
+            LuaMsg::CallStr(_, s) => h.call::<()>(s),
+            LuaMsg::CallPos(_, x, y) => h.call::<()>((x, y)),
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
@@ -172,15 +183,6 @@ fn walk(node: Table, handlers: &mut Vec<Function>) -> mlua::Result<El<LuaMsg>> {
 
         other => text(format!("unknown tag{}", other)),
     };
-    if let Some(f) = node.get::<Option<Function>>("on_click")? {
-        let idx = handlers.len() as u32;
-        handlers.push(f);
-        el = el.on_click(LuaMsg::Call(idx))
-    }
-    if let Some(g) = node.get::<Option<f32>>("gap")? {
-        el = el.gap(g);
-    }
-
     if let Some(f) = node.get::<Option<Function>>("on_drag")? {
         let id: String = node.get("id")?;
         let idx = handlers.len() as u32;
@@ -199,34 +201,8 @@ fn walk(node: Table, handlers: &mut Vec<Function>) -> mlua::Result<El<LuaMsg>> {
         el = el.id(s.as_str());
     }
 
-    if let Some(p) = node.get::<Option<f32>>("pad")? {
-        el = el.pad(p);
-    }
+    el = props::apply(el, &node, handlers)?;
 
-    if let Some(h) = node.get::<Option<f32>>("h")? {
-        el = el.h(h);
-    }
-    if let Some(w) = node.get::<Option<f32>>("w")? {
-        el = el.w(w);
-    }
-    if let Some(s) = node.get::<Option<String>>("fill")? {
-        el = el.fill(parse_color(&s)?);
-    }
-    if let Some(r) = node.get::<Option<f64>>("radius")? {
-        el = el.radius(r);
-    }
-    if let Some(true) = node.get::<Option<bool>>("center")? {
-        el = el.center();
-    }
-    if let Some(s) = node.get::<Option<String>>("color")? {
-        el = el.color(parse_color(&s)?);
-    }
-
-    if let Some(handle_enter) = node.get::<Option<Function>>("on_enter")? {
-        let idx = handlers.len() as u32;
-        handlers.push(handle_enter);
-        el = el.on_enter(LuaMsg::Call(idx));
-    }
     if let Some(scroll) = node.get::<Option<String>>("scroll")? {
         if id.is_none() {
             return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
@@ -240,7 +216,7 @@ fn walk(node: Table, handlers: &mut Vec<Function>) -> mlua::Result<El<LuaMsg>> {
     Ok(el)
 }
 
-fn parse_color(s: &str) -> mlua::Result<Color> {
+pub fn parse_color(s: &str) -> mlua::Result<Color> {
     let c = csscolorparser::parse(s).map_err(mlua::Error::external)?;
     let [r, g, b, a] = c.to_rgba8();
     Ok(Color::from_rgba8(r, g, b, a))
