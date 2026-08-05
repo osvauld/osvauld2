@@ -13,7 +13,7 @@ use vello::kurbo::Affine;
 use vello::peniko::Color;
 
 use crate::anim::{Driver, Easing};
-use crate::drag::DragEvent;
+use crate::drag::{DragEvent, DropEvent};
 use crate::id::Id;
 use crate::state::Slot;
 /// A text leaf's content + face. The real color is applied at vello draw time.
@@ -231,7 +231,7 @@ pub(crate) struct Behaviour<M> {
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
-    pub on_drop: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
+    pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
@@ -579,7 +579,7 @@ impl<M> El<M> {
         self
     }
 
-    pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
+    pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DropEvent) -> M + 'static) -> Self {
         self.behaviour.on_drop = Some((id.into(), Box::new(map)));
         self
     }
@@ -692,7 +692,7 @@ impl<M> El<M> {
         let new_drop = on_drop.map(|(id, d)| {
             (
                 id,
-                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DragEvent) -> B>,
+                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DropEvent) -> B>,
             )
         });
         let on_click = on_click.map(|m| f(m));

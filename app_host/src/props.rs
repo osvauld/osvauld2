@@ -1,66 +1,195 @@
-use crate::{LuaMsg, parse_color};
+use crate::{Ctx, LuaMsg, parse_color};
 use mlua::{Function, Table, Value};
 use runtime::El;
 use runtime::vello::peniko::Color;
 
 type E = El<LuaMsg>;
 
-/// A prop's Lua value type + the builder it forwards to. Each variant holds a plain fn pointer,
-/// so builder methods are named directly — `El::pad` *is* a `fn(E, f32) -> E`.
-///
-/// Nothing here is tag-aware: any prop may appear on any node, exactly as CSS ignores `gap` on a
-/// non-flex box. Tags differ only in construction and whether they take children.
-pub(crate) enum Prop {
-    F32(fn(E, f32) -> E),
-    Color(fn(E, Color) -> E),
-    Flag(fn(E) -> E),
-    /// `{ width, "#rrggbb" }`
-    Stroke(fn(E, f32, Color) -> E),
+/// How a Lua value becomes a Rust value. Keyed on the *type*, not the prop — once `Color`
+/// implements this, every builder taking a `Color` decodes for free, at any arity.
+pub(crate) trait FromProp: Sized {
+    fn from_prop(v: &Value) -> mlua::Result<Self>;
 }
 
+fn want(v: &Value, ty: &str) -> mlua::Error {
+    mlua::Error::runtime(format!("expected {ty} got {}", v.type_name()))
+}
+
+impl FromProp for f32 {
+    fn from_prop(v: &Value) -> mlua::Result<Self> {
+        v.as_f32()
+            .or_else(|| v.as_integer().map(|i| i as f32))
+            .ok_or_else(|| want(v, "a number"))
+    }
+}
+
+impl FromProp for bool {
+    fn from_prop(v: &Value) -> mlua::Result<Self> {
+        v.as_boolean().ok_or_else(|| want(v, "a bool"))
+    }
+}
+
+impl FromProp for String {
+    fn from_prop(v: &Value) -> mlua::Result<Self> {
+        v.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| want(v, "a str"))
+    }
+}
+impl FromProp for Color {
+    fn from_prop(v: &Value) -> mlua::Result<Self> {
+        parse_color(&String::from_prop(v)?)
+    }
+}
+impl<A: FromProp, B: FromProp> FromProp for (A, B) {
+    fn from_prop(v: &Value) -> mlua::Result<Self> {
+        let t = v.as_table().ok_or_else(|| want(v, "a list"))?;
+        Ok((
+            A::from_prop(&t.get::<Value>(1)?)?,
+            B::from_prop(&t.get::<Value>(2)?)?,
+        ))
+    }
+}
+
+pub(crate) struct DragCtx<'a> {
+    pub handlers: &'a mut Vec<Function>,
+    pub node: &'a Table,
+}
+
+/// Every prop erased to one signature, so arity stops being part of the type.
+type Apply = fn(E, &Value) -> mlua::Result<E>;
+
+/// `prop!(pad, f32)` expands to `("pad", |el, v| Ok(El::pad(el, f32::from_prop(v)?)))`.
+///
+/// The Lua name is `stringify!`d off the builder ident, so the two can't drift —
+/// 0 args is a boolean gate, 1 arg decodes the value directly, n args decode a positional list.
+/// Arms are enumerated rather than counted; std does the same for its tuple impls.
+macro_rules! prop {
+    ($f:ident) => {
+        (
+            stringify!($f),
+            (|el, v| Ok(if bool::from_prop(v)? { El::$f(el) } else { el })) as Apply,
+        )
+    };
+    ($f:ident, $t: ty) => {
+        (
+            stringify!($f),
+            (|el, v| Ok(El::$f(el, <$t>::from_prop(v)?))) as Apply,
+        )
+    };
+    ($f:ident, $a:ty, $b:ty) => {
+        (
+            stringify!($f),
+            (|el, v| {
+                let t = v.as_table().ok_or_else(|| want(v, "a list"))?;
+                Ok(El::$f(
+                    el,
+                    <$a>::from_prop(&t.get::<Value>(1)?)?,
+                    <$b>::from_prop(&t.get::<Value>(2)?)?,
+                ))
+            }) as Apply,
+        )
+    };
+
+    ($f:ident, $a:ty, $b:ty, $c: ty) => {
+        (
+            stringify!($f),
+            (|el, v| {
+                let t = v.as_table().ok_or_else(|| want(v, "a list"))?;
+                Ok(El::$f(
+                    el,
+                    <$a>::from_prop(&t.get::<Value>(1)?)?,
+                    <$b>::from_prop(&t.get::<Value>(2)?)?,
+                    <$c>::from_prop(&t.get::<Value>(3)?)?,
+                ))
+            }) as Apply,
+        )
+    };
+}
+
+type Bind = fn(E, &Value, &mut DragCtx) -> mlua::Result<E>;
+
+pub(crate) static BINDS: &[(&str, Bind)] = &[
+    ("on_drag", |el, v, cx| {
+        let id: String = cx.node.get("id")?;
+        let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
+        let idx = cx.handlers.len() as u32;
+        cx.handlers.push(handler.clone());
+        Ok(el.on_drag(id, move |e| {
+            LuaMsg::CallPhase(
+                idx,
+                e.phase.as_str(),
+                e.pos.0 - e.grab.0,
+                e.pos.1 - e.grab.1,
+            )
+        }))
+    }),
+    ("on_drop", |el, v, cx| {
+        let id: String = cx.node.get("id")?;
+        let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
+        let idx = cx.handlers.len() as u32;
+        cx.handlers.push(handler.clone());
+        Ok(el.on_drop(id, move |e| {
+            LuaMsg::CallPhase(
+                idx,
+                e.phase.as_str(),
+                e.pos.0 / e.size.0,
+                e.pos.1 / e.size.1,
+            )
+        }))
+    }),
+];
 /// Applied in this order, so shorthands precede the longhands that override them: `full` before
-/// `w`/`h`, `pad` before `px`/`py`. Lua table order is unspecified — this list is the only thing
-/// making the result deterministic when both are set.
-pub(crate) static PROPS: &[(&str, Prop)] = &[
+/// `w`/`h`, `size` before both, `pad` before `px`/`py`, `fade_in` before `fade` (it *is*
+/// `fade(1.0, ms)`). Lua table order is unspecified — this list is the only thing making the
+/// result deterministic when both are set.
+pub(crate) static PROPS: &[(&str, Apply)] = &[
     // box
-    ("full", Prop::Flag(El::full)),
-    ("w_full", Prop::Flag(El::w_full)),
-    ("h_full", Prop::Flag(El::h_full)),
-    ("w", Prop::F32(El::w)),
-    ("h", Prop::F32(El::h)),
-    ("grow", Prop::Flag(El::grow)),
+    prop!(full),
+    prop!(w_full),
+    prop!(h_full),
+    prop!(size, f32, f32),
+    prop!(w, f32),
+    prop!(h, f32),
+    prop!(grow),
     // spacing
-    ("pad", Prop::F32(El::pad)),
-    ("px", Prop::F32(El::px)),
-    ("py", Prop::F32(El::py)),
-    ("gap", Prop::F32(El::gap)),
-    ("mt", Prop::F32(El::mt)),
-    ("mb", Prop::F32(El::mb)),
+    prop!(pad, f32),
+    prop!(px, f32),
+    prop!(py, f32),
+    prop!(gap, f32),
+    prop!(mt, f32),
+    prop!(mb, f32),
     // alignment
-    ("center", Prop::Flag(El::center)),
-    ("align_center", Prop::Flag(El::align_center)),
-    ("stretch", Prop::Flag(El::stretch)),
+    prop!(center),
+    prop!(align_center),
+    prop!(stretch),
     // positioning
-    ("absolute", Prop::Flag(El::absolute)),
-    ("top", Prop::F32(El::top)),
-    ("left", Prop::F32(El::left)),
-    ("right", Prop::F32(El::right)),
-    ("bottom", Prop::F32(El::bottom)),
+    prop!(absolute),
+    prop!(top, f32),
+    prop!(left, f32),
+    prop!(right, f32),
+    prop!(bottom, f32),
+    prop!(offset, (f32, f32)),
     // paint
-    ("fill", Prop::Color(El::fill)),
-    ("color", Prop::Color(El::color)),
-    ("radius", Prop::F32(El::radius)),
-    ("stroke", Prop::Stroke(El::stroke)),
-    ("opacity", Prop::F32(El::opacity)),
-    ("font_size", Prop::F32(El::font_size)),
+    prop!(fill, Color),
+    prop!(color, Color),
+    prop!(radius, f32),
+    prop!(stroke, f32, Color),
+    prop!(opacity, f32),
+    prop!(font_size, f32),
     // hover
-    ("hover_fill", Prop::Color(El::hover_fill)),
-    ("hover_stroke", Prop::Stroke(El::hover_stroke)),
-    ("tint", Prop::F32(El::tint)),
+    prop!(hover_fill, Color),
+    prop!(hover_stroke, f32, Color),
+    prop!(tint, f32),
     // animation
-    ("fade_in", Prop::F32(El::fade_in)),
+    prop!(fade_in, f32),
+    prop!(fade, f32, f32),
+    prop!(slide_in, (f32, f32), f32),
+    // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
+    prop!(scroll_x),
+    prop!(scroll_y),
     // input
-    ("autofocus", Prop::Flag(El::autofocus)),
+    prop!(autofocus),
 ];
 
 /// Props whose value is a Lua function. Each is registered into `handlers` and reaches the app as
@@ -71,21 +200,10 @@ pub(crate) static CALLBACKS: &[(&str, fn(E, LuaMsg) -> E)] = &[
     ("on_esc", El::on_esc),
     ("on_faded_out", El::on_faded_out),
 ];
-pub(crate) static STRUCTURAL: &[&str] = &[
-    "tag",
-    "id",
-    "value",
-    "on_input",
-    "on_drag",
-    "on_drop",
-    "on_right_click",
-    "scroll",
-];
-fn as_num(v: &Value) -> Option<f32> {
-    v.as_f32().or_else(|| v.as_integer().map(|i| i as f32))
-}
+pub(crate) static STRUCTURAL: &[&str] =
+    &["tag", "id", "value", "on_input", "on_right_click", "line"];
 
-pub(crate) fn apply(mut el: E, node: &Table, handlers: &mut Vec<Function>) -> mlua::Result<E> {
+pub(crate) fn apply(mut el: E, node: &Table, context: &mut Ctx) -> mlua::Result<E> {
     let pairs = node.pairs::<Value, Value>();
     let mut found = Vec::new();
     for pair in pairs {
@@ -97,9 +215,18 @@ pub(crate) fn apply(mut el: E, node: &Table, handlers: &mut Vec<Function>) -> ml
             let f = v
                 .as_function()
                 .ok_or_else(|| mlua::Error::runtime(format!("{k} expects a function")))?;
-            let idx = handlers.len() as u32;
-            handlers.push(f.clone());
+            let idx = context.handlers.len() as u32;
+            context.handlers.push(f.clone());
             el = build(el, LuaMsg::Call(idx));
+        } else if let Some((_, bind)) = BINDS.iter().find(|(b, _v)| *b == &*k) {
+            el = bind(
+                el,
+                &v,
+                &mut DragCtx {
+                    handlers: context.handlers,
+                    node,
+                },
+            )?;
         } else if !STRUCTURAL.contains(&&*k) {
             return Err(mlua::Error::runtime(format!("unknown prop {k}")));
         }
@@ -108,26 +235,9 @@ pub(crate) fn apply(mut el: E, node: &Table, handlers: &mut Vec<Function>) -> ml
     found.sort_unstable_by_key(|(i, _)| *i);
 
     for (i, v) in found {
-        let (key, prop) = &PROPS[i];
-        let want = |ty| mlua::Error::runtime(format!("{key} expects {ty}, got {}", v.type_name()));
-        match prop {
-            Prop::F32(f) => el = f(el, as_num(&v).ok_or_else(|| want("a number"))?),
-            Prop::Color(f) => {
-                let s = v.as_str().ok_or_else(|| want("a color string"))?;
-                el = f(el, parse_color(&s)?);
-            }
-            Prop::Flag(f) => {
-                if v.as_boolean().ok_or_else(|| want("a boolean"))? {
-                    el = f(el);
-                }
-            }
-            Prop::Stroke(f) => {
-                let t = v.as_table().ok_or_else(|| want("{width, color}"))?;
-                let w: f32 = t.get(1)?;
-                let c: String = t.get(2)?;
-                el = f(el, w, parse_color(&c)?);
-            }
-        }
+        let (key, f) = &PROPS[i];
+        // `from_prop` only ever sees the value, so the prop name is reattached here.
+        el = f(el, &v).map_err(|e| mlua::Error::runtime(format!("{key}: {e}")))?;
     }
     Ok(el)
 }

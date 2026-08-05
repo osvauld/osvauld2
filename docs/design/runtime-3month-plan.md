@@ -30,7 +30,9 @@ presence/permits/iroh sync.
   (timer wheel + retained progress, W1).
 - **Progress (W1, done):** §2.4 overlay finished and the animation system stood up
   (`w1.md`). M0's *core* seams are in; its *polish* seams are deferred by the reorder, not
-  dropped. W1 detail in `w1.md`; **W2 detail in `w2.md`.**
+  dropped. W1 detail in `w1.md`, W2 in `w2.md`; **W3 detail in `w3.md`.**
+- **Progress (W2):** the app layer, walk, style props and drop targets landed — `kanban.lua`
+  drags across columns. Its `doc` binding (§5) did **not** — Loro is W3's debt.
 
 ---
 
@@ -73,14 +75,26 @@ possible; `w2.md` scopes the risk).
   columns with a live preview; an infinite loop is killed with a line number; state survives
   restart.
 
-### W3 — Hot reload + error cards (§3.4.2, §3.4.5)
-- Hot reload as an engine feature: watcher + write → reload, preserving the doc + retained
-  islands, sub-second. Everything pcall'd; broken view keeps last good frame + inline error
-  card (`file:line` + traceback); handler errors → console ring buffer.
-- **Done when:** editing a running app's view reloads sub-second with state intact; a syntax
-  error shows an error card at the right line, data survives.
+### W3 — Shell + accounts + store + tabs + MCP (§3.5, §3.4.3, §3.3 doc) — *current, detail in `w3.md`*
+**Reordered again (2026-08-04):** W3 and W5 swap. The old W3 (hot reload + error cards) reloaded
+a hardcoded path; it is worth much more once apps are real files in a store and MCP is the thing
+writing them — so the store/shell/bridge week comes first and the DX week lands on top of it.
+W2 also shipped without its `doc` binding (§5 of `w2.md`), so Loro is W3's debt to pay.
+- External wakeup (`EventLoopProxy`, §2.7 leftover) — the seam the Argon2 worker *and* the
+  bridge both need; without it both fail silently under `ControlFlow::Wait`.
+- Accounts on the real `vault` (signup/unlock, Argon2 off-thread); workspaces + `.app` items.
+- `doc:list/map/text` binding + persistence via `vault.put_state`; kanban ported onto it.
+- Tabs hosting several `LuaApp`s (ids namespaced per item — the retained-store collision).
+- `bridge2` as pure transport, UI thread as single authority; MCP senses `dump_tree`/`click`/
+  `read_state`/`read_console`.
+- **Done when: M1 exit test** — the agent authors and drives a working app over MCP, shell never
+  restarts; kanban's board survives a restart.
+- Runs Wed 8/5 → Fri 8/14 (8 days, borrowing 3 from W4); **W6's float absorbs the borrow.**
 
-### W4 — Types gate + harness (§3.4.1, §3.4.4)
+### W4 — Hot reload + error cards + types gate + harness (§3.4.1/.2/.4/.5)
+- Hot reload as an engine feature: watcher + write → reload preserving doc + retained islands
+  (W3's `WriteFile` already reloads an open tab — this generalizes it). Everything pcall'd;
+  broken view keeps the last good frame + inline error card (`file:line` + traceback).
 - Generate `ui.d.luau` / `doc.d.luau` stubs from the **one** Rust binding registry (source of
   truth for binding + stub + doc). `.luaurc`; `validate_app` runs `luau-lsp analyze` + parse
   **before** any hot-swap. (The research's constrained-surface finding: good stubs + itemized
@@ -90,13 +104,14 @@ possible; `w2.md` scopes the risk).
 - **Done when:** a type error is caught by validate before swap; a harness test asserts tree
   + state across a click.
 
-### W5 — spaces/explorer + bridge2 + MCP senses (§3.5, §3.4.3) — **M1 exit / working MVP**
-- Minimal store: workspace = index LoroDoc, file = own LoroDoc, vault persistence. Shell2
-  explorer (spaces → files) + tabbed hosting.
-- `bridge2` UDS/rpc (single authority, mutate on owning thread, seed on create, repaint on
-  write, `Refresh` fan-out). MCP tools: `screenshot`, `dump_tree`, `click`, `read_state`,
-  `read_console`.
-- **M1 exit test** (above) — **the agent authors a working app over MCP.**
+### W5 — M1 hardening + deferred senses (absorbs W3's borrow)
+- The three days W3 borrowed come back here, plus what W3 and W4 shed: `screenshot` (offscreen
+  wgpu render), per-block `.lua` edits (code_editor splitter port), account switching/recovery UI,
+  debounced/incremental persistence (`ExportMode::Updates`).
+- Harden the app layer under real agent use — this is the first week the MCP loop is driven in
+  anger, so budget it for what that shakes out rather than pre-committing it.
+- **Note:** the M1 exit test now lands in **W3**, not here. If W3 slips, this week is where it
+  finishes, and the M1 seam still closes on schedule.
 
 ---
 
@@ -187,9 +202,10 @@ a11y stub → dirty-gate → images. **Never cut:** the app layer (W2), hot relo
 (W3), the VM + validate gate (W2/W4), the grid island (W8), drop targets (W2, §8 of `w2.md`).
 Those are the load-bearing seams everything downstream stands on.
 
-**If W2–W5 hold, the MVP is real by ~W5** — an agent-authored, hot-reloading Lua app over
-MCP — with 8 weeks left for M2 + buffer. That is a far more comfortable clock than the
-original "MVP at W9, no slack."
+**The MVP now targets W3** (2026-08-14) — an agent-authored Lua app over MCP, with hot reload and
+the types gate following in W4 — leaving 10 weeks for M2 + buffer. The 8/4 reorder bought this by
+noticing that the store/bridge week unblocks the DX week rather than the reverse; the risk it adds
+is that W3 carries five seams at once, which is what `w3.md`'s cut lines exist to triage.
 
 ## Out of scope (post-window)
 

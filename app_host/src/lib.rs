@@ -5,9 +5,9 @@
 //! is unchanged — dispatch just calls the closure the index points at.
 
 mod props;
-use mlua::{Function, Lua, Table};
+use mlua::{Function, Lua, Table, Value};
 use runtime::vello::peniko::Color;
-use runtime::{El, col, row, text, text_input};
+use runtime::{El, col, row, text, text_area, text_input};
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
@@ -18,7 +18,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum LuaMsg {
     Call(u32),
     CallStr(u32, String),
-    CallPos(u32, f32, f32),
+    CallPhase(u32, &'static str, f32, f32),
+}
+
+pub struct Ctx<'a> {
+    pub handlers: &'a mut Vec<Function>,
+    pub dev: bool,
+    pub errors: Vec<String>,
+    pub path: String,
+}
+impl<'a> Ctx<'a> {
+    fn new(handlers: &'a mut Vec<Function>) -> Self {
+        Self {
+            handlers,
+            dev: true,
+            errors: Vec::new(),
+            path: String::new(),
+        }
+    }
 }
 
 pub struct LuaApp {
@@ -28,11 +45,12 @@ pub struct LuaApp {
     handlers: RefCell<Vec<Function>>, // refilled every frame
     path: Option<PathBuf>,
     error: Option<String>,
+    fires: Arc<AtomicU64>,
 }
 
 impl LuaApp {
     pub fn new(source: &str) -> mlua::Result<Self> {
-        let vm = sandboxed_vm()?;
+        let (vm, fires) = sandboxed_vm()?;
         let view_fn = Some(vm.load(source).eval::<Function>()?);
         Ok(Self {
             vm,
@@ -40,10 +58,11 @@ impl LuaApp {
             handlers: RefCell::new(Vec::new()),
             path: None,
             error: None,
+            fires,
         })
     }
     pub fn from_file(path: impl Into<PathBuf>) -> mlua::Result<Self> {
-        let vm = sandboxed_vm()?;
+        let (vm, fires) = sandboxed_vm()?;
         let path = path.into();
         let content = fs::read_to_string(&path);
         match content {
@@ -63,6 +82,7 @@ impl LuaApp {
                     handlers: RefCell::new(Vec::new()),
                     path: Some(path.into()),
                     error: error,
+                    fires,
                 })
             }
             Err(e) => Err(mlua::Error::runtime(format!(
@@ -75,6 +95,8 @@ impl LuaApp {
 impl runtime::App for LuaApp {
     type Msg = LuaMsg;
     fn view(&self) -> El<LuaMsg> {
+        //reset budget
+        self.fires.store(0, Ordering::Relaxed);
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
         }
@@ -85,26 +107,39 @@ impl runtime::App for LuaApp {
             Ok(t) => t,
             Err(e) => return text(format!("View error: {e}")),
         };
+        if let Ok(f) = self.vm.globals().get::<Function>("_sweep") {
+            let _ = f.call::<()>(());
+        }
         let mut handlers = self.handlers.borrow_mut();
         handlers.clear();
-        match walk(tree, &mut handlers) {
+        let mut context = Ctx::new(&mut handlers);
+        let el = match walk(tree, &mut context) {
             Ok(el) => el,
-            Err(e) => text(format!("walk error: {e}")),
+            Err(e) => {
+                context.errors.push(e.to_string());
+                err_box(&e.to_string())
+            }
+        };
+        for e in &context.errors {
+            eprintln!("{e}");
         }
+        el
     }
     fn update(&mut self, msg: LuaMsg) {
+        // reset budget
+        self.fires.store(0, Ordering::Relaxed);
         let handlers = self.handlers.borrow();
 
         // A message can outlive the frame that minted its index (queued click, landed animation),
         // so a stale index is expected — drop it rather than panicking.
-        let (LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPos(i, _, _)) = msg;
+        let (LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPhase(i, _, _, _)) = msg;
         let Some(h) = handlers.get(i as usize) else {
             return;
         };
         let result = match msg {
             LuaMsg::Call(_) => h.call::<()>(()),
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
-            LuaMsg::CallPos(_, x, y) => h.call::<()>((x, y)),
+            LuaMsg::CallPhase(_, phase, x, y) => h.call::<()>((phase, x, y)),
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
@@ -120,20 +155,45 @@ impl runtime::App for LuaApp {
     }
 }
 
-const PRELUDE: &str = r#"local function tagged(tag,t)
-                            t.tag = tag
-                            return t
-                        end 
-                        ui = {
-                            col = function(t) return tagged("col", t) end,
-                            row = function(t) return tagged("row", t) end,
-                            text = function(t) return tagged("text", t) end,
-                            button = function(t) return tagged("button", t) end,
-                            input = function(t) return  tagged("input", t) end,
-                        }
-                    "#;
+const PRELUDE: &str = r#"
+local _state,_live = {},{}
+local function tagger(tag)
+    return function(t)
+        t.tag = tag
+        t.line = debug.info(2, "l")
+        return t
+    end
+end
 
-pub fn sandboxed_vm() -> mlua::Result<Lua> {
+
+function _sweep()
+    for id in pairs(_state) do 
+    if not _live[id] then _state[id] = nil end
+    end
+    _live={}
+end
+
+ui = {
+    col = tagger("col"),
+    row = tagger("row"),
+    text = tagger("text"),
+    button = tagger("button"),
+    input = tagger("input"),
+    text_area = tagger("text_area"),
+}
+
+function ui.state(id, init) 
+    _live[id] = true
+    local s = _state[id]
+    if s== nil then
+    s = init or {}
+    _state[id] = s
+    end
+    return s
+end
+"#;
+
+pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     let vm = Lua::new();
     let now_fn = vm.create_function(|_, ()| {
         let secs = SystemTime::now()
@@ -142,8 +202,10 @@ pub fn sandboxed_vm() -> mlua::Result<Lua> {
             .as_secs() as i64;
         Ok(secs)
     })?;
+    let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;
     vm.globals().set("now", now_fn)?;
+    vm.globals().set("uuid", uuid_fn)?;
     let _ = vm.sandbox(true)?;
     let fires = Arc::new(AtomicU64::new(0));
     let f = fires.clone();
@@ -154,65 +216,186 @@ pub fn sandboxed_vm() -> mlua::Result<Lua> {
             Ok(mlua::VmState::Continue)
         }
     });
-    Ok(vm)
+    Ok((vm, fires))
+}
+fn fail(context: &mut Ctx, msg: String) -> El<LuaMsg> {
+    let msg = format!("{} > {msg}", context.path);
+    context.errors.push(msg.clone());
+    err_box(&msg)
+}
+fn children(
+    mut el: El<LuaMsg>,
+    node: &Table,
+    context: &mut Ctx,
+    tag: &str,
+) -> mlua::Result<El<LuaMsg>> {
+    for i in 1..=max_index(node) {
+        let mark = context.path.len();
+        context.path.push_str(&format!("> [{i}]"));
+        let child = node.get::<Value>(i)?;
+        match child {
+            Value::Boolean(false) => {}
+            Value::String(s) => {
+                el = el.child(text(s.to_str()?.to_owned()));
+            }
+            Value::Table(t) => {
+                if t.contains_key("tag")? {
+                    el = el.child(match walk(t, context) {
+                        Ok(c) => c,
+                        Err(e) => fail(context, e.to_string()),
+                    });
+                    context.path.truncate(mark);
+                } else {
+                    if max_index(&t) == 0 && t.pairs::<Value, Value>().count() > 0 {
+                        el = el.child(fail(
+                            context,
+                            format!(
+                                "plain table, not an element — missing `ui.col{{...}}`? has: {}",
+                                keys(&t)
+                            ),
+                        ));
+                    }
+                    el = children(el, &t, context, tag)?;
+                }
+            }
+            Value::Nil => {
+                el = el.child(fail(
+                    context,
+                    "is nil — a helper that forgot to `return`?".into(),
+                ))
+            }
+            Value::Boolean(true) => {
+                el = el.child(fail(
+                    context,
+                    "is `true` — did you write `el and cond` backwards?".into(),
+                ))
+            }
+            other => {
+                el = el.child(fail(
+                    context,
+                    format!("must be an element, string or false, got {}", show(&other)),
+                ))
+            }
+        }
+        context.path.truncate(mark);
+    }
+    Ok(el)
+}
+fn err_box(msg: &str) -> El<LuaMsg> {
+    let red = Color::from_rgba8(0xEF, 0x44, 0x44, 0xFF);
+    let mut el = col()
+        .pad(8.0)
+        .gap(2.0)
+        .radius(4.0)
+        .stroke(1.0, red)
+        .fill(Color::from_rgba8(0x2A, 0x11, 0x11, 0xFF));
+    for chunk in msg.as_bytes().chunks(64) {
+        el = el.child(
+            text(String::from_utf8_lossy(chunk).into_owned())
+                .color(red)
+                .font_size(11.0),
+        );
+    }
+    el
 }
 
-fn walk(node: Table, handlers: &mut Vec<Function>) -> mlua::Result<El<LuaMsg>> {
+fn walk(node: Table, context: &mut Ctx) -> mlua::Result<El<LuaMsg>> {
     let tag: String = node.get("tag")?;
-    let mut el = match tag.as_str() {
+    let line: String = node.get("line")?;
+    let seg = match node.get::<Option<String>>("id")? {
+        Some(id) => format!("{tag}#{id}:[{line}]"),
+        None => format!("{tag}:[{line}]"),
+    };
+    let mark = context.path.len();
+    if !context.path.is_empty() {
+        context.path.push_str(" > ");
+    }
+    context.path.push_str(&seg);
+
+    let r = build(node, context, &tag);
+    if r.is_ok() {
+        context.path.truncate(mark);
+    }
+    r
+}
+
+fn show(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("{:?}", s.to_string_lossy()),
+        Value::Table(t) => match t.get::<Option<String>>("tag") {
+            Ok(Some(tag)) => format!("<{tag}>"),
+            _ => "{...}".into(),
+        },
+
+        Value::Function(_) => "function".into(),
+        other => other
+            .to_string()
+            .unwrap_or_else(|_| other.type_name().into()),
+    }
+}
+
+fn keys(node: &Table) -> String {
+    let mut out = Vec::new();
+    for pair in node.pairs::<Value, Value>() {
+        let Ok((k, v)) = pair else { continue };
+        match k {
+            Value::Integer(i) => out.push(format!("[{i}] = {}", show(&v))),
+            Value::String(s) if s == "tag" || s == "line" => {}
+            k => out.push(format!("{}={}", show(&k), show(&v))),
+        };
+    }
+    out.join(",")
+}
+
+fn build(node: Table, context: &mut Ctx, tag: &str) -> mlua::Result<El<LuaMsg>> {
+    let mut el = match tag {
         "col" | "row" | "button" => {
-            let mut el = if tag == "col" { col() } else { row() };
-            for i in 1..=node.raw_len() {
-                let child: Table = node.get(i)?;
-                el = el.child(walk(child, handlers)?);
+            let el = if tag == "col" { col() } else { row() };
+            children(el, &node, context, &tag)?
+        }
+        "text" => match node.get::<Value>(1)? {
+            Value::String(s) => text(s.to_str()?.to_owned()),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "needs its label as child 1, got  {} - has {}",
+                    other.type_name(),
+                    keys(&node)
+                )));
             }
-            el
-        }
-        "text" => {
-            let label: String = node.get(1)?;
-            text(label)
-        }
-        "input" => {
+        },
+        "input" | "text_area" => {
+            if max_index(&node) > 0 {
+                return Err(mlua::Error::runtime(format!(
+                    "takes no children — put the button beside it, not inside. got: {}",
+                    keys(&node)
+                )));
+            }
             let value: String = node.get("value")?;
             let id: String = node.get("id")?;
             let f: mlua::Function = node.get("on_input")?;
-            let idx = handlers.len() as u32;
-            handlers.push(f);
-            text_input(value, id, move |s| LuaMsg::CallStr(idx, s))
+            let idx = context.handlers.len() as u32;
+            context.handlers.push(f);
+            let map = move |s| LuaMsg::CallStr(idx, s);
+            if tag == "input" {
+                text_input(value, id, map)
+            } else {
+                text_area(value, id, map)
+            }
         }
 
-        other => text(format!("unknown tag{}", other)),
+        other => err_box(&format!("unknown tag{}", other)),
     };
-    if let Some(f) = node.get::<Option<Function>>("on_drag")? {
-        let id: String = node.get("id")?;
-        let idx = handlers.len() as u32;
-        handlers.push(f);
-        el = el.on_drag(id, move |e| LuaMsg::CallPos(idx, e.pos.0, e.pos.1));
-    }
-
-    if let Some(f) = node.get::<Option<Function>>("on_drop")? {
-        let id: String = node.get("id")?;
-        let idx = handlers.len() as u32;
-        handlers.push(f);
-        el = el.on_drop(id, move |_e| LuaMsg::Call(idx));
-    }
     let id: Option<String> = node.get("id")?;
     if let Some(s) = &id {
         el = el.id(s.as_str());
     }
 
-    el = props::apply(el, &node, handlers)?;
-
-    if let Some(scroll) = node.get::<Option<String>>("scroll")? {
-        if id.is_none() {
-            return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
-        };
-        match scroll.as_str() {
-            "x" => el = el.scroll_x(),
-            "y" => el = el.scroll_y(),
-            other => return Err(mlua::Error::runtime(format!("bad scroll: {other}"))),
-        }
+    // Scroll offset is stored per element id, so a scroller without one silently never scrolls.
+    if id.is_none() && (node.contains_key("scroll_x")? || node.contains_key("scroll_y")?) {
+        return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
     }
+
+    el = props::apply(el, &node, context)?;
     Ok(el)
 }
 
@@ -221,6 +404,16 @@ pub fn parse_color(s: &str) -> mlua::Result<Color> {
     let [r, g, b, a] = c.to_rgba8();
     Ok(Color::from_rgba8(r, g, b, a))
 }
-
+fn max_index(node: &Table) -> usize {
+    let mut max = 0;
+    for pair in node.pairs::<Value, Value>() {
+        if let Ok((Value::Integer(i), _)) = pair {
+            if i > 0 {
+                max = max.max(i as usize);
+            }
+        }
+    }
+    max
+}
 #[cfg(test)]
 mod tests;

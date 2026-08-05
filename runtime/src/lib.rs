@@ -15,6 +15,7 @@ mod scroll;
 mod state;
 mod text;
 use crate::anim::{Driver, Transition};
+use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
 use crate::el::Binding;
 use crate::id::Id;
@@ -127,7 +128,7 @@ struct Hits<M> {
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
     drag: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> M>)>,
-    drop: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> M>)>,
+    drop: Vec<(Rect, Id, Box<dyn Fn(DropEvent) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -543,13 +544,14 @@ impl<A: App> Runner<A> {
         origin: &(f32, f32),
         start: &(f32, f32),
     ) {
-        let pos = (px - origin.0, py - origin.1);
+        let pos = (px, py);
         let mods = self.mods();
-        let delta = (pos.0 - start.0, pos.1 - start.1);
+        let delta = (px - origin.0 - start.0, py - origin.1 - start.1);
         let event = DragEvent {
             pos,
             delta,
             mods,
+            grab: *start,
             phase: DragPhase::Move,
         };
         if let Some((_, _, handler)) = self
@@ -561,6 +563,23 @@ impl<A: App> Runner<A> {
             self.app.update(handler(event));
             self.redraw();
         }
+
+        if let Some((rect, _, handler)) = self
+            .hits
+            .drop
+            .iter()
+            .rev()
+            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+        {
+            let drop_event = DropEvent {
+                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                mods: self.mods(),
+                dragged: handle_id,
+                phase: DropPhase::Over,
+                size: (rect.size().width as f32, rect.size().height as f32),
+            };
+            self.app.update(handler(drop_event));
+        }
     }
 
     fn on_cursor_release(&mut self) {
@@ -568,27 +587,35 @@ impl<A: App> Runner<A> {
             match cap {
                 Capture::App { id, origin, start } => {
                     if let Some((px, py)) = self.pointer {
-                        let pos = (px - origin.0, py - origin.1);
-                        let delta = (pos.0 - start.0, pos.1 - start.1);
-                        let event = DragEvent {
-                            pos,
-                            delta,
-                            mods: self.mods(),
-                            phase: DragPhase::End,
-                        };
-                        if let Some((_, _, handler)) =
-                            self.hits.drag.iter().find(|(_, hid, _)| *hid == id)
-                        {
-                            self.app.update(handler(event));
-                        }
+                        let pos = (px, py);
+                        let delta = (pos.0 - origin.0 - start.0, pos.1 - origin.1 - start.1);
 
-                        if let Some((_, _, handler)) = self
+                        if let Some((rect, _, handler)) = self
                             .hits
                             .drop
                             .iter()
                             .rev()
                             .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
                         {
+                            let drop_event = DropEvent {
+                                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                                mods: self.mods(),
+                                dragged: id.clone(),
+                                phase: DropPhase::Release,
+                                size: (rect.size().width as f32, rect.size().height as f32),
+                            };
+                            self.app.update(handler(drop_event));
+                        }
+                        if let Some((_, _, handler)) =
+                            self.hits.drag.iter().find(|(_, hid, _)| *hid == id)
+                        {
+                            let event = DragEvent {
+                                pos,
+                                delta,
+                                mods: self.mods(),
+                                grab: start,
+                                phase: DragPhase::End,
+                            };
                             self.app.update(handler(event));
                         }
                     }
@@ -653,7 +680,8 @@ impl<A: App> Runner<A> {
                         let event = DragEvent {
                             delta: (0.0, 0.0),
                             phase: DragPhase::Start,
-                            pos: *start,
+                            pos: (lx, ly),
+                            grab: *start,
                             mods: self.mods(),
                         };
                         let handler = self

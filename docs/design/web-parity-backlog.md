@@ -30,9 +30,15 @@ matching `walk` arm or Lua apps stay strictly smaller than the runtime.
 8. truncation / ellipsis + white-space/wrap control — always wraps to width (text.rs:74).
 9. per-side padding/margin + ml/mr/mx/my/uniform margin — trivial Rect writes.
 10. text-decoration (underline/strike) — parley props exist.
+11. **`El::scale`** — wanted for the drag ghost ("lifted" preview at ~1.05×). Paint-only `Affine` around
+    the subtree is easy; the catch is painted bounds then diverge from the layout rect used for hit
+    tests. Acceptable for a ghost (never hit-tested), a footgun in general — so gate it, or scale the
+    layout too. Also forces a Lua-boundary change: `walk` currently sends `pos - grab` pre-subtracted,
+    and scaling about the grab point needs `grab * s`, so Lua would need `grab` itself → wider
+    `CallPhase` or a table arg. See Tier 3 for the general transform.
 
 ### Tier 3 — advanced / rare
-per-element transforms (scale/rotate via `Affine`), z-index, rounded clipping (clip ignores radius today),
+per-element transforms (rotate via `Affine`), z-index, rounded clipping (clip ignores radius today),
 blend modes, filters/backdrop-filter, background image, multiple backgrounds, text-transform,
 box-sizing toggle, position:fixed.
 
@@ -50,7 +56,9 @@ overlay/anchored panel, CSS color parsing (in `app_host`), hover_fill/hover_stro
 2. **Tab focus traversal** — no Tab handling; needs (1) + ordered focusable list (frame already builds ordered hit lists).
 3. **App-level keydown + shortcuts** — only Enter/Esc/F5/F12 reach the app; mods already tracked (lib.rs:472). Wire an `on_key`/shortcut map.
 4. **active/pressed visual state** — none for general els (only scrollbar thumb, paint.rs:171). ← **in progress**; add `press_*` like `hover_*`.
-5. **click-on-release** — `on_click` currently fires on **mousedown** (lib.rs:771). Web fires on mouseup within the same element. Fix: dispatch from the Released arm using the existing `hits` list. **(parity bug — fix while touching those arms)**
+5. ~~**click-on-release**~~ — **done (2026-08)**. Press arms `Runner.pressed`; release fires only if the
+   pointer is still inside the pressed rect. Drag promotes past 5px and clears `pressed`, so a click and
+   a drag are mutually exclusive.
 
 ### Tier 2 — expected
 6. copy/cut/paste — absent; parley selection exists, plug clipboard (arboard/winit) into editor.rs.
@@ -69,19 +77,27 @@ cursor shape (auto grab/text/default), transitions engine (tint/slide/fade).
 
 ---
 
-## Lua exposure gap (`walk`, app_host/src/lib.rs:149)
+## Lua exposure gap (`walk` + `props.rs`, app_host)
 
-Currently forwards: `col/row/button/text/input`, `on_click`, `gap`, `on_drag`, `on_drop`, `pad`, `h`, `w`,
-`fill`, `radius`, `center`, `color`, `on_enter`, `scroll`.
+Mostly closed (2026-08) by the `PROPS` fn-pointer registry — 31 props, plus key/type validation and an
+`unknown prop` error. Covers sizing, spacing, alignment, absolute positioning, paint, hover_*, tint,
+fade_in, autofocus. `walk` keeps only tag construction, `id`, `scroll`, `on_drag`, `on_drop`, `on_input`.
 
-Runtime-side but **not yet reachable from Lua**: stroke/border, hover_*, font/font_size, opacity, absolute/positioning,
-w_full/grow, margins, right-click, on_esc, autofocus, overlay, animations.
+Children accept `false` (skipped), bare strings (text leaf), and untagged tables (fragments, spliced
+recursively). Nil children are a hard error — they leave holes and `raw_len` silently truncates.
+
+Still unreachable from Lua: `overlay`, two-arg `fade(to, ms)`, `slide`, `custom` painters, `font` family.
+
+**Standing hazard of the registry:** within a `Prop` variant any builder swaps silently — `("fill",
+Prop::Color(El::color))` typechecks and is wrong. Only the test suite catches it.
 
 ---
 
 ## Suggested near-term slice (tied to current work)
 
-1. **Pressed state** (`press_fill`/`press_stroke` + `mouse_down`) — in progress.
-2. **click-on-release fix** — same MouseInput arms (lib.rs:771/781).
-3. **Expose existing runtime styling in `walk`**: `stroke` (borders), `hover_fill/hover_stroke`, `font`/`font_size`, `opacity` — all already built, zero runtime work.
-4. Then pick from Tier 1 representation (font weight, shadow, text-align) as the "beautiful" pass.
+1. ~~**click-on-release fix**~~ — done.
+2. ~~**Expose existing runtime styling in `walk`**~~ — done via `props.rs`.
+3. **Pressed state** (`press_fill`/`press_stroke`) — `Runner.pressed` now exists, so the state is already
+   tracked; only the paint side is missing.
+4. **`El::scale`** (Tier 2 #11) — blocks the scaled drag ghost.
+5. Then pick from Tier 1 representation (font weight, shadow, text-align) as the "beautiful" pass.

@@ -22,7 +22,8 @@ pub enum Screen {
 }
 fn main() {
     runtime::run(
-        app_host::LuaApp::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/src/test.lua")).unwrap(),
+        app_host::LuaApp::from_file(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kanban2.lua"))
+            .unwrap(),
     );
     // runtime::run(Shell::new());
 }
