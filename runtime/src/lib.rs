@@ -33,6 +33,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+pub use winit::event_loop::{EventLoopClosed, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey::*};
 use winit::window::{CursorIcon, Window, WindowId};
 
@@ -51,7 +52,7 @@ const LINE_STEP: f32 = 30.0;
 /// in response to messages. The runtime calls `view` to paint and `update` when a click hits an
 /// element carrying a message. `Msg: Clone` because a laid-out region owns its message.
 pub trait App {
-    type Msg: Clone;
+    type Msg: Clone + Send + 'static;
 
     /// Describe the whole screen as an element tree, given the current state.
     fn view(&self) -> El<Self::Msg>;
@@ -197,6 +198,7 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let store = &mut self.store;
         let focused = &mut self.focused;
+        let pressed = self.pressed.as_ref().map(|(rect, _)| rect.clone());
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
@@ -212,6 +214,9 @@ impl<A: App> Runner<A> {
 
             let over =
                 pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
+            if p.appearance.repaint {
+                any_in_flight = true;
+            }
 
             for (b, slot) in p.behaviour.bindings() {
                 if let Some(id) = &p.id {
@@ -344,7 +349,16 @@ impl<A: App> Runner<A> {
             .as_ref()
             .and_then(Capture::thumb)
             .map(|t| (&t.id, t.axis));
-        paint::draw(&mut self.scene, &placed, text, t, pointer, store, &focused);
+        paint::draw(
+            &mut self.scene,
+            &placed,
+            text,
+            t,
+            pointer,
+            store,
+            &focused,
+            pressed,
+        );
         paint::scrollbars(&mut self.scene, &hits.bar, t, pointer, dragging);
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
@@ -827,7 +841,7 @@ impl<A: App> Runner<A> {
     }
 }
 
-impl<A: App> ApplicationHandler for Runner<A> {
+impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_some() {
             return;
@@ -914,12 +928,24 @@ impl<A: App> ApplicationHandler for Runner<A> {
             _ => {}
         }
     }
+    fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
+        self.app.update(msg);
+        self.redraw();
+    }
 }
 
 /// Open a window and run the event loop, driving `app`. Blocks until the window closes.
 pub fn run<A: App + 'static>(app: A) {
+    run_with(|_| app);
+}
+
+pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> A) {
     env_logger::init();
-    let event_loop = EventLoop::new().expect("event loop");
+
+    let event_loop = EventLoop::<A::Msg>::with_user_event()
+        .build()
+        .expect("event loop");
+    let app = build(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut runner = Runner {
         app,

@@ -10,4 +10,6 @@ license.workspace = true
 [dependencies]
 runtime = { path = "../runtime" }
 app_host = { path = "../app_host" }
+vault = { path = "../vault" }
+identity = { path = "../identity/" }
 vello = "0.9.0"

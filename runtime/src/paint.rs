@@ -37,6 +37,7 @@ pub(crate) fn draw<M>(
     pointer: Option<(f32, f32)>,
     store: &Store,
     focus: &Focus,
+    pressed: Option<Rect>,
 ) {
     for p in placed {
         let mut clipping = false;
@@ -48,6 +49,9 @@ pub(crate) fn draw<M>(
             clipping = true;
             scene.push_clip_layer(Fill::NonZero, t, &c);
         }
+
+        let over =
+            pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
         let t_e = if let Some(spec) = &p.behaviour.tint
             && let Some(id) = &p.id
         {
@@ -57,12 +61,21 @@ pub(crate) fn draw<M>(
                 .unwrap_or(0.0);
             spec.easing.apply(progress)
         } else {
-            let over =
-                pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
             let t = if over { 1.0 } else { 0.0 };
             t
         };
-        let (fill, stroke) = p.appearance.look.resolve_t(t_e);
+        let (mut fill, mut stroke) = p.appearance.look.resolve_t(t_e);
+
+        let pressed_over = over && pressed.is_some_and(|pr| pr == p.rect);
+        if pressed_over {
+            if let Some(filled) = p.appearance.look.press_fill {
+                fill = Some(filled);
+            }
+            if let Some(press_stroke) = p.appearance.look.press_stroke {
+                stroke = Some(press_stroke);
+            }
+        }
+
         let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius as f64);
         if let Some(mut c) = fill {
             c = c.multiply_alpha(p.alpha);

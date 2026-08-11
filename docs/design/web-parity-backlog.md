@@ -37,6 +37,18 @@ matching `walk` arm or Lua apps stay strictly smaller than the runtime.
     and scaling about the grab point needs `grab * s`, so Lua would need `grab` itself → wider
     `CallPhase` or a table arg. See Tier 3 for the general transform.
 
+12. **global UI scale (user zoom, Ctrl±)** — rem's accessibility job without a unit system: one
+    multiplier, viewport ÷ z before layout + root transform × z at paint. Numbers stay logical px;
+    no cascade, no new units. (DPI is already handled — `set_scale` at lib.rs:852.)
+13. **baseline alignment for mixed-size text in a row** — box-centering ≠ baseline: an 11px number
+    next to a 14px word floats ~2px high (mnemonic chips; the web's default `vertical-align:
+    baseline`). Taffy has `AlignItems::Baseline` but it's meaningless until our text measure
+    reports baseline metrics. Until then: manual `mt` nudge, or equal sizes + color hierarchy.
+14. **overflow-safe centering** — a centered child wider than the viewport overflows *both* edges
+    and the left side is unreachable by scroll (CSS's `safe center` / `margin:auto` problem).
+    No auto margins, no safe alignment in Taffy builders today. Mitigation shipped instead:
+    minimum window size (winit `with_min_inner_size`) so auth screens can't shrink into the bug.
+
 ### Tier 3 — advanced / rare
 per-element transforms (rotate via `Affine`), z-index, rounded clipping (clip ignores radius today),
 blend modes, filters/backdrop-filter, background image, multiple backgrounds, text-transform,
@@ -66,6 +78,10 @@ overlay/anchored panel, CSS color parsing (in `app_host`), hover_fill/hover_stro
 8. checkbox/radio/toggle + change events — no primitives.
 9. hover enter/leave events + tooltips — hover is visual-only; pointer∩rect already computed each frame (lib.rs:178).
 10. double-click + long-press — need press timestamp/count in `click()` (lib.rs:365).
+11. placeholder text for inputs — `TextSpec` carries only the value; draw a `fg_3`-style hint when
+    value is empty. Wanted by shell2 signup/login fields.
+12. password masking — editor renders plaintext only; needs bullet rendering (+ show/hide toggle).
+    Wanted by shell2 signup/login; until then passphrases are visible on screen.
 
 ### Tier 3
 on_scroll events + public programmatic scroll API, keyup, pointermove-to-app, per-element cursor override, explicit submit.
@@ -90,6 +106,54 @@ Still unreachable from Lua: `overlay`, two-arg `fade(to, ms)`, `slide`, `custom`
 
 **Standing hazard of the registry:** within a `Prop` variant any builder swaps silently — `("fill",
 Prop::Color(El::color))` typechecks and is wrong. Only the test suite catches it.
+
+---
+
+## Drawing + loops — the `custom` gap, decided (2026-08-07)
+
+Above lists `custom` painters as unreachable from Lua. That's not a missing builder, it's a design
+decision; taken here.
+
+**Drawing crosses to Lua as *data*, never as a callback.** A Lua fn invoked during paint breaks three
+commitments: `app-isolation-draft.md`'s instruction-count interrupt has no seam inside the frame, so
+a runaway painter hangs every app in the process; `w3.md` §6's `dump_tree` can't serialize a closure,
+so the agent goes blind on anything drawn that way; and per-element VM re-entry per frame is a
+different order of cost than the 0.19ms of a 0.92ms frame the W2 pass measured at 387 elements.
+
+**The primitive is an SVG path string.** `kurbo::BezPath::from_svg` (kurbo 0.13.1, `svg.rs:103`)
+parses `d` syntax directly, so one prop buys the whole expressiveness of SVG paths —
+`{ tag = "path", d = "M 12 3 A 9 9 0 1 1 3 12", stroke = 3, color = "#3b82f6" }`. No vocabulary to
+design: `d` is the geometry notation an LLM has read most, and a hand-rolled `{kind="arc", …}` table
+trades that familiarity for nothing.
+
+**Stock components (`ui.spinner`, gauges, sparklines) are Lua modules over the primitive, not Rust
+builders.** The author is a model and the model can't add Rust — a missing component blocks until
+someone writes it, a missing shape it derives in the same turn. Primitives in the platform,
+components in userland (the browser/React split). Hallucinated geometry is corrected by the feedback
+loop (`dump_tree` now, screenshot W4/W5), not by shrinking the vocabulary.
+
+### Loops (animation.md Tier 4) — the wake policy
+
+`fade`/`tint`/`slide` are *transitions*: Rust stores progress and detects arrival (`lib.rs:216`,
+`drive` at `:361`). A loop has no target, so it never registers as in-flight, the frame chain at
+`lib.rs:357` stops, and a declared spinner freezes mid-phase.
+
+- [ ] `Appearance.repaint: bool` + `El::repaint()`; the walk ORs it into `any_in_flight`. ~3 lines,
+      no `Store` entry, no `Transition` — loops are `f(now)`, nothing to store or GC.
+      **Needed by W3 §1** (Argon2 pending state), so this half lands this week.
+- [ ] `prop!(repaint)` for Lua, in lockstep — otherwise Lua apps can never have a loading state.
+- [ ] **later, with W4's caret blink:** `ControlFlow::WaitUntil` (animation.md §6's middle tier)
+      replaces the `any_in_flight` line *only* — declaration, builder, paint math and Lua prop all
+      carry over, so this is not throwaway work. Matters for **slow** loops (a blink burning 60fps to
+      move 2px); a spinner wants full rate regardless.
+- [ ] **open:** loops need a clock inside `view()`. Rust can read `since.elapsed()` off its own
+      state; Lua has no equivalent — either `ui.now()` (ambient, makes `view` impure) or `now` passed
+      into `view()` (an `App` signature change). Decide once, with both consumers visible.
+
+**Rotation stays deferred** (Tier 3 representation, above) and a spinner doesn't need it: rebuild the
+arc from angles each frame (`kurbo::Arc::new(c, r, start, sweep, 0.0)`) instead of transforming a
+fixed path. Name loop props for the effect, never the motion — `spin` is a trap while Affine is
+unbuilt.
 
 ---
 

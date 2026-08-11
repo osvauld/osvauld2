@@ -50,16 +50,29 @@ pub fn bd_1() -> Color {
 pub fn bd_2() -> Color {
     Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x1F)
 }
+/// ~0.22 — border-hover; accent borders stay reserved for focus.
+pub fn bd_3() -> Color {
+    Color::from_rgba8(0xFF, 0xFF, 0xFF, 0x38)
+}
 
 // ── Accent (single purple family) ───────────────────────────────────────
 pub fn accent() -> Color {
     Color::from_rgba8(0x8A, 0x86, 0xE5, 0xFF)
 }
-/// Pressed/shadow tone — the wordmark's offset drop-shadow uses this.
+/// Hover — one step lighter than rest.
+pub fn accent_hover() -> Color {
+    Color::from_rgba8(0xA0, 0x9D, 0xEE, 0xFF)
+}
+/// Press — one step darker; also the wordmark's offset drop-shadow.
 pub fn accent_press() -> Color {
     Color::from_rgba8(0x6E, 0x6A, 0xD0, 0xFF)
 }
 /// Selected row / chip fill (~0.14 over the page).
 pub fn accent_bg() -> Color {
     Color::from_rgba8(0x8A, 0x86, 0xE5, 0x24)
+}
+// ── Status ──────────────────────────────────────
+/// Errors / destructive actions
+pub fn error() -> Color {
+    Color::from_rgba8(0xE5, 0x48, 0x4D, 0xFF)
 }

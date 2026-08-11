@@ -6,7 +6,6 @@
 //! NOTE: this mirrors `app_engine`'s `Node` design but is its own type — app_engine still depends on
 //! egui, so importing it here would contaminate `runtime`. Converging the two is a later refactor.
 
-use std::rc::Rc;
 use taffy::prelude::*; // Style, Display, FlexDirection, length(), auto(), Size, Rect (geometry), …
 use vello::Scene;
 use vello::kurbo::Affine;
@@ -54,6 +53,8 @@ pub(crate) struct Look {
     pub radius: f32,
     pub hover_fill: Option<Color>,
     pub hover_stroke: Option<Border>,
+    pub press_fill: Option<Color>,
+    pub press_stroke: Option<Border>,
 }
 
 impl Look {
@@ -119,6 +120,7 @@ pub(crate) struct Appearance {
     pub look: Look,
     pub text: Option<TextSpec>,
     pub custom: Option<CustomFn>,
+    pub repaint: bool,
 }
 pub struct Overlay<M> {
     pub panel: Box<El<M>>,
@@ -490,8 +492,18 @@ impl<M> El<M> {
         self.appearance.look.hover_fill = Some(c);
         self
     }
+
+    pub fn press_fill(mut self, c: Color) -> Self {
+        self.appearance.look.press_fill = Some(c);
+        self
+    }
     pub fn hover_stroke(mut self, w: f32, c: Color) -> Self {
         self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
+        self
+    }
+
+    pub fn press_stroke(mut self, w: f32, c: Color) -> Self {
+        self.appearance.look.press_stroke = Some(Border { width: w, color: c });
         self
     }
     pub fn tint(mut self, ms: f32) -> Self {
@@ -533,6 +545,11 @@ impl<M> El<M> {
     }
     pub fn fade_in(self, ms: f32) -> Self {
         self.fade(1.0, ms)
+    }
+
+    pub fn repaint(mut self) -> Self {
+        self.appearance.repaint = true;
+        self
     }
 
     /// Fires whenever the fade settles — on arrival at 0
@@ -648,135 +665,5 @@ impl<M> El<M> {
             anchor,
         });
         self
-    }
-    pub fn map<B: 'static>(self, f: impl Fn(M) -> B + 'static) -> El<B>
-    where
-        M: 'static,
-    {
-        self.map_rc(Rc::new(f))
-    }
-    fn map_rc<B: 'static>(self, f: Rc<dyn Fn(M) -> B>) -> El<B>
-    where
-        M: 'static,
-    {
-        let El {
-            layout,
-            appearance,
-            behaviour,
-            children,
-            id,
-        } = self;
-        let Behaviour {
-            on_click,
-            input,
-            scroll,
-            on_drag,
-            on_drop,
-            overlay,
-            on_right_click,
-            offset,
-            opacity,
-            slide,
-            fade,
-            tint,
-        } = behaviour;
-        let r_f = Rc::clone(&f);
-        let new_drag = on_drag.map(|(id, d)| {
-            (
-                id,
-                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DragEvent) -> B>,
-            )
-        });
-
-        let r_f = Rc::clone(&f);
-        let new_drop = on_drop.map(|(id, d)| {
-            (
-                id,
-                Box::new(move |d_e| r_f(d(d_e))) as Box<dyn Fn(DropEvent) -> B>,
-            )
-        });
-        let on_click = on_click.map(|m| f(m));
-
-        let rc = Rc::clone(&f);
-        let on_right_click =
-            on_right_click.map(|m| Box::new(move |s| rc(m(s))) as Box<dyn Fn((f32, f32)) -> B>);
-        let input = match input {
-            Some(InputSpec {
-                map,
-                multiline,
-                on_enter,
-                on_esc,
-                autofocus,
-            }) => {
-                let r_f = Rc::clone(&f);
-                let new_map = map.map(|g| Box::new(move |s| r_f(g(s))) as Box<dyn Fn(String) -> B>);
-
-                Some(InputSpec {
-                    multiline,
-                    autofocus,
-                    on_enter: on_enter.map(|e| f(e)),
-                    on_esc: on_esc.map(|e| f(e)),
-                    map: new_map,
-                })
-            }
-            None => None,
-        };
-        let new_overlay = overlay.map(|o| Overlay {
-            panel: Box::new((*o.panel).map_rc(Rc::clone(&f))),
-            dismiss: o.dismiss.map(|d| f(d)),
-            placement: o.placement,
-            anchor: o.anchor,
-        });
-
-        let new_slide = slide.map(|(binding, (dx, dy))| {
-            (
-                Binding {
-                    driver: binding.driver,
-                    easing: binding.easing,
-                    on_done: binding.on_done.map(|(t, m)| (t, f(m))),
-                    duration: binding.duration,
-                },
-                (dx, dy),
-            )
-        });
-        let new_fade = fade.map(|fa| Binding {
-            driver: fa.driver,
-            duration: fa.duration,
-            easing: fa.easing,
-            on_done: fa.on_done.map(|(t, m)| (t, f(m))),
-        });
-
-        let new_tint = tint.map(|t| Binding {
-            driver: t.driver,
-            duration: t.duration,
-            easing: t.easing,
-            on_done: t.on_done.map(|(t, m)| (t, f(m))),
-        });
-
-        let behaviour = Behaviour {
-            on_click,
-            input,
-            scroll,
-            on_drag: new_drag,
-            on_drop: new_drop,
-            overlay: new_overlay,
-            on_right_click,
-            offset,
-            opacity,
-            slide: new_slide,
-            fade: new_fade,
-            tint: new_tint,
-        };
-        let mut converted_children: Vec<El<B>> = Vec::new();
-        for child in children {
-            converted_children.push(child.map_rc(Rc::clone(&f)));
-        }
-        El {
-            layout,
-            appearance,
-            behaviour,
-            children: converted_children,
-            id,
-        }
     }
 }
