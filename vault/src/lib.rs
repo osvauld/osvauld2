@@ -15,7 +15,7 @@ pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
-pub use item::{ItemKind, WorkspaceItem, APP_MAIN_SEED};
+pub use item::{ItemKind, WorkspaceItem};
 pub use workspace::WorkspaceMeta;
 
 use account::{did_to_filename, scan_dids};
@@ -34,6 +34,20 @@ struct Active {
     store: Store,
 }
 
+impl Active {
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, VaultError> {
+        Ok(identity::encrypt_for(
+            &self.identity.encryption_public_key(),
+            plaintext,
+        )?)
+    }
+    pub fn unseal(&self, sealed: &[u8]) -> Result<Vec<u8>, VaultError> {
+        self.identity
+            .decrypt_sealed(sealed)
+            .map_err(|e| VaultError::Crypto(e))
+    }
+}
+
 #[derive(Clone)]
 pub struct Vault {
     dir: PathBuf,
@@ -42,7 +56,7 @@ pub struct Vault {
 
 /// Split out so the Argon2 hashing ([`Vault::prepare_signup`]) can run off the UI thread,
 /// then be committed ([`Vault::commit_signup`]) on it.
-pub struct PreparedAccount {
+struct PreparedAccount {
     identity: Identity,
     mnemonic: Mnemonic,
     label: String,
@@ -51,7 +65,7 @@ pub struct PreparedAccount {
 
 /// The unlocked identity produced by [`Vault::prepare_login`] (off the UI thread), installed
 /// as the active account by [`Vault::commit_login`].
-pub struct UnlockedAccount {
+struct UnlockedAccount {
     did: String,
     label: String,
     identity: Identity,
@@ -60,7 +74,10 @@ pub struct UnlockedAccount {
 impl Vault {
     pub fn open(dir: PathBuf) -> Result<Self, VaultError> {
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir, active: Arc::new(Mutex::new(None)) })
+        Ok(Self {
+            dir,
+            active: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -77,25 +94,47 @@ impl Vault {
             .collect()
     }
 
-    pub fn signup(&mut self, label: &str, passphrase: &str) -> Result<(String, Mnemonic), VaultError> {
+    pub fn signup(
+        &mut self,
+        label: &str,
+        passphrase: &str,
+    ) -> Result<(String, Mnemonic), VaultError> {
         let prepared = Self::prepare_signup(label, passphrase)?;
         self.commit_signup(prepared)
     }
 
     /// Slow half (Argon2): no `self`, no I/O — safe to run on a worker thread.
-    pub fn prepare_signup(label: &str, passphrase: &str) -> Result<PreparedAccount, VaultError> {
+    fn prepare_signup(label: &str, passphrase: &str) -> Result<PreparedAccount, VaultError> {
         let (identity, mnemonic) = identity::generate();
         let keystore = identity::seal(&identity, passphrase)?;
-        Ok(PreparedAccount { identity, mnemonic, label: label.to_string(), keystore })
+        Ok(PreparedAccount {
+            identity,
+            mnemonic,
+            label: label.to_string(),
+            keystore,
+        })
     }
 
-    pub fn commit_signup(&mut self, prepared: PreparedAccount) -> Result<(String, Mnemonic), VaultError> {
-        let PreparedAccount { identity, mnemonic, label, keystore } = prepared;
+    fn commit_signup(
+        &mut self,
+        prepared: PreparedAccount,
+    ) -> Result<(String, Mnemonic), VaultError> {
+        let PreparedAccount {
+            identity,
+            mnemonic,
+            label,
+            keystore,
+        } = prepared;
         let did = identity.did().to_string();
         let store = Store::open(self.dir.join(did_to_filename(&did)?))?;
         store.put(KEYSTORE_KEY, &keystore.to_bytes())?;
         store.put(LABEL_KEY, label.as_bytes())?;
-        *self.active.lock().unwrap() = Some(Active { did: did.clone(), label, identity, store });
+        *self.active.lock().unwrap() = Some(Active {
+            did: did.clone(),
+            label,
+            identity,
+            store,
+        });
         Ok((did, mnemonic))
     }
 
@@ -106,7 +145,11 @@ impl Vault {
 
     /// Slow half (Argon2): opens the keystore read-only and decrypts it. Takes no `&self`, so
     /// the UI can run it on a worker thread; pair with [`Vault::commit_login`].
-    pub fn prepare_login(dir: &Path, did: &str, passphrase: &str) -> Result<UnlockedAccount, VaultError> {
+    fn prepare_login(
+        dir: &Path,
+        did: &str,
+        passphrase: &str,
+    ) -> Result<UnlockedAccount, VaultError> {
         let path = dir.join(did_to_filename(did)?);
         // Guard existence: Store::open would otherwise create a stray empty db for a bad DID.
         if !path.exists() {
@@ -116,45 +159,52 @@ impl Vault {
         let bytes = store.get(KEYSTORE_KEY)?.ok_or(VaultError::NoKeystore)?;
         let identity = identity::unlock(&Keystore::from_bytes(&bytes)?, passphrase)?;
         let label = read_label(&store);
-        Ok(UnlockedAccount { did: did.to_string(), label, identity })
+        Ok(UnlockedAccount {
+            did: did.to_string(),
+            label,
+            identity,
+        })
     }
 
-    pub fn commit_login(&mut self, unlocked: UnlockedAccount) -> Result<(), VaultError> {
-        let UnlockedAccount { did, label, identity } = unlocked;
+    fn commit_login(&mut self, unlocked: UnlockedAccount) -> Result<(), VaultError> {
+        let UnlockedAccount {
+            did,
+            label,
+            identity,
+        } = unlocked;
         // Re-open read-write to hold the db for the session (prepare's read-only handle is
         // already dropped, so there's no single-handle conflict).
         let store = Store::open(self.dir.join(did_to_filename(&did)?))?;
-        *self.active.lock().unwrap() = Some(Active { did, label, identity, store });
+        *self.active.lock().unwrap() = Some(Active {
+            did,
+            label,
+            identity,
+            store,
+        });
         Ok(())
-    }
-
-    pub fn switch(&mut self, did: &str, passphrase: &str) -> Result<(), VaultError> {
-        self.lock();
-        self.login(did, passphrase)
     }
 
     pub fn lock(&mut self) {
         *self.active.lock().unwrap() = None;
     }
 
-    /// The data directory, so a driver can hand it to [`Vault::prepare_login`] on a worker.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    pub fn identity(&self) -> Option<Identity> {
-        self.active.lock().unwrap().as_ref().map(|active| active.identity.clone())
-    }
-
     pub fn store(&self) -> Option<Store> {
-        self.active.lock().unwrap().as_ref().map(|a| a.store.clone())
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.store.clone())
     }
 
     pub fn current(&self) -> Option<AccountInfo> {
-        self.active.lock().unwrap().as_ref().map(|active| AccountInfo {
-            did: active.did.clone(),
-            label: active.label.clone(),
-        })
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|active| AccountInfo {
+                did: active.did.clone(),
+                label: active.label.clone(),
+            })
     }
 
     /// Create a new workspace named `name` in the active account, returning its header (with
@@ -170,22 +220,9 @@ impl Vault {
             created: workspace::now_secs(),
         };
         let plaintext = serde_json::to_vec(&meta)?;
-        let sealed = identity::encrypt_for(&active.identity.encryption_public_key(), &plaintext)?;
+        let sealed = active.seal(&plaintext)?;
         active.store.put(&workspace::meta_key(&meta.id), &sealed)?;
         Ok(meta)
-    }
-
-    /// A single workspace's header by id, or `None` if there's no such workspace. A direct
-    /// key read (`ws/<id>/meta`) — use this to open/restore one workspace without scanning the
-    /// whole set. Errs with [`VaultError::Locked`] when no account is unlocked.
-    pub fn workspace(&self, id: &str) -> Result<Option<WorkspaceMeta>, VaultError> {
-        let guard = self.active.lock().unwrap();
-        let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        let Some(sealed) = active.store.get(&workspace::meta_key(id))? else {
-            return Ok(None);
-        };
-        let plaintext = active.identity.decrypt_sealed(&sealed)?;
-        Ok(Some(serde_json::from_slice(&plaintext)?))
     }
 
     /// Every workspace in the active account, newest first (ties broken by id for a stable
@@ -199,8 +236,10 @@ impl Vault {
             if workspace::id_from_meta_key(&key).is_none() {
                 continue;
             }
-            let Some(sealed) = active.store.get(&key)? else { continue };
-            let plaintext = active.identity.decrypt_sealed(&sealed)?;
+            let Some(sealed) = active.store.get(&key)? else {
+                continue;
+            };
+            let plaintext = active.unseal(&sealed)?;
             out.push(serde_json::from_slice(&plaintext)?);
         }
         out.sort_by(|a: &WorkspaceMeta, b: &WorkspaceMeta| {
@@ -209,20 +248,23 @@ impl Vault {
         Ok(out)
     }
 
-    /// Create a new item of `kind` named `name` inside workspace `ws_id`.
-    /// App items get a starter `manifest.osv` here; their `main.lua` is seeded by the host as a
-    /// `block_doc` snapshot (the vault stays Loro-free), so a fresh app renders and is editable by
-    /// an agent over MCP right away.
-    pub fn create_item(&self, ws_id: &str, name: &str, kind: ItemKind) -> Result<WorkspaceItem, VaultError> {
+    /// Create a new item of `kind` named `name` inside workspace `ws_id`. Only the sealed header
+    /// is written: an .app's `main.lua` and `manifest.osv` arrive as a source doc via
+    /// [`Vault::put_src`], built by the shell (the vault stays Loro-free).
+    pub fn create_item(
+        &self,
+        ws_id: &str,
+        name: &str,
+        kind: ItemKind,
+    ) -> Result<WorkspaceItem, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
         let item = WorkspaceItem::new(ws_id, name, kind);
         let plaintext = serde_json::to_vec(&item)?;
-        let sealed = identity::encrypt_for(&active.identity.encryption_public_key(), &plaintext)?;
-        active.store.put(&item::meta_key(ws_id, &item.id), &sealed)?;
-        if item.kind == ItemKind::App {
-            active.store.put(&item::file_key(ws_id, &item.id, "manifest.osv"), item::APP_MANIFEST_SEED)?;
-        }
+        let sealed = active.seal(&plaintext)?;
+        active
+            .store
+            .put(&item::meta_key(ws_id, &item.id), &sealed)?;
         Ok(item)
     }
 
@@ -236,8 +278,10 @@ impl Vault {
             if item::id_from_meta_key(ws_id, &key).is_none() {
                 continue;
             }
-            let Some(sealed) = active.store.get(&key)? else { continue };
-            let plaintext = active.identity.decrypt_sealed(&sealed)?;
+            let Some(sealed) = active.store.get(&key)? else {
+                continue;
+            };
+            let plaintext = active.unseal(&sealed)?;
             out.push(serde_json::from_slice(&plaintext)?);
         }
         out.sort_by(|a: &WorkspaceItem, b: &WorkspaceItem| {
@@ -245,50 +289,51 @@ impl Vault {
         });
         Ok(out)
     }
+    //Retrieve lua src code
 
-    /// Read a source file at `path` from an item's folder tree. `None` if it doesn't exist.
-    pub fn get_file(&self, ws_id: &str, item_id: &str, path: &str) -> Result<Option<Vec<u8>>, VaultError> {
-        let guard = self.active.lock().unwrap();
-        let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.get(&item::file_key(ws_id, item_id, path))?)
+    pub fn get_src(&self, ws_id: &str, item_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        self.get_sealed(&item::src_key(ws_id, item_id))
     }
 
-    /// Write a source file at `path` in an item's folder tree (the path *is* the identity;
-    /// intermediate folders are implied, never created). Overwrites any existing file.
-    pub fn put_file(&self, ws_id: &str, item_id: &str, path: &str, data: &[u8]) -> Result<(), VaultError> {
-        let guard = self.active.lock().unwrap();
-        let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.put(&item::file_key(ws_id, item_id, path), data)?)
+    //update lua src code
+    pub fn put_src(&self, ws_id: &str, item_id: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        self.put_sealed(&item::src_key(ws_id, item_id), snapshot)
     }
 
-    /// Every source-file path in an item's folder tree, sorted (so the order is stable for a
-    /// file-tree UI). Empty for items with no files (e.g. a fresh .doc).
-    pub fn list_files(&self, ws_id: &str, item_id: &str) -> Result<Vec<String>, VaultError> {
-        let guard = self.active.lock().unwrap();
-        let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        let mut out = Vec::new();
-        for key in active.store.list_prefixed(&item::files_prefix(ws_id, item_id))? {
-            if let Some(path) = item::path_from_file_key(ws_id, item_id, &key) {
-                out.push(path.to_string());
-            }
-        }
-        out.sort();
-        Ok(out)
+    //get state document
+    pub fn get_doc(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, VaultError> {
+        self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
 
-    /// Read the item's runtime CRDT snapshot (a .doc's blocks, an app's runtime). `None` until
-    /// the item first stores state.
-    pub fn get_state(&self, ws_id: &str, item_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
-        let guard = self.active.lock().unwrap();
-        let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.get(&item::state_key(ws_id, item_id))?)
+    //update state persistance
+    pub fn put_doc(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        snapshot: &[u8],
+        name: &str,
+    ) -> Result<(), VaultError> {
+        if name.is_empty() || name.contains('/') {
+            return Err(VaultError::InvalidName(name.to_string()));
+        };
+        self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)
     }
-
-    /// Persist the item's runtime CRDT snapshot.
-    pub fn put_state(&self, ws_id: &str, item_id: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+    fn get_sealed(&self, key: &str) -> Result<Option<Vec<u8>>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
-        Ok(active.store.put(&item::state_key(ws_id, item_id), snapshot)?)
+        let sealed = active.store.get(key)?;
+        sealed.map(|s| active.unseal(&s)).transpose()
+    }
+    fn put_sealed(&self, key: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let sealed = active.seal(snapshot)?;
+        Ok(active.store.put(key, &sealed)?)
     }
 
     // The active account's label is cached; any other account is opened read-only just

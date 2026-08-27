@@ -1,5 +1,11 @@
 use super::*;
 use mlua::Table;
+use std::rc::Rc;
+
+// Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
+fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
+    Rc::new(|m| m)
+}
 
 #[test]
 fn vm_runs_lua() {
@@ -42,7 +48,7 @@ fn walk_builds_el() {
         .eval()
         .unwrap();
     let mut handlers: Vec<Function> = Vec::new();
-    let mut ctx = Ctx::new(&mut handlers);
+    let mut ctx = Ctx::new(&mut handlers, identity());
     assert!(walk(node, &mut ctx).is_ok());
 }
 #[test]
@@ -54,7 +60,7 @@ fn walk_collects_handlers() {
         .unwrap();
 
     let mut handlers: Vec<Function> = Vec::new();
-    let mut ctx = Ctx::new(&mut handlers);
+    let mut ctx = Ctx::new(&mut handlers, identity());
     let _el = walk(node, &mut ctx).unwrap();
     assert_eq!(handlers.len(), 1);
     assert!(handlers[0].call::<()>(()).is_ok());

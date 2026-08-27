@@ -5,6 +5,7 @@
 use std::time::Instant;
 
 use crate::signup::SignupForm;
+use crate::space::SpaceScreen;
 use crate::{Msg, Screen, theme};
 use runtime::{El, EventLoopProxy, MONO_FAMILY, PIXEL_FAMILY, col, custom, row, text, text_input};
 use vault::{AccountInfo, Vault};
@@ -69,7 +70,7 @@ impl LoginScreen {
             LoginMsg::Done(r) => {
                 self.pending = None;
                 match r {
-                    Ok(()) => Some(Screen::Signup(SignupForm::default())),
+                    Ok(()) => Some(Screen::Spaces(SpaceScreen::new(vault))),
                     Err(e) => {
                         self.error = Some(e);
                         None
@@ -102,6 +103,7 @@ impl LoginScreen {
         })
         .h(40.0)
         .px(12.0)
+        .autofocus()
         .fill(theme::bg_1())
         .color(theme::fg_1())
         .radius(6.0)
@@ -144,7 +146,7 @@ impl LoginScreen {
             .child(passphrase_label)
             .child(passphrase_input)
             .child(login_button);
-        let mut error_panel: El<Msg> = row().center().h(44.0);
+        let mut error_panel: El<Msg> = row().center().h(44.0).pad(20.0);
         if let Some(error) = &self.error {
             error_panel = error_panel
                 .child(text(error).font_size(13.0))

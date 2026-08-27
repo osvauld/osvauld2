@@ -5,12 +5,12 @@
 //! is unchanged — dispatch just calls the closure the index points at.
 
 mod props;
-use mlua::{Function, Lua, Table, Value};
+use loro::{Container, LoroDoc, ValueOrContainer};
+use mlua::{Error, Function, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{El, col, row, text, text_area, text_input};
 use std::cell::RefCell;
-use std::fs;
-use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,80 +21,59 @@ pub enum LuaMsg {
     CallPhase(u32, &'static str, f32, f32),
 }
 
-pub struct Ctx<'a> {
+pub struct Ctx<'a, M> {
     pub handlers: &'a mut Vec<Function>,
     pub dev: bool,
     pub errors: Vec<String>,
     pub path: String,
+    pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
 }
-impl<'a> Ctx<'a> {
-    fn new(handlers: &'a mut Vec<Function>) -> Self {
+impl<'a, M> Ctx<'a, M> {
+    fn new(handlers: &'a mut Vec<Function>, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> Self {
         Self {
             handlers,
             dev: true,
             errors: Vec::new(),
             path: String::new(),
+            to_msg,
         }
     }
 }
 
-pub struct LuaApp {
+pub struct LuaApp<M> {
     vm: Lua, // never read, but every `Function` below borrows from it — dropping it invalidates them
-
-    view_fn: Option<Function>,        //the closure the source returns
+    view_fn: Option<Function>, //the closure the source returns
     handlers: RefCell<Vec<Function>>, // refilled every frame
-    path: Option<PathBuf>,
     error: Option<String>,
     fires: Arc<AtomicU64>,
+    to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    src: LoroDoc,
 }
 
-impl LuaApp {
-    pub fn new(source: &str) -> mlua::Result<Self> {
+impl<M: 'static> LuaApp<M> {
+    pub fn open(src: LoroDoc, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> mlua::Result<Self> {
         let (vm, fires) = sandboxed_vm()?;
-        let view_fn = Some(vm.load(source).eval::<Function>()?);
+        let map = src.get_map("files");
+        let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
+            return Err(Error::runtime("no main.lua in app source"));
+        };
+        let main_src = t.to_string();
+        let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
+            Ok(f) => (Some(f), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         Ok(Self {
             vm,
             view_fn,
             handlers: RefCell::new(Vec::new()),
-            path: None,
-            error: None,
+            error,
             fires,
+            to_msg,
+            src,
         })
     }
-    pub fn from_file(path: impl Into<PathBuf>) -> mlua::Result<Self> {
-        let (vm, fires) = sandboxed_vm()?;
-        let path = path.into();
-        let content = fs::read_to_string(&path);
-        match content {
-            Ok(c) => {
-                let (view_fn, error) = match vm
-                    .load(c)
-                    .set_name(path.display().to_string())
-                    .eval::<Function>()
-                {
-                    Ok(f) => (Some(f), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
 
-                Ok(Self {
-                    vm,
-                    view_fn,
-                    handlers: RefCell::new(Vec::new()),
-                    path: Some(path.into()),
-                    error: error,
-                    fires,
-                })
-            }
-            Err(e) => Err(mlua::Error::runtime(format!(
-                "failed to read {}: {e}",
-                path.display()
-            ))),
-        }
-    }
-}
-impl runtime::App for LuaApp {
-    type Msg = LuaMsg;
-    fn view(&self) -> El<LuaMsg> {
+    pub fn view(&self) -> El<M> {
         //reset budget
         self.fires.store(0, Ordering::Relaxed);
         if let Some(e) = &self.error {
@@ -112,7 +91,7 @@ impl runtime::App for LuaApp {
         }
         let mut handlers = self.handlers.borrow_mut();
         handlers.clear();
-        let mut context = Ctx::new(&mut handlers);
+        let mut context = Ctx::new(&mut handlers, self.to_msg.clone());
         let el = match walk(tree, &mut context) {
             Ok(el) => el,
             Err(e) => {
@@ -125,7 +104,7 @@ impl runtime::App for LuaApp {
         }
         el
     }
-    fn update(&mut self, msg: LuaMsg) {
+    pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
         let handlers = self.handlers.borrow();
@@ -143,14 +122,6 @@ impl runtime::App for LuaApp {
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
-        }
-    }
-    fn reload(&mut self) {
-        if let Some(path) = self.path.clone() {
-            match Self::from_file(path) {
-                Ok(app) => *self = app,
-                Err(e) => self.error = Some(e.to_string()),
-            }
         }
     }
 }
@@ -218,17 +189,17 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     });
     Ok((vm, fires))
 }
-fn fail(context: &mut Ctx, msg: String) -> El<LuaMsg> {
+fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
     let msg = format!("{} > {msg}", context.path);
     context.errors.push(msg.clone());
     err_box(&msg)
 }
-fn children(
-    mut el: El<LuaMsg>,
+fn children<M: 'static>(
+    mut el: El<M>,
     node: &Table,
-    context: &mut Ctx,
+    context: &mut Ctx<M>,
     tag: &str,
-) -> mlua::Result<El<LuaMsg>> {
+) -> mlua::Result<El<M>> {
     for i in 1..=max_index(node) {
         let mark = context.path.len();
         context.path.push_str(&format!("> [{i}]"));
@@ -281,7 +252,7 @@ fn children(
     }
     Ok(el)
 }
-fn err_box(msg: &str) -> El<LuaMsg> {
+fn err_box<M>(msg: &str) -> El<M> {
     let red = Color::from_rgba8(0xEF, 0x44, 0x44, 0xFF);
     let mut el = col()
         .pad(8.0)
@@ -299,7 +270,7 @@ fn err_box(msg: &str) -> El<LuaMsg> {
     el
 }
 
-fn walk(node: Table, context: &mut Ctx) -> mlua::Result<El<LuaMsg>> {
+fn walk<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     let tag: String = node.get("tag")?;
     let line: String = node.get("line")?;
     let seg = match node.get::<Option<String>>("id")? {
@@ -347,7 +318,7 @@ fn keys(node: &Table) -> String {
     out.join(",")
 }
 
-fn build(node: Table, context: &mut Ctx, tag: &str) -> mlua::Result<El<LuaMsg>> {
+fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
     let mut el = match tag {
         "col" | "row" | "button" => {
             let el = if tag == "col" { col() } else { row() };
@@ -375,7 +346,8 @@ fn build(node: Table, context: &mut Ctx, tag: &str) -> mlua::Result<El<LuaMsg>> 
             let f: mlua::Function = node.get("on_input")?;
             let idx = context.handlers.len() as u32;
             context.handlers.push(f);
-            let map = move |s| LuaMsg::CallStr(idx, s);
+            let to_msg = context.to_msg.clone();
+            let map = move |s| to_msg(LuaMsg::CallStr(idx, s));
             if tag == "input" {
                 text_input(value, id, map)
             } else {

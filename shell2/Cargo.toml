@@ -13,3 +13,7 @@ app_host = { path = "../app_host" }
 vault = { path = "../vault" }
 identity = { path = "../identity/" }
 vello = "0.9.0"
+loro = "1.13.9"
+rfd = "0.17.2"
+[dev-dependencies]
+tempfile = "3"

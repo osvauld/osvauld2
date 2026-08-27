@@ -1,9 +1,10 @@
+use std::rc::Rc;
+
 use crate::{Ctx, LuaMsg, parse_color};
 use mlua::{Function, Table, Value};
 use runtime::El;
 use runtime::vello::peniko::Color;
-
-type E = El<LuaMsg>;
+use std::marker::PhantomData;
 
 /// How a Lua value becomes a Rust value. Keyed on the *type*, not the prop — once `Color`
 /// implements this, every builder taking a `Color` decodes for free, at any arity.
@@ -51,13 +52,14 @@ impl<A: FromProp, B: FromProp> FromProp for (A, B) {
     }
 }
 
-pub(crate) struct DragCtx<'a> {
+pub(crate) struct DragCtx<'a, M> {
     pub handlers: &'a mut Vec<Function>,
     pub node: &'a Table,
+    pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
 }
 
 /// Every prop erased to one signature, so arity stops being part of the type.
-type Apply = fn(E, &Value) -> mlua::Result<E>;
+type Apply<M> = fn(El<M>, &Value) -> mlua::Result<El<M>>;
 
 /// `prop!(pad, f32)` expands to `("pad", |el, v| Ok(El::pad(el, f32::from_prop(v)?)))`.
 ///
@@ -68,13 +70,13 @@ macro_rules! prop {
     ($f:ident) => {
         (
             stringify!($f),
-            (|el, v| Ok(if bool::from_prop(v)? { El::$f(el) } else { el })) as Apply,
+            (|el, v| Ok(if bool::from_prop(v)? { El::$f(el) } else { el })) as Apply<M>,
         )
     };
     ($f:ident, $t: ty) => {
         (
             stringify!($f),
-            (|el, v| Ok(El::$f(el, <$t>::from_prop(v)?))) as Apply,
+            (|el, v| Ok(El::$f(el, <$t>::from_prop(v)?))) as Apply<M>,
         )
     };
     ($f:ident, $a:ty, $b:ty) => {
@@ -87,7 +89,7 @@ macro_rules! prop {
                     <$a>::from_prop(&t.get::<Value>(1)?)?,
                     <$b>::from_prop(&t.get::<Value>(2)?)?,
                 ))
-            }) as Apply,
+            }) as Apply<M>,
         )
     };
 
@@ -102,129 +104,160 @@ macro_rules! prop {
                     <$b>::from_prop(&t.get::<Value>(2)?)?,
                     <$c>::from_prop(&t.get::<Value>(3)?)?,
                 ))
-            }) as Apply,
+            }) as Apply<M>,
+        )
+    };
+    ($f:ident, $a:ty, $b:ty, $c: ty, $d: ty) => {
+        (
+            stringify!($f),
+            (|el, v| {
+                let t = v.as_table().ok_or_else(|| want(v, "a list"))?;
+                Ok(El::$f(
+                    el,
+                    <$a>::from_prop(&t.get::<Value>(1)?)?,
+                    <$b>::from_prop(&t.get::<Value>(2)?)?,
+                    <$c>::from_prop(&t.get::<Value>(3)?)?,
+                    <$d>::from_prop(&t.get::<Value>(4)?)?,
+                ))
+            }) as Apply<M>,
         )
     };
 }
 
-type Bind = fn(E, &Value, &mut DragCtx) -> mlua::Result<E>;
+pub(crate) struct Registry<M>(PhantomData<M>);
+impl<M: 'static> Registry<M> {
+    pub(crate) const BINDS: &'static [(&str, Bind<M>)] = &[
+        ("on_drag", |el, v, cx| {
+            let id: String = cx.node.get("id")?;
+            let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
+            let idx = cx.handlers.len() as u32;
+            cx.handlers.push(handler.clone());
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_drag(id, move |e| {
+                to_msg(LuaMsg::CallPhase(
+                    idx,
+                    e.phase.as_str(),
+                    e.pos.0 - e.grab.0,
+                    e.pos.1 - e.grab.1,
+                ))
+            }))
+        }),
+        ("on_drop", |el, v, cx| {
+            let id: String = cx.node.get("id")?;
+            let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
+            let idx = cx.handlers.len() as u32;
+            cx.handlers.push(handler.clone());
 
-pub(crate) static BINDS: &[(&str, Bind)] = &[
-    ("on_drag", |el, v, cx| {
-        let id: String = cx.node.get("id")?;
-        let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
-        let idx = cx.handlers.len() as u32;
-        cx.handlers.push(handler.clone());
-        Ok(el.on_drag(id, move |e| {
-            LuaMsg::CallPhase(
-                idx,
-                e.phase.as_str(),
-                e.pos.0 - e.grab.0,
-                e.pos.1 - e.grab.1,
-            )
-        }))
-    }),
-    ("on_drop", |el, v, cx| {
-        let id: String = cx.node.get("id")?;
-        let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
-        let idx = cx.handlers.len() as u32;
-        cx.handlers.push(handler.clone());
-        Ok(el.on_drop(id, move |e| {
-            LuaMsg::CallPhase(
-                idx,
-                e.phase.as_str(),
-                e.pos.0 / e.size.0,
-                e.pos.1 / e.size.1,
-            )
-        }))
-    }),
-];
-/// Applied in this order, so shorthands precede the longhands that override them: `full` before
-/// `w`/`h`, `size` before both, `pad` before `px`/`py`, `fade_in` before `fade` (it *is*
-/// `fade(1.0, ms)`). Lua table order is unspecified — this list is the only thing making the
-/// result deterministic when both are set.
-pub(crate) static PROPS: &[(&str, Apply)] = &[
-    // box
-    prop!(full),
-    prop!(w_full),
-    prop!(h_full),
-    prop!(size, f32, f32),
-    prop!(w, f32),
-    prop!(h, f32),
-    prop!(grow),
-    // spacing
-    prop!(pad, f32),
-    prop!(px, f32),
-    prop!(py, f32),
-    prop!(gap, f32),
-    prop!(mt, f32),
-    prop!(mb, f32),
-    // alignment
-    prop!(center),
-    prop!(align_center),
-    prop!(stretch),
-    // positioning
-    prop!(absolute),
-    prop!(top, f32),
-    prop!(left, f32),
-    prop!(right, f32),
-    prop!(bottom, f32),
-    prop!(offset, (f32, f32)),
-    // paint
-    prop!(fill, Color),
-    prop!(color, Color),
-    prop!(radius, f32),
-    prop!(stroke, f32, Color),
-    prop!(opacity, f32),
-    prop!(font_size, f32),
-    // hover
-    prop!(hover_fill, Color),
-    prop!(hover_stroke, f32, Color),
-    prop!(tint, f32),
-    // animation
-    prop!(fade_in, f32),
-    prop!(fade, f32, f32),
-    prop!(slide_in, (f32, f32), f32),
-    // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
-    prop!(scroll_x),
-    prop!(scroll_y),
-    // input
-    prop!(autofocus),
-];
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_drop(id, move |e| {
+                to_msg(LuaMsg::CallPhase(
+                    idx,
+                    e.phase.as_str(),
+                    e.pos.0 / e.size.0,
+                    e.pos.1 / e.size.1,
+                ))
+            }))
+        }),
+    ];
+    /// Applied in this order, so shorthands precede the longhands that override them: `full` before
+    /// `w`/`h`, `size` before both, `pad` before `px`/`py`, `fade_in` before `fade` (it *is*
+    /// `fade(1.0, ms)`). Lua table order is unspecified — this list is the only thing making the
+    /// result deterministic when both are set.
+    pub(crate) const PROPS: &'static [(&'static str, Apply<M>)] = &[
+        // box
+        prop!(full),
+        prop!(w_full),
+        prop!(h_full),
+        prop!(size, f32, f32),
+        prop!(w, f32),
+        prop!(h, f32),
+        prop!(grow),
+        prop!(wrap),
+        // spacing
+        prop!(pad, f32),
+        prop!(px, f32),
+        prop!(py, f32),
+        prop!(gap, f32),
+        prop!(mt, f32),
+        prop!(mb, f32),
+        // alignment
+        prop!(center),
+        prop!(align_center),
+        prop!(stretch),
+        // positioning
+        prop!(absolute),
+        prop!(top, f32),
+        prop!(left, f32),
+        prop!(right, f32),
+        prop!(bottom, f32),
+        prop!(offset, (f32, f32)),
+        // paint
+        prop!(fill, Color),
+        prop!(color, Color),
+        prop!(radius, f32),
+        prop!(stroke, f32, Color),
+        prop!(stroke_dash, f32, Color, f32, f32),
+        prop!(opacity, f32),
+        prop!(font_size, f32),
+        // hover
+        prop!(hover_fill, Color),
+        prop!(hover_stroke, f32, Color),
+        prop!(tint, f32),
+        // animation
+        prop!(fade_in, f32),
+        prop!(fade, f32, f32),
+        prop!(slide_in, (f32, f32), f32),
+        // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
+        prop!(scroll_x),
+        prop!(scroll_y),
+        // input
+        prop!(autofocus),
+    ];
 
-/// Props whose value is a Lua function. Each is registered into `handlers` and reaches the app as
-/// `LuaMsg::Call(idx)`; these builders all take a plain `M`, so one fn-pointer shape covers them.
-pub(crate) static CALLBACKS: &[(&str, fn(E, LuaMsg) -> E)] = &[
-    ("on_click", El::on_click),
-    ("on_enter", El::on_enter),
-    ("on_esc", El::on_esc),
-    ("on_faded_out", El::on_faded_out),
-];
+    /// Props whose value is a Lua function. Each is registered into `handlers` and reaches the app as
+    /// `LuaMsg::Call(idx)`; these builders all take a plain `M`, so one fn-pointer shape covers them.
+    pub(crate) const CALLBACKS: &'static [(&'static str, fn(El<M>, M) -> El<M>)] = &[
+        ("on_click", El::on_click),
+        ("on_enter", El::on_enter),
+        ("on_esc", El::on_esc),
+        ("on_faded_out", El::on_faded_out),
+    ];
+}
+type Bind<M> = fn(El<M>, &Value, &mut DragCtx<M>) -> mlua::Result<El<M>>;
+
 pub(crate) static STRUCTURAL: &[&str] =
     &["tag", "id", "value", "on_input", "on_right_click", "line"];
 
-pub(crate) fn apply(mut el: E, node: &Table, context: &mut Ctx) -> mlua::Result<E> {
+pub(crate) fn apply<M: 'static>(
+    mut el: El<M>,
+    node: &Table,
+    context: &mut Ctx<M>,
+) -> mlua::Result<El<M>> {
     let pairs = node.pairs::<Value, Value>();
     let mut found = Vec::new();
     for pair in pairs {
         let (k, v) = pair?;
         let Some(k) = k.as_str() else { continue };
-        if let Some(i) = PROPS.iter().position(|(name, _)| *name == &*k) {
+        if let Some(i) = Registry::<M>::PROPS
+            .iter()
+            .position(|(name, _)| *name == &*k)
+        {
             found.push((i, v));
-        } else if let Some((_, build)) = CALLBACKS.iter().find(|(h, _f)| *h == &*k) {
+        } else if let Some((_, build)) = Registry::<M>::CALLBACKS.iter().find(|(h, _f)| *h == &*k) {
             let f = v
                 .as_function()
                 .ok_or_else(|| mlua::Error::runtime(format!("{k} expects a function")))?;
             let idx = context.handlers.len() as u32;
             context.handlers.push(f.clone());
-            el = build(el, LuaMsg::Call(idx));
-        } else if let Some((_, bind)) = BINDS.iter().find(|(b, _v)| *b == &*k) {
+            el = build(el, (context.to_msg)(LuaMsg::Call(idx)));
+        } else if let Some((_, bind)) = Registry::<M>::BINDS.iter().find(|(b, _v)| *b == &*k) {
             el = bind(
                 el,
                 &v,
                 &mut DragCtx {
                     handlers: context.handlers,
                     node,
+                    to_msg: context.to_msg.clone(),
                 },
             )?;
         } else if !STRUCTURAL.contains(&&*k) {
@@ -235,7 +268,7 @@ pub(crate) fn apply(mut el: E, node: &Table, context: &mut Ctx) -> mlua::Result<
     found.sort_unstable_by_key(|(i, _)| *i);
 
     for (i, v) in found {
-        let (key, f) = &PROPS[i];
+        let (key, f) = &Registry::<M>::PROPS[i];
         // `from_prop` only ever sees the value, so the prop name is reattached here.
         el = f(el, &v).map_err(|e| mlua::Error::runtime(format!("{key}: {e}")))?;
     }

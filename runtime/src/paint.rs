@@ -83,7 +83,11 @@ pub(crate) fn draw<M>(
         }
         if let Some(mut b) = stroke {
             b.color = b.color.multiply_alpha(p.alpha);
-            scene.stroke(&Stroke::new(b.width as f64), t, b.color, None, &shape);
+            let mut s = Stroke::new(b.width as f64);
+            if let Some(d) = b.dash {
+                s = s.with_dashes(0.0, d);
+            }
+            scene.stroke(&s, t, b.color, None, &shape);
         }
         if let Some(custom) = &p.appearance.custom {
             custom(scene, text, p.rect, t);
@@ -130,6 +134,18 @@ pub(crate) fn draw<M>(
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
                     text.draw_layout(scene, layout, origin, text_color);
+                    if ts.text.is_empty()
+                        && let Some(ph) = &spec.placeholder
+                    {
+                        text.draw(
+                            scene,
+                            ph,
+                            ts.family,
+                            ts.size,
+                            origin,
+                            text_color.multiply_alpha(0.4),
+                        );
+                    }
                     if focus.is_focused(id.clone()) {
                         if let Some(bb) = store
                             .get::<Field>(id, Slot::Editor)

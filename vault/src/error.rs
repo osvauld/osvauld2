@@ -14,6 +14,8 @@ pub enum VaultError {
     BadDid(String),
     #[error("vault is locked")]
     Locked,
+    #[error("not a valid name: {0}")]
+    InvalidName(String),
     #[error(transparent)]
     Identity(IdentityError),
     #[error(transparent)]

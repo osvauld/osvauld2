@@ -36,6 +36,7 @@ pub(crate) struct InputSpec<M> {
     pub autofocus: bool,
     pub on_enter: Option<M>,
     pub on_esc: Option<M>,
+    pub placeholder: Option<String>,
 }
 
 // A stroked outline: width (logical px) + color. Distinct from kurbo's `Stroke`
@@ -43,6 +44,7 @@ pub(crate) struct InputSpec<M> {
 pub(crate) struct Border {
     pub width: f32,
     pub color: Color,
+    pub dash: Option<[f64; 2]>,
 }
 
 /// Visual decoration with hover variants, resolved against pointer-inside at paint time
@@ -96,14 +98,17 @@ fn lerp_opt_border(a: Option<Border>, b: Option<Border>, t: f32) -> Option<Borde
         (Some(a), Some(b)) => Some(Border {
             width: a.width + (b.width - a.width) * t,
             color: lerp_color(a.color, b.color, t),
+            dash: b.dash.or(a.dash),
         }),
         (None, Some(b)) => Some(Border {
             width: b.width,
             color: b.color.multiply_alpha(t),
+            dash: b.dash,
         }),
         (Some(a), None) => Some(Border {
             width: a.width,
             color: a.color.multiply_alpha(1.0 - t),
+            dash: a.dash,
         }),
         (None, None) => None,
     }
@@ -318,6 +323,7 @@ pub fn input<M>(
         autofocus: false,
         on_enter: None,
         on_esc: None,
+        placeholder: None,
     });
     e
 }
@@ -433,6 +439,12 @@ impl<M> El<M> {
         self.layout.align_items = Some(AlignItems::CENTER);
         self
     }
+
+    pub fn wrap(mut self) -> Self {
+        self.layout.flex_wrap = taffy::FlexWrap::Wrap;
+        self.layout.align_content = Some(taffy::AlignContent::FLEX_START);
+        self
+    }
     /// Margin above / below this element.
     pub fn mt(mut self, v: f32) -> Self {
         self.layout.margin.top = length(v);
@@ -481,7 +493,11 @@ impl<M> El<M> {
         self
     }
     pub fn stroke(mut self, w: f32, c: Color) -> Self {
-        self.appearance.look.stroke = Some(Border { width: w, color: c });
+        self.appearance.look.stroke = Some(Border {
+            width: w,
+            color: c,
+            dash: None,
+        });
         self
     }
     pub fn radius(mut self, r: f32) -> Self {
@@ -498,12 +514,29 @@ impl<M> El<M> {
         self
     }
     pub fn hover_stroke(mut self, w: f32, c: Color) -> Self {
-        self.appearance.look.hover_stroke = Some(Border { width: w, color: c });
+        self.appearance.look.hover_stroke = Some(Border {
+            width: w,
+            color: c,
+            dash: None,
+        });
+        self
+    }
+
+    pub fn stroke_dash(mut self, w: f32, c: Color, on: f32, off: f32) -> Self {
+        self.appearance.look.stroke = Some(Border {
+            width: w,
+            color: c,
+            dash: Some([on as f64, off as f64]),
+        });
         self
     }
 
     pub fn press_stroke(mut self, w: f32, c: Color) -> Self {
-        self.appearance.look.press_stroke = Some(Border { width: w, color: c });
+        self.appearance.look.press_stroke = Some(Border {
+            width: w,
+            color: c,
+            dash: None,
+        });
         self
     }
     pub fn tint(mut self, ms: f32) -> Self {
@@ -647,6 +680,13 @@ impl<M> El<M> {
     pub fn on_esc(mut self, m: M) -> Self {
         if let Some(spec) = &mut self.behaviour.input {
             spec.on_esc = Some(m)
+        }
+        self
+    }
+
+    pub fn placeholder(mut self, s: impl Into<String>) -> Self {
+        if let Some(spec) = self.behaviour.input.as_mut() {
+            spec.placeholder = Some(s.into())
         }
         self
     }
