@@ -15,17 +15,39 @@ local C = {
 }
 
 -- MODEL
-local columns = {
-	{ id = "c-todo", name = "Todo" },
-	{ id = "c-doing", name = "In Progress" },
-	{ id = "c-done", name = "Done" },
-}
-local cards = {
-	{ id = "k1", col = "c-todo", text = "Wire the MCP bridge" },
-	{ id = "k2", col = "c-todo", text = "Font weight in TextSpec" },
-	{ id = "k3", col = "c-doing", text = "Error boundaries in walk" },
-	{ id = "k4", col = "c-done", text = "ui.state + sweep" },
-}
+--
+-- Columns and cards live in the CRDT, not in Lua tables: `board.columns` and `board.cards` are
+-- the mirror, refreshed from Loro before every frame, and every mutation goes back through the
+-- doc. That is what makes the board survive a restart, and what will make a second peer's drag
+-- show up here.
+--
+-- `drag`, `placement` and `col_modal` deliberately stay Lua locals. They are per-viewer UI
+-- state -- what *this* pointer is doing right now -- and putting them in the doc would
+-- broadcast one person's half-finished drag to everyone.
+--
+-- One rule to keep in mind while reading the actions below: **the mirror is a frame behind your
+-- own write.** `:set` and friends go straight to Loro, and `board.cards` is only repatched in
+-- view(). So read what you need first, then write; never read back what you just wrote.
+local board = doc:open("board")
+
+-- Module scope runs on every open, so seeding has to be guarded or reopening the app would
+-- wipe the board it just loaded.
+if not board.columns then
+	board:set({ "columns" }, doc.list({
+		doc.map({ id = "c-todo", name = "Todo" }),
+		doc.map({ id = "c-doing", name = "In Progress" }),
+		doc.map({ id = "c-done", name = "Done" }),
+	}))
+end
+if not board.cards then
+	board:set({ "cards" }, doc.list({
+		doc.map({ id = "k1", col = "c-todo", text = "Wire the MCP bridge" }),
+		doc.map({ id = "k2", col = "c-todo", text = "Font weight in TextSpec" }),
+		doc.map({ id = "k3", col = "c-doing", text = "Error boundaries in walk" }),
+		doc.map({ id = "k4", col = "c-done", text = "ui.state + sweep" }),
+	}))
+end
+
 local drag, placement = nil, nil
 local col_modal = false
 local actions = {}
@@ -39,49 +61,56 @@ local function index_of(list, id)
 	end
 end
 
+-- Loro's move removes then reinserts, so `to` is the index the element ends up at *after* its
+-- own removal. Dragging downwards therefore lands one slot short unless the target is nudged.
+local function target_index(list, from, anchor_id, before)
+	local at = index_of(list, anchor_id)
+	if not at then
+		return #list
+	end
+	local to = before and at or at + 1
+	if from < to then
+		to = to - 1
+	end
+	return to
+end
+
 local function commit_card()
+	local cards = board.cards
+	local from = index_of(cards, drag.id)
+	if not from then
+		return
+	end
+	-- Dropped on a column rather than on a card: leave the ordering alone and just restamp the
+	-- column. The card list is flat, so `col` is the only thing that has to change.
 	if placement.kind == "into" then
-		local i = index_of(cards, drag.id)
-		if not i then
-			return
-		end
-		local source = table.remove(cards, i)
-		source.col = placement.col
-		cards[#cards + 1] = source
+		board:set({ "cards", drag.id, "col" }, placement.col)
 		return
 	end
 	if drag.id == placement.id then
 		return
 	end
-	local i = index_of(cards, drag.id)
-	if not i then
-		return
-	end
-	local source = table.remove(cards, i)
 	local at = index_of(cards, placement.id)
-	if not at then
-		cards[#cards + 1] = source
-		return
+	local anchor = at and cards[at]
+	-- Move first, then restamp: :move retargets the element's `pos` register and :set writes a
+	-- field inside it, and those are independent registers. Deleting and reinserting would mint
+	-- a new element, which is how a concurrent edit turns into a duplicated card.
+	board:move({ "cards", drag.id }, target_index(cards, from, placement.id, placement.before))
+	if anchor and anchor.col ~= cards[from].col then
+		board:set({ "cards", drag.id, "col" }, anchor.col)
 	end
-	source.col = cards[at].col
-	table.insert(cards, placement.before and at or at + 1, source)
 end
 
 local function commit_col()
 	if drag.id == placement.id then
 		return
 	end
-	local i = index_of(columns, drag.id)
-	if not i then
+	local columns = board.columns
+	local from = index_of(columns, drag.id)
+	if not from then
 		return
 	end
-	local moved = table.remove(columns, i)
-	local at = index_of(columns, placement.id)
-	if not at then
-		columns[#columns + 1] = moved
-		return
-	end
-	table.insert(columns, placement.before and at or at + 1, moved)
+	board:move({ "columns", drag.id }, target_index(columns, from, placement.id, placement.before))
 end
 
 local function commit()
@@ -98,18 +127,13 @@ end
 function actions.add(msg)
 	local s = ui.state("draft:" .. msg.col)
 	if s.text and s.text ~= "" then
-		cards[#cards + 1] = { id = uuid(), col = msg.col, text = s.text }
+		board:insert({ "cards" }, doc.map({ id = uuid(), col = msg.col, text = s.text }))
 		s.text = ""
 	end
 end
 
 function actions.delete(msg)
-	for i = 1, #cards do
-		if cards[i].id == msg.id then
-			table.remove(cards, i)
-			return
-		end
-	end
+	board:delete({ "cards", msg.id })
 end
 
 function actions.drag(msg)
@@ -158,6 +182,8 @@ end
 
 function actions.close_col()
 	col_modal = false
+	-- Clear the draft too, or the next open shows the abandoned text.
+	ui.state("col_modal", { name = "" }).name = ""
 end
 
 function actions.add_col()
@@ -165,22 +191,25 @@ function actions.add_col()
 	if not m.name or m.name == "" then
 		return
 	end
-	columns[#columns + 1] = { id = uuid(), name = m.name }
+	board:insert({ "columns" }, doc.map({ id = uuid(), name = m.name }))
+	m.name = ""
 	col_modal = false
 end
 
 function actions.delete_col(msg)
-	for i = 1, #columns do
-		if columns[i].id == msg.id then
-			for j = #cards, 1, -1 do
-				if cards[j].col == msg.id then
-					table.remove(cards, j)
-				end
-			end
-			table.remove(columns, i)
-			return
+	-- Collect first, delete second. Each :delete lands in the doc immediately but the mirror is
+	-- only repatched in view(), so iterating `board.cards` while deleting from it would be
+	-- walking a stale list.
+	local doomed = {}
+	for _, c in ipairs(board.cards) do
+		if c.col == msg.id then
+			doomed[#doomed + 1] = c.id
 		end
 	end
+	for _, id in ipairs(doomed) do
+		board:delete({ "cards", id })
+	end
+	board:delete({ "columns", msg.id })
 end
 
 local function update(msg)
@@ -195,10 +224,10 @@ end
 -- HELPERS
 local function by_column()
 	local out = {}
-	for _, c in ipairs(columns) do
+	for _, c in ipairs(board.columns) do
 		out[c.id] = {}
 	end
-	for _, card in ipairs(cards) do
+	for _, card in ipairs(board.cards) do
 		local list = out[card.col]
 		if list then
 			list[#list + 1] = card
@@ -490,6 +519,10 @@ end
 
 -- ROOT
 return function()
+	-- Bind the mirror once per frame. `view()` repatches it before calling this, so these two
+	-- are current for the whole frame — and reading them once keeps every count and index below
+	-- consistent with each other.
+	local columns, cards = board.columns, board.cards
 	local grouped = by_column()
 	local col_list = {}
 	local flying = nil

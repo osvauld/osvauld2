@@ -3,17 +3,23 @@
 //! An app is an MVU app whose message = "call closure #n" (see [`LuaMsg`]). Its `view()`
 //! walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update loop
 //! is unchanged — dispatch just calls the closure the index points at.
-
+//! Item discovery is a prefix scan for `meta` keys; `src` and `state` are loaded on demand.
+mod crdt;
 mod props;
-use loro::{Container, LoroDoc, ValueOrContainer};
+pub use crdt::{Docs, Resolve, Wake};
+
+use loro::{Container, ExportMode, LoroDoc, ValueOrContainer};
 use mlua::{Error, Function, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{El, col, row, text, text_area, text_input};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::crdt::patch_into;
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
     Call(u32),
@@ -48,15 +54,24 @@ pub struct LuaApp<M> {
     fires: Arc<AtomicU64>,
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     src: LoroDoc,
+    docs: Docs,
 }
 
 impl<M: 'static> LuaApp<M> {
-    pub fn open(src: LoroDoc, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> mlua::Result<Self> {
+    pub fn open(
+        src: LoroDoc,
+        resolve: Resolve,
+        wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    ) -> mlua::Result<Self> {
         let (vm, fires) = sandboxed_vm()?;
         let map = src.get_map("files");
         let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
             return Err(Error::runtime("no main.lua in app source"));
         };
+        let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
+        crdt::install(&vm, docs.clone(), resolve, wake)?;
+
         let main_src = t.to_string();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
             Ok(f) => (Some(f), None),
@@ -70,6 +85,7 @@ impl<M: 'static> LuaApp<M> {
             fires,
             to_msg,
             src,
+            docs,
         })
     }
 
@@ -82,6 +98,18 @@ impl<M: 'static> LuaApp<M> {
         let Some(view_fn) = &self.view_fn else {
             return text("no view loaded");
         };
+        {
+            let mut docs = self.docs.borrow_mut();
+            for e in docs.values_mut() {
+                let v = e.version.load(Ordering::Relaxed);
+                if v > e.mirrored {
+                    if let Err(err) = patch_into(&self.vm, &e.mirror, &e.doc.get_deep_value()) {
+                        return err_box(&format!("mirror: {err}"));
+                    }
+                    e.mirrored = v;
+                }
+            }
+        }
         let tree = match view_fn.call::<Table>(()) {
             Ok(t) => t,
             Err(e) => return text(format!("View error: {e}")),
@@ -123,6 +151,35 @@ impl<M: 'static> LuaApp<M> {
         if let Err(e) = result {
             eprintln!("handler error: {e}");
         }
+    }
+
+    /// Save every doc whose version has moved since its last successful save. `put` is the
+    /// vault write — `(doc name, snapshot bytes)`.
+    ///
+    /// The shell calls this **after** `update`, not from inside it: MCP and peer writes never
+    /// pass through `update` at all, and one call site has to cover all three writers.
+    ///
+    /// A failed `put` leaves `saved` where it was, so the next flush retries. Advancing it
+    /// first would present as "my card vanished after a restart", which is unfindable.
+    pub fn flush(
+        &mut self,
+        mut put: impl FnMut(&str, &[u8]) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for (name, e) in self.docs.borrow_mut().iter_mut() {
+            // Read the counter *before* exporting: a write landing mid-flush then stays dirty
+            // rather than being marked saved by a snapshot taken before it.
+            let v = e.version.load(Ordering::Relaxed);
+            if v <= e.saved {
+                continue;
+            }
+            let bytes = e
+                .doc
+                .export(ExportMode::Snapshot)
+                .map_err(|err| err.to_string())?;
+            put(name, &bytes)?;
+            e.saved = v;
+        }
+        Ok(())
     }
 }
 
@@ -202,7 +259,9 @@ fn children<M: 'static>(
 ) -> mlua::Result<El<M>> {
     for i in 1..=max_index(node) {
         let mark = context.path.len();
-        context.path.push_str(&format!("> [{i}]"));
+        if context.dev {
+            context.path.push_str(&format!("> [{i}]"));
+        }
         let child = node.get::<Value>(i)?;
         match child {
             Value::Boolean(false) => {}
@@ -272,16 +331,22 @@ fn err_box<M>(msg: &str) -> El<M> {
 
 fn walk<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     let tag: String = node.get("tag")?;
-    let line: String = node.get("line")?;
-    let seg = match node.get::<Option<String>>("id")? {
-        Some(id) => format!("{tag}#{id}:[{line}]"),
-        None => format!("{tag}:[{line}]"),
-    };
+    // The breadcrumb is dev-only scaffolding, and it isn't cheap: a boundary get for
+    // `line`, another for `id`, a `format!`, and a `push_str` — per element, per frame.
+    // `walk` is ~80% of a frame's Lua cost (see the `cost_curve` test), so this stays off
+    // unless someone is going to read it. With it off, `fail`'s message loses its path.
     let mark = context.path.len();
-    if !context.path.is_empty() {
-        context.path.push_str(" > ");
+    if context.dev {
+        let line: String = node.get("line")?;
+        let seg = match node.get::<Option<String>>("id")? {
+            Some(id) => format!("{tag}#{id}:[{line}]"),
+            None => format!("{tag}:[{line}]"),
+        };
+        if !context.path.is_empty() {
+            context.path.push_str(" > ");
+        }
+        context.path.push_str(&seg);
     }
-    context.path.push_str(&seg);
 
     let r = build(node, context, &tag);
     if r.is_ok() {

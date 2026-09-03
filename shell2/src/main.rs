@@ -7,6 +7,8 @@ mod login;
 mod mnemonic;
 mod signup;
 mod space;
+#[cfg(test)]
+mod tests;
 mod theme;
 
 use std::{collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
@@ -17,7 +19,7 @@ use crate::{
     mnemonic::{Mnemonic, MnemonicMsg},
     space::{SpaceScreen, SpaceScreenMsg},
 };
-use app_host::LuaApp;
+use app_host::{LuaApp, Resolve, Wake};
 use loro::LoroDoc;
 use runtime::{App, El, EventLoopProxy, col, row, text};
 use vault::{Vault, WorkspaceItem};
@@ -36,6 +38,11 @@ pub enum Msg {
     /// Keyed by item id, not index: closing is destructive, and a stale index would tear down
     /// the wrong app's VM. `Focus` can stay positional because being wrong there is harmless.
     Close(Arc<str>),
+    /// A doc changed from outside this window — a peer, the MCP bridge. Carries nothing and
+    /// updates nothing: delivering *any* user event runs `update` and then repaints, and the
+    /// repaint is the entire point. `view()` compares each doc's version counter against its
+    /// own watermark, so the mirror catches up on its own.
+    DocChanged,
 }
 pub enum Screen {
     Signup(SignupForm),
@@ -50,12 +57,55 @@ enum Tab {
     Home,
     App((Arc<str>, String)),
 }
+/// A running app plus the workspace it came from. The item id is the map key; `ws_id` has to
+/// be kept because `put_doc` is scoped by both and nothing else remembers it once `open_tab`
+/// has returned.
+struct OpenApp {
+    ws_id: String,
+    app: LuaApp<Msg>,
+}
+
+/// The two halves of doc persistence, as free functions rather than closures built inline.
+///
+/// This is the only seam between `app_host`, which knows a doc by its name, and the vault,
+/// which knows it by `(workspace, item, name)`. `app_host`'s tests stub both sides and the
+/// vault's tests exercise the store directly, so the *scoping* — that the pair agree on which
+/// two ids a name hangs under — is only ever checked here. Extracting them is what lets a
+/// test check it without standing up a window.
+fn resolver(vault: &Vault, ws_id: &str, item_id: &str) -> Resolve {
+    let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
+    // Not `.ok().flatten()`: a vault read failure must not masquerade as "no doc yet", or the
+    // app opens empty and the first flush writes that emptiness over the real board.
+    Rc::new(move |name| v.get_doc(&ws, &it, name).map_err(|e| e.to_string()))
+}
+
+/// A change from outside the window has to ask for a frame; a click already has one.
+///
+/// The proxy is the only part of the runtime that is `Send`, which is what makes this the seam:
+/// Loro's subscriber demands `Send + Sync` and so cannot hold the VM, the mirror, or anything
+/// else in the app. An integer bump and a wake-up are all that can cross, and all that needs to.
+fn waker(proxy: &EventLoopProxy<Msg>) -> Wake {
+    let proxy = proxy.clone();
+    Arc::new(move || {
+        let _ = proxy.send_event(Msg::DocChanged);
+    })
+}
+
+fn persist(
+    vault: &Vault,
+    ws_id: &str,
+    item_id: &str,
+) -> impl FnMut(&str, &[u8]) -> Result<(), String> {
+    let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
+    move |name, bytes| v.put_doc(&ws, &it, bytes, name).map_err(|e| e.to_string())
+}
+
 struct Shell {
     proxy: EventLoopProxy<Msg>,
     screen: Screen,
     vault: Vault,
     tabs: Vec<Tab>,
-    apps: HashMap<Arc<str>, LuaApp<Msg>>,
+    apps: HashMap<Arc<str>, OpenApp>,
     focused: usize,
     error: Option<String>,
 }
@@ -98,9 +148,21 @@ impl Shell {
         doc.import(&src).map_err(|e| e.to_string())?;
         let id: Arc<str> = wi.id.as_str().into();
         let to_msg_id = id.clone();
-        let app = LuaApp::open(doc, Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)))
-            .map_err(|e| e.to_string())?;
-        self.apps.insert(id.clone(), app);
+
+        let app = LuaApp::open(
+            doc,
+            resolver(&self.vault, &wi.ws_id, &wi.id),
+            waker(&self.proxy),
+            Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
+        )
+        .map_err(|e| e.to_string())?;
+        self.apps.insert(
+            id.clone(),
+            OpenApp {
+                ws_id: wi.ws_id.clone(),
+                app,
+            },
+        );
         self.focused = self.tabs.len();
         self.tabs.push(Tab::App((id, wi.name)));
         Ok(())
@@ -131,7 +193,8 @@ impl Shell {
                 .on_click(Msg::Focus(idx));
 
             el = if focused {
-                el.fill(theme::accent_bg()).press_fill(theme::accent_press())
+                el.fill(theme::accent_bg())
+                    .press_fill(theme::accent_press())
             } else {
                 el.hover_fill(theme::bg_2()).press_fill(theme::bg_3())
             };
@@ -185,8 +248,8 @@ impl App for Shell {
                 Screen::Items(i) => i.view(),
             },
             Tab::App((id, _name)) => {
-                if let Some(app) = self.apps.get(id) {
-                    app.view()
+                if let Some(o) = self.apps.get(id) {
+                    o.app.view()
                 } else {
                     text("app not found").color(theme::error())
                 }
@@ -221,8 +284,8 @@ impl App for Shell {
                 None
             }
             Msg::Tab(id, msg) => {
-                if let Some(app) = self.apps.get_mut(&id) {
-                    app.update(msg);
+                if let Some(o) = self.apps.get_mut(&id) {
+                    o.app.update(msg);
                 }
                 None
             }
@@ -249,6 +312,10 @@ impl App for Shell {
                 }
                 None
             }
+            // Deliberately empty. The state it announces is already in the doc; what was missing
+            // was a frame, and delivering this message is what produced one. The flush below then
+            // saves the imported change like any other.
+            Msg::DocChanged => None,
 
             msg => match (&mut self.screen, msg) {
                 (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
@@ -259,6 +326,21 @@ impl App for Shell {
                 _ => None,
             },
         };
+        // Persist after every message, not only Lua ones: MCP and peer writes reach the docs
+        // without ever passing through `LuaApp::update`, so this is the single place that sees
+        // all three writers. `flush` is a no-op for any doc whose version hasn't moved.
+        let vault = self.vault.clone();
+        let mut failed = None;
+        for (item_id, o) in self.apps.iter_mut() {
+            let ws = o.ws_id.clone();
+            if let Err(e) = o.app.flush(persist(&vault, &ws, item_id)) {
+                failed = Some(format!("save failed: {e}"));
+            }
+        }
+        if failed.is_some() {
+            self.error = failed;
+        }
+
         if let Some(next) = next {
             self.screen = next;
         }
