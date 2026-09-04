@@ -39,14 +39,18 @@ pub(crate) fn id_from_meta_key(key: &str) -> Option<&str> {
 pub(crate) fn new_id() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().fold(String::with_capacity(32), |mut acc, byte| {
-        use std::fmt::Write;
-        let _ = write!(acc, "{byte:02x}");
-        acc
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut acc, byte| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
 }
 
 /// Unix seconds now, or 0 if the clock is before the epoch (it isn't).
 pub(crate) fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }

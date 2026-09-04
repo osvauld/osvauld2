@@ -28,7 +28,9 @@ impl Store {
     // Open an existing store without creating the file or running init. Used to peek at a
     // db we don't own (e.g. another account's label); only reads are performed on it.
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
-        Ok(Self { db: Arc::new(Database::open(path)?) })
+        Ok(Self {
+            db: Arc::new(Database::open(path)?),
+        })
     }
 
     // Create the table eagerly so a read before the first write doesn't hit a

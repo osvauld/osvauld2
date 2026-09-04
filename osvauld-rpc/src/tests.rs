@@ -18,16 +18,23 @@ fn list_workspaces_roundtrips() {
 
 #[test]
 fn list_items_roundtrips() {
-    let req = Request::ListItems { ws_id: "ws-abc".to_string() };
+    let req = Request::ListItems {
+        ws_id: "ws-abc".to_string(),
+    };
     let back: Request = roundtrip(&req);
     assert!(matches!(back, Request::ListItems { ws_id } if ws_id == "ws-abc"));
 }
 
 #[test]
 fn read_doc_roundtrips() {
-    let req = Request::ReadDoc { ws_id: "ws-abc".to_string(), item_id: "item-123".to_string() };
+    let req = Request::ReadDoc {
+        ws_id: "ws-abc".to_string(),
+        item_id: "item-123".to_string(),
+    };
     let back: Request = roundtrip(&req);
-    assert!(matches!(back, Request::ReadDoc { ws_id, item_id } if ws_id == "ws-abc" && item_id == "item-123"));
+    assert!(
+        matches!(back, Request::ReadDoc { ws_id, item_id } if ws_id == "ws-abc" && item_id == "item-123")
+    );
 }
 
 #[test]
@@ -39,19 +46,29 @@ fn set_block_text_roundtrips() {
         text: "hello world".to_string(),
     };
     let back: Request = roundtrip(&req);
-    assert!(matches!(back, Request::SetBlockText { block, text, .. } if block == "0@12345678" && text == "hello world"));
+    assert!(
+        matches!(back, Request::SetBlockText { block, text, .. } if block == "0@12345678" && text == "hello world")
+    );
 }
 
 #[test]
 fn ok_response_with_workspace_list_roundtrips() {
-    let ws = vec![WorkspaceSummary { id: "ws-1".to_string(), name: "personal".to_string() }];
+    let ws = vec![WorkspaceSummary {
+        id: "ws-1".to_string(),
+        name: "personal".to_string(),
+    }];
     let back: Response = roundtrip(&Response::ok(&ws));
     assert!(matches!(back, Response::Ok { .. }));
 }
 
 #[test]
 fn ok_response_with_item_list_roundtrips() {
-    let items = vec![ItemSummary { id: "i-1".to_string(), ws_id: "ws-1".to_string(), name: "notes".to_string(), kind: "doc".to_string() }];
+    let items = vec![ItemSummary {
+        id: "i-1".to_string(),
+        ws_id: "ws-1".to_string(),
+        name: "notes".to_string(),
+        kind: "doc".to_string(),
+    }];
     let back: Response = roundtrip(&Response::ok(&items));
     assert!(matches!(back, Response::Ok { .. }));
 }

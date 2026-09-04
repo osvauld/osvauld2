@@ -4,9 +4,9 @@ use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use osvauld_rpc::{read_msg, write_msg, Request, Response};
+use osvauld_rpc::{Request, Response, read_msg, write_msg};
 
 // ── JSON-RPC 2.0 wire types ───────────────────────────────────────────────────
 
@@ -37,10 +37,23 @@ struct RpcError {
 
 impl RpcResponse {
     fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
     fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self { jsonrpc: "2.0", id, result: None, error: Some(RpcError { code, message: message.into() }) }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+            }),
+        }
     }
 }
 
@@ -567,8 +580,8 @@ fn tools_list() -> Value {
 // ── Bridge call ───────────────────────────────────────────────────────────────
 
 fn call_gui(req: &Request) -> Result<Value, String> {
-    let socket_path = std::env::var("OSVAULD_SOCKET")
-        .unwrap_or_else(|_| "/tmp/osvauld.sock".to_string());
+    let socket_path =
+        std::env::var("OSVAULD_SOCKET").unwrap_or_else(|_| "/tmp/osvauld.sock".to_string());
 
     let mut stream = UnixStream::connect(&socket_path)
         .map_err(|e| format!("cannot connect to osvauld GUI ({socket_path}): {e}"))?;
@@ -596,202 +609,420 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "read_doc" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             Request::ReadDoc { ws_id, item_id }
         }
         "set_block_text" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
-            Request::SetBlockText { ws_id, item_id, block, text }
+            Request::SetBlockText {
+                ws_id,
+                item_id,
+                block,
+                text,
+            }
         }
         "insert_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let after = args["after"].as_str().map(|s| s.to_string());
             let kind = args["kind"].as_str().ok_or("missing kind")?.to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
-            Request::InsertBlock { ws_id, item_id, after, kind, text }
+            Request::InsertBlock {
+                ws_id,
+                item_id,
+                after,
+                kind,
+                text,
+            }
         }
         "set_block_kind" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let kind = args["kind"].as_str().ok_or("missing kind")?.to_string();
-            Request::SetBlockKind { ws_id, item_id, block, kind }
+            Request::SetBlockKind {
+                ws_id,
+                item_id,
+                block,
+                kind,
+            }
         }
         "delete_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
-            Request::DeleteBlock { ws_id, item_id, block }
+            Request::DeleteBlock {
+                ws_id,
+                item_id,
+                block,
+            }
         }
         "indent_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
-            Request::IndentBlock { ws_id, item_id, block }
+            Request::IndentBlock {
+                ws_id,
+                item_id,
+                block,
+            }
         }
         "outdent_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
-            Request::OutdentBlock { ws_id, item_id, block }
+            Request::OutdentBlock {
+                ws_id,
+                item_id,
+                block,
+            }
         }
         "move_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
-            let position = args["position"].as_str().ok_or("missing position")?.to_string();
+            let position = args["position"]
+                .as_str()
+                .ok_or("missing position")?
+                .to_string();
             let target = args["target"].as_str().ok_or("missing target")?.to_string();
-            Request::MoveBlock { ws_id, item_id, block, position, target }
+            Request::MoveBlock {
+                ws_id,
+                item_id,
+                block,
+                position,
+                target,
+            }
         }
         "set_todo_done" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let done = args["done"].as_bool().ok_or("missing done")?;
-            Request::SetTodoDone { ws_id, item_id, block, done }
+            Request::SetTodoDone {
+                ws_id,
+                item_id,
+                block,
+                done,
+            }
         }
         "set_code_lang" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let lang = args["lang"].as_str().ok_or("missing lang")?.to_string();
-            Request::SetCodeLang { ws_id, item_id, block, lang }
+            Request::SetCodeLang {
+                ws_id,
+                item_id,
+                block,
+                lang,
+            }
         }
         "apply_mark" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let start = args["start"].as_u64().ok_or("missing start")? as usize;
             let end = args["end"].as_u64().ok_or("missing end")? as usize;
             let mark = args["mark"].as_str().ok_or("missing mark")?.to_string();
-            Request::ApplyMark { ws_id, item_id, block, start, end, mark }
+            Request::ApplyMark {
+                ws_id,
+                item_id,
+                block,
+                start,
+                end,
+                mark,
+            }
         }
         "apply_link" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let start = args["start"].as_u64().ok_or("missing start")? as usize;
             let end = args["end"].as_u64().ok_or("missing end")? as usize;
             let url = args["url"].as_str().ok_or("missing url")?.to_string();
-            Request::ApplyLink { ws_id, item_id, block, start, end, url }
+            Request::ApplyLink {
+                ws_id,
+                item_id,
+                block,
+                start,
+                end,
+                url,
+            }
         }
         "clear_mark" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let start = args["start"].as_u64().ok_or("missing start")? as usize;
             let end = args["end"].as_u64().ok_or("missing end")? as usize;
             let mark = args["mark"].as_str().ok_or("missing mark")?.to_string();
-            Request::ClearMark { ws_id, item_id, block, start, end, mark }
+            Request::ClearMark {
+                ws_id,
+                item_id,
+                block,
+                start,
+                end,
+                mark,
+            }
         }
         "create_doc" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
             let name = args["name"].as_str().ok_or("missing name")?.to_string();
-            Request::CreateItem { ws_id, name, kind: "doc".to_string() }
+            Request::CreateItem {
+                ws_id,
+                name,
+                kind: "doc".to_string(),
+            }
         }
         "create_app" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
             let name = args["name"].as_str().ok_or("missing name")?.to_string();
-            Request::CreateItem { ws_id, name, kind: "app".to_string() }
+            Request::CreateItem {
+                ws_id,
+                name,
+                kind: "app".to_string(),
+            }
         }
         "list_files" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             Request::ListFiles { ws_id, item_id }
         }
         "read_file" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
-            Request::ReadFile { ws_id, item_id, path }
+            Request::ReadFile {
+                ws_id,
+                item_id,
+                path,
+            }
         }
         "write_file" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
-            let content = args["content"].as_str().ok_or("missing content")?.to_string();
-            Request::WriteFile { ws_id, item_id, path, content }
+            let content = args["content"]
+                .as_str()
+                .ok_or("missing content")?
+                .to_string();
+            Request::WriteFile {
+                ws_id,
+                item_id,
+                path,
+                content,
+            }
         }
         "read_file_blocks" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
-            Request::ReadFileBlocks { ws_id, item_id, path }
+            Request::ReadFileBlocks {
+                ws_id,
+                item_id,
+                path,
+            }
         }
         "set_file_block_text" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
-            Request::SetFileBlockText { ws_id, item_id, path, block, text }
+            Request::SetFileBlockText {
+                ws_id,
+                item_id,
+                path,
+                block,
+                text,
+            }
         }
         "insert_file_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
             let after = args["after"].as_str().map(|s| s.to_string());
             let kind = args["kind"].as_str().unwrap_or("statement").to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
-            Request::InsertFileBlock { ws_id, item_id, path, after, kind, text }
+            Request::InsertFileBlock {
+                ws_id,
+                item_id,
+                path,
+                after,
+                kind,
+                text,
+            }
         }
         "delete_file_block" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
             let block = args["block"].as_str().ok_or("missing block")?.to_string();
-            Request::DeleteFileBlock { ws_id, item_id, path, block }
+            Request::DeleteFileBlock {
+                ws_id,
+                item_id,
+                path,
+                block,
+            }
         }
         "app_data_get" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             Request::AppDataGet { ws_id, item_id }
         }
         "app_data_set_text" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let name = args["name"].as_str().ok_or("missing name")?.to_string();
             let text = args["text"].as_str().ok_or("missing text")?.to_string();
-            Request::AppDataSetText { ws_id, item_id, name, text }
+            Request::AppDataSetText {
+                ws_id,
+                item_id,
+                name,
+                text,
+            }
         }
         "app_data_row_add" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let list = args["list"].as_str().ok_or("missing list")?.to_string();
             let fields = args.get("fields").cloned().ok_or("missing fields")?;
-            Request::AppDataRowAdd { ws_id, item_id, list, fields }
+            Request::AppDataRowAdd {
+                ws_id,
+                item_id,
+                list,
+                fields,
+            }
         }
         "app_data_row_set" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let list = args["list"].as_str().ok_or("missing list")?.to_string();
             let row = args["row"].as_str().ok_or("missing row")?.to_string();
             let fields = args.get("fields").cloned().ok_or("missing fields")?;
-            Request::AppDataRowSet { ws_id, item_id, list, row, fields }
+            Request::AppDataRowSet {
+                ws_id,
+                item_id,
+                list,
+                row,
+                fields,
+            }
         }
         "app_data_row_remove" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let list = args["list"].as_str().ok_or("missing list")?.to_string();
             let row = args["row"].as_str().ok_or("missing row")?.to_string();
-            Request::AppDataRowRemove { ws_id, item_id, list, row }
+            Request::AppDataRowRemove {
+                ws_id,
+                item_id,
+                list,
+                row,
+            }
         }
         "export_pdf" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             Request::ExportPdf { ws_id, item_id }
         }
         "screenshot" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let width = args["width"].as_f64().map(|v| v as f32);
             let height = args["height"].as_f64().map(|v| v as f32);
             let scale = args["scale"].as_f64().map(|v| v as f32);
-            Request::Screenshot { ws_id, item_id, width, height, scale }
+            Request::Screenshot {
+                ws_id,
+                item_id,
+                width,
+                height,
+                scale,
+            }
         }
         "import_open" => {
             let path = args["path"].as_str().ok_or("missing path")?.to_string();
@@ -807,7 +1038,11 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
             let sheet = args["sheet"].as_str().map(|s| s.to_string());
             let query = args["query"].as_str().ok_or("missing query")?.to_string();
-            Request::ImportSql { handle, sheet, query }
+            Request::ImportSql {
+                handle,
+                sheet,
+                query,
+            }
         }
         "import_close" => {
             let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
@@ -815,9 +1050,16 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "table_sql" => {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
-            let item_id = args["item_id"].as_str().ok_or("missing item_id")?.to_string();
+            let item_id = args["item_id"]
+                .as_str()
+                .ok_or("missing item_id")?
+                .to_string();
             let query = args["query"].as_str().ok_or("missing query")?.to_string();
-            Request::TableSql { ws_id, item_id, query }
+            Request::TableSql {
+                ws_id,
+                item_id,
+                query,
+            }
         }
         "import_to_layer" => {
             let handle = args["handle"].as_str().ok_or("missing handle")?.to_string();
@@ -825,7 +1067,13 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let ws_id = args["ws_id"].as_str().ok_or("missing ws_id")?.to_string();
             let name = args["name"].as_str().ok_or("missing name")?.to_string();
             let columns = args.get("columns").cloned().ok_or("missing columns")?;
-            Request::ImportToLayer { handle, sheet, ws_id, name, columns }
+            Request::ImportToLayer {
+                handle,
+                sheet,
+                ws_id,
+                name,
+                columns,
+            }
         }
         _ => return Err(format!("unknown tool: {name}")),
     };
@@ -844,7 +1092,9 @@ fn handle(method: &str, params: &Value) -> Result<Value, (i32, String)> {
         })),
         "tools/list" => Ok(tools_list()),
         "tools/call" => {
-            let name = params["name"].as_str().ok_or((-32602, "missing name".to_string()))?;
+            let name = params["name"]
+                .as_str()
+                .ok_or((-32602, "missing name".to_string()))?;
             let args = &params["arguments"];
             match call_tool(name, args) {
                 // A screenshot comes back as an MCP image block, not JSON text.

@@ -1,4 +1,4 @@
-use super::{seal, unlock, Keystore};
+use super::{Keystore, seal, unlock};
 use crate::error::IdentityError;
 use crate::identity::Identity;
 
@@ -9,7 +9,10 @@ fn seal_unlock_round_trip() {
     let restored = unlock(&keystore, "pw").unwrap();
     assert_eq!(identity.did(), restored.did());
     assert_eq!(identity.signing_public_key(), restored.signing_public_key());
-    assert_eq!(identity.encryption_public_key(), restored.encryption_public_key());
+    assert_eq!(
+        identity.encryption_public_key(),
+        restored.encryption_public_key()
+    );
 }
 
 #[test]

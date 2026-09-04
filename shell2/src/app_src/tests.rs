@@ -104,7 +104,10 @@ fn files(v: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[test]
 fn a_manifest_without_an_app_line_falls_back_to_the_folder() {
-    let files = files(&[("main.lua", "return {}"), ("manifest.osv", "version \"0.1.0\"")]);
+    let files = files(&[
+        ("main.lua", "return {}"),
+        ("manifest.osv", "version \"0.1.0\""),
+    ]);
     assert_eq!(app_name(&files, Path::new("/x/kanban")), "kanban");
 }
 

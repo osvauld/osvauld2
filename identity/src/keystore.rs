@@ -1,6 +1,6 @@
 use cryptography::{aead, kdf};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -58,7 +58,11 @@ pub fn seal(identity: &Identity, passphrase: &str) -> Result<Keystore, IdentityE
     result
 }
 
-fn seal_with(identity: &Identity, kek: &[u8; 32], salt: [u8; 16]) -> Result<Keystore, IdentityError> {
+fn seal_with(
+    identity: &Identity,
+    kek: &[u8; 32],
+    salt: [u8; 16],
+) -> Result<Keystore, IdentityError> {
     Ok(Keystore {
         version: VERSION,
         did: identity.did().to_string(),
@@ -101,7 +105,10 @@ fn unlock_with(keystore: &Keystore, kek: &[u8; 32]) -> Result<Identity, Identity
 // collapse decrypt failures to that rather than leaking the underlying cause.
 fn decrypt_secret(kek: &[u8; 32], sealed: &[u8]) -> Result<[u8; 32], IdentityError> {
     let mut plain = aead::decrypt(kek, sealed).map_err(|_| IdentityError::WrongPassphrase)?;
-    let secret = plain.as_slice().try_into().map_err(|_| IdentityError::Decode);
+    let secret = plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| IdentityError::Decode);
     plain.zeroize();
     secret
 }

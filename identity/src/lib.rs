@@ -16,7 +16,7 @@ pub use cryptography::CryptoError;
 pub use did::{did_from_public_key, public_key_from_did};
 pub use error::IdentityError;
 pub use identity::Identity;
-pub use keystore::{seal, unlock, Keystore};
+pub use keystore::{Keystore, seal, unlock};
 
 pub fn generate() -> (Identity, Mnemonic) {
     Identity::generate()
@@ -35,7 +35,10 @@ pub fn verify(public: &[u8; 32], message: &[u8], sig: &[u8; 64]) -> bool {
 
 /// ECIES-seal to a recipient's X25519 public key. The ephemeral keypair means the
 /// sender's identity isn't involved, so this is a free function, not a method.
-pub fn encrypt_for(recipient_encryption_key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn encrypt_for(
+    recipient_encryption_key: &[u8; 32],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     ecies::seal(recipient_encryption_key, plaintext)
 }
 

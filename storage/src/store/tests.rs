@@ -8,7 +8,10 @@ fn mem() -> Store {
 fn put_get_round_trip() {
     let store = mem();
     store.put("space/page/layer", b"snapshot").unwrap();
-    assert_eq!(store.get("space/page/layer").unwrap(), Some(b"snapshot".to_vec()));
+    assert_eq!(
+        store.get("space/page/layer").unwrap(),
+        Some(b"snapshot".to_vec())
+    );
 }
 
 #[test]
@@ -47,7 +50,10 @@ fn persists_across_reopen() {
         store.put("space/page/layer", b"durable").unwrap();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.get("space/page/layer").unwrap(), Some(b"durable".to_vec()));
+    assert_eq!(
+        store.get("space/page/layer").unwrap(),
+        Some(b"durable".to_vec())
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -65,6 +71,9 @@ fn open_readonly_reads_existing() {
 
 #[test]
 fn open_readonly_missing_file_errors() {
-    let path = std::env::temp_dir().join(format!("osv-storage-missing-{}.redb", rand::random::<u64>()));
+    let path = std::env::temp_dir().join(format!(
+        "osv-storage-missing-{}.redb",
+        rand::random::<u64>()
+    ));
     assert!(Store::open_readonly(&path).is_err());
 }

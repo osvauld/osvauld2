@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use bip39::Mnemonic;
-use cryptography::{ecies, signature, CryptoError};
-use rand::rngs::OsRng;
+use cryptography::{CryptoError, ecies, signature};
 use rand::RngCore;
+use rand::rngs::OsRng;
 use zeroize::ZeroizeOnDrop;
 
 use crate::did;

@@ -9,9 +9,9 @@ use parley::{
     Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, PositionedLayoutItem,
     StyleProperty,
 };
+use vello::Scene;
 use vello::kurbo::Affine;
 use vello::peniko::{Color, Fill};
-use vello::Scene;
 
 /// The only faces we ship (OFL): non-standard fonts the OS can't be trusted to have, kept for
 /// brand/mono determinism. Everything else — the UI sans and every script — comes from the OS.

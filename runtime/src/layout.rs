@@ -109,7 +109,9 @@ fn emit<M>(
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
     let (mut dx, mut dy) = m.behaviour.offset;
-    if let Some((spec, (sx, sy))) = &m.behaviour.slide && let Some(id) = &m.id {
+    if let Some((spec, (sx, sy))) = &m.behaviour.slide
+        && let Some(id) = &m.id
+    {
         let p = store
             .get::<Transition>(id, Slot::Slide)
             .map(|t| t.progress)
@@ -131,7 +133,9 @@ fn emit<M>(
     let (mut cx, mut cy) = (x, y);
     let mut child_clip = clip;
     let mut parent_scroll = scroll_parent.clone();
-    if let Some(s) = &m.behaviour.scroll && let Some(id) = &m.id {
+    if let Some(s) = &m.behaviour.scroll
+        && let Some(id) = &m.id
+    {
         let scroll = store
             .get::<Scroll>(id, Slot::Scroll)
             .copied()
@@ -157,7 +161,9 @@ fn emit<M>(
         overlays.push((rect, overlay));
     }
     let mut opacity = m.behaviour.opacity;
-    if let Some(spec) = &m.behaviour.fade && let Some(id) = &m.id {
+    if let Some(spec) = &m.behaviour.fade
+        && let Some(id) = &m.id
+    {
         let p = store
             .get::<Transition>(id, Slot::Fade)
             .map(|t| t.progress)
