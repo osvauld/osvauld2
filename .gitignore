@@ -6,4 +6,7 @@ target/
 
 # Local machine / editor state
 .claude/settings.local.json
+# Agent scratch worktrees. Each is a full checkout on a throwaway branch; committing the gitlink
+# leaves a dangling submodule-shaped entry once the worktree is pruned.
+.claude/worktrees/
 .DS_Store
