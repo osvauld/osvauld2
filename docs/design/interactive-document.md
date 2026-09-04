@@ -647,16 +647,39 @@ reload — a fresh VM against the same docs — is what invalidates it. A `requi
 therefore takes effect on reload with no extra machinery, and there is deliberately no way for an
 app to clear the cache itself.
 
-**The two loops must not share a message.** `Msg::DocChanged` carries nothing and does nothing on
-purpose: delivering *any* user event repaints, and the repaint was the entire point. A source
-change is the opposite — it must actually rebuild before the next frame is worth drawing. Same
-`Wake` plumbing, different message, different handler.
+**The two loops share everything but the check.** An earlier draft of this section claimed the
+opposite twice — that the source needed its own message, and that its subscription "must not gate
+on `Import`" because an in-app code edit is a local write that still needs a rebuild. Both were
+wrong, and the thing that makes them wrong is *where the check runs*.
 
-And the gate inverts. The data subscription fires `wake()` only on `Import`, because a local write
-already happened inside a frame the host asked for. **The source subscription must not gate on
-Import** — a human editing a code block in-app is a *local* write that still needs a rebuild — so
-it fires on everything and **debounces instead**, because rebuilding the VM per keystroke is not a
-thing anyone wants. Same mechanism, opposite rule, for a concrete reason.
+`App::view` takes `&self`; `reload` needs `&mut self`. So the staleness check cannot live in the
+render path at all — it goes in `update`, which is `&mut self`. And once it is there, **every
+writer already reaches it**:
+
+| writer | how the check runs |
+|---|---|
+| a code block edited in-app | the message that carried the edit — the check runs on its way out |
+| the MCP bridge, a peer | `Import` → `wake()` → `Msg::DocChanged` → `update` |
+
+So `DocChanged` needs no payload and no second message: it exists to *produce a frame*, and the
+check rides the frame. And the `Import` gate is the same one the data docs use, for the same
+reason — it decides whether to schedule an **extra** frame, never whether an edit counts. The
+version bump sits above the gate; only the `wake()` sits inside it.
+
+**Debounce is deferrable, and was deferred.** A Loro commit is already a batching point, and
+today's source writes arrive from MCP or an upload — both coarse. It becomes necessary the day an
+in-app code editor writes per keystroke, and not before.
+
+What the trigger actually needs turns out to be two watermarks and an error, all in
+`reload_if_stale`:
+
+- `src_seen` is read **before** the build, so an edit landing mid-rebuild stays unseen rather than
+  being marked current for source the VM never read.
+- it advances **even when the reload fails**, so a source that does not compile is retried once per
+  *edit* rather than once per mouse move — and the next edit is the fix.
+- the failure is **recorded and rendered as a banner above the still-running app**. A failed reload
+  that says nothing is the worst outcome available: you change a file, the old code keeps running,
+  and nothing connects the two.
 
 ### 4.8 Stateful reload: what actually survives a VM rebuild
 

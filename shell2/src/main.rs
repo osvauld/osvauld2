@@ -313,8 +313,8 @@ impl App for Shell {
                 None
             }
             // Deliberately empty. The state it announces is already in the doc; what was missing
-            // was a frame, and delivering this message is what produced one. The flush below then
-            // saves the imported change like any other.
+            // was a frame, and delivering this message is what produced one. The reload check and
+            // the flush below then act on the imported change like any other.
             Msg::DocChanged => None,
 
             msg => match (&mut self.screen, msg) {
@@ -326,6 +326,20 @@ impl App for Shell {
                 _ => None,
             },
         };
+        // Rebuild any app whose source moved. Here rather than in `view` because reloading needs
+        // `&mut self` and `App::view` takes `&self` — but `update` is also the better place on its
+        // own terms, since every writer reaches it: an MCP write and a peer arrive as `DocChanged`,
+        // and a code block edited in-app moved the source during the message just dispatched.
+        //
+        // After the match for that last case, and before the flush so a reload that opens a new
+        // doc gets it saved in the same pass. The error is reported by the app's own banner; this
+        // line is only so a terminal is watching too.
+        for o in self.apps.values_mut() {
+            if let Some(Err(e)) = o.app.reload_if_stale() {
+                eprintln!("reload failed: {e}");
+            }
+        }
+
         // Persist after every message, not only Lua ones: MCP and peer writes reach the docs
         // without ever passing through `LuaApp::update`, so this is the single place that sees
         // all three writers. `flush` is a no-op for any doc whose version hasn't moved.

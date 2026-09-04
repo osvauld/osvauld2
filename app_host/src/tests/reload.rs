@@ -21,13 +21,13 @@ fn app(files: &[(&str, &str)], resolve: Resolve) -> LuaApp<LuaMsg> {
 
 /// Replace one source file, the way a save or an MCP write would.
 fn rewrite(app: &LuaApp<LuaMsg>, path: &str, body: &str) {
-    let map = app.src.get_map("files");
+    let map = app.src.doc.get_map("files");
     let Some(ValueOrContainer::Container(Container::Text(t))) = map.get(path) else {
         panic!("no {path} in this app");
     };
     t.delete(0, t.len_unicode()).unwrap();
     t.insert(0, body).unwrap();
-    app.src.commit();
+    app.src.doc.commit();
 }
 
 /// The rendered text of a one-`ui.text` app. Enough to say *which* source is running, which is
@@ -383,6 +383,234 @@ fn a_reload_sweeps_state_the_new_source_stopped_using() {
             .unwrap(),
         "state for an element the new source never draws stayed alive"
     );
+}
+
+// ── the trigger ───────────────────────────────────────────────────────────────
+//
+// `reload` is the mechanism; these are about *when* it runs. The rule is one line — reload when
+// the source moved and not otherwise — and everything below is a way for that to go wrong: not
+// noticing, noticing twice, or noticing forever because the new source is broken.
+
+#[test]
+fn an_unchanged_source_is_not_stale() {
+    let mut app = app(
+        &[(
+            "main.lua",
+            "return function() return ui.col{ ui.text{ 'v1' } } end",
+        )],
+        Rc::new(|_| Ok(None)),
+    );
+    assert!(
+        app.reload_if_stale().is_none(),
+        "rebuilt a VM for a source nobody touched"
+    );
+}
+
+#[test]
+fn a_source_edit_makes_the_app_stale() {
+    let mut app = app(
+        &[(
+            "main.lua",
+            "return function() return ui.col{ ui.text{ 'v1' } } end",
+        )],
+        Rc::new(|_| Ok(None)),
+    );
+    rewrite(
+        &app,
+        "main.lua",
+        "return function() return ui.col{ ui.text{ 'v2' } } end",
+    );
+
+    app.reload_if_stale()
+        .expect("the edit went unnoticed")
+        .unwrap();
+    assert_eq!(rendered(&app), "v2");
+    // And exactly once: the watermark the staged VM carried is now current, so the very next
+    // message must not rebuild all over again.
+    assert!(
+        app.reload_if_stale().is_none(),
+        "reloaded twice for one edit"
+    );
+}
+
+/// A *local* write — the shape an in-app code editor has — moves the source like any other.
+/// It must not poke the host, though: the message that carried the edit is already inside a
+/// frame, and waking from here would schedule a second one per keystroke.
+#[test]
+fn a_local_source_edit_counts_but_does_not_wake() {
+    let (wake, fired) = counting_wake();
+    let src = LoroDoc::new();
+    let t = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    t.insert(0, "return function() return ui.col{ ui.text{ 'v1' } } end")
+        .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), wake, identity()).unwrap();
+
+    rewrite(
+        &app,
+        "main.lua",
+        "return function() return ui.col{ ui.text{ 'v2' } } end",
+    );
+    assert_eq!(
+        fired.load(Ordering::Relaxed),
+        0,
+        "a local edit asked for a frame"
+    );
+    app.reload_if_stale()
+        .expect("the edit went unnoticed")
+        .unwrap();
+    assert_eq!(rendered(&app), "v2");
+}
+
+/// The other half, and the case the gate exists for: the MCP bridge or a peer writes while the
+/// window sits idle. Nothing is going to run `update` on its own, so the subscription has to ask.
+#[test]
+fn an_imported_source_edit_asks_for_a_frame() {
+    let (wake, fired) = counting_wake();
+    let src = LoroDoc::new();
+    let t = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    t.insert(0, "return function() return ui.col{ ui.text{ 'v1' } } end")
+        .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), wake, identity()).unwrap();
+
+    let peer = LoroDoc::new();
+    peer.import(&snapshot_of(&app.src.doc)).unwrap();
+    let Some(ValueOrContainer::Container(Container::Text(pt))) =
+        peer.get_map("files").get("main.lua")
+    else {
+        panic!("no main.lua in the peer's copy");
+    };
+    pt.delete(0, pt.len_unicode()).unwrap();
+    pt.insert(0, "return function() return ui.col{ ui.text{ 'v2' } } end")
+        .unwrap();
+    peer.commit();
+    app.src.doc.import(&snapshot_of(&peer)).unwrap();
+
+    assert_eq!(
+        fired.load(Ordering::Relaxed),
+        1,
+        "an import landed with no frame to notice it in"
+    );
+    app.reload_if_stale()
+        .expect("the import went unnoticed")
+        .unwrap();
+    assert_eq!(rendered(&app), "v2");
+}
+
+/// `src_seen` is read *before* the build, not after, so an edit landing while the VM is being
+/// built still counts as unseen. Reading it afterwards marks this VM current for source it never
+/// read, and that edit is then lost until something unrelated happens to move the file again.
+///
+/// `resolve` runs *inside* `build` — module scope calls `doc:open` — which makes it the one hook
+/// a test has into the middle of a rebuild.
+#[test]
+fn an_edit_landing_mid_build_is_not_marked_seen() {
+    let src = LoroDoc::new();
+    let t = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    t.insert(
+        0,
+        r#"
+        local b = doc:open("board")
+        return function() return ui.col{ ui.text{ "v1" } } end
+        "#,
+    )
+    .unwrap();
+    src.commit();
+
+    // Once only: every rebuild re-runs module scope, and a resolve that wrote every time would
+    // keep the app permanently stale.
+    let armed = Rc::new(std::cell::Cell::new(true));
+    let (writer, armed) = (src.clone(), armed.clone());
+    let resolve: Resolve = Rc::new(move |_| {
+        if armed.replace(false) {
+            let Some(ValueOrContainer::Container(Container::Text(t))) =
+                writer.get_map("files").get("main.lua")
+            else {
+                panic!("no main.lua");
+            };
+            t.insert(0, "-- landed mid-build\n").unwrap();
+            writer.commit();
+        }
+        Ok(None)
+    });
+
+    let mut app = LuaApp::open(src, resolve, noop_wake(), identity()).unwrap();
+    assert!(
+        app.reload_if_stale().is_some(),
+        "an edit that landed mid-build was marked as already seen"
+    );
+}
+
+/// The failure this whole path exists to make visible: you edit a file, it does not compile, and
+/// the app keeps running. Without the recorded error nothing anywhere connects the two.
+#[test]
+fn a_failed_reload_is_recorded_and_the_app_keeps_running() {
+    let mut app = app(
+        &[(
+            "main.lua",
+            "return function() return ui.col{ ui.text{ 'v1' } } end",
+        )],
+        Rc::new(|_| Ok(None)),
+    );
+    rewrite(&app, "main.lua", "return function( -- unclosed");
+
+    app.reload_if_stale()
+        .expect("the edit went unnoticed")
+        .unwrap_err();
+    let err = app.reload_error.as_deref().expect("a failure said nothing");
+    assert!(
+        err.contains("main.lua"),
+        "the banner should name the file: {err}"
+    );
+    assert_eq!(rendered(&app), "v1", "the old view stopped rendering");
+    // `error` is the other kind — a source that never loaded at all. Conflating them would swap
+    // a working app for an error page.
+    assert_eq!(app.error, None);
+    // The banner goes above the app rather than instead of it. `El`'s fields are private to
+    // `runtime`, so this only pins that the wrapped tree builds at all.
+    let _ = app.view();
+}
+
+/// Retried once per *edit*, not once per mouse move. Every message runs the staleness check, so
+/// a watermark that stayed put would recompile a broken source on every pointer event — and the
+/// next edit, which is the fix, is the only retry worth making.
+#[test]
+fn a_broken_source_is_retried_only_when_it_changes_again() {
+    let mut app = app(
+        &[(
+            "main.lua",
+            "return function() return ui.col{ ui.text{ 'v1' } } end",
+        )],
+        Rc::new(|_| Ok(None)),
+    );
+    rewrite(&app, "main.lua", "return function( -- unclosed");
+    app.reload_if_stale().unwrap().unwrap_err();
+
+    assert!(
+        app.reload_if_stale().is_none(),
+        "a broken source is being recompiled on every message"
+    );
+
+    rewrite(
+        &app,
+        "main.lua",
+        "return function() return ui.col{ ui.text{ 'v2' } } end",
+    );
+    app.reload_if_stale()
+        .expect("the fix went unnoticed")
+        .unwrap();
+    assert_eq!(rendered(&app), "v2");
+    assert_eq!(app.reload_error, None, "the banner outlived the error");
 }
 
 // ── the acceptance test ───────────────────────────────────────────────────────

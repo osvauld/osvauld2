@@ -9,7 +9,7 @@ mod modules;
 mod props;
 pub use crdt::{Cores, Docs, Resolve, Wake};
 
-use loro::{Container, ExportMode, LoroDoc, ValueOrContainer};
+use loro::{Container, EventTriggerKind, ExportMode, LoroDoc, Subscription, ValueOrContainer};
 use mlua::{Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{El, col, row, text, text_area, text_input};
@@ -47,19 +47,64 @@ impl<'a, M> Ctx<'a, M> {
     }
 }
 
+/// The app's source, and the counter that says when it moved.
+///
+/// Shared rather than owned for the same reason [`Cores`] is: it outlives every VM built from it.
+/// The subscription has to outlive them too — it unsubscribes on drop, so a rebuild that owned
+/// one would either lose the watch or start a second one and double-count every later edit.
+pub struct Source {
+    pub doc: LoroDoc,
+    /// Bumped on every commit to `doc`, local or imported, and compared against the per-VM
+    /// watermark in [`LuaApp::reload_if_stale`].
+    version: Arc<AtomicU64>,
+    _sub: Subscription,
+}
+
+impl Source {
+    /// Start watching a source doc.
+    ///
+    /// The `Import` gate is the same one the data docs use, and for the same reason: a *local*
+    /// source write — a code block edited in-app — already happens inside a frame the host asked
+    /// for, and the message that carried it runs the staleness check on its way out. An import
+    /// has no such frame, so it has to ask for one. The gate decides whether to schedule an extra
+    /// frame; it never decides whether the edit counts, which is why the bump sits above it.
+    pub fn new(doc: LoroDoc, wake: Wake) -> Self {
+        let version = Arc::new(AtomicU64::new(0));
+        let v = version.clone();
+        let sub = doc.subscribe_root(Arc::new(move |ev| {
+            v.fetch_add(1, Ordering::Relaxed);
+            if ev.triggered_by == EventTriggerKind::Import {
+                wake();
+            }
+        }));
+        Self {
+            doc,
+            version,
+            _sub: sub,
+        }
+    }
+}
+
 pub struct LuaApp<M> {
     vm: Lua, // never read, but every `Function` below borrows from it — dropping it invalidates them
     view_fn: Option<Function>, //the closure the source returns
     handlers: RefCell<Vec<Function>>, // refilled every frame
     error: Option<String>,
+    /// The last reload that failed, rendered by `view()` as a banner *above* the still-running
+    /// app. `error` is the other kind: a source that never loaded at all, which leaves nothing to
+    /// run. Cleared by the next successful reload, since that replaces the whole struct.
+    reload_error: Option<String>,
     fires: Arc<AtomicU64>,
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
-    src: LoroDoc,
-    docs: Docs,
+    /// Which version of the source this VM was built from. Read *before* the build, so an edit
+    /// landing mid-build leaves the VM stale rather than falsely current.
+    src_seen: u64,
     /// The four below outlive the VM, and that is the whole reason [`reload`](Self::reload) can
     /// build a replacement beside the running one: `cores` keeps the open docs (and so their
-    /// unflushed writes and their single subscription), and the other three are what `build`
-    /// needs to make a VM at all.
+    /// unflushed writes and their single subscription), `src` keeps the watch, and the rest is
+    /// what `build` needs to make a VM at all.
+    src: Rc<Source>,
+    docs: Docs,
     cores: Cores,
     resolve: Resolve,
     wake: Wake,
@@ -73,23 +118,28 @@ impl<M: 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
+        let src = Rc::new(Source::new(src, wake.clone()));
         Self::build(src, cores, resolve, wake, to_msg)
     }
 
-    /// Everything that makes a VM, with the doc cores handed in rather than created — so `open`
-    /// starts with an empty set and `reload` starts with the running app's.
+    /// Everything that makes a VM, with the doc cores and the source watch handed in rather than
+    /// created — so `open` starts with an empty set and `reload` starts with the running app's.
     ///
     /// A source that fails to compile is **not** an error here: it lands in `self.error` and
     /// `view()` renders it. `reload` is the caller that wants the opposite, and it checks.
     fn build(
-        src: LoroDoc,
+        src: Rc<Source>,
         cores: Cores,
         resolve: Resolve,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     ) -> mlua::Result<Self> {
+        // Before reading a single file, so a write landing mid-build is still counted as unseen.
+        // The other order marks this VM current for an edit it never read, and that edit is then
+        // lost until the next one happens to arrive.
+        let src_seen = src.version.load(Ordering::Relaxed);
         let (vm, fires) = sandboxed_vm()?;
-        let map = src.get_map("files");
+        let map = src.doc.get_map("files");
         let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
             return Err(Error::runtime("no main.lua in app source"));
         };
@@ -102,7 +152,7 @@ impl<M: 'static> LuaApp<M> {
             wake.clone(),
         )?;
         // Before `main.lua` runs, because its first line will be a `require`.
-        modules::install(&vm, &src)?;
+        modules::install(&vm, &src.doc)?;
 
         let main_src = t.to_string();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
@@ -114,8 +164,10 @@ impl<M: 'static> LuaApp<M> {
             view_fn,
             handlers: RefCell::new(Vec::new()),
             error,
+            reload_error: None,
             fires,
             to_msg,
+            src_seen,
             src,
             docs,
             cores,
@@ -169,9 +221,49 @@ impl<M: 'static> LuaApp<M> {
         Ok(())
     }
 
+    /// Reload if the source has moved since this VM was built; `None` if it had not.
+    ///
+    /// This is the caller [`reload`](Self::reload) was written for, and it is the one that keeps
+    /// the books — which is what lets `reload`'s "on failure nothing changes" stay literally true.
+    /// Two entries:
+    ///
+    /// The **watermark advances either way**. On success it comes from the staged app, which read
+    /// it before building. On failure it is advanced here anyway, so a source that does not
+    /// compile is retried once per *edit* rather than once per mouse move — and the next edit is
+    /// the fix, which is exactly when a retry is worth anything.
+    ///
+    /// The **error is recorded**, because a failed reload that says nothing is the worst outcome
+    /// there is: you change a file, the app keeps running the old code, and nothing anywhere
+    /// connects the two.
+    pub fn reload_if_stale(&mut self) -> Option<Result<(), String>> {
+        let v = self.src.version.load(Ordering::Relaxed);
+        if v <= self.src_seen {
+            return None;
+        }
+        let r = self.reload();
+        self.src_seen = self.src_seen.max(v);
+        self.reload_error = r.as_ref().err().cloned();
+        Some(r)
+    }
+
     pub fn view(&self) -> El<M> {
         //reset budget
         self.fires.store(0, Ordering::Relaxed);
+        let body = self.body();
+        let Some(e) = &self.reload_error else {
+            return body;
+        };
+        // Above the app, not instead of it. What is on screen is still the last version that
+        // worked, and it stays interactive — the banner only says that it is not what is on disk.
+        col()
+            .full()
+            .child(err_box(&format!(
+                "source changed but does not load — still running the last good version\n{e}"
+            )))
+            .child(body)
+    }
+
+    fn body(&self) -> El<M> {
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
         }
