@@ -471,6 +471,148 @@ The failure to avoid is **the cliff** — any point where the next increment of 
 leaving the environment. Ours would be "to do X, edit a `.lua` file outside the document." The
 splitter is what prevents it: the file is already in here.
 
+### 4.7 The two loops
+
+Writing behaviour goes to the doc, the doc signals that it changed, and the refresh comes from
+that. Same shape as a data write — but *refresh* means something different on each side, and
+that difference is the whole design.
+
+**The data loop, which exists and is tested:**
+
+```
+write (local edit, or a peer/MCP import)
+  → subscribe_root fires → version.fetch_add(1)
+  → if triggered_by == Import: wake() → proxy.send_event(Msg::DocChanged)
+  → user_event: app.update(msg); redraw()
+  → view(): v > mirrored ⇒ patch_into(mirror, doc.get_deep_value()); mirrored = v
+  → the Lua view() runs against a fresh mirror
+  → flush(): v > saved ⇒ persist
+```
+
+**The code loop, which does not exist at all:**
+
+```
+write to the source doc
+  → [no subscription on src]                              ← missing
+  → [no wake]                                             ← missing
+  → rebuild the VM: fresh Lua, reinstall crdt + modules,
+    re-eval main.lua, take the new view_fn                ← missing
+  → keep:  the data LoroDocs, the retained islands
+  → drop:  the module cache (per-VM, so this is automatic)
+```
+
+`LuaApp` already holds `src: LoroDoc` — and the compiler says `field 'src' is never read`. That
+dead field is exactly the hook. Today the only way new code enters is `LuaApp::open`, which is why
+every Lua edit costs a fresh upload *and* a fresh item.
+
+Three things this makes concrete:
+
+**You cannot repatch code.** A mirror repatch fixes stale *data* in place. Changed code needs a new
+`view_fn`, which needs a new chunk — and every closure the old chunk created captured the old VM's
+globals and upvalues, so it needs a new VM. That's the cost asymmetry from §3.1, stated in
+mechanism rather than in a table.
+
+**The module cache dies with the VM, by design.** `modules.rs` caches per-VM precisely so that a
+reload — a fresh VM against the same docs — is what invalidates it. A `require`d file's edit
+therefore takes effect on reload with no extra machinery, and there is deliberately no way for an
+app to clear the cache itself.
+
+**The two loops must not share a message.** `Msg::DocChanged` carries nothing and does nothing on
+purpose: delivering *any* user event repaints, and the repaint was the entire point. A source
+change is the opposite — it must actually rebuild before the next frame is worth drawing. Same
+`Wake` plumbing, different message, different handler.
+
+And the gate inverts. The data subscription fires `wake()` only on `Import`, because a local write
+already happened inside a frame the host asked for. **The source subscription must not gate on
+Import** — a human editing a code block in-app is a *local* write that still needs a rebuild — so
+it fires on everything and **debounces instead**, because rebuilding the VM per keystroke is not a
+thing anyone wants. Same mechanism, opposite rule, for a concrete reason.
+
+### 4.8 Stateful reload: what actually survives a VM rebuild
+
+This is where the code loop stops being plumbing. Four categories of state, and only two of them
+survive on their own:
+
+| state | lives in | survives a rebuild? |
+|---|---|---|
+| the data | `LoroDoc` | **yes** — a separate object; the mirror is rebuilt, the doc is not |
+| scroll, drag gesture, text fields, transitions | runtime `Store`, keyed by `Id` | **yes** — outside the VM |
+| `ui.state(id, init)` | `_state`, a **Lua global in the VM** | **no** |
+| module-scope locals (`S.drag`, `S.col_modal`) | Lua upvalues **in the VM** | **no** |
+
+**`ui.state` is a retained island living in the wrong place.** Look at what it already is: a flat
+`id → table` map of plain data, string-keyed, with a `_live`/`_sweep` mark-and-drop lifecycle that
+is the same idea as the `Store`'s liveness pass. It is the *same category of thing* as a scroll
+offset and it is only in the VM by accident. Two ways out — snapshot `_state` before the rebuild
+and restore after (smallest change, Lua API untouched), or move it into the runtime `Store`
+outright (correct, and then it never needed rescuing). The second is right.
+
+**Module-scope locals don't survive, and mostly shouldn't.** A drag in flight when a file is saved
+is not worth preserving. But the kanban shows exactly where that rule bites: the new-column modal
+keeps its *open-ness* in `S.col_modal` (a module local, dies) and its *typed text* in
+`ui.state("col_modal", { name = "" })` (survivable). One modal, two storage classes, two different
+survival semantics — and the split is invisible in the source. The guidance that falls out:
+**anything a user would be annoyed to lose belongs in `ui.state`, never in a module local.**
+
+**And the setup chunk re-runs.** Every reload re-executes `main.lua`'s top level — `doc:open`, the
+seeding, any module-scope side effect. The old `app_engine` hit this and its fix is recorded in
+its own source: load the CRDT snapshot *before* the script runs so seeds don't duplicate. The
+kanban's seeding is guarded (`if #columns == 0`), which is the pattern — but reload turns an
+unguarded module-scope write into a bug that multiplies once per save.
+
+The hinge under all of it is **id stability**. Retained islands, `ui.state`, and the caret all key
+off ids; a reload that silently renames one scrolls the user to the top, drops their draft, and
+looks like data loss. That is the thing to test first, and it is exactly the lesson §3.6 already
+records from the code-as-blocks attempt — `doc_from_source` minting fresh `TreeID`s desynced every
+anchor. Same failure, different layer.
+
+### 4.9 The retained-state survival contract
+
+`view-and-interaction.md` Bundle D already has this as a checklist item, and states the important
+part: *"physics worlds, Frame caches, and coroutines are one problem (§8.5), not three."* It is
+now five, because this document adds `ui.state` and the document editor. So the contract is worth
+writing once, as a rule the runtime enforces rather than a list each consumer reimplements.
+
+**Four clauses, ordered by what they cost:**
+
+1. **Never in the VM → untouched.** It doesn't survive the reload; the reload never reaches it.
+2. **Reconstructible from the doc → rebuilt.** Cheaper to re-derive than to carry.
+3. **Plain data → carried.** Has to be copied out and back, because nothing else backs it.
+4. **Holds VM identity → dies with the VM.** Cannot be carried by any mechanism.
+
+Every consumer lands in exactly one:
+
+| state | clause | why |
+|---|---|---|
+| document content, app data | 1 | `LoroDoc`, a separate object |
+| scroll, drag, text fields, transitions | 1 | runtime `Store`, keyed by `Id` |
+| caret, selection, undo, IME, focus | 1 | the editor is a Rust retained island (§4.8) |
+| doc mirrors | 2 | `mirrored: 0` and the first `view()` repatches from the doc |
+| Frame caches | 2 | a cache by definition — re-derive rather than carry |
+| `ui.state` plain entries — drafts, toggles | 3 | nothing backs them |
+| coroutines (`ui.run`), anything holding a function | 4 | a `thread` holds a live stack of old-chunk closures |
+| module-scope locals (`S.drag`) | 4 | upvalues; the host has no name for them |
+| physics worlds | 3 or 4 | **undecided** — depends whether the world is Lua tables or a Rust object |
+
+**Clause 4 is correct, not a compromise.** `view-and-interaction.md` §8.4 already gives the reason
+in its own terms — *"the animation dies with the thing it was animating"* — and it generalises: a
+suspended stack from code that no longer exists is precisely the hidden state we refused in §4.1.
+Carrying it would be Jupyter's disease wearing a nicer hat.
+
+**The failure mode to design against is silence.** Put a function in `ui.state` today and a reload
+gives a confusing error, or worse, quietly does nothing. The partition has to be *visible*: the
+snapshot pass names what it dropped and why, so "my animation restarted" has an answer at the
+point it happens rather than in a doc nobody reads.
+
+Two consequences for the code:
+
+- The `ui.state` snapshot is a **filter, not a copy** — it walks `_state` and carries only what is
+  plain, reporting the rest. That is a different function from "serialize `_state`", and getting
+  it wrong is how clause 4 becomes silent.
+- **Physics worlds need the Lua-or-Rust decision made** before they're built, because it picks
+  their clause. Rust-side puts them in clause 1 for free, alongside the editor and the `Store` —
+  which is an argument for building them there.
+
 ---
 
 ## 5. Rich text, concretely
