@@ -291,7 +291,89 @@ the existing tree (matching surviving blocks by content similarity to preserve i
 an explicit gesture; or accept a coarser granularity and let a block hold several constructs. This
 is the piece to design before behaviour-as-blocks ships.
 
-### 3.7 Structural editing: what the agent actually calls
+### 3.7 The block is also the unit of failure
+
+A view tree ought to let one bad part fail while the rest draws, and half of that already works.
+Walk-time errors — a bad node shape, an unknown tag, a wrong prop type — are already localised,
+because by then the tree exists and Rust is reading it:
+
+```rust
+fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
+    let msg = format!("{} > {msg}", context.path);   // breadcrumb to the offending node
+    context.errors.push(msg.clone());
+    err_box(&msg)                                    // stands in place of the bad node
+}
+```
+
+**A Lua throw is the case that cannot be localised this way.** If the app's `view()` throws while
+building, there is no partial tree — the call unwound and nothing came back. `view()` falling back
+to one screen-sized `text("View error: …")` is not a poor implementation; it is genuinely all the
+information that exists.
+
+The fix is not in the renderer. It is to stop having one `view()`: give each block its **own**
+builder, called separately and `pcall`ed individually. Then a throwing block gets a box in its own
+slot and every other block still renders, because every other block was a separate call that
+succeeded.
+
+So **per-block error isolation is a consequence of the block model rather than a feature added to
+it** — and it is the strongest practical argument for the model, over and above §3.1's cost
+asymmetry. `app_engine` had this: every Lua entry point returned a `Result` and errors rendered
+inline in the cell rather than crashing the app.
+
+It also amends §4.7's reload policy, which is currently too strict. The failure unit becomes the
+block, not the app:
+
+| what failed | reload |
+|---|---|
+| the root — no tree at all | **reject**, keep the old VM |
+| one block's behaviour | **accept**, and render that block as an error box |
+
+Rejecting a reload that fixed four blocks and broke a fifth leaves the user unable to see what they
+did. And it gives the runaway-loop case a decent answer too: `fires` catches a block that never
+returns, and with per-block calls that is one box rather than a dead screen.
+
+### 3.8 `Frame` is what a block's behaviour produces
+
+`visual-substrate.md` already defines the output type, and it is exactly the shape this needs:
+
+```rust
+Frame { w: f32, h: f32, baseline: f32, items: Vec<(f32, f32, Item)> }
+```
+
+Four consequences, and together they close the largest hole in this document.
+
+**It is the intrinsic-sizing contract.** §4.7 and open question 1 flag that nothing in the runtime
+measures to fit a width. `Frame` is the answer: a producer is asked for a width and returns
+`w`/`h`/`baseline`, which is precisely what a block in a flowing document has to report for block
+offsets, scroll extent and PDF pagination to be right. *"Given child frames with w/h/baseline"* is
+that doc's stated layout rule at every depth.
+
+**Block-level and inline are the same production.** A chart on its own line and `{= runway() }`
+in the middle of a sentence both produce a `Frame`; the difference is only which pass consumes it —
+the block flow, or the inline pass. That collapses open question 3 entirely: an inline computed
+value is not a mark, not a zero-width block and not a special case, it is a `Frame` with a baseline.
+
+**It is pure, so blocks are testable headlessly.** `str → Frame` is specified as *"no scene, no
+GPU, no parley, no window."* A block's output can be asserted in a unit test without a window ever
+opening.
+
+**It is what `runtime::el::custom` should have been.** `custom` takes a closure that paints itself
+given a rect. A closure cannot report its size, cannot be cached, cannot be diffed, and cannot be
+tested without a `Scene`. `Frame` is the same idea as *data*, which is why it gets all four.
+
+Two things this forces:
+
+- **`err_box` needs a `Frame` form.** §3.7's isolation works for block-level failures because the
+  box owns a line. An *inline* computed that throws must fail as an atom with a sensible width and
+  baseline, or one bad value breaks the paragraph's line breaking. Error rendering has to exist at
+  both placements or isolation is only half-true.
+- **A Frame cache must key on the source version, not just the data.** Frame caches are clause 2
+  of §4.9 — reconstructible, so a reload drops them. But a cache that survived and keyed only on
+  inputs would serve a Frame built by code that no longer exists. §4.2's content-addressed key
+  already says `hash(source, input values, block id)`; this is the same rule, and the two must not
+  drift apart.
+
+### 3.9 Structural editing: what the agent actually calls
 
 The splitter as built is deliberately **shallow** — it cuts at top-level construct boundaries and
 function *bodies* stay flat text in one block. So today an agent can replace a whole function and
@@ -902,10 +984,11 @@ graph inspector shipped in the same commit as the graph.** Start with two or thr
    and must *not* sync (it's per-viewer, like scroll and drag). Probably the retained-island
    store keyed by block `TreeID`, never the doc.
 
-3. **Inline computed values** — `{= runway() }` mid-sentence. Are they a mark with a value, an
-   `InlineBox` in parley, or a zero-width block? parley's `InlineBox` is the mechanism; the
-   document model question is whether the *source* of an inline computed lives in the text (and
-   is therefore visible when you arrow through it) or beside it.
+3. ~~**Inline computed values** — mark, `InlineBox`, or zero-width block?~~ **Answered in §3.8:**
+   a `Frame`, same as a block-level one. What remains is narrower and still open — whether the
+   *source* of an inline computed lives in the text (and is therefore visible when you arrow
+   through it) or beside it. Note also that parley's `push_inline_box` may already do most of the
+   inline pass `view-and-interaction.md` §9 assumes we must write; worth checking before building.
 
 4. **Do we sync the fact that a block is *running*?** Presence-shaped, not document-shaped. Rides
    an awareness channel if it rides anything.
