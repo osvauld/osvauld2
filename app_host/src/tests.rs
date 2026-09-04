@@ -76,7 +76,7 @@ fn walk_collects_handlers() {
 // patches twice: once to fill, once to prove the second pass converges.
 
 use crate::crdt::patch_into;
-use loro::{LoroDoc, LoroMap, LoroValue};
+use loro::{LoroDoc, LoroMap, LoroMovableList, LoroValue};
 
 /// A doc with one map root and one list-of-maps root — the kanban shape in miniature.
 fn board(titles: &[&str]) -> LoroDoc {
@@ -185,6 +185,163 @@ fn patch_keeps_table_identity() {
         lua.load("return held[2].title").eval::<String>().unwrap(),
         "b"
     );
+}
+
+/// A doc with one nested container under `data.items`, built by `f`.
+fn nested(f: impl FnOnce(&LoroMap)) -> LoroDoc {
+    let doc = LoroDoc::new();
+    let data = doc.get_map("data");
+    f(&data);
+    doc.commit();
+    doc
+}
+
+/// Loro cannot change a container's type in place, but deleting a key and inserting a
+/// different container under the same name is an ordinary edit — and one a peer can make
+/// without this app ever seeing the intermediate state. `patch_into` then finds a Lua table
+/// already sitting at that key and reuses it, because `child` asks only "is there a table
+/// here?" and never "of the right kind".
+#[test]
+fn a_map_replaced_by_a_list_drops_the_old_keys() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let t = lua.create_table().unwrap();
+    let doc = nested(|d| {
+        let m = d.insert_container("items", LoroMap::new()).unwrap();
+        m.insert("a", 1).unwrap();
+    });
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    doc.get_map("data").delete("items").unwrap();
+    let l = doc
+        .get_map("data")
+        .insert_container("items", LoroMovableList::new())
+        .unwrap();
+    l.insert(0, 10).unwrap();
+    l.insert(1, 20).unwrap();
+    doc.commit();
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    lua.globals().set("m", &t).unwrap();
+    assert_eq!(lua.load("return #m.data.items").eval::<usize>().unwrap(), 2);
+    assert_eq!(
+        lua.load("return m.data.items.a").eval::<Value>().unwrap(),
+        Value::Nil,
+        "the map's key survived into a list"
+    );
+}
+
+/// The mirror image. The map arm's stale sweep iterates `pairs::<mlua::String, _>` and
+/// `filter_map`s the failures away, so an integer key is dropped from consideration *before*
+/// it is ever judged stale.
+#[test]
+fn a_list_replaced_by_a_map_drops_the_old_indices() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let t = lua.create_table().unwrap();
+    let doc = nested(|d| {
+        let l = d.insert_container("items", LoroMovableList::new()).unwrap();
+        l.insert(0, 10).unwrap();
+        l.insert(1, 20).unwrap();
+    });
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    doc.get_map("data").delete("items").unwrap();
+    let m = doc
+        .get_map("data")
+        .insert_container("items", LoroMap::new())
+        .unwrap();
+    m.insert("a", 1).unwrap();
+    doc.commit();
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    lua.globals().set("m", &t).unwrap();
+    assert_eq!(lua.load("return m.data.items.a").eval::<i64>().unwrap(), 1);
+    assert_eq!(
+        lua.load("return m.data.items[1]").eval::<Value>().unwrap(),
+        Value::Nil,
+        "the list's elements survived into a map"
+    );
+}
+
+/// A shorter list of maps must not leave the tail's *tables* behind either — the truncation
+/// loop keyed on `raw_len()` only ever removed a contiguous tail, which is correct for a list
+/// but says nothing about a table that also picked up string keys along the way.
+#[test]
+fn a_list_sweep_removes_a_stray_string_key() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let t = lua.create_table().unwrap();
+    patch_into(&lua, &t, &board(&["a"]).get_deep_value()).unwrap();
+
+    // Something a Map→List flip leaves behind, planted directly.
+    lua.globals().set("m", &t).unwrap();
+    lua.load("m.cards.leftover = true").exec().unwrap();
+
+    patch_into(&lua, &t, &board(&["a", "b"]).get_deep_value()).unwrap();
+    assert_eq!(
+        lua.load("return m.cards.leftover").eval::<Value>().unwrap(),
+        Value::Nil
+    );
+}
+
+/// Lua has no `null`, so a Loro null and an absent key mirror to the same thing: nothing.
+/// Fine in a map — `m.meta.temp` is nil either way — but in a *list* it punches a hole, and a
+/// Lua array with a hole has no defined length. Pinned rather than fixed: the only honest
+/// alternatives are a sentinel value leaking into app code or an error on import, and neither
+/// is obviously right until something actually writes one.
+#[test]
+fn a_null_in_a_list_leaves_a_hole() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let t = lua.create_table().unwrap();
+    let doc = nested(|d| {
+        let l = d.insert_container("items", LoroMovableList::new()).unwrap();
+        l.insert(0, 10).unwrap();
+        l.insert(1, LoroValue::Null).unwrap();
+        l.insert(2, 30).unwrap();
+    });
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    lua.globals().set("m", &t).unwrap();
+    assert_eq!(
+        lua.load("return m.data.items[1]").eval::<i64>().unwrap(),
+        10
+    );
+    assert_eq!(
+        lua.load("return m.data.items[2]").eval::<Value>().unwrap(),
+        Value::Nil,
+        "the null itself"
+    );
+    assert_eq!(
+        lua.load("return m.data.items[3]").eval::<i64>().unwrap(),
+        30
+    );
+
+    // The survivor of the sweep: index 3 is inside `1..=len`, so it is kept even though the
+    // hole at 2 makes `#` unable to reach it.
+    let n = lua.load("return #m.data.items").eval::<usize>().unwrap();
+    assert!(
+        n == 1 || n == 3,
+        "a hole makes the border arbitrary, got {n}"
+    );
+}
+
+/// The map half of the same thing, and the one that matters today: null and absent are
+/// indistinguishable, which is what lets `patch_shrinks_a_map` and this share one code path.
+#[test]
+fn a_null_in_a_map_reads_as_absent() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let t = lua.create_table().unwrap();
+    let doc = nested(|d| {
+        let m = d.insert_container("items", LoroMap::new()).unwrap();
+        m.insert("a", LoroValue::Null).unwrap();
+        m.insert("b", 2).unwrap();
+    });
+    patch_into(&lua, &t, &doc.get_deep_value()).unwrap();
+
+    lua.globals().set("m", &t).unwrap();
+    assert_eq!(
+        lua.load("return m.data.items.a").eval::<Value>().unwrap(),
+        Value::Nil
+    );
+    assert_eq!(lua.load("return m.data.items.b").eval::<i64>().unwrap(), 2);
 }
 
 #[test]

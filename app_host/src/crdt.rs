@@ -174,18 +174,12 @@ pub fn patch_into(lua: &Lua, dst: &Table, src: &LoroValue) -> mlua::Result<()> {
                 };
             }
 
-            let stale: Vec<mlua::String> = dst
-                .pairs::<mlua::String, Value>()
-                .filter_map(|p| p.ok())
-                .filter(|(k, _)| k.to_str().is_ok_and(|s| !entries.contains_key(&*s)))
-                .map(|(k, _)| k)
-                .collect();
-            for k in stale {
-                dst.set(k, Value::Nil)?;
-            }
+            sweep(dst, |k| match k {
+                Value::String(s) => s.to_str().is_ok_and(|s| entries.contains_key(&*s)),
+                _ => false,
+            })?;
         }
         LoroValue::List(items) => {
-            let old = dst.raw_len();
             for (i, item) in items.iter().enumerate() {
                 match item {
                     LoroValue::Map(_) | LoroValue::List(_) => {
@@ -194,9 +188,8 @@ pub fn patch_into(lua: &Lua, dst: &Table, src: &LoroValue) -> mlua::Result<()> {
                     _ => dst.set(i + 1, scalar(lua, item)?)?,
                 }
             }
-            for i in (items.len() + 1..=old).rev() {
-                dst.set(i, Value::Nil)?;
-            }
+            let n = items.len() as i64;
+            sweep(dst, |k| index_of(k).is_some_and(|i| (1..=n).contains(&i)))?;
         }
 
         _ => return Err(Error::runtime("patch into: Expected a map or a list")),
@@ -204,6 +197,40 @@ pub fn patch_into(lua: &Lua, dst: &Table, src: &LoroValue) -> mlua::Result<()> {
 
     Ok(())
 }
+/// Delete every key `keep` rejects.
+///
+/// Both arms need this and neither can do it inline: mutating a table while `pairs` walks it is
+/// undefined in Lua, so the keys are collected first. It iterates `Value` keys rather than typed
+/// ones because the whole point is to catch keys of the *wrong* type — a typed iterator with a
+/// `filter_map(ok)` silently drops exactly the keys that need deleting.
+///
+/// `pairs` uses raw `lua_next`, so the mirror's `__index` metatable (`:set`, `:insert`, …) is
+/// invisible here and survives the sweep. That is why the method table lives in a metatable
+/// rather than in the table itself.
+fn sweep(dst: &Table, keep: impl Fn(&Value) -> bool) -> mlua::Result<()> {
+    let mut doomed = Vec::new();
+    for pair in dst.pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        if !keep(&k) {
+            doomed.push(k);
+        }
+    }
+    for k in doomed {
+        dst.set(k, Value::Nil)?;
+    }
+    Ok(())
+}
+
+/// A Lua array index, or `None` for anything that is not a whole positive number. Lua stores
+/// `t[1]` as an integer but arithmetic can leave a float behind, so both spellings count.
+fn index_of(k: &Value) -> Option<i64> {
+    match k {
+        Value::Integer(i) => Some((*i).into()),
+        Value::Number(n) if n.fract() == 0.0 => Some(*n as i64),
+        _ => None,
+    }
+}
+
 fn child<K: IntoLua + Clone>(lua: &Lua, dst: &Table, k: K) -> mlua::Result<Table> {
     Ok(match dst.get::<Value>(k.clone())? {
         Value::Table(t) => t,
