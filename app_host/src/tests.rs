@@ -1785,13 +1785,32 @@ fn a_board_survives_a_restart_after_every_operation() {
 /// The real app source. The path reaches into shell2 deliberately: a fixture copy would drift
 /// away from the app that ships, and the whole value of these tests is that the write API works
 /// for its actual first caller. It is an `include_str!`, not a crate dependency.
-const KANBAN: &str = include_str!("../../shell2/src/kanban/main.lua");
+/// The real app, all four files of it — `include_str!` rather than a fixture so these tests
+/// fail when the app changes. It is also the only end-to-end check that `require` resolves a
+/// subdirectory (`ui/widgets`) the way an upload stores one.
+const KANBAN: [(&str, &str); 4] = [
+    ("main.lua", include_str!("../../shell2/src/kanban/main.lua")),
+    (
+        "model.lua",
+        include_str!("../../shell2/src/kanban/model.lua"),
+    ),
+    (
+        "theme.lua",
+        include_str!("../../shell2/src/kanban/theme.lua"),
+    ),
+    (
+        "ui/widgets.lua",
+        include_str!("../../shell2/src/kanban/ui/widgets.lua"),
+    ),
+];
 
 fn kanban_app(resolve: Resolve) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();
     let files = src.get_map("files");
-    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
-    main.insert(0, KANBAN).unwrap();
+    for (path, body) in KANBAN {
+        let t = files.insert_container(path, LoroText::new()).unwrap();
+        t.insert(0, body).unwrap();
+    }
     src.commit();
     LuaApp::open(src, resolve, noop_wake(), Rc::new(|m| m)).unwrap()
 }
@@ -1890,4 +1909,98 @@ fn the_kanban_renders_its_seeded_board() {
     if let Err(e) = view_fn.call::<Table>(()) {
         panic!("the view failed to build: {e}");
     }
+}
+
+/// What the split actually introduced. `drag`, `placement` and `col_modal` used to be file-scoped
+/// locals; now handlers in `model.lua` write them and the view in `main.lua` reads them, which
+/// only works because both hold the *same* table. Get that wrong and nothing fails to load — the
+/// board renders perfectly and simply never responds to a pointer.
+#[test]
+fn the_kanban_shares_pointer_state_across_modules() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+
+    app.vm
+        .load("require('model').update({ kind = 'open_col' })")
+        .exec()
+        .unwrap();
+    assert!(
+        app.vm
+            .load("return require('model').state.col_modal")
+            .eval::<bool>()
+            .unwrap(),
+        "the handler's write did not land in the shared table"
+    );
+
+    // The read half, and the only assertion that can catch the failure that matters. Building
+    // without error proves nothing: `main.lua` holding its *own* `{ col_modal = false }` would
+    // still render a perfectly good board — just one that ignores every click forever. So look
+    // for the thing the modal draws.
+    let view_fn = app.view_fn.as_ref().expect("no view closure");
+    let tree = view_fn
+        .call::<Table>(())
+        .expect("the view failed to build with the modal open");
+    assert!(
+        has_text(&tree, "New column"),
+        "the view did not see the handler's write"
+    );
+}
+
+/// Depth-first search for a string anywhere in a `ui.*` tree — the cheapest way to ask "did this
+/// actually render?" without teaching the tests the shape of every node.
+fn has_text(node: &Table, needle: &str) -> bool {
+    for pair in node.pairs::<Value, Value>() {
+        let Ok((_, v)) = pair else { continue };
+        let found = match v {
+            Value::String(s) => s.to_str().is_ok_and(|s| &*s == needle),
+            Value::Table(t) => has_text(&t, needle),
+            _ => false,
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+/// The whole loop across all four files: a handler in `model.lua` reads pointer state, writes
+/// the doc, and the mirror in `main.lua` shows the result on the next frame. Dropping a card on
+/// another column's background restamps `col` and leaves the ordering alone.
+#[test]
+fn the_kanban_moves_a_card_across_modules() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+    assert_eq!(card_col(&app, "k1"), "c-todo", "seeded position");
+
+    app.vm
+        .load(
+            r#"
+            local m = require('model')
+            m.update({ kind = 'drag', what = 'card', id = 'k1', phase = 'start', x = 0, y = 0 })
+            m.update({ kind = 'drop_col', col = 'c-done', phase = 'over', x = 0.5 })
+            m.update({ kind = 'drop_col', col = 'c-done', phase = 'end', x = 0.5 })
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+    // The write reached Loro immediately; the mirror only catches up in view().
+    assert_eq!(card_col(&app, "k1"), "c-todo", "stale until the next frame");
+    let _ = app.view();
+    assert_eq!(card_col(&app, "k1"), "c-done");
+}
+
+/// A card's column, read out of the mirror by id.
+fn card_col(app: &LuaApp<LuaMsg>, id: &str) -> String {
+    let docs = app.docs.borrow();
+    let cards: Table = docs.get("board").unwrap().mirror.get("cards").unwrap();
+    for i in 1..=cards.raw_len() {
+        let card: Table = cards.get(i).unwrap();
+        if card.get::<String>("id").unwrap() == id {
+            return card.get::<String>("col").unwrap();
+        }
+    }
+    panic!("no card {id}");
 }
