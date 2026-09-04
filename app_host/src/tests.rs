@@ -1,6 +1,8 @@
 use super::*;
-use mlua::Table;
+use mlua::{FromLua, Table};
 use std::rc::Rc;
+
+mod require;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {

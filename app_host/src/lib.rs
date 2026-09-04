@@ -5,6 +5,7 @@
 //! is unchanged — dispatch just calls the closure the index points at.
 //! Item discovery is a prefix scan for `meta` keys; `src` and `state` are loaded on demand.
 mod crdt;
+mod modules;
 mod props;
 pub use crdt::{Docs, Resolve, Wake};
 
@@ -71,6 +72,8 @@ impl<M: 'static> LuaApp<M> {
         };
         let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
         crdt::install(&vm, docs.clone(), resolve, wake)?;
+        // Before `main.lua` runs, because its first line will be a `require`.
+        modules::install(&vm, &src)?;
 
         let main_src = t.to_string();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
