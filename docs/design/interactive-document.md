@@ -373,6 +373,54 @@ Two things this forces:
   already says `hash(source, input values, block id)`; this is the same rule, and the two must not
   drift apart.
 
+**Where `El`/Taffy stops and `Frame` starts: a Frame is a Taffy leaf.**
+`view-and-interaction.md` §9 already names the pattern for the hardest case — *"a graph/canvas
+(positions come from a simulation: one taffy leaf, fixed size, place nodes inside)."* Generalised,
+the leaf has **two modes**, and picking between them is the real decision:
+
+| | who decides the size | example |
+|---|---|---|
+| **fixed leaf** | Taffy, outside-in — "you get 600×400" | canvas, a physics scene |
+| **measured leaf** | the Frame, inside-out — "I am 240×90, baseline 62" | a chart, inline math, a live block, **a wrapped paragraph** |
+
+Taffy 0.12's `compute_layout_with_measure` hands its closure both `known_dimensions` and
+`available_space`, so **one hook serves both**: dimensions known → canvas mode; only an available
+width → measure mode, and the Frame reports `w`/`h`/`baseline` back. That is the same hook open
+question 1 needs for text wrapping, which means intrinsic sizing is **one mechanism with five
+consumers** — text, charts, math, canvas, live blocks — rather than five pieces of work.
+
+Coordinates compose through a single transform. A `Frame` nested in an `El` inherits the El's
+accumulated transform, and `Group { transform: Affine, … }` composes onto that. There is no second
+coordinate system, which is exactly why `view-and-interaction.md`'s decisions log puts scale in
+`emit`'s accumulator rather than paint-only: visuals stay equal to hits.
+
+The case that stays genuinely awkward is **a paragraph with inline atoms, which is Frame-level
+composition all the way down**, since inline layout is neither Taffy's job nor parley's.
+Everything else is "Taffy outside, Frame inside."
+
+**And a measured leaf is cheaper to add than it sounds, because the runtime already re-lays-out
+every frame.** `runtime/src/lib.rs:206` calls `layout::solve(app.view(), …)` inside `frame()`, and
+`solve` (`layout.rs:217`) does `TaffyTree::new()` followed by `compute_layout` — a full Lua view
+rebuild and a fresh tree, unconditionally, every frame. So there is no incremental-layout machinery
+to integrate with: the measure closure just runs during that frame's solve, and
+`compute_layout_with_measure` is a drop-in for `compute_layout` in the same function.
+
+Three consequences worth stating plainly, because they are easy to get backwards:
+
+- **Animating a size costs nothing extra.** The relayout was already happening. What is expensive
+  is **text shaping**, not Taffy — solving a few thousand flexbox nodes is cheap; re-shaping
+  paragraphs through parley is not. The old `doc_editor` cached galleys on a fingerprint over
+  (runs, style, width, lang), and its author flagged computing `runs` per frame as *"the cost to
+  revisit (Loro diff) at scale."* A content cache keyed on (text, marks, width) is the mitigation,
+  and it is orthogonal to animation.
+- **"Reserve the space" is a visual rule, not a performance one.** The kanban renders its drop
+  guides on every gap so nothing *shifts* when a target appears. Words jumping between lines
+  mid-animation reads as broken however cheap the relayout was. The discipline stands — just not
+  for a perf reason.
+- **The real ceiling is node and shaping count**, which is the O(n)-per-frame problem the old
+  editor hit: fine at 50 blocks, dead at 5000. Animation only means sitting at that ceiling
+  continuously rather than occasionally.
+
 ### 3.9 Structural editing: what the agent actually calls
 
 The splitter as built is deliberately **shallow** — it cuts at top-level construct boundaries and
@@ -978,6 +1026,12 @@ graph inspector shipped in the same commit as the graph.** Start with two or thr
    which hands a measure closure `known_dimensions` and `available_space`; parley's builders take
    a max advance for wrapping. Route text leaves — and later, live blocks — through that hook.
    **This is the first piece of engine work and it precedes everything in §8.**
+
+   §3.8 sharpens this: it is not text-specific work. The same hook is the **measured leaf** that
+   charts, math, canvas and live blocks all need, so it is one mechanism with five consumers. And
+   because `solve` already builds a fresh `TaffyTree` and re-lays-out every frame, there is no
+   incremental-layout machinery to integrate with — `compute_layout_with_measure` is a drop-in for
+   `compute_layout` in the same function.
 
 2. **Where does a live block's per-viewer state live?** `ui.doc`'s `"uidoc:{id}"` convention is
    the pattern, but a block's scratch state must survive re-ordering, copy-paste and duplication,
