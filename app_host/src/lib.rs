@@ -7,10 +7,10 @@
 mod crdt;
 mod modules;
 mod props;
-pub use crdt::{Docs, Resolve, Wake};
+pub use crdt::{Cores, Docs, Resolve, Wake};
 
 use loro::{Container, ExportMode, LoroDoc, ValueOrContainer};
-use mlua::{Error, Function, Lua, Table, Value};
+use mlua::{Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{El, col, row, text, text_area, text_input};
 use std::cell::RefCell;
@@ -56,11 +56,34 @@ pub struct LuaApp<M> {
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     src: LoroDoc,
     docs: Docs,
+    /// The four below outlive the VM, and that is the whole reason [`reload`](Self::reload) can
+    /// build a replacement beside the running one: `cores` keeps the open docs (and so their
+    /// unflushed writes and their single subscription), and the other three are what `build`
+    /// needs to make a VM at all.
+    cores: Cores,
+    resolve: Resolve,
+    wake: Wake,
 }
 
 impl<M: 'static> LuaApp<M> {
     pub fn open(
         src: LoroDoc,
+        resolve: Resolve,
+        wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    ) -> mlua::Result<Self> {
+        let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
+        Self::build(src, cores, resolve, wake, to_msg)
+    }
+
+    /// Everything that makes a VM, with the doc cores handed in rather than created — so `open`
+    /// starts with an empty set and `reload` starts with the running app's.
+    ///
+    /// A source that fails to compile is **not** an error here: it lands in `self.error` and
+    /// `view()` renders it. `reload` is the caller that wants the opposite, and it checks.
+    fn build(
+        src: LoroDoc,
+        cores: Cores,
         resolve: Resolve,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
@@ -71,7 +94,13 @@ impl<M: 'static> LuaApp<M> {
             return Err(Error::runtime("no main.lua in app source"));
         };
         let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
-        crdt::install(&vm, docs.clone(), resolve, wake)?;
+        crdt::install(
+            &vm,
+            docs.clone(),
+            cores.clone(),
+            resolve.clone(),
+            wake.clone(),
+        )?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src)?;
 
@@ -89,7 +118,55 @@ impl<M: 'static> LuaApp<M> {
             to_msg,
             src,
             docs,
+            cores,
+            resolve,
+            wake,
         })
+    }
+
+    /// Rebuild the VM from the current source, keeping the docs and as much per-viewer state as
+    /// can cross a VM boundary. On any failure **nothing changes** and the running app is
+    /// untouched.
+    ///
+    /// That guarantee is the reason this builds a whole second app rather than re-evaluating in
+    /// place. Lua cannot unload a chunk: re-running `main.lua` here would leave every global the
+    /// old version set that the new one does not, and every closure already in `handlers` would
+    /// still point at the old upvalues. Building beside and swapping is also what makes the
+    /// failure path free — the staged `Docs` map is dropped, and the cores it borrowed are still
+    /// held by `self.cores`.
+    ///
+    /// The three stages are load, setup and **first render**, and the third is not optional: a
+    /// `main.lua` that compiles and returns a closure which throws on its first call is the
+    /// ordinary case, and without the trial frame we would have swapped before finding out.
+    pub fn reload(&mut self) -> Result<(), String> {
+        let staged = Self::build(
+            self.src.clone(),
+            self.cores.clone(),
+            self.resolve.clone(),
+            self.wake.clone(),
+            self.to_msg.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        if let Some(e) = &staged.error {
+            return Err(e.clone());
+        }
+        let dropped = carry_state(&self.vm, &staged.vm).map_err(|e| e.to_string())?;
+        let view_fn = staged.view_fn.as_ref().ok_or("no view loaded")?;
+        view_fn.call::<Table>(()).map_err(|e| e.to_string())?;
+        // A real frame, not half of one. `_sweep` is what drops carried state belonging to an
+        // element the new source no longer draws — skip it and that state lingers until whenever
+        // the next frame happens to be.
+        if let Ok(f) = staged.vm.globals().get::<Function>("_sweep") {
+            f.call::<()>(()).map_err(|e| e.to_string())?;
+        }
+        // The trial frame filled the staged app's handler table with closures nothing will ever
+        // dispatch to; clear it so the first real frame starts from an empty one.
+        staged.handlers.borrow_mut().clear();
+        *self = staged;
+        for name in dropped {
+            eprintln!("reload: dropped ui.state({name:?}) — it holds a value tied to the old VM");
+        }
+        Ok(())
     }
 
     pub fn view(&self) -> El<M> {
@@ -104,9 +181,10 @@ impl<M: 'static> LuaApp<M> {
         {
             let mut docs = self.docs.borrow_mut();
             for e in docs.values_mut() {
-                let v = e.version.load(Ordering::Relaxed);
+                let v = e.core.version.load(Ordering::Relaxed);
                 if v > e.mirrored {
-                    if let Err(err) = patch_into(&self.vm, &e.mirror, &e.doc.get_deep_value()) {
+                    if let Err(err) = patch_into(&self.vm, &e.mirror, &e.core.doc.get_deep_value())
+                    {
                         return err_box(&format!("mirror: {err}"));
                     }
                     e.mirrored = v;
@@ -168,22 +246,120 @@ impl<M: 'static> LuaApp<M> {
         &mut self,
         mut put: impl FnMut(&str, &[u8]) -> Result<(), String>,
     ) -> Result<(), String> {
-        for (name, e) in self.docs.borrow_mut().iter_mut() {
+        // Over the *cores*, not the current VM's open docs. A doc the previous source opened and
+        // the new one does not still holds unflushed writes, and iterating the mirrors would
+        // silently stop saving it the moment a reload dropped it from the view.
+        for (name, core) in self.cores.borrow().iter() {
             // Read the counter *before* exporting: a write landing mid-flush then stays dirty
             // rather than being marked saved by a snapshot taken before it.
-            let v = e.version.load(Ordering::Relaxed);
-            if v <= e.saved {
+            let v = core.version.load(Ordering::Relaxed);
+            if v <= core.saved.get() {
                 continue;
             }
-            let bytes = e
+            let bytes = core
                 .doc
                 .export(ExportMode::Snapshot)
                 .map_err(|err| err.to_string())?;
             put(name, &bytes)?;
-            e.saved = v;
+            core.saved.set(v);
         }
         Ok(())
     }
+}
+
+/// A `ui.state` entry reduced to data. What *cannot* be represented here — a function, a thread,
+/// userdata — is exactly what makes an entry uncarryable.
+enum Plain {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    Num(f64),
+    Str(String),
+    Table(Vec<(Plain, Plain)>),
+}
+
+/// How deep a `ui.state` entry may nest before we give up. This is not a size limit — it is the
+/// cycle guard. A table that contains itself would otherwise recurse forever, and returning
+/// `None` funnels it into the same "dropped, and said so" path as a coroutine.
+const MAX_DEPTH: u32 = 16;
+
+/// Carry `ui.state` across a rebuild, returning the names of the entries that could not come.
+///
+/// A **filter, not a copy**, and the difference is the point. `_state` holds per-viewer scratch —
+/// an unsent draft, whether a panel is open — but it is also where retained *execution* state
+/// lands once `ui.run` exists, and a suspended coroutine is a live stack of closures belonging to
+/// a chunk that no longer exists. No mechanism can move that to another VM: not serialization,
+/// not a Rust-side mirror.
+///
+/// Dropping it is correct rather than a compromise — an animation whose code just changed should
+/// restart, which is the same rule that makes `_sweep` kill an animation when its element leaves
+/// the tree. What is not acceptable is doing it *silently*, so the names come back to the caller.
+///
+/// `_live` is deliberately not carried. The trial frame runs after this, marks whatever the new
+/// source actually touches, and `_sweep` drops the rest — so state belonging to an element the
+/// new code no longer draws is cleaned up on the way in, for free.
+fn carry_state(from: &Lua, to: &Lua) -> mlua::Result<Vec<String>> {
+    let old: Table = from.globals().get::<Function>("_dump_state")?.call(())?;
+    let new = to.create_table()?;
+    let mut dropped = Vec::new();
+    for pair in old.pairs::<Value, Value>() {
+        let (k, v) = pair?;
+        match (plain(&k, 0), plain(&v, 0)) {
+            (Some(k), Some(v)) => new.set(into_lua(to, &k)?, into_lua(to, &v)?)?,
+            _ => dropped.push(match &k {
+                Value::String(s) => s.to_string_lossy(),
+                other => format!("{other:?}"),
+            }),
+        }
+    }
+    to.globals()
+        .get::<Function>("_load_state")?
+        .call::<()>(new)?;
+    Ok(dropped)
+}
+
+/// `None` for anything carrying VM identity, and for anything nested past [`MAX_DEPTH`].
+fn plain(v: &Value, depth: u32) -> Option<Plain> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    match v {
+        Value::Nil => Some(Plain::Nil),
+        Value::Boolean(b) => Some(Plain::Bool(*b)),
+        // Luau integers are i32, so this widens rather than truncating.
+        Value::Integer(i) => Some(Plain::Int((*i).into())),
+        Value::Number(n) => Some(Plain::Num(*n)),
+        Value::String(s) => Some(Plain::Str(s.to_str().ok()?.to_owned())),
+        Value::Table(t) => {
+            // `pairs` is raw, so a metatable does not come along — which is right: the only
+            // metatables in reach here are the mirror's and the container tags, and neither
+            // belongs to per-viewer scratch.
+            let mut out = Vec::new();
+            for pair in t.pairs::<Value, Value>() {
+                let (k, v) = pair.ok()?;
+                out.push((plain(&k, depth + 1)?, plain(&v, depth + 1)?));
+            }
+            Some(Plain::Table(out))
+        }
+        _ => None,
+    }
+}
+
+fn into_lua(lua: &Lua, p: &Plain) -> mlua::Result<Value> {
+    Ok(match p {
+        Plain::Nil => Value::Nil,
+        Plain::Bool(b) => Value::Boolean(*b),
+        Plain::Int(i) => (*i).into_lua(lua)?,
+        Plain::Num(n) => Value::Number(*n),
+        Plain::Str(s) => Value::String(lua.create_string(s)?),
+        Plain::Table(entries) => {
+            let t = lua.create_table()?;
+            for (k, v) in entries {
+                t.set(into_lua(lua, k)?, into_lua(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
 }
 
 const PRELUDE: &str = r#"
@@ -198,11 +374,17 @@ end
 
 
 function _sweep()
-    for id in pairs(_state) do 
+    for id in pairs(_state) do
     if not _live[id] then _state[id] = nil end
     end
     _live={}
 end
+
+-- The host's seam onto `ui.state`, used only by `reload` to carry per-viewer scratch across a
+-- VM rebuild. `_state` is a local so an app cannot replace the table wholesale; these two are
+-- the same deliberate exception `_sweep` already is.
+function _dump_state() return _state end
+function _load_state(t) _state = t end
 
 ui = {
     col = tagger("col"),

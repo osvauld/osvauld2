@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
     sync::{Arc, atomic::AtomicU64},
@@ -11,17 +11,33 @@ use loro::{
 };
 use mlua::{Error, FromLua, Function, IntoLua, Lua, Table, Value};
 
-pub struct DocEntry {
+/// Everything about an open doc that outlives a VM.
+///
+/// The line is drawn by what a `mlua::Table` can do: it belongs to one `Lua` and cannot cross a
+/// rebuild, so the mirror lives in [`DocEntry`] and everything else lives here. Keeping the core
+/// shared buys three things — a reload neither re-reads the vault nor re-subscribes, and a
+/// *failed* reload has nothing to roll back, because the staged [`Docs`] map is simply dropped.
+pub struct DocCore {
     pub doc: LoroDoc,
-    pub mirror: Table,
     pub version: Arc<AtomicU64>,
-    /// Watermark for the Lua mirror. Advanced in `view()`.
-    pub mirrored: u64,
     /// Watermark for the vault. Advanced in `flush()`, and only after the write lands.
     /// Two consumers means two watermarks — a single `dirty` flag would let whichever
     /// cleared it first starve the other.
-    pub saved: u64,
+    ///
+    /// A `Cell` because the core is shared: `flush` reaches it through `Cores` while the VM
+    /// reaches the same one through its `DocEntry`.
+    pub saved: Cell<u64>,
     _sub: Subscription,
+}
+
+/// The per-VM half of an open doc. A reload throws this away and rebuilds it, which costs
+/// exactly one `patch_into` — the mirror is a cache, not storage.
+pub struct DocEntry {
+    pub core: Rc<DocCore>,
+    pub mirror: Table,
+    /// Watermark for the Lua mirror. Advanced in `view()`. A fresh entry starts at 0, which is
+    /// precisely what makes the first frame after a reload repatch everything from the doc.
+    pub mirrored: u64,
 }
 pub enum Seg {
     Name(String),
@@ -33,48 +49,75 @@ pub enum Seg {
 /// with that emptiness.
 pub type Resolve = Rc<dyn Fn(&str) -> Result<Option<Vec<u8>>, String>>;
 pub type Docs = Rc<RefCell<HashMap<String, DocEntry>>>;
+/// The open docs, indexed by name, surviving every VM the app has had. Held by `LuaApp` and
+/// handed to each `install`, so a rebuilt VM re-opens what it had rather than reloading it.
+pub type Cores = Rc<RefCell<HashMap<String, Rc<DocCore>>>>;
 /// Ask the host for a frame. Called from Loro's subscriber, which is `Send + Sync`, so this is
 /// too — it cannot touch the VM or the mirror, and does not need to: all it has to do is get the
 /// event loop to run `view()` again, which repatches on its own.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
-pub fn install(lua: &Lua, docs: Docs, resolve: Resolve, wake: Wake) -> mlua::Result<()> {
+pub fn install(
+    lua: &Lua,
+    docs: Docs,
+    cores: Cores,
+    resolve: Resolve,
+    wake: Wake,
+) -> mlua::Result<()> {
     let open = lua.create_function(move |lua, (_this, name): (Value, String)| {
         let hit = docs.borrow().get(&name).map(|e| e.mirror.clone());
         if let Some(mirror) = hit {
             return Ok(mirror);
         }
-        let doc = LoroDoc::new();
-        if let Some(bytes) = resolve(&name).map_err(Error::runtime)? {
-            doc.import(&bytes).map_err(Error::external)?;
-        }
+        // A hit here is a reload re-opening what the previous VM had: same doc, same version
+        // counter, same subscription. Missing that would re-read the vault (losing every
+        // unflushed write) and subscribe a second time (double-counting every edit after).
+        let core = match cores.borrow().get(&name) {
+            Some(core) => Some(core.clone()),
+            None => None,
+        };
+        let core = match core {
+            Some(core) => core,
+            None => {
+                let doc = LoroDoc::new();
+                if let Some(bytes) = resolve(&name).map_err(Error::runtime)? {
+                    doc.import(&bytes).map_err(Error::external)?;
+                }
+                let version = Arc::new(AtomicU64::new(0));
+                let v = version.clone();
+                let w = wake.clone();
+                let sub = doc.subscribe_root(Arc::new(move |ev| {
+                    v.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // A local write already happened inside a frame the host asked for, and
+                    // poking from here would schedule a second one for every keystroke. An
+                    // import did not: it is a peer or the MCP bridge writing while the window
+                    // sits idle, and without this the change lands in the doc and stays
+                    // invisible until the next mouse move.
+                    if ev.triggered_by == EventTriggerKind::Import {
+                        w();
+                    }
+                }));
+                let core = Rc::new(DocCore {
+                    doc,
+                    version,
+                    saved: Cell::new(0),
+                    _sub: sub,
+                });
+                cores.borrow_mut().insert(name.clone(), core.clone());
+                core
+            }
+        };
         let mirror = lua.create_table()?;
-        patch_into(lua, &mirror, &doc.get_deep_value())?;
+        patch_into(lua, &mirror, &core.doc.get_deep_value())?;
         let mt = lua.create_table()?;
         mt.set("__index", methods(lua, &docs, &name)?)?;
         mirror.set_metatable(Some(mt));
-        let version = Arc::new(AtomicU64::new(0));
-        let v = version.clone();
-        let w = wake.clone();
-        let sub = doc.subscribe_root(Arc::new(move |ev| {
-            v.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // A local write already happened inside a frame the host asked for, and poking from
-            // here would schedule a second one for every keystroke. An import did not: it is a
-            // peer or the MCP bridge writing while the window sits idle, and without this the
-            // change lands in the doc and stays invisible until the next mouse move.
-            if ev.triggered_by == EventTriggerKind::Import {
-                w();
-            }
-        }));
         docs.borrow_mut().insert(
             name,
             DocEntry {
-                doc,
+                core,
                 mirror: mirror.clone(),
-                version,
                 mirrored: 0,
-                saved: 0,
-                _sub: sub,
             },
         );
         Ok(mirror)
@@ -603,7 +646,7 @@ fn insert_at(lua: &Lua, l: &LoroMovableList, i: usize, v: &Value) -> mlua::Resul
 fn handle(docs: &Docs, name: &str) -> mlua::Result<LoroDoc> {
     docs.borrow()
         .get(name)
-        .map(|e| e.doc.clone())
+        .map(|e| e.core.doc.clone())
         .ok_or_else(|| Error::runtime("doc closed"))
 }
 

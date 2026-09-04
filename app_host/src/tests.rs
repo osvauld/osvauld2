@@ -2,6 +2,7 @@ use super::*;
 use mlua::{FromLua, Table};
 use std::rc::Rc;
 
+mod reload;
 mod require;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
@@ -10,6 +11,12 @@ fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
 }
 
 /// No window to repaint. Tests that care about the poke build their own counting waker.
+/// A fresh, empty core set. Only `reload` ever hands a populated one in — every other test
+/// opens its docs for the first time.
+fn no_cores() -> Cores {
+    Rc::new(RefCell::new(HashMap::new()))
+}
+
 fn noop_wake() -> Wake {
     std::sync::Arc::new(|| {})
 }
@@ -375,6 +382,7 @@ fn open_imports_and_mirrors() {
     install(
         &lua,
         docs.clone(),
+        no_cores(),
         serving("board", snapshot_of(&board(&["a", "b"]))),
         noop_wake(),
     )
@@ -397,6 +405,7 @@ fn open_is_idempotent() {
     install(
         &lua,
         docs.clone(),
+        no_cores(),
         serving("board", snapshot_of(&board(&["a"]))),
         noop_wake(),
     )
@@ -415,7 +424,14 @@ fn open_is_idempotent() {
 fn open_missing_doc_is_empty_not_an_error() {
     let (lua, _) = sandboxed_vm().unwrap();
     let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
-    install(&lua, docs.clone(), Rc::new(|_| Ok(None)), noop_wake()).unwrap();
+    install(
+        &lua,
+        docs.clone(),
+        no_cores(),
+        Rc::new(|_| Ok(None)),
+        noop_wake(),
+    )
+    .unwrap();
 
     let n: usize = lua
         .load(r#"local b = doc:open("fresh") local n = 0 for _ in pairs(b) do n = n + 1 end return n"#)
@@ -432,6 +448,7 @@ fn open_reports_a_corrupt_snapshot() {
     install(
         &lua,
         docs.clone(),
+        no_cores(),
         serving("board", b"not a snapshot".to_vec()),
         noop_wake(),
     )
@@ -458,6 +475,7 @@ fn open_reports_a_resolver_failure() {
     install(
         &lua,
         docs.clone(),
+        no_cores(),
         Rc::new(|_| Err("vault locked".to_string())),
         noop_wake(),
     )
@@ -542,7 +560,7 @@ fn external_write_reaches_the_mirror_on_next_view() {
     assert_eq!(cards_len(&app), 2);
 
     // `LoroDoc::clone` is a reference clone, so this is the app's own doc, not a fork.
-    let doc = app.docs.borrow().get("board").unwrap().doc.clone();
+    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
     let extra = doc
         .get_movable_list("cards")
         .insert_container(2, LoroMap::new())
@@ -557,6 +575,7 @@ fn external_write_reaches_the_mirror_on_next_view() {
             .borrow()
             .get("board")
             .unwrap()
+            .core
             .version
             .load(Ordering::Relaxed),
         1
@@ -573,7 +592,7 @@ fn view_without_a_write_does_not_repatch() {
     let _ = app.view();
     let e = app.docs.borrow();
     let e = e.get("board").unwrap();
-    assert_eq!(e.version.load(Ordering::Relaxed), 0);
+    assert_eq!(e.core.version.load(Ordering::Relaxed), 0);
     assert_eq!(e.mirrored, 0);
 }
 
@@ -581,7 +600,7 @@ fn view_without_a_write_does_not_repatch() {
 #[test]
 fn many_writes_are_one_patch() {
     let app = board_app(serving("board", snapshot_of(&board(&["a"]))));
-    let doc = app.docs.borrow().get("board").unwrap().doc.clone();
+    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
     for t in ["b", "c", "d"] {
         let m = doc
             .get_movable_list("cards")
@@ -595,6 +614,7 @@ fn many_writes_are_one_patch() {
             .borrow()
             .get("board")
             .unwrap()
+            .core
             .version
             .load(Ordering::Relaxed),
         3
@@ -647,7 +667,7 @@ fn an_import_asks_for_a_frame() {
     let app = board_app_waking(serving("board", snapshot_of(&base)), wake);
     assert_eq!(hits.load(Ordering::Relaxed), 0, "opening is not a change");
 
-    let doc = app.docs.borrow().get("board").unwrap().doc.clone();
+    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
     doc.import(&update_adding("b", &base)).unwrap();
 
     assert_eq!(hits.load(Ordering::Relaxed), 1);
@@ -668,7 +688,7 @@ fn a_local_write_does_not_ask_for_a_frame() {
     let (wake, hits) = counting_wake();
     let app = board_app_waking(serving("board", snapshot_of(&board(&["a"]))), wake);
 
-    let doc = app.docs.borrow().get("board").unwrap().doc.clone();
+    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
     let m = doc
         .get_movable_list("cards")
         .push_container(LoroMap::new())
@@ -681,6 +701,7 @@ fn a_local_write_does_not_ask_for_a_frame() {
             .borrow()
             .get("board")
             .unwrap()
+            .core
             .version
             .load(Ordering::Relaxed),
         1,
@@ -707,7 +728,7 @@ fn a_batch_of_changes_is_one_poke() {
         m.insert("title", t).unwrap();
         peer.commit();
     }
-    let doc = app.docs.borrow().get("board").unwrap().doc.clone();
+    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
     doc.import(&peer.export(ExportMode::Snapshot).unwrap())
         .unwrap();
 
@@ -983,7 +1004,7 @@ fn scan_for_id_skips_elements_that_cannot_match() {
 /// write API is still being designed. This is also what MCP and peer writes will look like.
 fn add_card(app: &LuaApp<LuaMsg>, title: &str) {
     let docs = app.docs.borrow();
-    let doc = &docs.get("board").unwrap().doc;
+    let doc = &docs.get("board").unwrap().core.doc;
     let cards = doc.get_movable_list("cards");
     let m = cards.insert_container(cards.len(), LoroMap::new()).unwrap();
     m.insert("title", title).unwrap();
@@ -1204,13 +1225,20 @@ fn resolve_path_rejects_a_position_inside_a_map() {
 fn writing() -> (Lua, LoroDoc) {
     let (lua, _) = sandboxed_vm().unwrap();
     let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
-    install(&lua, docs.clone(), Rc::new(|_| Ok(None)), noop_wake()).unwrap();
+    install(
+        &lua,
+        docs.clone(),
+        no_cores(),
+        Rc::new(|_| Ok(None)),
+        noop_wake(),
+    )
+    .unwrap();
     // Roots have to be declared: nothing owns them, so `:set` cannot invent one on the way
     // down a path. Every test below writes under `meta`, so seed it once here.
     lua.load(r#"board = doc:open("board") board:set({"meta"}, doc.map{})"#)
         .exec()
         .unwrap();
-    let doc = docs.borrow().get("board").unwrap().doc.clone();
+    let doc = docs.borrow().get("board").unwrap().core.doc.clone();
     (lua, doc)
 }
 
