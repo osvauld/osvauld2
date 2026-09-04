@@ -130,39 +130,228 @@ thing in the whole brief that is uniquely available to us.
 
 ---
 
-## 3. The one block
+## 3. The one block: data and behaviour
+
+A block is **data**, plus optionally **behaviour**. Both live in the CRDT. Both are editable — by
+a human, a peer, or the agent. Neither is privileged.
 
 ```
 Block = {
-  kind:    paragraph | h1..h3 | li | ol | todo | quote | code | divider | live
-  content: LoroText          -- what a human typed. Marks live here.
-  meta:    LoroMap           -- lang, done, view, cost, effects
-  children: subtree
+  kind,
+  data:      LoroText | LoroMap   -- what it IS.   Prose + marks, or typed values.
+  behaviour: block subtree | nil  -- what it DOES. Luau, itself split into blocks (§3.6).
+  props:     LoroMap              -- declared editable slots (§3.2)
+  children:  subtree
 }
 ```
 
-A **live** block adds nothing to the storage model. Its `content` is Luau source; its `meta.view`
-names the recognizer that renders it. That's the entire delta.
+This costs **nothing in storage**. `block_doc` blocks already carry a `LoroMap` of metadata around
+a `LoroText` of content: `content` is the data, and behaviour is one more `LoroText` in the map.
 
-Three faces, one object:
+The two ends of the spectrum turn out to be the same object:
 
-| face | what it is | who uses it |
+- a **paragraph** is a block with data and no behaviour;
+- a **function** — one of the splitter's `Function` blocks in a `.lua` file — is a block with
+  behaviour and no data;
+- everything interesting is in between.
+
+### 3.1 Why the split matters
+
+The earlier draft of this document made a live block's *content* be its Luau source, which forced
+every visual edit to be **AST surgery**: dragging a chart's axis meant rewriting `y = "cost"` in
+the source text. That works — mage proves it's tractable for a bounded set of shapes — but it
+makes the common case as expensive as the rare one.
+
+Separating them collapses that:
+
+| | data edit | behaviour edit |
 |---|---|---|
-| **view** | a Luau function `(ast, value) -> scene` that recognizes shapes in the source | the default; what a reader sees |
-| **source** | the `LoroText`, as code blocks with highlighting | disclosure arrow; what the agent writes |
-| **value** | derived, never stored | what downstream blocks and inline computeds read |
+| example | change a colour, retitle an axis, tick a box | change how the value is computed |
+| mechanism | an ordinary CRDT write | a text edit that invalidates a compiled chunk |
+| cost | free — no recompile, no re-analysis | recompile, re-derive dependencies |
+| safety | **always safe** | sandboxed, budgeted, effects declared |
+| frequency | constant | rare |
 
-**The source is always ground truth.** A view is a renderer *plus* a structured editor for the
-shapes it declares. Dragging an axis performs an AST-level edit of the source. Outside the
-declared shapes the view is a read-only renderer with a visible "I don't recognise this" state.
-Never a conversion. Never a door.
+The last two rows are the argument. A right-click colour change must never be a security question
+or a recompile, and with the split it structurally cannot be. **AST recognition is then reserved
+for what it's actually good at** — editing behaviour visually — instead of being the only
+mechanism available.
 
-**Views are Luau functions living in the document.** This is the ambitious half and I think it's
-right. Glamorous Toolkit measured 131 custom views across 84 objects at **~9.2 lines of code per
-view** — when a bespoke visual surface costs ten lines, people write hundreds of them and the
-visual/code dichotomy dissolves. If a view is a block, then users author block types without
-leaving the document, agents author block types, a document carries its own bespoke UI, and
-Boxer's naive realism holds: there is no privileged layer you can't open.
+### 3.2 Declared property slots, and the context menu
+
+A block declares its editable slots:
+
+```lua
+props = {
+  fill  = { type = "color",  default = C.card },
+  title = { type = "string" },
+  y     = { type = "column", of = "budget" },
+}
+```
+
+One declaration, **three consumers**:
+
+- the **context menu** is generated from it — right-click a block and you get exactly the slots it
+  declares, with the right editor per type: a swatch for a colour, a picker for a column;
+- the **view** reads the same slots to render;
+- the **agent** reads them to know what it can change without touching code.
+
+This kills two traps at once. The *avocado slicer* (#15): no bespoke menu per block kind, so a
+user-authored block gets a context menu the moment it declares props. And *schema drift* (#9):
+Embark's map view implicitly hunted for a `location` property with nothing enforcing or
+documenting that contract, which they named as one of their main challenges. Declared slots make
+the mismatch a nameable error instead of an empty render.
+
+### 3.3 The rung between data and behaviour
+
+**A property slot accepts a literal or an expression.** This is what the ladder needs and what the
+data/behaviour split lacks on its own — without it there are two rungs (pick a value / write a
+program) with a cliff between them.
+
+```lua
+fill = "#2b6a3f"                                     -- a literal
+fill = expr [[ if row.overdue then C.danger else C.card end ]]   -- same slot, computed
+```
+
+Inkbase built exactly this: any property holds a literal *or* a reactive expression, edited in the
+same place by the same gesture. Their stated reason for choosing a Lisp was that "everything in
+Lisp is an expression… which composes nicely with the idea of reactive properties." Luau
+expressions serve the same role.
+
+So the slope is **right-click and pick a value → bind the slot to an expression → open the
+behaviour and write a script.** Three rungs where there were two, and the middle one is where most
+real tailoring will land.
+
+### 3.4 Behaviour syncs — so an import must never fire an effect
+
+Behaviour belongs in the CRDT: it's something a human typed, so it merges, diffs, undoes, and the
+agent's block-granular edits work on it exactly as they work on prose.
+
+The consequence has to be said out loud. **A peer can change what your document does.** That's
+ordinary — Notion and Coda have the same property — but combined with §4.3 it becomes a rule:
+
+> An imported behaviour change never executes an effect. Effects run once, on the actor who
+> triggered them.
+
+A pure block re-deriving on import is just a repaint. An *effectful* block re-running because a
+peer edited its source is a document that mails someone when a colleague fixes a typo. The effect
+declaration and the capability grants are what stand between those two, and this is the case that
+proves they're load-bearing rather than ceremony.
+
+### 3.5 Views are still Luau functions living in the document
+
+Unchanged, and now cheaper: a view is `(data, props, value) -> scene`, and it only falls back to
+AST recognition when the *behaviour itself* is being edited visually.
+
+Glamorous Toolkit measured 131 custom views across 84 objects at **~9.2 lines of code per view**.
+When a bespoke visual surface costs ten lines, people write hundreds of them and the visual/code
+dichotomy dissolves. If a view is a block, users author block types without leaving the document,
+agents author block types, a document carries its own bespoke UI, and Boxer's naive realism holds:
+there is no privileged layer you can't open.
+
+### 3.6 Behaviour is itself a block tree — and this was already tried
+
+Behaviour is not a flat string. It is parsed and stored as blocks, the same way prose is, using
+the splitter that already exists: `code_editor/src/lua.rs` cuts Lua at top-level construct
+boundaries into `Function | Statement | Comment` blocks, and `store.rs` writes them into a
+`block_doc::BlockDoc` — the same `LoroTree` + `LoroText` shape. A `.lua` file on disk is persisted
+as **Loro snapshot bytes, not UTF-8**.
+
+The invariant that makes it safe to do this at all, asserted for every input including invalid
+Lua:
+
+```
+emit(&split(src)) == src        // byte-exact, always
+```
+
+Every byte lands in exactly one block; whitespace between constructs is peeled into `Comment`
+blocks; a tree-sitter `ERROR` node classifies as `Statement` so a half-typed program still
+round-trips. That is what lets the CRDT hold code at block granularity while the VM still gets an
+exact source string to `load()`.
+
+So there is **one representation for everything.** A document's blocks and a block's behaviour's
+blocks are the same structure — recursion, not a special case. And the payoff is the seam that
+already worked once: MCP merging an edit into *one function block* of a running app while the
+human's caret sat untouched in another.
+
+**Two lessons from the earlier attempt, both load-bearing:**
+
+**Never re-split a live document.** `doc_from_bytes` loads a snapshot *directly* to preserve block
+IDs, because `doc_from_source` re-splits and **mints fresh `TreeID`s, desyncing every anchor** —
+agent references, MCP block edits, and carets all point at blocks that no longer exist. Splitting
+is an *import-time* operation, once, at the boundary. After that the block tree is the truth and
+the text is derived from it.
+
+**Re-splitting on edit is unsolved.** `code_editor/src/edit.rs` deliberately never changes the
+block count: cross-block edits no-op, Enter inserts a literal `"\n"` rather than splitting, and
+blocks fully inside a deleted span are emptied but kept so identity survives. That was the right
+call for the old scope and it leaves a real gap — **type a new function into a behaviour and the
+block structure does not follow.** Options, none yet chosen: re-split on blur into a diff against
+the existing tree (matching surviving blocks by content similarity to preserve ids); split only on
+an explicit gesture; or accept a coarser granularity and let a block hold several constructs. This
+is the piece to design before behaviour-as-blocks ships.
+
+### 3.7 Structural editing: what the agent actually calls
+
+The splitter as built is deliberately **shallow** — it cuts at top-level construct boundaries and
+function *bodies* stay flat text in one block. So today an agent can replace a whole function and
+nothing finer. To insert a statement into a function, add a field to a table, or change one
+argument, it is back to string matching and line numbers, which is where agent edits go wrong.
+
+What's wanted is the full parse, addressed structurally. The design question is **how deep the
+CRDT itself goes**, and there are three answers:
+
+| | CRDT stores | agent edits | human edits | invalid states |
+|---|---|---|---|---|
+| **A** — today | top-level blocks of text | whole constructs | free text | fine |
+| **B** — full AST as CRDT | every node | surgical, merges structurally | constrained: typing must restructure | **no tree exists while you type** |
+| **C** — text + derived tree | block text (as today) | surgical, applied as text ranges | free text | fine |
+
+**C is the answer.** B is the seductive one and it breaks on the thing you do most: while you are
+typing `if x the`, there is no valid AST, so a store that holds only AST nodes has nothing to
+hold. It also throws away `emit(&split(src)) == src`, and it replaces Loro's well-understood text
+merge with a structural merge whose semantics you'd have to invent and explain.
+
+C keeps text as ground truth and makes the *addressing* structural:
+
+> The agent names a node. The server parses, resolves the node to a byte range, and applies an
+> ordinary Loro text edit. **Structural request, textual application.**
+
+That's enough to get everything the ask wants, and it costs no new merge theory.
+
+**The API shape**, in place of "write this file":
+
+```
+outline(block)                  -- the tree: kinds, names, node paths, ranges
+read(node_path)                 -- source of one node
+insert_before/after(node_path, src)
+replace(node_path, src)
+delete(node_path)
+set_field(node_path, field, src)   -- an argument, a table entry, a condition
+```
+
+**The safety gate is the parser, and it is the point of "perfect parsing."** Every edit is applied
+to a scratch copy, re-parsed, and rejected if it introduces an `ERROR` node that wasn't already
+there — so a malformed agent edit never reaches the document. Then re-resolve the node path and
+confirm the node that changed is the node it named. This is W4's types-gate idea moved one step
+earlier: validate *before* the write, not before the hot-swap.
+
+Two prerequisites, both concrete:
+
+**The grammar must be Luau, not Lua.** `code_editor/src/lua.rs` parses with a plain Lua grammar.
+Luau's type annotations, string interpolation, compound assignment and `continue` are not Lua, so
+that grammar produces `ERROR` nodes on perfectly valid source — which silently defeats the safety
+gate above, since "did this edit introduce an error" becomes unanswerable. Either adopt a Luau
+tree-sitter grammar or extend the Lua one; **verify what exists before assuming.**
+
+**Node paths must survive an edit.** A path like `function:update > body > stmt:3` is resolved
+against a parse that the next edit invalidates. Either the agent re-reads `outline` between edits
+(simple, chatty), or paths are anchored to Loro cursors at the node's start and end so they
+survive concurrent human typing (the same trick §5.7 uses for the caret, and the better answer).
+
+This is what makes the deferred MCP work (W3 §5–§7) worth doing properly rather than as a
+file-write shim — and the old bridge already proved the hard half, merging a per-block edit into a
+running app while the human kept typing.
 
 ---
 
@@ -272,11 +461,12 @@ HyperCard's user levels (Browse / Type / Paint / Author / Script) are named by I
 canonical gentle slope. Copy them literally:
 
 ```
-read → interact with a widget → edit through the view → read the source
-     → edit the source → author a view
+read → interact with a widget → right-click and set a property
+     → bind that property to an expression → read the behaviour
+     → edit the behaviour → author a view
 ```
 
-Six rungs. Each costs an increment of skill, each is reversible, and the current rung is visible.
+Seven rungs, and §3.2–§3.3 are what put the middle three there. Each costs an increment of skill, each is reversible, and the current rung is visible.
 The failure to avoid is **the cliff** — any point where the next increment of power requires
 leaving the environment. Ours would be "to do X, edit a `.lua` file outside the document." The
 splitter is what prevents it: the file is already in here.
@@ -583,5 +773,17 @@ graph inspector shipped in the same commit as the graph.** Start with two or thr
    document tool represents it. Cheap to describe, unclear how it interacts with §4.1's read
    tracking. Parked, but wanted.
 
-6. **Luau vs Lua for the splitter.** `code_editor/src/lua.rs` uses a plain Lua tree-sitter
-   grammar. Luau type annotations would need grammar and highlight-capture work.
+6. ~~**Luau vs Lua for the splitter.**~~ **Promoted to a prerequisite — see §3.7.** It stops being
+   a nicety once the parser is the safety gate for agent edits: with a Lua grammar, valid Luau
+   produces `ERROR` nodes, so "did this edit break the source" has no reliable answer.
+
+7. **Right-click inside a live block's rendered output.** Right-clicking the *block* is easy — it
+   has declared props (§3.2). Right-clicking a **bar in a chart** means the rendered scene has to
+   carry provenance back to the datum that produced it. That's the same machinery a view needs to
+   be a structured editor, so it's one problem rather than two, but it's the harder half and it
+   isn't designed.
+
+8. **Does a `props` change belong in undo with the text?** A colour picked from a context menu and
+   a sentence typed into a paragraph are both CRDT writes on the same block. One undo stack or
+   two? Loro's `UndoManager` merge interval will happily fold a colour change into the keystroke
+   burst before it, which is probably wrong.
