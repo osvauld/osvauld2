@@ -283,6 +283,52 @@ conditions all exist, and what has to be written is the schema and the printer.
 reparse that subtree, and confirm untouched siblings keep their ids. That is what makes "surgical"
 true rather than aspirational.
 
+### 9.1 Result: it passes
+
+Built as the `lua_tree` crate — `schema.rs`, `lower.rs`, `print.rs`, 11 tests. All four conditions
+hold across the corpus, plus two the build added:
+
+| | |
+|---|---|
+| print is idempotent | ✓ |
+| comments survive | ✓ — asserted by name, so a failure says *which* comment |
+| printed source still parses | ✓ *(weak form — see below)* |
+| opaque rate 0% | ✓ |
+| ids survive a reprint | ✓ |
+| a fresh import gets fresh ids | ✓ |
+
+**Two real bugs, both in trivia, both found by the tests rather than by reading:**
+
+1. **`Node::tokens()` yields in struct-field order, not source order.** A table's braces are
+   visited before its fields, so `.last()` lands on the final field rather than on `}` — and a
+   statement's trailing comment lives on `}`. Empty tables happened to work, which hid it until
+   `_nid` made every table non-empty. Position is the only reliable way to ask which token is
+   physically last.
+2. **`Last` had nowhere to put trivia.** `-- ROOT` above a file's `return function()` is a comment
+   on the last statement, and `Last` was a bare enum. It is a struct with `leading`/`trailing` now,
+   the same shape as `Stmt`.
+
+**One sabotage passed, which is its own finding.** Sorting a table's entries — destroying child
+order, the thing §6 calls *meaning* — was caught by nothing. The test case was degenerate: its
+entries were already in sorted order. Rewritten to interleave named and positional entries so that
+neither sorting by name nor grouping by kind survives it.
+
+That gap points at the real one: **nothing yet checks that the printed program means what the input
+meant.** Condition 3 is implemented in its weak form, "still parses". The strong form — load in
+Luau, call `view()`, compare the element tree — needs `app_host`, and it is the next thing to add,
+because it is what would have caught the sorting sabotage on its own.
+
+### 9.2 What the printer costs in readability
+
+Every table gets a printed `_nid`, and the corpus has 184 of them. That is the §3 decision working
+as designed — ids are visible metadata — but it is worth seeing at scale before it is settled:
+
+```lua
+ui.text({ "Add card", color = "#ffffff", font_size = 13, _nid = "b09bf97d" })
+```
+
+A stripped projection for reading remains the escape hatch (§3), still not required.
+
 ---
 
 ## 10. The schema
