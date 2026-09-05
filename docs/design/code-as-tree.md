@@ -128,10 +128,20 @@ inside.
 **Formatting as an authored property.** The printer owns layout. What a human typed as spacing does
 not survive; comments do (§8).
 
-That last one is now a *choice rather than a constraint*: the parser preserves formatting perfectly
-(§8½), so whatever is lost is lost in our lowering, at whatever fidelity the schema decides to
-carry. Worth knowing before the schema is written, because it means "keep the author's line breaks"
-is on the table if it turns out to matter.
+The parser preserves formatting perfectly (§8½), so this loss is entirely ours, and **the decision
+is to accept it.** The schema does not carry quote style, number literal spelling, trailing commas,
+blank-line placement or named-field order. The printer picks one form and always picks the same one.
+
+This costs less than it looks like, because **normalisation happens at the door**: import parses,
+lowers, prints once, and stores the canonical form. Every reprint after that already matches, so a
+one-property edit produces a one-property diff. The reformatting is a single event on the file you
+uploaded, not a tax on every edit.
+
+**The exception, and it is a correctness one rather than a taste one: positional order is meaning.**
+In `ui.text({ "Add card", color = "#ffffff" })` the string is `[1]`, and in this DSL positional
+entries are the child list — reordering them is a different UI. So a table lowers to an *ordered
+list of entries*, never to a map of keys. Modelling it as a map loses child order silently, and
+silently is what separates a bug from a trade.
 
 ---
 
