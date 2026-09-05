@@ -232,7 +232,7 @@ impl LoginScreen {
 fn wordmark() -> El<Msg> {
     custom(|scene, text, rect, t| {
         let o = 2.0;
-        let (w, _) = text.measure("sthalam", PIXEL_FAMILY, 56.0);
+        let (w, _) = text.measure("sthalam", PIXEL_FAMILY, 56.0, None);
         let offset = (rect.width() - w as f64) / 2.0;
         text.draw(
             scene,

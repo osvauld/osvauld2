@@ -61,7 +61,9 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<()>, text_engine: &mut TextEngin
     //never text sized.
     if let Some(ts) = &el.appearance.text {
         if el.behaviour.input.is_none() {
-            let (w, h) = text_engine.measure(&ts.text, ts.family, ts.size);
+            // `None` — a text leaf is still sized before Taffy runs, so there is no width to
+            // wrap to yet. Handing that width to this call is what the measure hook changes.
+            let (w, h) = text_engine.measure(&ts.text, ts.family, ts.size, None);
             let pad_x =
                 style.padding.right.into_raw().value() + style.padding.left.into_raw().value();
             let pad_y =

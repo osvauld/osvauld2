@@ -64,20 +64,54 @@ impl TextEngine {
         (&mut self.font_cx, &mut self.layout_cx)
     }
 
-    fn build_layout(&mut self, text: &str, family: &str, size: f32) -> Layout<[u8; 4]> {
+    /// `max_advance` is the line-break constraint: `None` never wraps, which is how every caller
+    /// behaved before wrapping existed and is still what an unconstrained measurement means.
+    fn build_layout(
+        &mut self,
+        text: &str,
+        family: &str,
+        size: f32,
+        max_advance: Option<f32>,
+    ) -> Layout<[u8; 4]> {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
         builder.push_default(StyleProperty::FontFamily(resolve_family(family)));
         builder.push_default(StyleProperty::FontSize(size));
         let mut layout = builder.build(text);
-        layout.break_all_lines(None);
+        layout.break_all_lines(max_advance);
         layout
     }
 
-    pub fn measure(&mut self, text: &str, family: &str, size: f32) -> (f32, f32) {
-        let layout = self.build_layout(text, family, size);
+    /// Shape `text` and report `(width, height)` after breaking lines at `max_width`.
+    ///
+    /// The width returned is what the text *used*, not what it was offered — at `Some(200.0)` a
+    /// short string still measures short. That is the honest answer for a leaf's intrinsic size;
+    /// filling the offered width is the parent's business, not the text's.
+    ///
+    /// Trailing whitespace is excluded (`width()`, not `full_width()`), which is both what CSS
+    /// does at a line end and what this returned before the parameter existed.
+    pub fn measure(
+        &mut self,
+        text: &str,
+        family: &str,
+        size: f32,
+        max_width: Option<f32>,
+    ) -> (f32, f32) {
+        let layout = self.build_layout(text, family, size, max_width);
         (layout.width(), layout.height())
+    }
+
+    /// The narrowest and widest this string can be: `(min, max)`.
+    ///
+    /// Parley's own pair, and it lines up exactly with Taffy's `AvailableSpace::MinContent` /
+    /// `MaxContent` — the two questions a flex container asks a leaf before it can decide how much
+    /// room to give it. `min` takes every soft break, `max` takes none.
+    pub fn content_widths(&mut self, text: &str, family: &str, size: f32) -> (f32, f32) {
+        let w = self
+            .build_layout(text, family, size, None)
+            .calculate_content_widths();
+        (w.min, w.max)
     }
 
     pub fn draw(
@@ -89,9 +123,14 @@ impl TextEngine {
         transform: Affine,
         brush: Color,
     ) {
-        let mut layout = self.build_layout(text, family, size);
+        let mut layout = self.build_layout(text, family, size, None);
         layout.align(Alignment::Start, AlignmentOptions::default());
         self.draw_layout(scene, &layout, transform, brush)
+    }
+
+    #[cfg(test)]
+    fn lines(&mut self, text: &str, max_width: Option<f32>) -> usize {
+        self.build_layout(text, UI_FAMILY, 16.0, max_width).len()
     }
 
     pub fn draw_layout(
@@ -123,5 +162,107 @@ impl TextEngine {
                     );
             }
         }
+    }
+}
+
+/// What parley actually does with a width constraint.
+///
+/// These pin behaviour the measure hook is about to depend on, and they are deliberately
+/// *relational* — no absolute pixel counts. The default family is the OS's sans-serif, so every
+/// number here differs between machines; what cannot differ is that wrapping makes text narrower
+/// and taller, and that it stops at the longest word.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A paragraph, chosen so no single word is long: every width below `max` has somewhere to
+    /// break.
+    const PARA: &str = "the quick brown fox jumps over the lazy dog and keeps on running";
+
+    fn engine() -> TextEngine {
+        TextEngine::new()
+    }
+
+    #[test]
+    fn wrapping_trades_width_for_height() {
+        let mut e = engine();
+        let (uw, uh) = e.measure(PARA, UI_FAMILY, 16.0, None);
+        let (ww, wh) = e.measure(PARA, UI_FAMILY, 16.0, Some(uw / 4.0));
+
+        assert!(
+            ww <= uw / 4.0,
+            "wrapped past the constraint: {ww} > {}",
+            uw / 4.0
+        );
+        assert!(wh > uh, "wrapping did not add height: {wh} vs {uh}");
+        assert_eq!(e.lines(PARA, None), 1, "unconstrained text broke a line");
+        assert!(e.lines(PARA, Some(uw / 4.0)) >= 4);
+    }
+
+    /// The pair Taffy asks for. `min` is the answer to `AvailableSpace::MinContent` and `max` to
+    /// `MaxContent`, so `max` has to agree with an unconstrained measure — otherwise the measure
+    /// hook would report two different sizes for the same question.
+    #[test]
+    fn content_widths_bracket_the_unconstrained_measure() {
+        let mut e = engine();
+        let (min, max) = e.content_widths(PARA, UI_FAMILY, 16.0);
+        let (unconstrained, _) = e.measure(PARA, UI_FAMILY, 16.0, None);
+
+        assert!(min > 0.0 && min < max, "min {min} max {max}");
+        assert!(
+            (max - unconstrained).abs() < 0.5,
+            "max-content {max} disagrees with an unwrapped measure {unconstrained}"
+        );
+    }
+
+    /// The one behaviour I could not read off the type signature: parley takes *soft* breaks only,
+    /// so a constraint below the longest word is refused rather than breaking mid-word. That is
+    /// what makes `min` a real floor — and it means the measure hook must expect a leaf to
+    /// overflow rather than assume it always fits.
+    #[test]
+    fn a_constraint_below_min_content_does_not_break_a_word() {
+        let mut e = engine();
+        let (min, _) = e.content_widths(PARA, UI_FAMILY, 16.0);
+        let (w, _) = e.measure(PARA, UI_FAMILY, 16.0, Some(1.0));
+
+        assert!(
+            (w - min).abs() < 0.5,
+            "a 1px constraint gave {w}, not the longest word ({min})"
+        );
+    }
+
+    /// Min-content is the tallest a string gets, and nothing exceeds it — but it is **not** one
+    /// word per line. `min` is the width of the *longest* word, so two short neighbours still
+    /// share a line when they both fit under it: this paragraph has 13 words and breaks into 12
+    /// lines. Worth pinning, because "min-content means one word per line" is the obvious wrong
+    /// intuition and it would make a height prediction off by a line.
+    #[test]
+    fn min_content_is_the_tallest_layout_but_not_one_word_per_line() {
+        let mut e = engine();
+        let (min, _) = e.content_widths(PARA, UI_FAMILY, 16.0);
+        let words = PARA.split_whitespace().count();
+        let at_min = e.lines(PARA, Some(min));
+
+        assert!(
+            at_min >= e.lines(PARA, Some(min * 2.0)),
+            "a narrower constraint produced fewer lines"
+        );
+        assert!(
+            at_min <= words,
+            "{at_min} lines from {words} words — a word was broken"
+        );
+        let (w, h) = e.measure(PARA, UI_FAMILY, 16.0, Some(min));
+        assert!(w <= min + 0.5, "a line ran past min-content: {w} > {min}");
+        assert!(h >= e.measure(PARA, UI_FAMILY, 16.0, Some(min * 2.0)).1);
+    }
+
+    /// An empty string has to measure rather than panic: it is what an unfilled input holds, and
+    /// the measure hook will be handed it on the very first frame.
+    #[test]
+    fn an_empty_string_measures_to_no_width() {
+        let mut e = engine();
+        let (w, h) = e.measure("", UI_FAMILY, 16.0, Some(100.0));
+        assert_eq!(w, 0.0);
+        assert!(h > 0.0, "an empty line still has a line height");
     }
 }

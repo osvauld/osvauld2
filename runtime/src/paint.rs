@@ -164,7 +164,7 @@ pub(crate) fn draw<M>(
                     scene.pop_layer();
                 }
             } else {
-                let (_, th) = text.measure(&ts.text, ts.family, ts.size);
+                let (_, th) = text.measure(&ts.text, ts.family, ts.size, None);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
                 let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
                 text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color);
@@ -274,7 +274,7 @@ pub fn debug_boxes<M>(
         &Line::new((0.0, p.rect.y1), (viewport.0 as f64, p.rect.y1)),
     );
     let label = format!("{:.0}x{:.0}", p.rect.width(), p.rect.height());
-    let (w, h) = text.measure(&label, MONO_FAMILY, 11.0);
+    let (w, h) = text.measure(&label, MONO_FAMILY, 11.0, None);
     let cx = p.rect.x0;
     let mut cy = p.rect.y0 - (h as f64 + 6.0);
     if cy < 0.0 {
