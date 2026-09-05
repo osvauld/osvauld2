@@ -386,8 +386,9 @@ the leaf has **two modes**, and picking between them is the real decision:
 Taffy 0.12's `compute_layout_with_measure` hands its closure both `known_dimensions` and
 `available_space`, so **one hook serves both**: dimensions known → canvas mode; only an available
 width → measure mode, and the Frame reports `w`/`h`/`baseline` back. That is the same hook open
-question 1 needs for text wrapping, which means intrinsic sizing is **one mechanism with five
-consumers** — text, charts, math, canvas, live blocks — rather than five pieces of work.
+question 1 turned out to need for text wrapping, which means intrinsic sizing is **one mechanism
+with five consumers** — text, charts, math, canvas, live blocks — rather than five pieces of work.
+Text is the one that shipped; the other four inherit it.
 
 Coordinates compose through a single transform. A `Frame` nested in an `El` inherits the El's
 accumulated transform, and `Group { transform: Affine, … }` composes onto that. There is no second
@@ -403,7 +404,8 @@ every frame.** `runtime/src/lib.rs:206` calls `layout::solve(app.view(), …)` i
 `solve` (`layout.rs:217`) does `TaffyTree::new()` followed by `compute_layout` — a full Lua view
 rebuild and a fresh tree, unconditionally, every frame. So there is no incremental-layout machinery
 to integrate with: the measure closure just runs during that frame's solve, and
-`compute_layout_with_measure` is a drop-in for `compute_layout` in the same function.
+`compute_layout_with_measure` was a drop-in for `compute_layout` in the same function — a swap
+that has since shipped, along with the `TextCtx` the closure reads.
 
 Three consequences worth stating plainly, because they are easy to get backwards:
 
@@ -1037,24 +1039,29 @@ graph inspector shipped in the same commit as the graph.** Start with two or thr
 
 ## 9. Open questions
 
-1. ~~**Does `runtime`'s layout do intrinsic sizing?**~~ **Answered: no — and it blocks step ①,
-   not step ④.** `runtime/src/layout.rs` measures a text leaf *unconstrained* —
-   `text_engine.measure(&ts.text, ts.family, ts.size)` takes no width — and bakes the result into
-   `style.size` as a fixed length before Taffy runs. `solve` then calls `tree.compute_layout`, not
-   `compute_layout_with_measure`. So **text does not wrap to an available width anywhere in the
-   runtime today.** A wrapped prose paragraph is currently impossible, never mind a live block
-   reporting its height as a function of width.
+1. ~~**Does `runtime`'s layout do intrinsic sizing?**~~ **Answered, and since built.** It did not,
+   and it blocked step ① rather than step ④: `layout.rs` shaped every text leaf unconstrained and
+   froze the answer into `style.size` before Taffy ran, so text could not wrap to an available
+   width anywhere in the runtime. A text leaf now carries a `TextCtx` as Taffy node context and
+   `solve` runs `compute_layout_with_measure`.
 
-   The fix is well-defined and both halves exist: Taffy 0.12 has `compute_layout_with_measure`,
-   which hands a measure closure `known_dimensions` and `available_space`; parley's builders take
-   a max advance for wrapping. Route text leaves — and later, live blocks — through that hook.
-   **This is the first piece of engine work and it precedes everything in §8.**
+   Three findings worth keeping, because each was a wrong guess that cost a test or a commit:
 
-   §3.8 sharpens this: it is not text-specific work. The same hook is the **measured leaf** that
-   charts, math, canvas and live blocks all need, so it is one mechanism with five consumers. And
-   because `solve` already builds a fresh `TaffyTree` and re-lays-out every frame, there is no
-   incremental-layout machinery to integrate with — `compute_layout_with_measure` is a drop-in for
-   `compute_layout` in the same function.
+   - **`available_space` is the source of truth for the wrap width, not `known_dimensions`.** On
+     the final pass Taffy passes `known` empty (`leaf.rs:136`) having already folded any resolved
+     width into `available` as `Definite`, with padding and border subtracted — and it adds that
+     inset back afterwards, so a measure closure that adds it too counts it twice.
+   - **Min-content is the longest *word*, not one word per line.** Two short neighbours still
+     share a line under that width. The obvious reading makes every height prediction off by a
+     line.
+   - **The paint pass must shape against the same width the layout pass used**, and only the
+     layout pass is told what it was — paint recovers it from the placed rect. Getting this wrong
+     reserves exactly the right box and draws the glyphs somewhere else entirely, which no test of
+     the box can see.
+
+   §3.8's wider point stands and is now load-bearing: the same hook is the **measured leaf** that
+   charts, math, canvas and live blocks need, so those arrive as consumers of working code rather
+   than as fresh engine work.
 
 2. **Where does a live block's per-viewer state live?** `ui.doc`'s `"uidoc:{id}"` convention is
    the pattern, but a block's scratch state must survive re-ordering, copy-paste and duplication,
