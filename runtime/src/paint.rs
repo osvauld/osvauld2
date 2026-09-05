@@ -133,7 +133,7 @@ pub(crate) fn draw<M>(
                         );
                         scene.fill(Fill::NonZero, t, SELECTION, None, &r);
                     }
-                    text.draw_layout(scene, layout, origin, text_color);
+                    text.draw_layout(scene, layout, origin, Some(text_color));
                     if ts.text.is_empty()
                         && let Some(ph) = &spec.placeholder
                     {

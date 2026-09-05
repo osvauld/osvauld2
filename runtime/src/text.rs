@@ -1,16 +1,17 @@
 //! Text engine: registers the fonts we ship and shapes strings into vello glyph runs via parley.
 //! This is the reusable "string → positioned glyphs" service every screen/widget calls.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use parley::fontique::Blob;
-use parley::style::FontFamily;
+use parley::style::{FontFamily, FontStyle, FontWeight};
 use parley::{
     Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, PositionedLayoutItem,
     StyleProperty,
 };
 use vello::Scene;
-use vello::kurbo::Affine;
+use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Color, Fill};
 
 /// The only faces we ship (OFL): non-standard fonts the OS can't be trusted to have, kept for
@@ -33,9 +34,63 @@ pub(crate) fn resolve_family(name: &str) -> FontFamily<'_> {
     FontFamily::from(name)
 }
 
+/// One styled span of a rich string: a byte range plus the face it is drawn in.
+///
+/// Runs are the **flattened** form — non-overlapping, in order, covering the string. A document's
+/// marks are not: they nest and overlap, and flattening them into runs is the caller's job.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub range: Range<usize>,
+    pub family: &'static str,
+    pub size: f32,
+    /// CSS numeric weight — 400 regular, 700 bold.
+    pub weight: f32,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub color: Color,
+}
+
+impl Run {
+    /// A plain span in the default UI face. The `with_*` setters build the variants.
+    pub fn new(range: Range<usize>, size: f32, color: Color) -> Self {
+        Self {
+            range,
+            family: UI_FAMILY,
+            size,
+            weight: 400.0,
+            italic: false,
+            underline: false,
+            strike: false,
+            color,
+        }
+    }
+    pub fn bold(mut self) -> Self {
+        self.weight = 700.0;
+        self
+    }
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+    pub fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+    pub fn strike(mut self) -> Self {
+        self.strike = true;
+        self
+    }
+    pub fn font(mut self, family: &'static str) -> Self {
+        self.family = family;
+        self
+    }
+}
+
 /// Owns parley's font collection (`font_cx`) + reusable shaping scratch (`layout_cx`). One per
-/// render runtime, created once. Brush type is a throwaway `[u8; 4]` — parley's brush must be
-/// `Default`, which `peniko::Color` isn't, and we set the real color at vello draw time anyway.
+/// render runtime, created once. The brush is `[u8; 4]` because parley's brush must be `Default`
+/// and `peniko::Color` isn't — but four bytes are an rgba, so a rich run's colour rides it through
+/// shaping and `draw_layout` reads it back. A plain draw overrides it with one colour instead.
 pub struct TextEngine {
     font_cx: FontContext,
     layout_cx: LayoutContext<[u8; 4]>,
@@ -102,6 +157,74 @@ impl TextEngine {
         (layout.width(), layout.height())
     }
 
+    /// Shape `text` with a style per byte range.
+    ///
+    /// One string with ranged properties, not one layout per run: line breaking has to see the
+    /// whole paragraph. A bold word mid-sentence still wraps with its neighbours, and a run
+    /// boundary is not a break opportunity — `un`+`bold`+`ed` stays one word.
+    ///
+    /// Defaults are pushed first so a byte no run covers still has a face rather than none.
+    fn build_rich(
+        &mut self,
+        text: &str,
+        runs: &[Run],
+        max_advance: Option<f32>,
+    ) -> Layout<[u8; 4]> {
+        let mut builder = self
+            .layout_cx
+            .ranged_builder(&mut self.font_cx, text, 1.0, true);
+        builder.push_default(StyleProperty::FontFamily(resolve_family(UI_FAMILY)));
+        for r in runs {
+            let at = r.range.clone();
+            builder.push(
+                StyleProperty::FontFamily(resolve_family(r.family)),
+                at.clone(),
+            );
+            builder.push(StyleProperty::FontSize(r.size), at.clone());
+            builder.push(
+                StyleProperty::FontWeight(FontWeight::new(r.weight)),
+                at.clone(),
+            );
+            let slant = if r.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            };
+            builder.push(StyleProperty::FontStyle(slant), at.clone());
+            // The brush is `[u8; 4]` precisely so it can carry rgba this far; `draw_layout` reads
+            // it back per run, which is the only way a string gets more than one colour.
+            builder.push(
+                StyleProperty::Brush(r.color.to_rgba8().to_u8_array()),
+                at.clone(),
+            );
+            builder.push(StyleProperty::Underline(r.underline), at.clone());
+            builder.push(StyleProperty::Strikethrough(r.strike), at);
+        }
+        let mut layout = builder.build(text);
+        layout.break_all_lines(max_advance);
+        layout.align(Alignment::Start, AlignmentOptions::default());
+        layout
+    }
+
+    /// Shape a rich string and report `(width, height)` after breaking lines at `max_width`.
+    pub fn measure_rich(&mut self, text: &str, runs: &[Run], max_width: Option<f32>) -> (f32, f32) {
+        let layout = self.build_rich(text, runs, max_width);
+        (layout.width(), layout.height())
+    }
+
+    /// Paint a rich string, each run in its own colour.
+    pub fn draw_rich(
+        &mut self,
+        scene: &mut Scene,
+        text: &str,
+        runs: &[Run],
+        transform: Affine,
+        max_width: Option<f32>,
+    ) {
+        let layout = self.build_rich(text, runs, max_width);
+        self.draw_layout(scene, &layout, transform, None);
+    }
+
     /// The narrowest and widest this string can be: `(min, max)`.
     ///
     /// Parley's own pair, and it lines up exactly with Taffy's `AvailableSpace::MinContent` /
@@ -129,7 +252,7 @@ impl TextEngine {
     ) {
         let mut layout = self.build_layout(text, family, size, max_width);
         layout.align(Alignment::Start, AlignmentOptions::default());
-        self.draw_layout(scene, &layout, transform, brush)
+        self.draw_layout(scene, &layout, transform, Some(brush))
     }
 
     #[cfg(test)]
@@ -137,12 +260,15 @@ impl TextEngine {
         self.build_layout(text, UI_FAMILY, 16.0, max_width).len()
     }
 
+    /// `brush` paints every run one colour — `None` uses the colour each run was shaped with,
+    /// which is how a rich string gets more than one. An override still wins for decorations, so
+    /// a plain layout (whose runs were never given a brush) never paints a transparent underline.
     pub fn draw_layout(
         &self,
         scene: &mut Scene,
         layout: &Layout<[u8; 4]>,
         transform: Affine,
-        brush: Color,
+        brush: Option<Color>,
     ) {
         for line in layout.lines() {
             for item in line.items() {
@@ -150,12 +276,17 @@ impl TextEngine {
                     continue;
                 };
                 let run = glyph_run.run();
+                let style = glyph_run.style();
+                let color = brush.unwrap_or_else(|| {
+                    let [r, g, b, a] = style.brush;
+                    Color::from_rgba8(r, g, b, a)
+                });
                 scene
                     .draw_glyphs(run.font())
                     .font_size(run.font_size())
                     .normalized_coords(run.normalized_coords())
                     .transform(transform)
-                    .brush(brush)
+                    .brush(color)
                     .draw(
                         Fill::NonZero,
                         glyph_run.positioned_glyphs().map(|g| vello::Glyph {
@@ -164,6 +295,34 @@ impl TextEngine {
                             y: g.y,
                         }),
                     );
+
+                // Decorations are metrics, not geometry: parley says *whether* a run is underlined
+                // and leaves `offset`/`size` as `None` meaning "ask the run's font". Nothing draws
+                // them for us, so they are rects. Per *run*, which is why a phrase crossing a font
+                // fallback boundary can step: each font carries its own offset and thickness.
+                let m = run.metrics();
+                let deco = [
+                    (&style.underline, m.underline_offset, m.underline_size),
+                    (
+                        &style.strikethrough,
+                        m.strikethrough_offset,
+                        m.strikethrough_size,
+                    ),
+                ];
+                for (spec, fallback_offset, fallback_size) in deco {
+                    let Some(d) = spec else { continue };
+                    let offset = d.offset.unwrap_or(fallback_offset);
+                    let size = d.size.unwrap_or(fallback_size);
+                    let color = brush.unwrap_or_else(|| {
+                        let [r, g, b, a] = d.brush;
+                        Color::from_rgba8(r, g, b, a)
+                    });
+                    // `offset` is measured up from the baseline to the *top* of the rule.
+                    let y = (glyph_run.baseline() - offset) as f64;
+                    let x = glyph_run.offset() as f64;
+                    let rect = Rect::new(x, y, x + glyph_run.advance() as f64, y + size as f64);
+                    scene.fill(Fill::NonZero, transform, color, None, &rect);
+                }
             }
         }
     }
@@ -258,6 +417,176 @@ mod tests {
         let (w, h) = e.measure(PARA, UI_FAMILY, 16.0, Some(min));
         assert!(w <= min + 0.5, "a line ran past min-content: {w} > {min}");
         assert!(h >= e.measure(PARA, UI_FAMILY, 16.0, Some(min * 2.0)).1);
+    }
+
+    // ── rich runs ──
+
+    const WHITE: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF);
+    const RED: Color = Color::from_rgba8(0xFF, 0x00, 0x00, 0xFF);
+
+    /// One run covering everything, so a rich layout can be compared against a plain one.
+    fn uniform(text: &str, size: f32) -> Vec<Run> {
+        vec![Run::new(0..text.len(), size, WHITE)]
+    }
+
+    /// `(baseline, font size)` for every glyph run on the first line.
+    fn first_line_runs(e: &mut TextEngine, text: &str, runs: &[Run]) -> Vec<(f32, f32)> {
+        let layout = e.build_rich(text, runs, None);
+        let line = layout.lines().next().expect("no lines");
+        line.items()
+            .filter_map(|i| match i {
+                PositionedLayoutItem::GlyphRun(g) => Some((g.baseline(), g.run().font_size())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A rich layout with one uniform run has to agree with the plain path, or the two shaping
+    /// routes have quietly diverged and every comparison below means nothing.
+    #[test]
+    fn one_uniform_run_measures_the_same_as_plain_text() {
+        let mut e = engine();
+        let (pw, ph) = e.measure(PARA, UI_FAMILY, 16.0, None);
+        let (rw, rh) = e.measure_rich(PARA, &uniform(PARA, 16.0), None);
+
+        assert!((rw - pw).abs() < 0.5, "width {rw} vs {pw}");
+        assert!((rh - ph).abs() < 0.5, "height {rh} vs {ph}");
+    }
+
+    /// The line is as tall as its tallest run. This is the first thing rich text breaks that the
+    /// plain leaf could assume away: one string no longer implies one line height.
+    #[test]
+    fn a_line_is_as_tall_as_its_largest_run() {
+        let mut e = engine();
+        let s = "small BIG";
+        let mixed = vec![
+            Run::new(0..6, 12.0, WHITE),
+            Run::new(6..s.len(), 32.0, WHITE),
+        ];
+
+        let (w_mixed, h_mixed) = e.measure_rich(s, &mixed, None);
+        let (w_small, h_small) = e.measure_rich(s, &uniform(s, 12.0), None);
+        let (w_big, h_big) = e.measure_rich(s, &uniform(s, 32.0), None);
+
+        // The width is what proves only *part* of the string got the larger size. Without it the
+        // test cannot tell a mixed line from a uniformly large one, and a `push_default` in place
+        // of a ranged `push` sails straight through — the last default silently wins everywhere.
+        assert!(
+            w_mixed > w_small && w_mixed < w_big,
+            "width {w_mixed} is not between {w_small} and {w_big} — the runs are not mixed"
+        );
+        assert!(h_mixed > h_small, "mixed {h_mixed} vs all-small {h_small}");
+        assert!(
+            (h_mixed - h_big).abs() < 1.0,
+            "mixed {h_mixed} vs all-big {h_big}"
+        );
+    }
+
+    /// Runs on one line share one baseline — it is a property of the line, not of the run. Worth
+    /// pinning because the obvious fear (every face sitting on its own baseline) would make mixed
+    /// styling unusable, and because the known fallback *dip* is a different thing: it moves the
+    /// whole line, which is what the next test measures.
+    #[test]
+    fn every_run_on_a_line_shares_one_baseline() {
+        let mut e = engine();
+        let s = "regular mono BIG";
+        let runs = vec![
+            Run::new(0..8, 16.0, WHITE),
+            Run::new(8..13, 16.0, WHITE).font(MONO_FAMILY),
+            Run::new(13..s.len(), 30.0, WHITE),
+        ];
+
+        let seen = first_line_runs(&mut e, s, &runs);
+        assert!(seen.len() >= 2, "expected several runs, got {seen:?}");
+        let first = seen[0].0;
+        assert!(
+            seen.iter().all(|(b, _)| (b - first).abs() < 0.01),
+            "runs disagreed about the baseline: {seen:?}"
+        );
+    }
+
+    /// A run boundary is not a line-break opportunity: `un`+`bold`+`ed` is still one word. If it
+    /// were, styling a word would silently let it wrap mid-word, which no editor does.
+    #[test]
+    fn a_run_boundary_is_not_a_break_opportunity() {
+        let mut e = engine();
+        let s = "unbolded";
+        let split = vec![
+            Run::new(0..2, 16.0, WHITE),
+            Run::new(2..6, 16.0, WHITE).bold(),
+            Run::new(6..s.len(), 16.0, WHITE),
+        ];
+
+        let (w, _) = e.measure_rich(s, &split, Some(1.0));
+        let (whole, _) = e.measure_rich(s, &split, None);
+        assert!(
+            (w - whole).abs() < 0.5,
+            "a 1px constraint split the word: {w} vs {whole}"
+        );
+    }
+
+    /// Colour rides the brush all the way into the built layout, which is what `draw_layout` reads
+    /// back per run. Nothing else in this crate would notice if it were dropped.
+    #[test]
+    fn each_run_keeps_its_own_colour() {
+        let mut e = engine();
+        let s = "white red";
+        let runs = vec![Run::new(0..6, 16.0, WHITE), Run::new(6..s.len(), 16.0, RED)];
+
+        let layout = e.build_rich(s, &runs, None);
+        let brushes: Vec<[u8; 4]> = layout
+            .lines()
+            .flat_map(|l| l.items())
+            .filter_map(|i| match i {
+                PositionedLayoutItem::GlyphRun(g) => Some(g.style().brush),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            brushes.contains(&[0xFF, 0xFF, 0xFF, 0xFF]) && brushes.contains(&[0xFF, 0, 0, 0xFF]),
+            "expected both colours, got {brushes:?}"
+        );
+    }
+
+    /// Family changes a line's height as surely as size does, and mixing takes the max.
+    ///
+    /// Measured on this machine at 16pt: the OS sans is 21.792 tall, JetBrains Mono 21.120,
+    /// VT323 16.000. **So a paragraph whose second line happens to contain a mono word is 0.7pt
+    /// taller than its first**, and the step moves as you edit. That is the residual of the
+    /// fallback baseline problem, in the one place rich text puts it: prose that wants even
+    /// leading has to push an explicit `LineHeight` rather than let the faces decide.
+    ///
+    /// Asserted as `mixed == max(a, b)` rather than against those numbers — and between the two
+    /// faces we *ship*, so the OS's `sans-serif` cannot make it flaky. The width check is what
+    /// stops the test passing when the family push is dropped entirely: ignoring it leaves one
+    /// face, whose height already equals the max.
+    #[test]
+    fn a_lines_height_is_the_max_over_its_faces() {
+        let mut e = engine();
+        let s = "mono pixel";
+        let all = |fam| vec![Run::new(0..s.len(), 16.0, WHITE).font(fam)];
+        let mixed = vec![
+            Run::new(0..5, 16.0, WHITE).font(MONO_FAMILY),
+            Run::new(5..s.len(), 16.0, WHITE).font(PIXEL_FAMILY),
+        ];
+
+        let (w_mixed, h_mixed) = e.measure_rich(s, &mixed, None);
+        let (w_mono, h_mono) = e.measure_rich(s, &all(MONO_FAMILY), None);
+        let (w_pixel, h_pixel) = e.measure_rich(s, &all(PIXEL_FAMILY), None);
+
+        assert!(
+            (h_mono - h_pixel).abs() > 0.1,
+            "the two faces are the same height ({h_mono}); this proves nothing"
+        );
+        assert!(
+            w_mixed > w_pixel.min(w_mono) && w_mixed < w_pixel.max(w_mono),
+            "width {w_mixed} is not between {w_pixel} and {w_mono} — one face was ignored"
+        );
+        assert!(
+            (h_mixed - h_mono.max(h_pixel)).abs() < 0.01,
+            "mixed {h_mixed} is not max({h_mono}, {h_pixel})"
+        );
     }
 
     /// An empty string has to measure rather than panic: it is what an unfilled input holds, and
