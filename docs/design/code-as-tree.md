@@ -285,25 +285,31 @@ true rather than aspirational.
 
 ## 10. The schema
 
-Drafted from a **census of the corpus**, not from the Lua grammar — 16 files, 2,007 lines, all of
-`shell2/src/kanban` plus all of `app_engine/examples`. Designing against the grammar produces a
-schema for a language; designing against the census produces one for *this* code, and names what is
-missing rather than leaving it implied.
+Drafted from a **census of the corpus**, not from the Lua grammar — 23 files, 2,490 lines, all of
+`shell2/src/kanban` plus all of `app_engine/examples` including its nested apps. Designing against
+the grammar produces a schema for a language; designing against the census produces one for *this*
+code, and names what is missing rather than leaving it implied.
 
 ### 10.1 What the corpus actually uses
 
-| statements (642) | | expressions (3,706) | | table fields (1,969) | |
+| statements (753) | | expressions (4,819) | | table fields (2,673) | |
 |---|---:|---|---:|---|---:|
-| LocalAssignment | 153 | Var | 898 | **NameKey** `k = v` | 1,525 |
-| Assignment | 107 | String | 774 | **NoKey** positional | 444 |
-| FunctionCall | 107 | Number | 560 | *ExpressionKey* `[k] = v` | **0** |
-| If | 89 | TableConstructor | 422 | | |
-| Return | 81 | FunctionCall | 410 | | |
-| LocalFunction | 36 | BinaryOperator | 325 | | |
-| NumericFor | 24 | Symbol | 147 | | |
-| FunctionDeclaration | 21 | UnaryOperator | 89 | | |
-| GenericFor | 14 | Function (anon) | 65 | | |
-| Break | 10 | Parentheses | 16 | | |
+| LocalAssignment | 181 | Var | 1,109 | **NameKey** `k = v` | 2,050 |
+| Assignment | 117 | String | 1,041 | **NoKey** positional | 623 |
+| Return | 116 | Number | 761 | *ExpressionKey* `[k] = v` | **0** |
+| FunctionCall | 110 | FunctionCall | 598 | | |
+| If | 94 | TableConstructor | 567 | | |
+| LocalFunction | 51 | BinaryOperator | 393 | | |
+| FunctionDeclaration | 34 | Symbol | 160 | | |
+| NumericFor | 25 | UnaryOperator | 100 | | |
+| GenericFor | 15 | Function (anon) | 70 | | |
+| Break | 10 | Parentheses | 20 | | |
+
+The corpus was widened from 16 files to 23 partway through — six nested example apps had been
+missed. **It introduced no new construct.** Same ten statement kinds, same ten expression kinds,
+still zero `ExpressionKey`. A 24% larger and structurally more varied corpus finding nothing new is
+the closest thing to evidence that this list is the shape of the DSL rather than the shape of one
+app.
 
 Three things fall out of this that reading the grammar would not have told us:
 
@@ -405,9 +411,37 @@ columns is a *move*, and modelling it as delete+insert loses concurrent edits to
 - `replace(nid, lua)` — parse to `Expr`, swap the subtree. **The root keeps `nid`**; new tables
   inside it get fresh ids. That is precisely what makes siblings survive an agent edit.
 
-### 10.7 The cost of being opaque
+### 10.7 The opaque node, and why the schema need not be complete
 
-An `Opaque` node round-trips its text verbatim, so nothing is corrupted. But it contains no `Table`
-nodes, which means **no ids, which means everything inside it is dark to the UI** — unclickable,
-unresizable, unaddressable. Opaque is safe for correctness and expensive for capability, so the list
-in §10.1 of what is currently unmodelled is also a list of what a user cannot yet right-click.
+An `Opaque` node holds the raw source text of a construct the schema has no case for. It parses
+(full-moon covers all of Lua), it prints back verbatim, and the tree does not model its insides:
+
+```lua
+while running do step() end     -->  Opaque { text: "while running do step() end" }
+```
+
+The distinction it buys is the one that matters for every app not yet written:
+
+> The schema does not need to be **complete**. It needs to be **total.**
+
+*Complete* would mean a case for every Lua construct. *Total* means every Lua program is
+representable without loss — which opaque delivers today, at zero coverage. So a future app cannot
+break import, cannot lose code, and cannot fail to run. It can only be **less editable**, and only
+inside the regions using constructs we have not modelled yet.
+
+**The gap is bounded and known**, which is the other half of the reassurance. To go from this
+schema to complete is roughly ten variants: `Do`, `While`, `Repeat`, `goto`/`::label::`,
+`[expr] = value` fields, and Luau's compound assignment, type declarations, type assertions,
+if-expressions and string interpolation. Not an open horizon — a finite list, and every addition is
+purely additive, so trees written under an older schema keep working.
+
+**The cost is capability, not correctness.** An opaque region contains no `Table` nodes, so it
+carries no ids, so everything inside it is **dark to the UI** — unclickable, unresizable,
+unaddressable. The list of what is unmodelled is therefore also the list of what a user cannot yet
+right-click.
+
+**So coverage should be measured, not assumed.** The census already computes an opaque rate; it
+belongs in the test suite rather than in a throwaway probe — assert it stays at 0% for the corpus,
+so the day an app introduces a construct we do not model, a test says so instead of a user finding
+a region where right-click silently does nothing. Per-file coverage surfaced in the app itself is
+the same idea aimed at the person rather than the build.
