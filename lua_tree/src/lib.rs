@@ -8,7 +8,7 @@ pub mod lower;
 pub mod print;
 pub mod schema;
 
-pub use print::print;
+pub use print::{print, print_bare};
 pub use schema::*;
 
 #[derive(Debug)]

@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 mod reload;
 mod require;
+mod round_trip;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
@@ -1833,10 +1834,19 @@ const KANBAN: [(&str, &str); 4] = [
 ];
 
 fn kanban_app(resolve: Resolve) -> LuaApp<LuaMsg> {
+    app_from(KANBAN.iter().map(|(p, b)| (*p, *b)), resolve)
+}
+
+/// `kanban_app` with the bodies handed in, so `round_trip` can run the same app from source that
+/// went through the printer.
+fn app_from<'a>(
+    files: impl Iterator<Item = (&'a str, &'a str)>,
+    resolve: Resolve,
+) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();
-    let files = src.get_map("files");
-    for (path, body) in KANBAN {
-        let t = files.insert_container(path, LoroText::new()).unwrap();
+    let map = src.get_map("files");
+    for (path, body) in files {
+        let t = map.insert_container(path, LoroText::new()).unwrap();
         t.insert(0, body).unwrap();
     }
     src.commit();

@@ -93,6 +93,11 @@ This is a rule, and it must be visible as one rather than discovered:
 
 ## 4. How code reaches the VM
 
+> **Disproved by §13.** The `_nid` in the diagram below does not survive contact with the host: a
+> table constructor is not always an element, and the seed rejects the key before `view()` runs.
+> The rest of the chain — `walk` → `El` → `Placed` → click — still stands; what changes is where
+> the id comes *from*.
+
 ```
 tree ──print──▶ Lua text (with _nid) ──vm.load──▶ VM ──view()──▶ table ──walk──▶ El ──▶ Placed
                                                                     │
@@ -267,6 +272,8 @@ source of surprises, and that the dialect risk is gone.
 ---
 
 ## 9. The spike
+
+> Condition 3 is now met in its strong form, and it found something — **§13**.
 
 Before any schema, one question, because its answer can change the plan:
 
@@ -666,3 +673,78 @@ mechanism**, and Level 3 is where it lives.
 Document content is separate `LoroText` with its own merge. For kanban that is 184 tables — a
 small, low-churn object that changes when someone edits the app, not when someone types. Node-
 granular undo and click-to-node provenance come with it rather than as separate work.
+
+---
+
+## 13. The strong spike, and what it found
+
+§9 condition 3 was "the printed source still parses", and §9.1 admitted that is the weak form: it
+says the output is Lua, not that it is the *same* Lua. The sorting sabotage passed every one of
+`lua_tree`'s tests while destroying child order, which named the missing judge — the only thing
+that can say whether a program means what it meant is the host that runs it.
+
+`app_host/src/tests/round_trip.rs` is that test. It runs the real kanban twice, once from the
+source that ships and once from that source printed through `lua_tree`, and compares the three
+things an app actually produces:
+
+| output | what it catches |
+|---|---|
+| the node tree `view()` returns | reordering, dropped children, changed operators |
+| the `El` tree `walk` builds | props the host will not accept |
+| the doc `model.lua` seeds | anything the printer leaks into data |
+
+### 13.1 Verified by breaking it
+
+Three sabotages in the printer, each chosen to look like formatting:
+
+| sabotage | `lua_tree` (11 tests) | `round_trip` |
+|---|---|---|
+| `and` printed as `or` | **all green** | 2 fail |
+| `a.b` printed as `a[b]` | **all green** | 4 fail |
+| children stably sorted by printed text | 10 green, 1 fails | 1 fails |
+
+The first two are the point. Each produces output that parses, is idempotent, keeps every comment
+and has no opaque node — and means something else. Text-level tests cannot see any of it.
+
+The third is the original sabotage, and its `lua_tree` catch is *incidental*: sorting changes the
+depth-first visit order, so `ids_survive_a_reprint` notices the ids come back in a different
+sequence. That test only exists because ids are in the text. Under §12 level 3 it would not exist,
+and the sort would go through clean. The catch that survives the redesign is the tree comparison.
+
+### 13.2 The finding: `_nid` in text does not run
+
+The first run failed somewhere I had not predicted, and the error is worth quoting:
+
+```
+doc.list takes positional entries only, got the key `_nid`
+  [string "model.lua"]:18
+```
+
+§4 assumed an id could ride into the VM as an ordinary field. It cannot. The printer stamps `_nid`
+into **every table constructor**, and only some table constructors are elements — `model.lua` seeds
+the board through `doc.list({ … })`, which rejects named keys on purpose so that a stray field
+cannot vanish into a list silently. That guard is right. `_nid` violates it.
+
+So the app does not render wrong. It **fails to load**, at module scope, before `view()` is reached
+and well before `props::apply` gets its own chance to reject the key on an element.
+
+The narrow reading is that two host functions need teaching, plus `STRUCTURAL`, plus a filter so
+`doc.map` does not write `_nid` into the CRDT and ship it to every peer. The wider reading is the
+one that matters:
+
+> **Stamping ids into source is a claim about every table in the file, and the design only ever
+> meant to make a claim about elements.** Syntax cannot tell the two apart; only the runtime can.
+
+That is §12's Level 2 failing in the specific way §12 predicted it would — and it is an argument
+for Level 3 that does not depend on concurrency at all. Under Level 3 identity lives on the Loro
+node, the text carries none of it, and the question never arises.
+
+`lua_tree::print_bare` is that text: the same printer with the stamping off. It is what the
+meaning tests compare, and what an app actually runs today. `print` keeps the ids, and
+`stamping_ids_into_source_breaks_the_data_path` pins the defect as a live assertion rather than a
+note here — so it fails on the day the question is answered, whichever way it is answered.
+
+### 13.3 What it still does not judge
+
+Handlers render as `fn`. Swapping two `on_click` bodies would pass. The comparison is over
+structure, and behaviour is the next weakest link.
