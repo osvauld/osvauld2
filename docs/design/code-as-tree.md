@@ -183,9 +183,8 @@ path. Ids can be generated, stored and printed first, and `walk` picks them up w
 
 ## 8. Open questions
 
-1. **What is a node?** Not full-moon's concrete tree — nobody wants a CRDT container per comma.
-   A semantic subset: statements, calls, table literals, fields, literals, function bodies. The
-   subset is a schema decision and it is the bulk of the design work.
+1. ~~**What is a node?**~~ **Answered — §10.** Drafted against a census of the real corpus rather
+   than the Lua grammar: 22 node kinds plus an opaque escape.
 
 2. ~~**Trivia.**~~ **Largely answered** (§8½). full-moon attaches leading/trailing trivia to every
    token, so comments arrive already anchored and already positioned. What remains is not a model
@@ -281,3 +280,134 @@ conditions all exist, and what has to be written is the schema and the printer.
 **Second spike, only if the first passes:** replace one function body the way an agent would,
 reparse that subtree, and confirm untouched siblings keep their ids. That is what makes "surgical"
 true rather than aspirational.
+
+---
+
+## 10. The schema
+
+Drafted from a **census of the corpus**, not from the Lua grammar — 16 files, 2,007 lines, all of
+`shell2/src/kanban` plus all of `app_engine/examples`. Designing against the grammar produces a
+schema for a language; designing against the census produces one for *this* code, and names what is
+missing rather than leaving it implied.
+
+### 10.1 What the corpus actually uses
+
+| statements (642) | | expressions (3,706) | | table fields (1,969) | |
+|---|---:|---|---:|---|---:|
+| LocalAssignment | 153 | Var | 898 | **NameKey** `k = v` | 1,525 |
+| Assignment | 107 | String | 774 | **NoKey** positional | 444 |
+| FunctionCall | 107 | Number | 560 | *ExpressionKey* `[k] = v` | **0** |
+| If | 89 | TableConstructor | 422 | | |
+| Return | 81 | FunctionCall | 410 | | |
+| LocalFunction | 36 | BinaryOperator | 325 | | |
+| NumericFor | 24 | Symbol | 147 | | |
+| FunctionDeclaration | 21 | UnaryOperator | 89 | | |
+| GenericFor | 14 | Function (anon) | 65 | | |
+| Break | 10 | Parentheses | 16 | | |
+
+Three things fall out of this that reading the grammar would not have told us:
+
+- **Table fields have two shapes, not three.** `[expr] = value` never appears. `Entry` is therefore
+  `Named | Positional`, which is the ordered-entries decision from §6 arriving as a two-variant enum
+  rather than a general map.
+- **`Do`, `While` and `Repeat` are entirely unused**, as is every Luau-only statement. They go
+  straight to opaque with nothing lost today.
+- **Positional entries are the child list.** 444 of them, and they are what `ui.col({ ..., ui.text(…) })`
+  is made of — which is why their order is meaning and not formatting.
+
+### 10.2 Two structural decisions
+
+**Depth is total; ids are not.**
+
+The tree is structured all the way down — that was the call in §2, and surgical edits need it. But an
+`_nid` is *printed* only where a pixel can land, which is table constructors. Two independent
+constraints agree on this:
+
+1. **Lua syntax.** You cannot hang a field on a statement or on a string literal. Only a table can
+   carry `_nid = "k3f9"`.
+2. **Hit-testing.** Only elements are clickable, and in this DSL an element *is* a table
+   constructor — `ui.text({ … })`.
+
+Everything else is reached as **nearest id + path**. So §8's addressing question resolves itself:
+ids for what a click produces, paths for everything below it.
+
+**Numbers are doubles.** Luau has no integer subtype, so `13` and `13.0` are the same value and
+normalising the spelling is safe. In Lua 5.3+ it would not have been.
+
+### 10.3 The nodes
+
+```
+Block  { stmts: [Stmt], last: Last? }          -- a file body or a function body
+
+Stmt   ( + leading: [Comment], trailing: Comment? )
+  Local   { names: [Name], values: [Expr] }
+  Assign  { targets: [Expr], values: [Expr] }
+  Call    { call: Expr }                        -- a call in statement position
+  If      { arms: [(Expr, Block)], else: Block? }
+  Func    { scope: local|global, name: Path, params: [Name], body: Block }
+  NumFor  { name, from: Expr, to: Expr, step: Expr?, body: Block }
+  GenFor  { names: [Name], exprs: [Expr], body: Block }
+  Opaque  { text }
+
+Last
+  Return  { values: [Expr] }
+  Break
+  Continue                                      -- luau
+
+Expr
+  Name   { name }                               -- x
+  Index  { base: Expr, key: Expr, dot: bool }   -- C.text, t[i]
+  Call   { callee: Expr, method: Name?, args: [Expr] }
+  Str    { value }
+  Num    { value: f64 }
+  Sym    { true | false | nil | ... }
+  Table  { id: Nid, entries: [Entry] }          -- ← the only node with a printed id
+  Bin    { op, lhs: Expr, rhs: Expr }
+  Un     { op, expr: Expr }
+  Fn     { params: [Name], body: Block }        -- anonymous
+  Paren  { expr: Expr }
+  Opaque { text }
+
+Entry  ( + leading: [Comment], trailing: Comment? )
+  Named      { name, value: Expr }
+  Positional { value: Expr }
+```
+
+22 kinds, two of them opaque. `Var` and `FunctionCall` from the census decompose into
+`Name`/`Index`/`Call`, which composes cleanly: `C.text` is `Index(Name "C", Str "text")`, and
+`ui.text({…})` is `Call(Index(Name "ui", Str "text"), [Table])`. `Paren` earns its place because
+`(a + b) * c` is not `a + b * c`.
+
+### 10.4 Where trivia lives
+
+`leading` and `trailing` on **`Stmt` and `Entry` only**. Those are the two places comments actually
+occur in the corpus, and both are list members — so a comment travels with the thing beneath it when
+that thing moves. A comment buried inside an expression attaches to the nearest enclosing statement.
+That is a real loss, and it is the acceptable one: formatting is already normalised (§6).
+
+### 10.5 Loro mapping
+
+| schema | Loro |
+|---|---|
+| a node | `LoroMap` with a `kind` field |
+| `[Stmt]`, `[Entry]`, `[Expr]` | `LoroMovableList` |
+| `Nid` | our own generated id, a field on `Table` |
+
+`MovableList` rather than `List` because reordering is a first-class edit — dragging a card between
+columns is a *move*, and modelling it as delete+insert loses concurrent edits to the moved subtree.
+`loro-gotchas` applies throughout: eager containers before undo, delete hides rather than removes.
+
+### 10.6 What the operations become
+
+- `set(nid, key, value)` — find the `Table` by id, find its `Named` entry, replace `value`. Append
+  the entry if absent.
+- `insert(nid, index, lua)` — parse to `Expr`, insert a `Positional` entry at `index`.
+- `replace(nid, lua)` — parse to `Expr`, swap the subtree. **The root keeps `nid`**; new tables
+  inside it get fresh ids. That is precisely what makes siblings survive an agent edit.
+
+### 10.7 The cost of being opaque
+
+An `Opaque` node round-trips its text verbatim, so nothing is corrupted. But it contains no `Table`
+nodes, which means **no ids, which means everything inside it is dark to the UI** — unclickable,
+unresizable, unaddressable. Opaque is safe for correctness and expensive for capability, so the list
+in §10.1 of what is currently unmodelled is also a list of what a user cannot yet right-click.
