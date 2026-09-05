@@ -137,6 +137,8 @@ pub(crate) fn draw<M>(
                     if ts.text.is_empty()
                         && let Some(ph) = &spec.placeholder
                     {
+                        // The same constraint `editor::sync` gives the real value, so a long
+                        // placeholder wraps exactly where the text replacing it will.
                         text.draw(
                             scene,
                             ph,
@@ -144,6 +146,7 @@ pub(crate) fn draw<M>(
                             ts.size,
                             origin,
                             text_color.multiply_alpha(0.4),
+                            spec.multiline.then(|| content.width() as f32),
                         );
                     }
                     if focus.is_focused(id.clone()) {
@@ -164,16 +167,24 @@ pub(crate) fn draw<M>(
                     scene.pop_layer();
                 }
             } else {
-                let (_, th) = text.measure(&ts.text, ts.family, ts.size, None);
+                let w = wrap_width(p.rect, p.pad);
+                let (_, th) = text.measure(&ts.text, ts.family, ts.size, w);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
                 let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
-                text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color);
+                text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color, w);
             }
         }
         if clipping {
             scene.pop_layer();
         }
     }
+}
+
+/// The width a text leaf's glyphs must be shaped against: its content box, which is exactly the
+/// constraint `layout::measure_text` was given. Shaping at anything else — `None` above all — lays
+/// the string out against a width nobody reserved space for, and the glyphs leave the box.
+pub(crate) fn wrap_width(rect: Rect, pad: Insets) -> Option<f32> {
+    Some((rect.width() - pad.x0 - pad.x1).max(0.0) as f32)
 }
 
 pub(crate) fn content_offset(
@@ -289,5 +300,6 @@ pub fn debug_boxes<M>(
         11.0,
         t * Affine::translate((cx + 6.0, cy + 6.0)),
         DEBUG_BOX,
+        None,
     );
 }

@@ -241,6 +241,7 @@ fn wordmark() -> El<Msg> {
             56.0,
             t * Affine::translate((rect.x0 + offset + o, rect.y0 + o)),
             theme::accent_press(),
+            None,
         );
         text.draw(
             scene,
@@ -249,6 +250,7 @@ fn wordmark() -> El<Msg> {
             56.0,
             t * Affine::translate((rect.x0 + offset, rect.y0)),
             theme::accent(),
+            None,
         );
     })
     .h(52.0)

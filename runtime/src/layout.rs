@@ -424,6 +424,45 @@ mod tests {
         assert!((r.width() - 300.0).abs() < 1.0, "got {}", r.width());
     }
 
+    /// The layout pass and the paint pass have to shape against the *same* width, and only the
+    /// layout pass knows it — so paint recovers it from the placed rect. Getting this wrong is
+    /// invisible to every test above: the box is reserved correctly and the glyphs are drawn
+    /// somewhere else entirely, which is exactly what shipped for one commit here.
+    #[test]
+    fn painted_glyphs_fit_the_box_the_layout_reserved() {
+        let placed = solve::<()>(
+            col().w(200.0).pad(12.0).child(text(PARA)),
+            &mut TextEngine::new(),
+            (800.0, 600.0),
+            &Store::new(),
+        );
+        let p = placed
+            .iter()
+            .find(|p| p.appearance.text.is_some())
+            .expect("no text node");
+        let ts = p.appearance.text.as_ref().unwrap();
+
+        let (w, h) = TextEngine::new().measure(
+            &ts.text,
+            ts.family,
+            ts.size,
+            crate::paint::wrap_width(p.rect, p.pad),
+        );
+        let (box_w, box_h) = (
+            p.rect.width() - p.pad.x0 - p.pad.x1,
+            p.rect.height() - p.pad.y0 - p.pad.y1,
+        );
+
+        assert!(
+            w as f64 <= box_w + 1.0,
+            "glyphs run {w} wide out of a {box_w} box"
+        );
+        assert!(
+            h as f64 <= box_h + 1.0,
+            "glyphs run {h} tall out of a {box_h} box"
+        );
+    }
+
     /// An input is designed sized, never text sized — the one exception `build` carves out, and
     /// the reason it hands Taffy no context for one. Stated as "its box does not move when its
     /// value does", which holds whatever the designed width happens to be.

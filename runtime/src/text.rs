@@ -114,6 +114,9 @@ impl TextEngine {
         (w.min, w.max)
     }
 
+    /// `max_width` must be the same constraint the layout pass measured with, or the glyphs will
+    /// not match the box that was reserved for them: measuring at the parent's width and painting
+    /// at `None` reserves a narrow, tall rect and then paints one long line straight out of it.
     pub fn draw(
         &mut self,
         scene: &mut Scene,
@@ -122,8 +125,9 @@ impl TextEngine {
         size: f32,
         transform: Affine,
         brush: Color,
+        max_width: Option<f32>,
     ) {
-        let mut layout = self.build_layout(text, family, size, None);
+        let mut layout = self.build_layout(text, family, size, max_width);
         layout.align(Alignment::Start, AlignmentOptions::default());
         self.draw_layout(scene, &layout, transform, brush)
     }
