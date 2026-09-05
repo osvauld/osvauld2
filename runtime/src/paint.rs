@@ -6,6 +6,7 @@ use crate::MONO_FAMILY;
 use crate::anim::Transition;
 use crate::editor::Field;
 use crate::editor::Focus;
+use crate::el::TextSpec;
 use crate::id::Id;
 use crate::layout::Placed;
 use crate::scroll::Axis;
@@ -167,11 +168,19 @@ pub(crate) fn draw<M>(
                     scene.pop_layer();
                 }
             } else {
+                // Routed on `runs` exactly as `layout::measure_text` is, so a leaf is never
+                // measured rich and painted plain — the two would disagree about its size.
                 let w = wrap_width(p.rect, p.pad);
-                let (_, th) = text.measure(&ts.text, ts.family, ts.size, w);
+                let (_, th) = measure_placed(text, ts, p.rect, p.pad);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
                 let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
-                text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color, w);
+                if !ts.runs.is_empty() {
+                    // `p.alpha` is folded in per run rather than handed down as one brush, since
+                    // the whole point is that the runs carry their own colours.
+                    text.draw_rich(scene, &ts.text, &ts.runs, origin, w, p.alpha);
+                } else {
+                    text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color, w);
+                }
             }
         }
         if clipping {
@@ -185,6 +194,25 @@ pub(crate) fn draw<M>(
 /// the string out against a width nobody reserved space for, and the glyphs leave the box.
 pub(crate) fn wrap_width(rect: Rect, pad: Insets) -> Option<f32> {
     Some((rect.width() - pad.x0 - pad.x1).max(0.0) as f32)
+}
+
+/// Shape a placed text node exactly as [`draw`] will: same width, same plain/rich routing.
+///
+/// One function so paint and `layout::measure_text` cannot drift apart. Routing a rich leaf
+/// through the plain path does not overflow — it renders *small*, inside a box sized for runs it
+/// then ignored, which is why the test for this asserts the height back rather than a bound.
+pub(crate) fn measure_placed(
+    engine: &mut TextEngine,
+    ts: &TextSpec,
+    rect: Rect,
+    pad: Insets,
+) -> (f32, f32) {
+    let w = wrap_width(rect, pad);
+    if ts.runs.is_empty() {
+        engine.measure(&ts.text, ts.family, ts.size, w)
+    } else {
+        engine.measure_rich(&ts.text, &ts.runs, w)
+    }
 }
 
 pub(crate) fn content_offset(

@@ -12,7 +12,7 @@
 //!   input    — designed sized: its box does not move when its value grows
 
 use runtime::vello::peniko::Color;
-use runtime::{App, El, col, row, text, text_input};
+use runtime::{App, El, Run, col, rich, row, text, text_input};
 
 const PARA: &str = "The runtime was permanently at max-content: every string was shaped once, \
     with line breaking switched off, and the answer frozen into the style before Taffy ever ran. \
@@ -41,6 +41,31 @@ fn para<M: Clone>() -> El<M> {
     text(PARA).font_size(14.0).color(INK)
 }
 
+/// Every run feature at once, over one string. The point to look at is that it still wraps as a
+/// single paragraph — the styles do not break it into pieces that lay out separately.
+fn styled<M: Clone>() -> El<M> {
+    const S: &str = "Bold and italic and struck and underlined and mono and red, \
+        all wrapping as one paragraph rather than as six.";
+    let at = |needle: &str| {
+        let i = S.find(needle).expect("needle");
+        i..i + needle.len()
+    };
+    rich(
+        S,
+        vec![
+            Run::new(at("Bold"), 14.0, INK).bold(),
+            Run::new(at("italic"), 14.0, INK).italic(),
+            Run::new(at("struck"), 14.0, INK).strike(),
+            Run::new(at("underlined"), 14.0, INK).underline(),
+            Run::new(at("mono"), 14.0, INK).font(runtime::MONO_FAMILY),
+            Run::new(at("red"), 14.0, Color::from_rgba8(0xF8, 0x5C, 0x5C, 0xFF)),
+            Run::new(at("six"), 20.0, INK).bold(),
+        ],
+    )
+    .color(INK)
+    .font_size(14.0)
+}
+
 impl App for Wrap {
     type Msg = ();
 
@@ -67,6 +92,10 @@ impl App for Wrap {
                     .child(panel(
                         "padding counted once",
                         col().w(260.0).pad(20.0).child(para()),
+                    ))
+                    .child(panel(
+                        "rich runs — wraps as one paragraph",
+                        col().w(300.0).pad(12.0).child(styled()),
                     ))
                     .child(panel(
                         "input: designed sized",

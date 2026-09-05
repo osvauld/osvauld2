@@ -12,7 +12,7 @@ use crate::el::{Anchor, Appearance, Behaviour, El, Overlay};
 use crate::id::Id;
 use crate::scroll::Scroll;
 use crate::state::{Slot, Store};
-use crate::text::TextEngine;
+use crate::text::{Run, TextEngine};
 
 /// One positioned node, ready to paint and hit-test. `rect` is in logical points.
 pub(crate) struct Placed<M> {
@@ -44,6 +44,8 @@ pub(crate) struct TextCtx {
     text: String,
     family: &'static str,
     size: f32,
+    /// Empty for a plain leaf. Copied for the same reason the string is.
+    runs: Vec<Run>,
 }
 
 /// Answer Taffy's "how big is this leaf?" for a text node.
@@ -68,7 +70,11 @@ fn measure_text(
         AvailableSpace::MinContent => Some(0.0),
         AvailableSpace::MaxContent => None,
     };
-    let (width, height) = text.measure(&ctx.text, ctx.family, ctx.size, max_width);
+    let (width, height) = if ctx.runs.is_empty() {
+        text.measure(&ctx.text, ctx.family, ctx.size, max_width)
+    } else {
+        text.measure_rich(&ctx.text, &ctx.runs, max_width)
+    };
     Size { width, height }
 }
 
@@ -120,6 +126,7 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<TextCtx>) -> Mapped<M> {
             text: ts.text.clone(),
             family: ts.family,
             size: ts.size,
+            runs: ts.runs.clone(),
         }),
         _ => None,
     };
@@ -342,10 +349,12 @@ pub(crate) fn solve<M>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::el::{text, text_input};
+    use crate::el::{rich, text, text_input};
+    use vello::peniko::Color;
 
     /// Long enough to overflow any of the widths below, with no long word to get stuck on.
     const PARA: &str = "the quick brown fox jumps over the lazy dog and keeps on running";
+    const WHITE: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF);
 
     /// The rect of the one node carrying text.
     fn text_rect(root: El<()>) -> Rect {
@@ -424,43 +433,98 @@ mod tests {
         assert!((r.width() - 300.0).abs() < 1.0, "got {}", r.width());
     }
 
-    /// The layout pass and the paint pass have to shape against the *same* width, and only the
-    /// layout pass knows it — so paint recovers it from the placed rect. Getting this wrong is
-    /// invisible to every test above: the box is reserved correctly and the glyphs are drawn
-    /// somewhere else entirely, which is exactly what shipped for one commit here.
+    /// The layout pass and the paint pass have to shape the same way — same width, same plain/rich
+    /// routing — and only the layout pass is told either. Getting it wrong is invisible to every
+    /// test above: the box is reserved correctly and the glyphs land somewhere else, which is
+    /// exactly what shipped for one commit here.
+    ///
+    /// Asserted as the height coming *back*, not as a bound, because the two ways to get it wrong
+    /// point opposite ways. Shaping unwrapped overflows the box; shaping a rich leaf through the
+    /// plain path underfills one sized for runs it then ignored. Only equality catches both.
     #[test]
-    fn painted_glyphs_fit_the_box_the_layout_reserved() {
-        let placed = solve::<()>(
-            col().w(200.0).pad(12.0).child(text(PARA)),
-            &mut TextEngine::new(),
-            (800.0, 600.0),
-            &Store::new(),
-        );
-        let p = placed
-            .iter()
-            .find(|p| p.appearance.text.is_some())
-            .expect("no text node");
-        let ts = p.appearance.text.as_ref().unwrap();
+    fn paint_shapes_text_to_the_box_the_layout_reserved() {
+        let runs = vec![
+            Run::new(0..20, 15.0, WHITE).bold(),
+            Run::new(20..PARA.len(), 34.0, WHITE),
+        ];
+        for (name, leaf) in [("plain", text(PARA)), ("rich", rich(PARA, runs))] {
+            let placed = solve::<()>(
+                col().w(200.0).pad(12.0).child(leaf),
+                &mut TextEngine::new(),
+                (800.0, 600.0),
+                &Store::new(),
+            );
+            let p = placed
+                .iter()
+                .find(|p| p.appearance.text.is_some())
+                .expect("no text node");
+            let ts = p.appearance.text.as_ref().unwrap();
 
-        let (w, h) = TextEngine::new().measure(
-            &ts.text,
-            ts.family,
-            ts.size,
-            crate::paint::wrap_width(p.rect, p.pad),
-        );
-        let (box_w, box_h) = (
-            p.rect.width() - p.pad.x0 - p.pad.x1,
-            p.rect.height() - p.pad.y0 - p.pad.y1,
-        );
+            let (w, h) = crate::paint::measure_placed(&mut TextEngine::new(), ts, p.rect, p.pad);
+            let (box_w, box_h) = (
+                p.rect.width() - p.pad.x0 - p.pad.x1,
+                p.rect.height() - p.pad.y0 - p.pad.y1,
+            );
+
+            assert!(
+                w as f64 <= box_w + 1.0,
+                "{name}: glyphs run {w} wide out of a {box_w} box"
+            );
+            assert!(
+                (h as f64 - box_h).abs() < 1.0,
+                "{name}: paint shapes {h} tall into a box reserved for {box_h}"
+            );
+        }
+    }
+
+    /// A rich leaf measures through the run list, which is the whole point of carrying it into
+    /// `TextCtx`. Pinned by size rather than by inspecting the tree, because a run that never
+    /// reaches the measure hook produces a perfectly plausible box — just the plain one.
+    #[test]
+    fn a_rich_leaf_is_measured_from_its_runs() {
+        let s = "small BIG";
+        let plain = text_rect(text(s));
+        let mixed = text_rect(rich(
+            s,
+            vec![
+                Run::new(0..6, 15.0, WHITE),
+                Run::new(6..s.len(), 40.0, WHITE),
+            ],
+        ));
 
         assert!(
-            w as f64 <= box_w + 1.0,
-            "glyphs run {w} wide out of a {box_w} box"
+            mixed.height() > plain.height(),
+            "the large run did not make the leaf taller: {} vs {}",
+            mixed.height(),
+            plain.height()
         );
         assert!(
-            h as f64 <= box_h + 1.0,
-            "glyphs run {h} tall out of a {box_h} box"
+            mixed.width() > plain.width(),
+            "the large run did not make the leaf wider: {} vs {}",
+            mixed.width(),
+            plain.width()
         );
+    }
+
+    /// An empty run list is exactly `text`, so `rich` can be the only builder a caller reaches for
+    /// without paying for it when there is nothing to style.
+    #[test]
+    fn rich_with_no_runs_is_plain_text() {
+        assert_eq!(text_rect(rich(PARA, Vec::new())), text_rect(text(PARA)));
+    }
+
+    /// Rich leaves wrap like plain ones — the run list rides through the measure hook rather than
+    /// round it, so the width constraint still reaches parley.
+    #[test]
+    fn a_rich_leaf_still_wraps_to_its_parent() {
+        let runs = vec![
+            Run::new(0..20, 15.0, WHITE).bold(),
+            Run::new(20..PARA.len(), 15.0, WHITE),
+        ];
+        let r = text_rect(col().w(200.0).child(rich(PARA, runs)));
+
+        assert!(r.width() <= 200.0, "rich text overflowed: {}", r.width());
+        assert!(r.height() > 20.0, "rich text did not wrap: {}", r.height());
     }
 
     /// An input is designed sized, never text sized — the one exception `build` carves out, and

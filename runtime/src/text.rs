@@ -212,7 +212,10 @@ impl TextEngine {
         (layout.width(), layout.height())
     }
 
-    /// Paint a rich string, each run in its own colour.
+    /// Paint a rich string, each run in its own colour, the whole thing faded by `alpha`.
+    ///
+    /// The fade is folded into the runs rather than passed as an override, because an override is
+    /// a single colour and that is the one thing a rich string cannot have.
     pub fn draw_rich(
         &mut self,
         scene: &mut Scene,
@@ -220,7 +223,21 @@ impl TextEngine {
         runs: &[Run],
         transform: Affine,
         max_width: Option<f32>,
+        alpha: f32,
     ) {
+        let faded: Vec<Run>;
+        let runs = if alpha >= 1.0 {
+            runs
+        } else {
+            faded = runs
+                .iter()
+                .map(|r| Run {
+                    color: r.color.multiply_alpha(alpha),
+                    ..r.clone()
+                })
+                .collect();
+            &faded
+        };
         let layout = self.build_rich(text, runs, max_width);
         self.draw_layout(scene, &layout, transform, None);
     }

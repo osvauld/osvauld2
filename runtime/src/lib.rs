@@ -39,12 +39,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Anchor, El, Placement, PlacementAlign, PlacementSide, col, custom, row, text, text_area,
+    Anchor, El, Placement, PlacementAlign, PlacementSide, col, custom, rich, row, text, text_area,
     text_input,
 };
 pub use render::Render;
 use state::Store;
-pub use text::{MONO_FAMILY, PIXEL_FAMILY, TextEngine, UI_FAMILY};
+pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;

@@ -15,12 +15,20 @@ use crate::anim::{Driver, Easing};
 use crate::drag::{DragEvent, DropEvent};
 use crate::id::Id;
 use crate::state::Slot;
-/// A text leaf's content + face. The real color is applied at vello draw time.
+use crate::text::Run;
+
+/// A text leaf's content + face.
+///
+/// `family`/`size`/`color` are the whole leaf's style when `runs` is empty, and stay meaningful
+/// even when it is not: an input drives `PlainEditor` from them, and they are the fallback for any
+/// byte no run covers. A non-empty `runs` routes both measuring and painting through the rich
+/// path, so the two never disagree about which shaping a leaf got.
 pub(crate) struct TextSpec {
     pub text: String,
     pub family: &'static str,
     pub size: f32,
     pub color: Color,
+    pub runs: Vec<Run>,
 }
 
 /// Escape hatch: draw arbitrary vello (shapes and/or text) into the element's computed rect — e.g.
@@ -305,7 +313,24 @@ pub fn text<M>(s: impl Into<String>) -> El<M> {
         family: crate::UI_FAMILY,
         size: 15.0,
         color: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF),
+        runs: Vec::new(),
     });
+    e
+}
+
+/// A text leaf whose style varies across the string: bold, a second face, another colour.
+///
+/// `runs` are byte ranges into `s`, flattened and in order — a document's overlapping marks have
+/// to be resolved into these before they get here. An empty list is exactly [`text`], and out of
+/// range or overlapping runs are parley's problem, not checked here.
+///
+/// `.font()`/`.font_size()`/`.color()` still apply, and still mean what they did: the style for
+/// bytes no run covers.
+pub fn rich<M>(s: impl Into<String>, runs: Vec<Run>) -> El<M> {
+    let mut e = text(s);
+    if let Some(ts) = &mut e.appearance.text {
+        ts.runs = runs;
+    }
     e
 }
 
