@@ -1,7 +1,9 @@
 # Code as a tree
 
-**Status:** design, agreed in outline. Parser chosen and measured (§8½). One spike outstanding
-before any code — now scoped to the lowering alone.
+**Status:** parser chosen and measured (§8½), schema drafted from a census (§10), **spike built and
+passing** (§9.1, the `lua_tree` crate). §11 revises what actually belongs in the tree; §12 is why
+the tree survives that revision. Remaining unbuilt: the Loro representation, the operations, and
+`_nid` carried onto `El`.
 **Related:** `interactive-document.md` §3 (data and behaviour), `merge-referee.md`,
 `view-and-interaction.md`. Memory: *code-as-CRDT* moves out of "future directions" and becomes
 the substrate this describes.
@@ -13,6 +15,12 @@ the substrate this describes.
 Right-click a label and change its colour. Drag a container's edge and resize it. Ask an agent to
 restyle one card. All three have to end with **the app's own source changed**, and the next frame
 showing it.
+
+> **Revised by §11.** Only the third of those turns out to be a source edit. Resize and text
+> editing land in a per-viewer override layer and in document data respectively, and never touch
+> the app. What remains genuinely code — agent restructuring, authoring a default, anything
+> touching behaviour — is narrower than this section assumed, and §12 is the argument that it is
+> still enough to need the tree.
 
 Today none of them can, and the reason is not the gesture — it is that nothing connects a pixel
 back to the code that made it. `app_host` stamps `t.line = debug.info(2, "l")` on every node
@@ -498,3 +506,163 @@ belongs in the test suite rather than in a throwaway probe — assert it stays a
 so the day an app introduces a construct we do not model, a test says so instead of a user finding
 a region where right-click silently does nothing. Per-file coverage surfaced in the app itself is
 the same idea aimed at the person rather than the build.
+
+---
+
+## 11. What is *not* code: the data/override split
+
+Everything above assumes the gesture ends in a source edit. Working through resize and rich text
+showed that most of them do not — and the ones that do are a narrower, clearer set than §0 implied.
+
+### 11.1 Three destinations, not one
+
+| edit | lands in | reload |
+|---|---|---|
+| document text and its formatting | **data** — `LoroText` + marks | never |
+| per-viewer panel width, filters, caret, pending marks | **override layer** | never |
+| transient drag state | **override layer** | never |
+| agent restructuring, authoring a default, any `on_click` | **the tree** | once |
+
+The rule underneath: **the CRDT holds what a human typed plus structure a human intended**
+(§4.2 of `interactive-document.md`), and *which* CRDT depends on whether the thing being edited is
+the app or the content the app displays.
+
+### 11.2 The override layer
+
+A map from `nid` (plus path) to a property value, applied to `El` **after `walk` and before
+layout**:
+
+```
+view() ──walk──▶ El ──[ overrides ]──▶ El′ ──▶ layout ──▶ Placed
+```
+
+Lua produced `w = 300`; the shell patches it to `320`. No reparse, no reprint, no `reload()`.
+
+This exists because `reload()` (`app_host/src/lib.rs:193`) is not cheap — it builds a whole new VM,
+runs `carry_state`, executes a trial frame, runs `_sweep`, then swaps, and it can *drop*
+`ui.state`. A drag at 60fps would mean sixty VM rebuilds a second. The layer makes interactive
+editing free and reserves reload for commits.
+
+It has **three tenants**, arrived at independently, which is the argument that it is a real thing
+rather than a convenience:
+
+1. resize and other uncommitted authoring gestures, folded into source on release;
+2. per-viewer view state that is never folded in — the same call as *filters are per-viewer*;
+3. `stored_marks` and the caret — §5.2 already says pending formatting at a collapsed caret
+   "cannot live in the CRDT and must not try to".
+
+Overrides can orphan when a nid disappears. `_sweep` already solves exactly this shape for carried
+`ui.state`; the same sweep applies.
+
+### 11.3 Two address spaces
+
+A click resolves to **both**, and conflating them is a bug waiting to happen:
+
+> **Code edits address by `nid`. Content edits address by data path.**
+
+The reason is a loop. `for _, b in ipairs(doc.notes.blocks) do ui.rich({ bind = b.text }) end` is
+**one code node with one `nid`** rendering **N paragraphs**. The nid says which code drew it and
+cannot say which paragraph was clicked. Recolour the font → `nid`. Type a character → path.
+
+### 11.4 Binding, and the handle
+
+The mirror returns a **handle** for text, not a string:
+
+```lua
+ui.rich({ bind = doc.notes.body, editable = true })
+```
+
+`doc.notes.body` is a `TextRef { path }`. The document's bytes never cross the Lua boundary during
+a frame — the runtime resolves the path itself. That keeps §4.1's mediated-read discipline (the
+access is recorded, mutation bumps the version) while keeping a large document out of `walk`.
+
+Writability is four independent gates: the tree says *binding, not literal*; the mirror says *text
+container, not computed value*; caps say *this app may write there*; and the app says
+`editable = true`. All four, or the affordance lies.
+
+The write loop skips Lua entirely — `keystroke → LoroText insert → version bump → next frame
+re-resolves → repaint` — which is what lets concurrent typing merge per character instead of
+LWW-ing a source literal.
+
+**`Vec<Run>` is a render type, not storage.** Marks are stored; runs are derived per frame and
+cached on `hash(text version, marks, width)`. §4.2's rule about outputs covers this directly.
+
+### 11.5 Two operations called "insert"
+
+- **A paragraph in a document** is a *data* insert into a Loro list. The code already says "render
+  every block"; no source changes.
+- **A container in the app** is a *tree* insert. Source changes, one reload.
+
+So the tree's `insert` is for app structure only, and document editing needs none of it.
+
+### 11.6 Affordance props
+
+`resizable` and `editable` are a third kind of prop: not how an element looks, not what it
+dispatches, but **what the editor may do to it**. Worth naming as one category now rather than
+inventing them separately later. They split by destination — **`resizable` writes code,
+`editable` writes data.**
+
+Declaration is policy and does not replace the tree's check. `resizable` on a `grow = true` box is
+a handle producing a value Taffy ignores, so writability is still a precondition. And the bounds
+belong in the declaration: `resizable = { min = 160, max = 600 }`, because "what stops it
+collapsing" is part of offering the gesture.
+
+### 11.7 Resize needs two layout knobs the DSL does not expose
+
+Taffy needs a concrete value, and **which** value depends on the edge rather than the element:
+
+| boundary | knob | the edit writes |
+|---|---|---|
+| fixed ↔ `grow` | `size.width` | `w` on the fixed side; the grow side absorbs |
+| fixed ↔ fixed | `size.width` ×2 | both, sum preserved — brittle under parent resize |
+| `grow` ↔ `grow` | `flex_grow` | ratios on **both** siblings |
+
+**One side of a dragged boundary must be elastic**, or the drag fights the parent and any window
+resize undoes it. Row 1 — the sidebar splitter — works with today's layout and is most of what is
+wanted.
+
+Row 3 is currently inexpressible: `grow()` sets `flex_grow = 1.0` (`runtime/src/el.rs:458`,
+`prop!(grow)`), a flag rather than a ratio, so two `grow` siblings are permanently 50/50. And there
+is no `min_size`/`max_size` exposed at all. Both are already `f32` in Taffy; only the DSL flattens
+them. Two small additions.
+
+This also sharpens the writability check from §2: a splitter edits **two sibling nodes**, so the
+question is what the *edge* resolves to, one level up at the parent — not what the node's own `w` is.
+
+---
+
+## 12. Why the tree still has to be the artifact
+
+§11 removes most of §0's motivation. Rich text and resize both leave the source untouched, so the
+fair question is whether the CRDT tree is needed at all, or whether `lua_tree` as a parser over
+text storage is enough.
+
+Three levels:
+
+| | what it is | state |
+|---|---|---|
+| **1** | parser only — parse, splice, print, write the file as text | **built** (`lua_tree`) |
+| **2** | ids printed into the source, files still text | small — needs `_nid` carried |
+| **3** | the tree itself in Loro | the large one |
+
+Level 2 looks like a resting point and is not one, for a reason specific to this design:
+
+> **A normalizing printer turns a local semantic edit into a wide textual one.**
+
+Change one property, the table crosses the printer's single-line/multi-line threshold, and forty
+lines rewrite. Two agents editing genuinely unrelated nodes then produce *overlapping* text diffs,
+and a text CRDT merges them into Lua neither wrote. Hand-written code does not have this problem;
+printed code does. Text storage is therefore **worse** here than it would be for a normal repo.
+
+And flattening an addressed operation to text before merging discards exactly the precision that
+made the edit surgical. `set(k3f9, "fill", …)` and `set(k7a2, "w", …)` merge trivially as *ops* —
+different nodes, no conflict — and same-node-same-property is LWW, which is the only correct answer
+anyway (§5.3 makes the identical argument for colour).
+
+So the addressing the agent needs and the merge concurrent editing needs are **the same
+mechanism**, and Level 3 is where it lives.
+
+**It is also smaller than it first appears**, because of §11: the tree holds *app structure only*.
+Document content is separate `LoroText` with its own merge. For kanban that is 184 tables — a
+small, low-churn object that changes when someone edits the app, not when someone types. Node-
+granular undo and click-to-node provenance come with it rather than as separate work.
