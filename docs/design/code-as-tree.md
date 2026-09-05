@@ -1,6 +1,7 @@
 # Code as a tree
 
-**Status:** design, agreed in outline. One spike outstanding before any code.
+**Status:** design, agreed in outline. Parser chosen and measured (§8½). One spike outstanding
+before any code — now scoped to the lowering alone.
 **Related:** `interactive-document.md` §3 (data and behaviour), `merge-referee.md`,
 `view-and-interaction.md`. Memory: *code-as-CRDT* moves out of "future directions" and becomes
 the substrate this describes.
@@ -127,6 +128,11 @@ inside.
 **Formatting as an authored property.** The printer owns layout. What a human typed as spacing does
 not survive; comments do (§8).
 
+That last one is now a *choice rather than a constraint*: the parser preserves formatting perfectly
+(§8½), so whatever is lost is lost in our lowering, at whatever fidelity the schema decides to
+carry. Worth knowing before the schema is written, because it means "keep the author's line breaks"
+is on the table if it turns out to matter.
+
 ---
 
 ## 7. Costs that land on the hot path
@@ -134,6 +140,10 @@ not survive; comments do (§8).
 **The printer runs every reload**, not on save — the VM needs source text, so tree → text is
 between every structural edit and the next frame. The reload trigger itself already exists
 (`Source`, `reload_if_stale`), so this slots into machinery that works.
+
+Measured, and it is not the thing to worry about: full parse **and** print of `main.lua` (342 lines)
+is **1.0 ms** release-mode. Our own print will differ, but the order of magnitude is set, and reload
+is not a per-frame path. The cost that matters is the next one.
 
 **`_nid` costs a boundary get per element per frame.** This is exactly the cost the existing `line`
 breadcrumb is `dev`-gated to avoid: the comment in `walk` records that it is ~80% of a frame's Lua
@@ -148,17 +158,22 @@ Measure against that test before assuming it is fine.
 
 ## 8. Open questions
 
-1. **What is a node?** Not tree-sitter's concrete tree — nobody wants a CRDT container per comma.
+1. **What is a node?** Not full-moon's concrete tree — nobody wants a CRDT container per comma.
    A semantic subset: statements, calls, table literals, fields, literals, function bodies. The
    subset is a schema decision and it is the bulk of the design work.
 
-2. **Trivia.** Comments and blank lines have no home in a syntax tree, and losing them is the
-   classic way these systems fail. Leading/trailing trivia per node is the standard answer. The
-   requirement is *preservation*, not byte-fidelity — the printer owns formatting.
+2. ~~**Trivia.**~~ **Largely answered** (§8½). full-moon attaches leading/trailing trivia to every
+   token, so comments arrive already anchored and already positioned. What remains is not a model
+   but a policy: when an edit replaces a node, which of its trivia belongs to the replacement and
+   which to the hole it left.
 
 3. **Totality, and the opaque node.** Every Lua construct must be representable or import corrupts
    files, silently. The mitigation is an **opaque node** holding raw text for anything the schema
    does not model, so coverage can grow without risking data. This is not optional.
+
+   One half of it is now cheap: malformed input never reaches the schema at all, because the parser
+   rejects it (§8½). The remaining risk is narrower and more specific — input that parses fine but
+   that *our lowering* has no case for. That is the one the opaque node exists for.
 
 4. **Addressing, for the agent.** It has to name a node to edit one. Ids are visible in the printed
    source, so it can read them — but a *path* (`view/children/2/runs/0`) is more legible and needs
@@ -171,22 +186,67 @@ Measure against that test before assuming it is fine.
 
 ---
 
+## 8½. The parser: settled
+
+**`full_moon`, with the `luau` feature.** Not tree-sitter.
+
+tree-sitter was the first answer here for one bad reason — it is already vendored through inkjet
+(`code_highlight`, `code_editor`), so it looked free. Checking it turned up two problems that
+convenience does not cover:
+
+- **The vendored grammar is tree-sitter-*lua*, and this VM is Luau.** `app_host/Cargo.toml:11` is
+  `mlua = { features = ["luau"] }`. No current `.lua` in the repo uses Luau-only syntax, so nothing
+  is broken today — but an agent can emit `x += 1` or a type annotation at any moment, the VM will
+  run it, and a Lua 5.x grammar will hand back an `ERROR` node for code that works.
+- **tree-sitter is error-tolerant by design.** Correct for a highlighter, wrong for an import gate:
+  it yields a tree rather than refusing, and a typo becomes an opaque node instead of a rejection.
+
+full-moon inverts both, and it exists specifically to parse → mutate → print without loss, which is
+this document's requirement rather than a bonus.
+
+### What was measured
+
+16 real files, 2,007 lines — all of `shell2/src/kanban` plus all of `app_engine/examples`:
+
+| check | result |
+|---|---|
+| parse → print equals **the original**, byte for byte | 16 / 16 |
+| print is idempotent | 16 / 16 |
+| comments preserved | 200 / 200 |
+| Luau syntax parses, losslessly — annotations, `+=`, `continue`, string interpolation, typed and generic functions, `export type` | 7 / 7 |
+| malformed input **rejected** (truncated, unclosed block, garbage, unclosed string) | 4 / 4 |
+| trivia reachable per token | yes — `-- leading comment` arrives as leading trivia of `local` |
+| parse + print, 342 lines, release | 1.0 ms |
+
+The first row is stronger than this document assumed. Round-tripping is not merely idempotent, it is
+**lossless** — which is why §6's formatting trade is now a schema decision rather than a given.
+
+### What this did *not* settle
+
+This measured full-moon's own tree, and full-moon's tree is not our tree. The open question is
+whether the **lowering** round-trips — and a lowering is lossy by construction, which is exactly
+what makes it the interesting half. What the check bought is that the layer underneath is not a
+source of surprises, and that the dialect risk is gone.
+
+---
+
 ## 9. The spike
 
 Before any schema, one question, because its answer can change the plan:
 
-> Parse `shell2/src/kanban/main.lua` (342 lines of real code) with tree-sitter-lua, build the
-> semantic tree, print it back. Then parse *that* and print again.
+> Parse `shell2/src/kanban/main.lua` (342 lines of real code) with full-moon, **lower it to the
+> semantic tree**, and print *that* back. Then parse the result and print again.
 
 Pass conditions:
 
 - **Print is idempotent** — the second print equals the first. (Not byte-identical to the input:
-  the printer normalises formatting, and that is intended.)
+  our lowering normalises formatting, and that is intended.)
 - **Comments survive** the round trip, in the right places.
 - **It still runs** — the printed source loads and behaves identically.
 
-tree-sitter-lua is already vendored in this repo through inkjet (`code_highlight`, `code_editor`),
-so the parser is a known-good dependency rather than new risk.
+The parse step is now known-good (§8½), so the spike measures only the lowering, which is the part
+that can actually fail. Its cost dropped accordingly: the corpus, the harness and the pass/fail
+conditions all exist, and what has to be written is the schema and the printer.
 
 **Second spike, only if the first passes:** replace one function body the way an agent would,
 reparse that subtree, and confirm untouched siblings keep their ids. That is what makes "surgical"
