@@ -649,6 +649,51 @@ mod tests {
             .height()
     }
 
+    /// Paint re-shapes a string into the box the layout reserved, so the two have to agree about
+    /// how many lines that is. `paint_shapes_text_to_the_box_the_layout_reserved` above covers a
+    /// paragraph — and a paragraph is where this bug hides, because both paths wrap it identically
+    /// and the heights match. The failure needs a label that fits on *one* line and whose natural
+    /// width is fractional.
+    ///
+    /// "+ new workspace" at 13pt measures 105.0010. Taffy rounds the reserved box to 105, and paint,
+    /// handed one thousandth of a point less than the string that sized it, breaks the line: a
+    /// one-line label painted as two, in a box tall enough for one, at every window size. Reported
+    /// as "same everywhere, it has space it is not using", which is exactly right.
+    #[test]
+    fn paint_does_not_fold_a_label_the_layout_fitted_on_one_line() {
+        for label in [
+            "+ new workspace",
+            "+ Add another account",
+            "+ Add item",
+            "Add card",
+            "Create Identity",
+        ] {
+            let placed = solve::<()>(
+                row()
+                    .h(36.0)
+                    .px(14.0)
+                    .center()
+                    .child(text(label).font_size(13.0)),
+                &mut TextEngine::new(),
+                (800.0, 600.0),
+                &Store::new(),
+            );
+            let p = placed
+                .iter()
+                .find(|p| p.appearance.text.is_some())
+                .expect("no text node");
+            let ts = p.appearance.text.as_ref().unwrap();
+            let (_, painted) =
+                crate::paint::measure_placed(&mut TextEngine::new(), ts, p.rect, p.pad);
+
+            assert!(
+                (painted as f64 - p.rect.height()).abs() < 1.0,
+                "{label:?}: layout reserved {:.2} tall, paint shaped {painted:.2} — it folded",
+                p.rect.height()
+            );
+        }
+    }
+
     /// `no_wrap` outranks a definite width, which is the case `no_shrink` cannot reach: a label
     /// centred in a *column* has its width set on the cross axis, where `flex_shrink` does nothing
     /// at all. This is the shape of `login.rs`'s "+ Add another account", measured at 139pt.
