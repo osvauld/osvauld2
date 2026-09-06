@@ -609,6 +609,64 @@ mod tests {
         );
     }
 
+    /// `shell2`'s header, small enough to reproduce the bug: back button, title, `grow` spacer,
+    /// action button. Narrow it and the spacer collapses first, then every remaining item shrinks
+    /// together — a flex item's floor being its *min-content* width, which for a text leaf is the
+    /// longest word. So the button does not clip, it folds "+ Add item" into stacked words inside
+    /// a 36pt box. Measured at 260pt before the fix: 28 wide and 53 tall, three lines.
+    fn header(action: El<()>) -> El<()> {
+        let page = col().full().pad(40.0).gap(24.0).child(
+            row()
+                .gap(12.0)
+                .align_center()
+                .child(text("My workspace").font_size(15.0))
+                .child(col().grow())
+                .child(action),
+        );
+        page
+    }
+
+    /// The label's height, which is the only portable way to say "it wrapped" — font metrics are
+    /// the OS's, so no absolute pixel count here would travel.
+    fn label_height(root: El<()>) -> f64 {
+        solve(root, &mut TextEngine::new(), (260.0, 600.0), &Store::new())
+            .iter()
+            .find(|p| {
+                p.appearance
+                    .text
+                    .as_ref()
+                    .is_some_and(|t| t.text == "+ Add item")
+            })
+            .expect("no label")
+            .rect
+            .height()
+    }
+
+    #[test]
+    fn a_squeezed_row_folds_a_button_label_without_no_shrink() {
+        let bare = row()
+            .h(36.0)
+            .px(14.0)
+            .center()
+            .child(text("+ Add item").font_size(13.0));
+        let held = row()
+            .h(36.0)
+            .px(14.0)
+            .center()
+            .no_shrink()
+            .child(text("+ Add item").font_size(13.0));
+
+        let (folded, kept) = (label_height(header(bare)), label_height(header(held)));
+        assert!(
+            kept < folded,
+            "no_shrink changed nothing: {kept} vs {folded} — is the row wide enough to prove it?"
+        );
+        assert!(
+            folded > kept * 1.5,
+            "the label did not actually fold, so this test proves nothing: {folded} vs {kept}"
+        );
+    }
+
     /// And a ceiling holds against a child that would otherwise take everything.
     #[test]
     fn max_w_caps_a_full_width_child() {

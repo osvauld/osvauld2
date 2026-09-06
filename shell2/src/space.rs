@@ -71,6 +71,9 @@ impl SpaceScreen {
             .px(14.0)
             .radius(6.0)
             .center()
+            // See `item.rs` — a label is not a paragraph, and a squeezed row folds it into
+            // stacked words rather than clipping it.
+            .no_shrink()
             .id("add_space")
             .fill(theme::accent())
             .hover_fill(theme::accent_hover())

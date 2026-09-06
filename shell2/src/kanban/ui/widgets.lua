@@ -56,6 +56,11 @@ function M.grip(id, active, on_drag)
 	})
 end
 
+-- Both of these sit on the *main* axis of a row next to text that can be any length — the badge
+-- beside a column name, the button beside a card's body. A flex item shrinks to its min-content
+-- width before its neighbour gives way, so without `no_shrink` a long card title squashes the
+-- delete button until its glyph wraps, and the control the user is reaching for is the one that
+-- disappears. Grows nothing, costs nothing, and only matters when space runs out.
 function M.badge(n)
 	return ui.row({
 		px = 7,
@@ -63,6 +68,7 @@ function M.badge(n)
 		radius = 10,
 		fill = C.line_soft,
 		center = true,
+		no_shrink = true,
 		ui.text({ tostring(n), color = C.muted, font_size = 11 }),
 	})
 end
@@ -73,6 +79,7 @@ function M.icon_button(glyph, on_press, hover)
 		h = 22,
 		radius = 6,
 		center = true,
+		no_shrink = true,
 		hover_fill = hover or C.line,
 		ui.text({ glyph, color = C.muted, font_size = 13 }),
 		on_click = on_press,

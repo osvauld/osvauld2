@@ -36,6 +36,10 @@ impl ItemsScreen {
             .px(14.0)
             .radius(6.0)
             .center()
+            // Without this a narrow window folds the label into three stacked words rather than
+            // letting the title beside it give way — the spacer collapses first, then everything
+            // shrinks to min-content together.
+            .no_shrink()
             .id("add_item")
             .fill(theme::accent())
             .hover_fill(theme::accent_hover())
@@ -48,6 +52,7 @@ impl ItemsScreen {
             .px(10.0)
             .radius(6.0)
             .center()
+            .no_shrink()
             .id("back")
             .hover_fill(theme::bg_1())
             .tint(120.0)

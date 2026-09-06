@@ -442,6 +442,21 @@ impl<M> El<M> {
     pub fn size(self, w: f32, h: f32) -> Self {
         self.w(w).h(h)
     }
+    /// Refuse to be shrunk when the row runs out of room.
+    ///
+    /// Flex items shrink by default, and a text leaf's floor is its *min-content* width — the
+    /// longest word. So a squeezed header does not clip its button, it folds the label: "+ Add
+    /// item" becomes three stacked words inside a 36pt-tall box. A control is not a paragraph, and
+    /// `text_wraps_to_the_width_its_parent_offers` is the behaviour we want for prose and never
+    /// for a label.
+    ///
+    /// Only acts on the **main** axis — in a `col`, a child's width is the cross axis and this
+    /// does nothing to it. `build` already applies the same thing to the children of a main-axis
+    /// scroller, which is why the kanban's columns keep their width and a header's button does not.
+    pub fn no_shrink(mut self) -> Self {
+        self.layout.flex_shrink = 0.0;
+        self
+    }
     /// Bounds, not a size. A dragged boundary needs one side elastic (see the resize table in
     /// docs/design/code-as-tree.md §11), and elastic without a floor collapses to nothing the
     /// first time the window is narrow — these are how a `grow` child says how far it will go.
