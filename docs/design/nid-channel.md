@@ -133,6 +133,10 @@ lookup is two table indexes and no allocation.
 
 ## 3. What the printer has to change
 
+> **Built.** `every_table_opens_on_its_own_line` in `lua_tree`'s suite holds the invariant, reading
+> brace positions back out of the printed text with full-moon so a printer that lies about its own
+> layout cannot pass. It took two rules, not one — see §3.1.
+
 **Rule: a call whose arguments contain a table constructor starts its own line.**
 
 Without it the map is not a function. `main.lua:55` today:
@@ -151,6 +155,28 @@ would also get its own line — which costs some vertical space and nothing else
 
 §6 already gives the printer total authority over formatting, so this is a rule change, not a
 design change.
+
+### 3.1 It took two rules
+
+The rule above is about a table that *contains* a call, and it is where `multiline` fixes it:
+`has_table` replaces `matches!(value(e), Expr::Table(_))` and recurses through calls, indexes,
+unops, binops and parens. `Expr::Fn` is deliberately not recursed into — it already forces its
+container open, and a body's tables are printed by `block`, a statement to a line.
+
+That fixed `main.lua` and left four sites in `model.lua`:
+
+```lua
+board:set({ "columns" }, doc.list({ … }))
+```
+
+No enclosing table is involved at all, so no `multiline` rule can reach it — the collision is
+between two *arguments*. So a call carrying more than one table-bearing argument breaks its
+argument list, one argument per line. Structural, so the second print still agrees with the first;
+no trailing comma, which Lua rejects there.
+
+The lesson is small and worth keeping: "every constructor on its own line" is a property of the
+whole output, and a rule stated over one construct only covers the collisions that construct
+causes. The test is over the output, which is why it found the second case.
 
 ---
 
@@ -204,13 +230,38 @@ unlikely and worth knowing about rather than defending against.
 | printer | print | one extra output; slightly taller files |
 
 The second row is the one to watch. `lib.rs:611` already carries a warning that `walk` is ~80% of a
-frame's Lua cost and that a `get` plus a `format!` per element is why the dev breadcrumb is
-gated. The `cost_curve` test measures exactly this shape, and the earlier estimate — one extra
-string prop is +50–130 ns/el against the breadcrumb's +490–820 — bounds it.
+frame's Lua cost and that a `get` plus a `format!` per element is why the dev breadcrumb is gated.
 
-If it does not fit, the id does not have to be a string. It has to be unique and cheap to compare;
-an interned `u32` handed out at map-install time would keep the boundary crossing but drop the
-allocation.
+### 6.1 Measured
+
+`cost_curve`'s **id probe** (`app_host/src/tests.rs`) stands in for `_nid`: `walk` already reads
+`id` the way `_nid` would be read — `node.get::<Option<String>>` at `lib.rs:702`, then an
+`Arc<str>` on the `El` — so the marginal cost of one more identity string is measurable without
+building anything. One *more* prop, not a swapped one, because that is what `_nid` is.
+
+Release, four runs, the two with the cleanest `lua` control:
+
+| n | no id | + const id | Δ ns/el |
+|---|---|---|---|
+| 1 001 | 1657 / 1755 | 1878 / 1938 | +221 / +183 |
+| 10 001 | 1909 / 1952 | 2098 / 2132 | **+189 / +180** |
+
+**~+180–220 ns/el**, about 130 of it in `walk` and 60 in Lua. Higher than this note's first
+estimate of +50–130, and still a fraction of the dev breadcrumb's +490–820.
+
+Two things fall out of the same table. `walk` is flat between a constant id and a per-element
+`"k" .. i` (16.55 vs 16.32 ms, 16.83 vs 16.62) — it cannot tell an interned literal from a fresh
+string, so the whole difference between those rows is Lua-side concatenation. And a nid *is* a
+literal: the printer writes it into the chunk, Luau interns it once at load, and the constant row
+is therefore the row that bounds it.
+
+**Verdict: a `String` is affordable.** A few hundred elements is under 0.1 ms and a thousand is
+~0.2 ms. It only becomes material past ~5 000 elements, where the frame is already blown without
+it — at 10 001 the app costs 19.5 ms before any id at all. So the string is not what to fix first.
+
+If that changes, the id does not have to be a string. It has to be unique and cheap to compare, and
+an interned `u32` handed out at map-install time would drop the allocation — but not the boundary
+crossing, which is most of the `walk` share. The ceiling on that saving is roughly half of 130.
 
 ---
 
@@ -234,7 +285,8 @@ printer would know without guessing.
 
 ## 8. Open before building
 
-1. **Cost.** Measure `_nid` in `walk` against `cost_curve` before committing to a string.
+1. ~~**Cost.** Measure `_nid` in `walk` against `cost_curve` before committing to a string.~~
+   Answered in §6.1: ~+180–220 ns/el, affordable, use a string.
 2. **Where the map lives.** It is per-VM and rebuilt by `reload()` along with everything else
    (`lib.rs:193`), which is free. But `reload` stages a whole second app — the map has to be built
    inside `build`, not beside it, or a failed reload leaves a map pointing at the wrong text.

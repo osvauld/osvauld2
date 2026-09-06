@@ -798,11 +798,9 @@ end
 ///
 /// `els` is what the app *intends* to build; if the interrupt budget kills the
 /// frame first, that's the finding, so it's reported rather than unwrapped.
-/// Colour probe: identical shape, identical *prop count*, varying only how many of those
-/// props are colour strings. The slope across 0/1/2 is the per-colour cost — a Lua string
-/// crossing the boundary, a Rust `String` allocation (`props.rs:41`), and a full
-/// `csscolorparser` parse — separated from everything else `walk` does.
-fn colour_app(props: &str) -> String {
+/// The probe body: identical shape, N leaves, only the prop list varying. Used by the colour
+/// probe (same prop *count*, differing types) and by the id probe (one prop more).
+fn probe_app(props: &str) -> String {
     const T: &str = r##"
 local C = { bg = "#0d1117", cell = "#161b22", text = "#e6edf3" }
 
@@ -907,7 +905,7 @@ fn cost_curve() {
         }
     }
 
-    // Colour probe runs once, at dev = false, so the breadcrumb doesn't dilute the slope.
+    // Both probes run once, at dev = false, so the breadcrumb doesn't dilute the slope.
     eprintln!("\n================ colour probe (dev = false) ================");
     eprintln!("same element count, same 2 props each — only the prop *types* differ\n");
     for n in [1_000usize, 10_000] {
@@ -919,7 +917,39 @@ fn cost_curve() {
             frame(
                 name,
                 &format!("local N = {n}"),
-                &colour_app(props),
+                &probe_app(props),
+                n + 1,
+                false,
+            );
+        }
+        eprintln!();
+    }
+
+    // Id probe: what one more identity string per element costs. `id` stands in for `_nid`
+    // (docs/design/nid-channel.md §8.1) because `walk` already reads it the way `_nid` would be
+    // read — `node.get::<Option<String>>` at lib.rs:702, then an `Arc<str>` on the `El`.
+    //
+    // The two `id` rows differ in where the *Lua* string comes from, and that is the point. A
+    // nid is a literal the printer wrote into the chunk, so Luau interns it once at load and
+    // hands back the same object every frame; only the Rust side allocates. An author's
+    // `"k" .. i` is built fresh per element per frame. `const` is the row that bounds `_nid`;
+    // `unique` is there to show how much of the cost is the concatenation rather than the
+    // boundary, so the two are not confused for each other.
+    eprintln!("\n================ id probe (dev = false) ================");
+    eprintln!("one *more* prop, not a swapped one — the marginal cost of an identity string\n");
+    for n in [1_000usize, 10_000] {
+        for (name, props) in [
+            ("no id", "font_size = 13, opacity = 1.0"),
+            ("+ const id", "font_size = 13, opacity = 1.0, id = \"k3f9\""),
+            (
+                "+ unique id",
+                "font_size = 13, opacity = 1.0, id = \"k\" .. i",
+            ),
+        ] {
+            frame(
+                name,
+                &format!("local N = {n}"),
+                &probe_app(props),
                 n + 1,
                 false,
             );
