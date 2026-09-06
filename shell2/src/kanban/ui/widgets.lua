@@ -33,6 +33,29 @@ function M.guide_v(id, on)
 	})
 end
 
+-- The resize grip: a hairline in the gutter to the right of a column. Same shape as `guide_v` on
+-- purpose — it stands in the same kind of gap and must not push the columns around by being there.
+--
+-- Faint but never invisible. `guide_v` can fade to nothing because a drop target announces itself
+-- when it becomes relevant; a grip has to be found before it is useful, and a control you can only
+-- hit by guessing where it is is not a control. Hover brightens it, dragging holds it bright.
+--
+-- Pure like everything else here: it is handed the handler rather than reaching for `update`.
+function M.grip(id, active, on_drag)
+	return ui.col({
+		px = 4,
+		ui.col({
+			id = id,
+			w = 3,
+			grow = true,
+			radius = 2,
+			fill = active and C.accent or C.line,
+			hover_fill = C.accent,
+			on_drag = on_drag,
+		}),
+	})
+end
+
 function M.badge(n)
 	return ui.row({
 		px = 7,

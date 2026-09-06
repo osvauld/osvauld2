@@ -1,0 +1,12 @@
+[package]
+name = "lua_tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Lua as a tree, not as text. Parses with full-moon (the `luau` feature matters — app_host
+# runs Luau, not 5.4), lowers to the semantic schema in `schema.rs`, and prints back.
+# See docs/design/code-as-tree.md; the schema is §10.
+[dependencies]
+full_moon = { version = "2.2", features = ["luau"] }
+uuid = { version = "1.24.0", features = ["v4"] }

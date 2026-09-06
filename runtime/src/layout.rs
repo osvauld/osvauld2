@@ -349,7 +349,7 @@ pub(crate) fn solve<M>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::el::{rich, text, text_input};
+    use crate::el::{rich, row, text, text_input};
     use vello::peniko::Color;
 
     /// Long enough to overflow any of the widths below, with no long word to get stuck on.
@@ -363,6 +363,23 @@ mod tests {
             .find(|p| p.appearance.text.is_some())
             .expect("no text node")
             .rect
+    }
+
+    /// Widths of named nodes, from one solve. Sizing tests read children by id rather than by
+    /// position, so a change to the emit order can't quietly make them assert about another node.
+    /// One call for all of them because `El` is not `Clone` — it carries handler closures.
+    fn widths_of(root: El<()>, ids: &[&str]) -> Vec<f64> {
+        let placed = solve(root, &mut TextEngine::new(), (800.0, 600.0), &Store::new());
+        ids.iter()
+            .map(|id| {
+                placed
+                    .iter()
+                    .find(|p| p.id.as_deref() == Some(*id))
+                    .unwrap_or_else(|| panic!("no node with id {id}"))
+                    .rect
+                    .width()
+            })
+            .collect()
     }
 
     /// The acceptance test for the whole hook, and the bug it was written against: before it, a
@@ -539,6 +556,69 @@ mod tests {
             (short.width(), short.height()),
             (long.width(), long.height()),
             "an input resized itself to fit its value"
+        );
+    }
+
+    // ── elastic sizing ───────────────────────────────────────────────────────
+    // What a splitter drag has to be able to write. The `grow`↔`grow` row of the resize table in
+    // docs/design/code-as-tree.md §11 was inexpressible while `grow` set `flex_grow = 1.0` flatly:
+    // two elastic siblings were permanently 50/50, so a boundary between them had nowhere to put
+    // the drag. These say the knobs exist and that Taffy honours them.
+
+    /// A ratio, not a flag. 2:1 of 600 is 400/200.
+    #[test]
+    fn two_grow_siblings_split_by_their_ratio() {
+        let root = row()
+            .w(600.0)
+            .child(col().id("a").grow_by(2.0))
+            .child(col().id("b").grow_by(1.0));
+        let w = widths_of(root, &["a", "b"]);
+
+        assert!((w[0] - 400.0).abs() < 1.0, "a was {}, expected 400", w[0]);
+        assert!((w[1] - 200.0).abs() < 1.0, "b was {}, expected 200", w[1]);
+    }
+
+    /// The old spelling still means what it meant, so no app has to change. `grow = true` reaches
+    /// this path through `props.rs` as `grow_by(1.0)`.
+    #[test]
+    fn plain_grow_is_still_an_even_split() {
+        let root = row()
+            .w(600.0)
+            .child(col().id("a").grow())
+            .child(col().id("b").grow());
+        let w = widths_of(root, &["a", "b"]);
+
+        assert!((w[0] - 300.0).abs() < 1.0, "a was {}", w[0]);
+        assert!((w[1] - 300.0).abs() < 1.0, "b was {}", w[1]);
+    }
+
+    /// Elastic without a floor collapses. The sidebar dragged shut that cannot be dragged back is
+    /// the failure this prevents, so the floor has to beat the ratio rather than lose to it.
+    #[test]
+    fn min_w_outranks_the_grow_ratio() {
+        let root = row()
+            .w(600.0)
+            .child(col().id("a").grow_by(1.0).min_w(500.0))
+            .child(col().id("b").grow_by(5.0));
+        let w = widths_of(root, &["a"]);
+
+        assert!(
+            (w[0] - 500.0).abs() < 1.0,
+            "a was {}, expected its 500 floor",
+            w[0]
+        );
+    }
+
+    /// And a ceiling holds against a child that would otherwise take everything.
+    #[test]
+    fn max_w_caps_a_full_width_child() {
+        let root = row().w(600.0).child(col().id("a").w_full().max_w(150.0));
+        let w = widths_of(root, &["a"]);
+
+        assert!(
+            (w[0] - 150.0).abs() < 1.0,
+            "a was {}, expected its 150 cap",
+            w[0]
         );
     }
 }

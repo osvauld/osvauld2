@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 mod reload;
 mod require;
+mod round_trip;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
@@ -65,6 +66,43 @@ fn walk_builds_el() {
     let mut ctx = Ctx::new(&mut handlers, identity());
     assert!(walk(node, &mut ctx).is_ok());
 }
+/// Walk one node written in Lua, and report what `props::apply` made of it.
+fn walk_props(src: &str) -> mlua::Result<()> {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua.load(src).eval().unwrap();
+    let mut handlers: Vec<Function> = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    walk(node, &mut ctx).map(|_| ())
+}
+
+/// `grow` is the one prop that takes two Lua types, so it is the one that cannot go through the
+/// `prop!` macro — its arms are keyed on a single type each. The ratio is what a drag between two
+/// elastic siblings has to write (docs/design/code-as-tree.md §11); the bool is what every app
+/// already says and must keep meaning 1.0. The layout consequences are asserted where the layout
+/// is, in `runtime::layout` — this is about the decode.
+#[test]
+fn grow_takes_a_bool_or_a_ratio() {
+    for src in [
+        r#"return ui.col{ grow = true }"#,
+        r#"return ui.col{ grow = false }"#,
+        r#"return ui.col{ grow = 2 }"#,
+        r#"return ui.col{ grow = 0.5 }"#,
+    ] {
+        assert!(walk_props(src).is_ok(), "{src}");
+    }
+    // Still a decode, not a shrug: a string is neither spelling.
+    let err = walk_props(r#"return ui.col{ grow = "wide" }"#)
+        .expect_err("a string grow must not be accepted")
+        .to_string();
+    assert!(err.contains("expected a number"), "{err}");
+}
+
+#[test]
+fn size_bounds_are_props() {
+    assert!(walk_props(r#"return ui.col{ min_w = 100, max_w = 200 }"#).is_ok());
+    assert!(walk_props(r#"return ui.col{ min_h = 10, max_h = 20 }"#).is_ok());
+}
+
 #[test]
 fn walk_collects_handlers() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -797,11 +835,9 @@ end
 ///
 /// `els` is what the app *intends* to build; if the interrupt budget kills the
 /// frame first, that's the finding, so it's reported rather than unwrapped.
-/// Colour probe: identical shape, identical *prop count*, varying only how many of those
-/// props are colour strings. The slope across 0/1/2 is the per-colour cost — a Lua string
-/// crossing the boundary, a Rust `String` allocation (`props.rs:41`), and a full
-/// `csscolorparser` parse — separated from everything else `walk` does.
-fn colour_app(props: &str) -> String {
+/// The probe body: identical shape, N leaves, only the prop list varying. Used by the colour
+/// probe (same prop *count*, differing types) and by the id probe (one prop more).
+fn probe_app(props: &str) -> String {
     const T: &str = r##"
 local C = { bg = "#0d1117", cell = "#161b22", text = "#e6edf3" }
 
@@ -906,7 +942,7 @@ fn cost_curve() {
         }
     }
 
-    // Colour probe runs once, at dev = false, so the breadcrumb doesn't dilute the slope.
+    // Both probes run once, at dev = false, so the breadcrumb doesn't dilute the slope.
     eprintln!("\n================ colour probe (dev = false) ================");
     eprintln!("same element count, same 2 props each — only the prop *types* differ\n");
     for n in [1_000usize, 10_000] {
@@ -918,7 +954,39 @@ fn cost_curve() {
             frame(
                 name,
                 &format!("local N = {n}"),
-                &colour_app(props),
+                &probe_app(props),
+                n + 1,
+                false,
+            );
+        }
+        eprintln!();
+    }
+
+    // Id probe: what one more identity string per element costs. `id` stands in for `_nid`
+    // (docs/design/nid-channel.md §8.1) because `walk` already reads it the way `_nid` would be
+    // read — `node.get::<Option<String>>` at lib.rs:702, then an `Arc<str>` on the `El`.
+    //
+    // The two `id` rows differ in where the *Lua* string comes from, and that is the point. A
+    // nid is a literal the printer wrote into the chunk, so Luau interns it once at load and
+    // hands back the same object every frame; only the Rust side allocates. An author's
+    // `"k" .. i` is built fresh per element per frame. `const` is the row that bounds `_nid`;
+    // `unique` is there to show how much of the cost is the concatenation rather than the
+    // boundary, so the two are not confused for each other.
+    eprintln!("\n================ id probe (dev = false) ================");
+    eprintln!("one *more* prop, not a swapped one — the marginal cost of an identity string\n");
+    for n in [1_000usize, 10_000] {
+        for (name, props) in [
+            ("no id", "font_size = 13, opacity = 1.0"),
+            ("+ const id", "font_size = 13, opacity = 1.0, id = \"k3f9\""),
+            (
+                "+ unique id",
+                "font_size = 13, opacity = 1.0, id = \"k\" .. i",
+            ),
+        ] {
+            frame(
+                name,
+                &format!("local N = {n}"),
+                &probe_app(props),
                 n + 1,
                 false,
             );
@@ -1833,10 +1901,19 @@ const KANBAN: [(&str, &str); 4] = [
 ];
 
 fn kanban_app(resolve: Resolve) -> LuaApp<LuaMsg> {
+    app_from(KANBAN.iter().map(|(p, b)| (*p, *b)), resolve)
+}
+
+/// `kanban_app` with the bodies handed in, so `round_trip` can run the same app from source that
+/// went through the printer.
+fn app_from<'a>(
+    files: impl Iterator<Item = (&'a str, &'a str)>,
+    resolve: Resolve,
+) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();
-    let files = src.get_map("files");
-    for (path, body) in KANBAN {
-        let t = files.insert_container(path, LoroText::new()).unwrap();
+    let map = src.get_map("files");
+    for (path, body) in files {
+        let t = map.insert_container(path, LoroText::new()).unwrap();
         t.insert(0, body).unwrap();
     }
     src.commit();
@@ -2031,4 +2108,175 @@ fn card_col(app: &LuaApp<LuaMsg>, id: &str) -> String {
         }
     }
     panic!("no card {id}");
+}
+
+/// A column's stored width, read out of the mirror by id.
+fn col_w(app: &LuaApp<LuaMsg>, id: &str) -> f64 {
+    let docs = app.docs.borrow();
+    let cols: Table = docs.get("board").unwrap().mirror.get("columns").unwrap();
+    for i in 1..=cols.raw_len() {
+        let c: Table = cols.get(i).unwrap();
+        if c.get::<String>("id").unwrap() == id {
+            return c.get::<f64>("w").unwrap();
+        }
+    }
+    panic!("no column {id}");
+}
+
+/// Every `id` in a `ui.*` tree that starts with `prefix`, depth-first.
+fn ids_with(node: &Table, prefix: &str, out: &mut Vec<String>) {
+    if let Ok(Some(id)) = node.get::<Option<String>>("id")
+        && id.starts_with(prefix)
+    {
+        out.push(id);
+    }
+    for pair in node.pairs::<Value, Value>() {
+        if let Ok((_, Value::Table(t))) = pair {
+            ids_with(&t, prefix, out);
+        }
+    }
+}
+
+/// The four tests below drive `model.lua` directly, which means every one of them would still pass
+/// if the grip were deleted from `main.lua` — a board that resizes perfectly and offers nothing to
+/// grab. So look for the control itself, one per column and keyed to it.
+#[test]
+fn the_kanban_draws_a_grip_for_every_column() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+
+    let tree = app
+        .view_fn
+        .as_ref()
+        .expect("no view closure")
+        .call::<Table>(())
+        .expect("the view failed to build");
+
+    let mut grips = Vec::new();
+    ids_with(&tree, "grip:", &mut grips);
+    grips.sort();
+    assert_eq!(
+        grips,
+        ["grip:c-doing", "grip:c-done", "grip:c-todo"],
+        "a grip is missing, or is not keyed to its column"
+    );
+}
+
+/// Drive a resize gesture: grab at `from`, release at `to`, both in the same coordinates the
+/// runtime hands a drag handler (`pos - grab`, so their difference is the pointer's travel).
+fn resize(app: &LuaApp<LuaMsg>, id: &str, from: f64, to: f64) {
+    app.vm
+        .load(format!(
+            r#"
+            local m = require('model')
+            m.update({{ kind = 'resize', id = '{id}', phase = 'start', x = {from} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'move', x = {to} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'end', x = {to} }})
+            "#
+        ))
+        .exec()
+        .unwrap();
+}
+
+/// Column width is board data, not view state and not source, so a resize takes the same route a
+/// card move does: pointer state while the gesture runs, one write at the end, mirror next frame.
+/// Nothing here is checkable by looking — the app cannot be launched from a test — so the
+/// assertion is on what the doc holds.
+#[test]
+fn the_kanban_resizes_a_column() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "seeded width");
+
+    resize(&app, "c-todo", 100.0, 180.0);
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "stale until the next frame");
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 380.0, "300 plus the 80pt travelled");
+
+    // Only the one column moved. A splitter that quietly rewrites its neighbour is the failure
+    // the fixed-width layout is supposed to make impossible, so say so.
+    assert_eq!(col_w(&app, "c-doing"), 300.0);
+    assert_eq!(col_w(&app, "c-done"), 300.0);
+}
+
+/// The doc is untouched *during* the gesture. Sixty frames of dragging is one op, not sixty —
+/// otherwise every resize floods the history and every peer replays the whole sweep.
+#[test]
+fn a_resize_in_flight_writes_nothing_to_the_doc() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    let _ = app.view();
+
+    app.vm
+        .load(
+            r#"
+            local m = require('model')
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 0 })
+            for i = 1, 60 do
+                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', x = i })
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "a live drag reached the doc");
+    assert_eq!(
+        app.vm
+            .load("return require('model').state.resize.w")
+            .eval::<f64>()
+            .unwrap(),
+        360.0,
+        "the width the frame should be drawing is not in pointer state"
+    );
+}
+
+/// The floor is not decoration. A column dragged to nothing has no grip left to drag it back by,
+/// and there is no undo for it — so the clamp has to run on every move, not once at release.
+#[test]
+fn a_resize_cannot_drag_a_column_away() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    let _ = app.view();
+
+    resize(&app, "c-todo", 0.0, -5000.0);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 180.0, "theme's col_w_min");
+
+    resize(&app, "c-todo", 0.0, 5000.0);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 620.0, "theme's col_w_max");
+}
+
+/// A brush against the grip is not an edit: a press with no drag must leave the doc alone, so an
+/// accidental touch does not put an op in every peer's history.
+///
+/// Both halves, because the negative one alone is worthless — a `flush` that never produces
+/// anything would pass it while the whole feature was dead.
+#[test]
+fn a_resize_that_never_moved_writes_nothing() {
+    let mut app = kanban_app(Rc::new(|_| Ok(None)));
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    puts.take(); // drop the seed
+    let _ = app.view();
+
+    app.vm
+        .load(
+            r#"
+            local m = require('model')
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 42 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', x = 42 })
+            "#,
+        )
+        .exec()
+        .unwrap();
+    app.flush(puts.recorder()).unwrap();
+    assert!(puts.take().is_empty(), "a press with no drag wrote to Loro");
+
+    // The same path, moved. This is what makes the assertion above mean something.
+    resize(&app, "c-todo", 0.0, 40.0);
+    app.flush(puts.recorder()).unwrap();
+    assert!(!puts.take().is_empty(), "a real resize wrote nothing");
 }

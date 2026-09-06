@@ -13,3 +13,8 @@ loro = "1.12.0"
 runtime = { path = "../runtime" }
 csscolorparser = "0.8.3"
 uuid = { version = "1.24.0", features = ["v4"] }
+
+# Tests only, and the direction matters: `lua_tree` must not know what a host is. This is the
+# one place the two meet — running printed source to check it still *means* what it meant.
+[dev-dependencies]
+lua_tree = { path = "../lua_tree" }
