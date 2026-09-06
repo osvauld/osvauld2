@@ -713,6 +713,9 @@ and the sort would go through clean. The catch that survives the redesign is the
 
 ### 13.2 The finding: `_nid` in text does not run
 
+> The proposed answer is `nid-channel.md`: the id is stamped by the **tagger**, not by the printer,
+> because the tagger is the one place in the system that knows a table is an element.
+
 The first run failed somewhere I had not predicted, and the error is worth quoting:
 
 ```
