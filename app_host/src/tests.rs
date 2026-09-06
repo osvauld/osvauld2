@@ -66,6 +66,43 @@ fn walk_builds_el() {
     let mut ctx = Ctx::new(&mut handlers, identity());
     assert!(walk(node, &mut ctx).is_ok());
 }
+/// Walk one node written in Lua, and report what `props::apply` made of it.
+fn walk_props(src: &str) -> mlua::Result<()> {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua.load(src).eval().unwrap();
+    let mut handlers: Vec<Function> = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    walk(node, &mut ctx).map(|_| ())
+}
+
+/// `grow` is the one prop that takes two Lua types, so it is the one that cannot go through the
+/// `prop!` macro — its arms are keyed on a single type each. The ratio is what a drag between two
+/// elastic siblings has to write (docs/design/code-as-tree.md §11); the bool is what every app
+/// already says and must keep meaning 1.0. The layout consequences are asserted where the layout
+/// is, in `runtime::layout` — this is about the decode.
+#[test]
+fn grow_takes_a_bool_or_a_ratio() {
+    for src in [
+        r#"return ui.col{ grow = true }"#,
+        r#"return ui.col{ grow = false }"#,
+        r#"return ui.col{ grow = 2 }"#,
+        r#"return ui.col{ grow = 0.5 }"#,
+    ] {
+        assert!(walk_props(src).is_ok(), "{src}");
+    }
+    // Still a decode, not a shrug: a string is neither spelling.
+    let err = walk_props(r#"return ui.col{ grow = "wide" }"#)
+        .expect_err("a string grow must not be accepted")
+        .to_string();
+    assert!(err.contains("expected a number"), "{err}");
+}
+
+#[test]
+fn size_bounds_are_props() {
+    assert!(walk_props(r#"return ui.col{ min_w = 100, max_w = 200 }"#).is_ok());
+    assert!(walk_props(r#"return ui.col{ min_h = 10, max_h = 20 }"#).is_ok());
+}
+
 #[test]
 fn walk_collects_handlers() {
     let (lua, _) = sandboxed_vm().unwrap();

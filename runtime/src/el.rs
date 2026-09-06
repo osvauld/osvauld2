@@ -442,6 +442,25 @@ impl<M> El<M> {
     pub fn size(self, w: f32, h: f32) -> Self {
         self.w(w).h(h)
     }
+    /// Bounds, not a size. A dragged boundary needs one side elastic (see the resize table in
+    /// docs/design/code-as-tree.md §11), and elastic without a floor collapses to nothing the
+    /// first time the window is narrow — these are how a `grow` child says how far it will go.
+    pub fn min_w(mut self, v: f32) -> Self {
+        self.layout.min_size.width = length(v);
+        self
+    }
+    pub fn max_w(mut self, v: f32) -> Self {
+        self.layout.max_size.width = length(v);
+        self
+    }
+    pub fn min_h(mut self, v: f32) -> Self {
+        self.layout.min_size.height = length(v);
+        self
+    }
+    pub fn max_h(mut self, v: f32) -> Self {
+        self.layout.max_size.height = length(v);
+        self
+    }
     /// Fill the available width / height (100%).
     pub fn w_full(mut self) -> Self {
         self.layout.size.width = percent(1.0);
@@ -455,8 +474,15 @@ impl<M> El<M> {
         self.w_full().h_full()
     }
     /// Grow to absorb free space along the main axis (e.g. a spacer pushing siblings apart).
-    pub fn grow(mut self) -> Self {
-        self.layout.flex_grow = 1.0;
+    pub fn grow(self) -> Self {
+        self.grow_by(1.0)
+    }
+    /// The same knob as a share rather than a flag. Two plain `grow` siblings are permanently
+    /// 50/50, which makes the `grow`↔`grow` row of §11's resize table inexpressible: dragging the
+    /// boundary between two elastic children has to write a *ratio* to both of them. `grow_by(2.0)`
+    /// beside `grow()` is 2:1.
+    pub fn grow_by(mut self, n: f32) -> Self {
+        self.layout.flex_grow = n;
         self
     }
     /// Center children on the cross axis only (e.g. vertically centering a row's contents).

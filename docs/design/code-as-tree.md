@@ -628,10 +628,22 @@ Taffy needs a concrete value, and **which** value depends on the edge rather tha
 resize undoes it. Row 1 — the sidebar splitter — works with today's layout and is most of what is
 wanted.
 
-Row 3 is currently inexpressible: `grow()` sets `flex_grow = 1.0` (`runtime/src/el.rs:458`,
-`prop!(grow)`), a flag rather than a ratio, so two `grow` siblings are permanently 50/50. And there
-is no `min_size`/`max_size` exposed at all. Both are already `f32` in Taffy; only the DSL flattens
-them. Two small additions.
+Row 3 *was* inexpressible: `grow()` set `flex_grow = 1.0` flatly, a flag rather than a ratio, so two
+`grow` siblings were permanently 50/50 and a boundary between them had nowhere to put the drag.
+There was no `min_size`/`max_size` exposed at all. Both were already `f32` in Taffy; only the DSL
+flattened them.
+
+> **Done.** `El::grow_by(f32)` is the ratio and `grow()` is `grow_by(1.0)`, so nothing an app has
+> already written changes meaning. `min_w`/`max_w`/`min_h`/`max_h` expose the bounds. On the Lua
+> side `grow` is the one prop that takes two types — `grow = true` is the old flag, `grow = 2` the
+> share — which is why it is a hand-written entry rather than a `prop!`, whose arms are keyed on
+> one type each. Four layout tests in `runtime::layout` assert the split, the unchanged default,
+> and that a floor outranks the ratio; the floor is the part that matters, since elastic without
+> one is a sidebar that can be dragged shut and not dragged back.
+
+Every row of the table is now writable. What is still missing is not the knob but the *address*:
+the drag has to know which two nodes it is between, which is §11's other half and the reason the
+nid channel exists.
 
 This also sharpens the writability check from §2: a splitter edits **two sibling nodes**, so the
 question is what the *edge* resolves to, one level up at the parent — not what the node's own `w` is.
