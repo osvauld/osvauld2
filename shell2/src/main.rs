@@ -218,7 +218,7 @@ impl Shell {
                         .hover_fill(theme::bd_2())
                         .tint(120.0)
                         .on_click(Msg::Close(cid))
-                        .child(text("×").font_size(13.0).color(theme::fg_3())),
+                        .child(text("×").font_size(13.0).no_wrap().color(theme::fg_3())),
                 );
             }
             tabs.push(el);

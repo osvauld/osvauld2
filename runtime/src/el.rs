@@ -29,6 +29,8 @@ pub(crate) struct TextSpec {
     pub size: f32,
     pub color: Color,
     pub runs: Vec<Run>,
+    /// False for a label. See [`El::no_wrap`].
+    pub wrap: bool,
 }
 
 /// Escape hatch: draw arbitrary vello (shapes and/or text) into the element's computed rect — e.g.
@@ -314,6 +316,7 @@ pub fn text<M>(s: impl Into<String>) -> El<M> {
         size: 15.0,
         color: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF),
         runs: Vec::new(),
+        wrap: true,
     });
     e
 }
@@ -680,6 +683,24 @@ impl<M> El<M> {
     pub fn color(mut self, c: Color) -> Self {
         if let Some(t) = &mut self.appearance.text {
             t.color = c;
+        }
+        self
+    }
+    /// Measure at max-content and never fold, whatever width the parent offers.
+    ///
+    /// The fix for a *label*, and distinct from [`El::no_shrink`], which stops the parent being
+    /// squeezed in the first place. `no_shrink` only acts on a row's main axis, so it cannot help
+    /// a control centred in a column; this works on any axis and whatever the cause, because it
+    /// takes the decision away from the layout entirely.
+    ///
+    /// The trade is that a label too long for its box overflows rather than folding — which is the
+    /// right failure for a control. A folded label is unreadable *and* silently changes the
+    /// element's height, so a fixed-height button paints its background behind only the first
+    /// line. Prose keeps the default: `text_wraps_to_the_width_its_parent_offers` is the whole
+    /// point of the parley hook and is not what this turns off.
+    pub fn no_wrap(mut self) -> Self {
+        if let Some(t) = &mut self.appearance.text {
+            t.wrap = false;
         }
         self
     }

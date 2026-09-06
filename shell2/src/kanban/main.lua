@@ -105,7 +105,7 @@ local function composer(c)
 			center = true,
 			fill = C.accent,
 			hover_fill = C.accent_hi,
-			ui.text({ "Add card", color = "#ffffff", font_size = 13 }),
+			ui.text({ "Add card", no_wrap = true, color = "#ffffff", font_size = 13 }),
 			on_click = send,
 		}),
 	})
@@ -160,7 +160,7 @@ local function column_of(c, list)
 			on_drag = function(phase, x, y)
 				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = x, y = y })
 			end,
-			ui.text({ c.name, color = C.text, font_size = 14 }),
+			ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			W.badge(#list),
 			ui.col({ grow = true }),
 			W.icon_button("x", function()
@@ -195,7 +195,7 @@ local function modal()
 		stroke = { 1, C.line },
 		fade_in = 120,
 		on_click = function() end,
-		ui.text({ "New column", color = C.text, font_size = 16 }),
+		ui.text({ "New column", no_wrap = true, color = C.text, font_size = 16 }),
 		ui.input({
 			value = m.name,
 			id = "col_name",
@@ -225,7 +225,7 @@ local function modal()
 				radius = 6,
 				center = true,
 				hover_fill = C.line_soft,
-				ui.text({ "Cancel", color = C.muted, font_size = 13 }),
+				ui.text({ "Cancel", no_wrap = true, color = C.muted, font_size = 13 }),
 				on_click = function()
 					update({ kind = "close_col" })
 				end,
@@ -237,7 +237,7 @@ local function modal()
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
-				ui.text({ "Create", color = "#ffffff", font_size = 13 }),
+				ui.text({ "Create", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = create,
 			}),
 		}),
@@ -294,7 +294,7 @@ return function()
 				pad = 12,
 				fill = C.panel,
 				stroke = { 1, C.accent },
-				ui.text({ c.name, color = C.text, font_size = 14 }),
+				ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			})
 		end
 	end
@@ -330,7 +330,7 @@ return function()
 			px = 24,
 			py = 14,
 			align_center = true,
-			ui.text({ "Board", color = C.text, font_size = 18 }),
+			ui.text({ "Board", no_wrap = true, color = C.text, font_size = 18 }),
 			W.badge(#cards),
 			ui.col({ grow = true }),
 			ui.button({
@@ -340,7 +340,7 @@ return function()
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
-				ui.text({ "+  Column", color = "#ffffff", font_size = 13 }),
+				ui.text({ "+  Column", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = function()
 					update({ kind = "open_col" })
 				end,

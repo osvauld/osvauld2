@@ -161,7 +161,7 @@ impl TodoScreen {
             .fill(theme::accent())
             .hover_fill(theme::accent_press())
             .on_click(Msg::New)
-            .child(text("Add todo"))
+            .child(text("Add todo").no_wrap())
             .id("add_todo")
             .slide_in((200.0, 0.0), 500.0);
         let mut todos = Vec::new();
@@ -175,7 +175,7 @@ impl TodoScreen {
                 .on_drag(format!("todorow:{}", r.id), move |e| {
                     Msg::Reorder(todo_id, e)
                 })
-                .child(text("::").color(theme::fg_4()));
+                .child(text("::").no_wrap().color(theme::fg_4()));
             let editing = self.editing == Some(r.id);
             let t_row = if editing {
                 text_input(&r.text, id.clone(), move |s| Msg::Update(s, todo_id))
@@ -204,14 +204,14 @@ impl TodoScreen {
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
                 .on_click(Msg::Delete(r.id))
-                .child(text("x").font_size(14.0).color(theme::fg_4()));
+                .child(text("x").font_size(14.0).no_wrap().color(theme::fg_4()));
             let edit = col()
                 .size(24.0, 24.0)
                 .center()
                 .radius(4.0)
                 .hover_fill(theme::fg_2())
                 .on_click(Msg::ToggleEdit(r.id))
-                .child(text("E").font_size(14.0))
+                .child(text("E").font_size(14.0).no_wrap())
                 .fill(if editing {
                     theme::fg_4()
                 } else {
@@ -322,7 +322,7 @@ pub fn checkbox<M>(checked: bool, msg: M) -> El<M> {
     if checked {
         b = b
             .fill(theme::accent())
-            .child(text("✓").font_size(12.0).color(theme::fg_1()))
+            .child(text("✓").font_size(12.0).no_wrap().color(theme::fg_1()))
             .hover_stroke(1.0, theme::accent());
     } else {
         b = b

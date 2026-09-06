@@ -46,7 +46,12 @@ impl ItemsScreen {
             .press_fill(theme::accent_press())
             .tint(120.0)
             .on_click(Msg::Items(ItemsScreenMsg::Upload))
-            .child(text("+ Add item").font_size(13.0).color(theme::bg_page()));
+            .child(
+                text("+ Add item")
+                    .font_size(13.0)
+                    .no_wrap()
+                    .color(theme::bg_page()),
+            );
         let back = row()
             .h(36.0)
             .px(10.0)
@@ -57,7 +62,7 @@ impl ItemsScreen {
             .hover_fill(theme::bg_1())
             .tint(120.0)
             .on_click(Msg::Items(ItemsScreenMsg::Back))
-            .child(text("←").font_size(15.0).color(theme::fg_3()));
+            .child(text("←").font_size(15.0).no_wrap().color(theme::fg_3()));
         let header = row()
             .gap(12.0)
             .align_center()

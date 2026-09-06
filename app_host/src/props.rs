@@ -217,6 +217,7 @@ impl<M: 'static> Registry<M> {
         prop!(stroke_dash, f32, Color, f32, f32),
         prop!(opacity, f32),
         prop!(font_size, f32),
+        prop!(no_wrap),
         // hover
         prop!(hover_fill, Color),
         prop!(hover_stroke, f32, Color),
