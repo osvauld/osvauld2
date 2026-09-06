@@ -69,7 +69,10 @@ fn wordmark() -> El<Msg> {
 impl SignupForm {
     pub fn view(&self) -> El<Msg> {
         let mut panel_children = Vec::new();
-        let label = text("Username").font_size(13.0).color(theme::fg_3());
+        let label = text("Username")
+            .font_size(13.0)
+            .no_wrap()
+            .color(theme::fg_3());
         let label_input = text_input(&self.label, "label", |s| Msg::Signup(SignupMsg::Label(s)))
             .h(40.0)
             .w(PANEL_W)
@@ -82,7 +85,10 @@ impl SignupForm {
 
         let label_el = col().gap(4.0).child(label).child(label_input);
 
-        let pass = text("Password").font_size(13.0).color(theme::fg_3());
+        let pass = text("Password")
+            .font_size(13.0)
+            .no_wrap()
+            .color(theme::fg_3());
         let password_input =
             text_input(&self.pass, "password", |s| Msg::Signup(SignupMsg::Pass(s)))
                 .h(40.0)
@@ -97,7 +103,7 @@ impl SignupForm {
         let mut submit_button = row()
             .center()
             .gap(8.0)
-            .child(text("Create Identity"))
+            .child(text("Create Identity").no_wrap())
             .fill(theme::accent())
             .press_fill(theme::accent_press())
             .h(44.0)

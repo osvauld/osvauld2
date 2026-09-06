@@ -62,6 +62,7 @@ impl SpaceScreen {
                 .child(
                     text("press ⏎ to create")
                         .font_size(11.0)
+                        .no_wrap()
                         .color(theme::fg_3()),
                 );
         }
@@ -83,6 +84,7 @@ impl SpaceScreen {
             .child(
                 text("+ new workspace")
                     .font_size(13.0)
+                    .no_wrap()
                     .color(theme::bg_page()),
             );
         if self.add_space {
@@ -100,6 +102,7 @@ impl SpaceScreen {
                 .child(
                     text("⏎ create · esc cancel")
                         .font_size(11.0)
+                        .no_wrap()
                         .color(theme::fg_3()),
                 );
             add_btn = add_btn.overlay(

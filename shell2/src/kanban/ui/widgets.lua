@@ -69,7 +69,7 @@ function M.badge(n)
 		fill = C.line_soft,
 		center = true,
 		no_shrink = true,
-		ui.text({ tostring(n), color = C.muted, font_size = 11 }),
+		ui.text({ tostring(n), no_wrap = true, color = C.muted, font_size = 11 }),
 	})
 end
 
@@ -81,7 +81,7 @@ function M.icon_button(glyph, on_press, hover)
 		center = true,
 		no_shrink = true,
 		hover_fill = hover or C.line,
-		ui.text({ glyph, color = C.muted, font_size = 13 }),
+		ui.text({ glyph, no_wrap = true, color = C.muted, font_size = 13 }),
 		on_click = on_press,
 	})
 end
@@ -92,7 +92,7 @@ function M.empty_slot(on)
 		center = true,
 		radius = 8,
 		stroke = { 1, on and C.accent or C.line_soft },
-		ui.text({ "drop a card here", color = on and C.accent or C.muted, font_size = 12 }),
+		ui.text({ "drop a card here", no_wrap = true, color = on and C.accent or C.muted, font_size = 12 }),
 	})
 end
 

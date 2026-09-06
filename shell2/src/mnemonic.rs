@@ -50,7 +50,7 @@ impl Mnemonic {
         let mut continue_button = col()
             .pad(20.0)
             .radius(6.0)
-            .child(text("Continue").color(theme::fg_1()))
+            .child(text("Continue").no_wrap().color(theme::fg_1()))
             .fill(theme::fg_4());
         if self.accepted {
             continue_button = continue_button
@@ -91,7 +91,7 @@ fn checkbox(checked: bool, label: &str, msg: Msg) -> El<Msg> {
     let mut mark = col().size(18.0, 18.0).radius(4.0).center();
     mark = if checked {
         mark.fill(theme::accent())
-            .child(text("✓").font_size(12.0).color(theme::fg_1()))
+            .child(text("✓").font_size(12.0).no_wrap().color(theme::fg_1()))
     } else {
         mark.stroke(1.0, theme::bd_2())
             .hover_stroke(1.0, theme::bd_3())

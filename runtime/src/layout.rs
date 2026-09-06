@@ -46,6 +46,9 @@ pub(crate) struct TextCtx {
     size: f32,
     /// Empty for a plain leaf. Copied for the same reason the string is.
     runs: Vec<Run>,
+    /// False for a label — see [`crate::El::no_wrap`]. Makes the answer below ignore `available`
+    /// entirely and report max-content.
+    wrap: bool,
 }
 
 /// Answer Taffy's "how big is this leaf?" for a text node.
@@ -62,7 +65,10 @@ fn measure_text(
     let Some(ctx) = ctx else {
         return Size::ZERO;
     };
+    // A label answers max-content whatever it is offered, so nothing downstream can fold it. It
+    // overflows instead, which is the right failure for a control (`El::no_wrap`).
     let max_width = match available.width {
+        _ if !ctx.wrap => None,
         AvailableSpace::Definite(w) => Some(w),
         // Parley refuses to break inside a word, so any width under the longest one *is*
         // min-content — see `text::tests::a_constraint_below_min_content_does_not_break_a_word`.
@@ -127,6 +133,7 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<TextCtx>) -> Mapped<M> {
             family: ts.family,
             size: ts.size,
             runs: ts.runs.clone(),
+            wrap: ts.wrap,
         }),
         _ => None,
     };
@@ -640,6 +647,35 @@ mod tests {
             .expect("no label")
             .rect
             .height()
+    }
+
+    /// `no_wrap` outranks a definite width, which is the case `no_shrink` cannot reach: a label
+    /// centred in a *column* has its width set on the cross axis, where `flex_shrink` does nothing
+    /// at all. This is the shape of `login.rs`'s "+ Add another account", measured at 139pt.
+    #[test]
+    fn a_label_does_not_fold_however_narrow_the_box() {
+        let boxed = |el: El<()>| col().w(80.0).center().child(el);
+        let folded = text_rect(boxed(text("+ Add another account").font_size(13.0)));
+        let kept = text_rect(boxed(
+            text("+ Add another account").font_size(13.0).no_wrap(),
+        ));
+
+        assert!(
+            folded.height() > kept.height(),
+            "the 80pt box did not fold the wrapping label: {folded:?}"
+        );
+        assert!(
+            kept.width() > 80.0,
+            "no_wrap must overflow the box, not shrink into it: {kept:?}"
+        );
+    }
+
+    /// And prose still wraps — the parley hook is the point of the whole measure path, and
+    /// `no_wrap` is opt-in precisely so this keeps working.
+    #[test]
+    fn no_wrap_is_opt_in_and_prose_still_wraps() {
+        let r = text_rect(col().w(200.0).child(text(PARA)));
+        assert!(r.width() <= 200.0, "prose stopped wrapping: {r:?}");
     }
 
     #[test]

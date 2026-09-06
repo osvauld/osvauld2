@@ -96,7 +96,7 @@ impl LoginScreen {
         let panel = col().w(PANEL_W).gap(8.0).child(wordmark()).child(acc_list);
         let passphrase_label = row()
             .gap(4.0)
-            .child(text("Passphrase.").color(theme::fg_3()))
+            .child(text("Passphrase.").no_wrap().color(theme::fg_3()))
             .child(text(&self.accounts[self.selected].label).color(theme::fg_2()));
         let passphrase_input = text_input(&self.passphrase, "passphrase", |m| {
             Msg::Login(LoginMsg::Passphrase(m))
@@ -115,7 +115,7 @@ impl LoginScreen {
             .h(44.0)
             .center()
             .id("login")
-            .child(text("Login").font_size(15.0).color(theme::fg_1()))
+            .child(text("Login").font_size(15.0).no_wrap().color(theme::fg_1()))
             .radius(6.0)
             .fill(theme::accent());
         login_button = if let Some(since) = self.pending {
@@ -165,6 +165,7 @@ impl LoginScreen {
             .child(
                 text("+ Add another account")
                     .font_size(13.0)
+                    .no_wrap()
                     .color(theme::fg_3()),
             );
 
