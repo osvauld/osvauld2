@@ -11,15 +11,20 @@
 --
 -- This module runs once per app instance -- `require` caches it -- so the seeding below happens
 -- once no matter how many files ask for the model.
+local C = require("theme")
+
 local board = doc:open("board")
 
 -- Module scope runs on every open, so seeding has to be guarded or reopening the app would
 -- wipe the board it just loaded.
+--
+-- `w` is seeded so the field is there to read, but every reader still says `c.w or C.col_w`:
+-- boards created before columns had a width are the common case, not the exotic one.
 if not board.columns then
 	board:set({ "columns" }, doc.list({
-		doc.map({ id = "c-todo", name = "Todo" }),
-		doc.map({ id = "c-doing", name = "In Progress" }),
-		doc.map({ id = "c-done", name = "Done" }),
+		doc.map({ id = "c-todo", name = "Todo", w = C.col_w }),
+		doc.map({ id = "c-doing", name = "In Progress", w = C.col_w }),
+		doc.map({ id = "c-done", name = "Done", w = C.col_w }),
 	}))
 end
 if not board.cards then
@@ -38,7 +43,7 @@ end
 -- `local drag` is file-scoped, and reassigning it here could never be seen from main.lua; a
 -- field on an exported table can. That is the whole cost of the split, and it is why there is
 -- exactly one of these tables rather than one per module.
-local S = { drag = nil, placement = nil, col_modal = false }
+local S = { drag = nil, placement = nil, col_modal = false, resize = nil }
 
 local actions = {}
 
@@ -48,6 +53,11 @@ local function index_of(list, id)
 			return i
 		end
 	end
+end
+
+local function find(list, id)
+	local i = index_of(list, id)
+	return i and list[i]
 end
 
 -- Loro's move removes then reinserts, so `to` is the index the element ends up at *after* its
@@ -168,6 +178,44 @@ function actions.drop_col(msg)
 	end
 end
 
+-- Column width goes in the doc, and the two things it is *not* are worth saying out loud.
+--
+-- Not source. The obvious home for a size is the `ui.col` that draws the column — that is what
+-- docs/design/code-as-tree.md §11 is about — but there is no such node: `column_of` is one
+-- constructor drawing every column, so main.lua has nothing in it that means "the Todo column".
+-- That is nid-channel.md §5's instance-identity limit, met the first time it mattered.
+--
+-- Not per-viewer state either, which is the other tempting answer. A wide column is a claim about
+-- the work in it, so it belongs to the board the way the column's name does — the next person to
+-- open this should see the board somebody arranged, not their own default.
+--
+-- The clamp runs on every move rather than once at the end, or the pointer walks past the limit
+-- and the column sits still until it comes all the way back.
+function actions.resize(msg)
+	if msg.phase == "start" then
+		local c = find(board.columns, msg.id)
+		local w = c and c.w or C.col_w
+		S.resize = { id = msg.id, from = w, x0 = msg.x, w = w }
+		return
+	end
+	if not (S.resize and S.resize.id == msg.id) then
+		return
+	end
+	if msg.phase == "move" then
+		local w = S.resize.from + msg.x - S.resize.x0
+		S.resize.w = math.max(C.col_w_min, math.min(C.col_w_max, w))
+	else
+		-- Written unconditionally, including when the press never moved. A guard here looked
+		-- obviously right and turned out to be theatre: Loro's own `insert` skips an op whose
+		-- value already matches, and `app_host`'s `:set` adds no check of its own, so an
+		-- unchanged width never reaches the history either way. Removing the guard fails no test,
+		-- which is how it was found. `a_resize_that_never_moved_writes_nothing` pins the behaviour
+		-- we are leaning on, so this comment stops being true loudly rather than quietly.
+		board:set({ "columns", msg.id, "w" }, S.resize.w)
+		S.resize = nil
+	end
+end
+
 function actions.open_col()
 	S.col_modal = true
 end
@@ -183,7 +231,7 @@ function actions.add_col()
 	if not m.name or m.name == "" then
 		return
 	end
-	board:insert({ "columns" }, doc.map({ id = uuid(), name = m.name }))
+	board:insert({ "columns" }, doc.map({ id = uuid(), name = m.name, w = C.col_w }))
 	m.name = ""
 	S.col_modal = false
 end

@@ -2109,3 +2109,174 @@ fn card_col(app: &LuaApp<LuaMsg>, id: &str) -> String {
     }
     panic!("no card {id}");
 }
+
+/// A column's stored width, read out of the mirror by id.
+fn col_w(app: &LuaApp<LuaMsg>, id: &str) -> f64 {
+    let docs = app.docs.borrow();
+    let cols: Table = docs.get("board").unwrap().mirror.get("columns").unwrap();
+    for i in 1..=cols.raw_len() {
+        let c: Table = cols.get(i).unwrap();
+        if c.get::<String>("id").unwrap() == id {
+            return c.get::<f64>("w").unwrap();
+        }
+    }
+    panic!("no column {id}");
+}
+
+/// Every `id` in a `ui.*` tree that starts with `prefix`, depth-first.
+fn ids_with(node: &Table, prefix: &str, out: &mut Vec<String>) {
+    if let Ok(Some(id)) = node.get::<Option<String>>("id")
+        && id.starts_with(prefix)
+    {
+        out.push(id);
+    }
+    for pair in node.pairs::<Value, Value>() {
+        if let Ok((_, Value::Table(t))) = pair {
+            ids_with(&t, prefix, out);
+        }
+    }
+}
+
+/// The four tests below drive `model.lua` directly, which means every one of them would still pass
+/// if the grip were deleted from `main.lua` — a board that resizes perfectly and offers nothing to
+/// grab. So look for the control itself, one per column and keyed to it.
+#[test]
+fn the_kanban_draws_a_grip_for_every_column() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+
+    let tree = app
+        .view_fn
+        .as_ref()
+        .expect("no view closure")
+        .call::<Table>(())
+        .expect("the view failed to build");
+
+    let mut grips = Vec::new();
+    ids_with(&tree, "grip:", &mut grips);
+    grips.sort();
+    assert_eq!(
+        grips,
+        ["grip:c-doing", "grip:c-done", "grip:c-todo"],
+        "a grip is missing, or is not keyed to its column"
+    );
+}
+
+/// Drive a resize gesture: grab at `from`, release at `to`, both in the same coordinates the
+/// runtime hands a drag handler (`pos - grab`, so their difference is the pointer's travel).
+fn resize(app: &LuaApp<LuaMsg>, id: &str, from: f64, to: f64) {
+    app.vm
+        .load(format!(
+            r#"
+            local m = require('model')
+            m.update({{ kind = 'resize', id = '{id}', phase = 'start', x = {from} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'move', x = {to} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'end', x = {to} }})
+            "#
+        ))
+        .exec()
+        .unwrap();
+}
+
+/// Column width is board data, not view state and not source, so a resize takes the same route a
+/// card move does: pointer state while the gesture runs, one write at the end, mirror next frame.
+/// Nothing here is checkable by looking — the app cannot be launched from a test — so the
+/// assertion is on what the doc holds.
+#[test]
+fn the_kanban_resizes_a_column() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    assert_eq!(app.error, None);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "seeded width");
+
+    resize(&app, "c-todo", 100.0, 180.0);
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "stale until the next frame");
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 380.0, "300 plus the 80pt travelled");
+
+    // Only the one column moved. A splitter that quietly rewrites its neighbour is the failure
+    // the fixed-width layout is supposed to make impossible, so say so.
+    assert_eq!(col_w(&app, "c-doing"), 300.0);
+    assert_eq!(col_w(&app, "c-done"), 300.0);
+}
+
+/// The doc is untouched *during* the gesture. Sixty frames of dragging is one op, not sixty —
+/// otherwise every resize floods the history and every peer replays the whole sweep.
+#[test]
+fn a_resize_in_flight_writes_nothing_to_the_doc() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    let _ = app.view();
+
+    app.vm
+        .load(
+            r#"
+            local m = require('model')
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 0 })
+            for i = 1, 60 do
+                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', x = i })
+            end
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 300.0, "a live drag reached the doc");
+    assert_eq!(
+        app.vm
+            .load("return require('model').state.resize.w")
+            .eval::<f64>()
+            .unwrap(),
+        360.0,
+        "the width the frame should be drawing is not in pointer state"
+    );
+}
+
+/// The floor is not decoration. A column dragged to nothing has no grip left to drag it back by,
+/// and there is no undo for it — so the clamp has to run on every move, not once at release.
+#[test]
+fn a_resize_cannot_drag_a_column_away() {
+    let app = kanban_app(Rc::new(|_| Ok(None)));
+    let _ = app.view();
+
+    resize(&app, "c-todo", 0.0, -5000.0);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 180.0, "theme's col_w_min");
+
+    resize(&app, "c-todo", 0.0, 5000.0);
+    let _ = app.view();
+    assert_eq!(col_w(&app, "c-todo"), 620.0, "theme's col_w_max");
+}
+
+/// A brush against the grip is not an edit: a press with no drag must leave the doc alone, so an
+/// accidental touch does not put an op in every peer's history.
+///
+/// Both halves, because the negative one alone is worthless — a `flush` that never produces
+/// anything would pass it while the whole feature was dead.
+#[test]
+fn a_resize_that_never_moved_writes_nothing() {
+    let mut app = kanban_app(Rc::new(|_| Ok(None)));
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    puts.take(); // drop the seed
+    let _ = app.view();
+
+    app.vm
+        .load(
+            r#"
+            local m = require('model')
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 42 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', x = 42 })
+            "#,
+        )
+        .exec()
+        .unwrap();
+    app.flush(puts.recorder()).unwrap();
+    assert!(puts.take().is_empty(), "a press with no drag wrote to Loro");
+
+    // The same path, moved. This is what makes the assertion above mean something.
+    resize(&app, "c-todo", 0.0, 40.0);
+    app.flush(puts.recorder()).unwrap();
+    assert!(!puts.take().is_empty(), "a real resize wrote nothing");
+}

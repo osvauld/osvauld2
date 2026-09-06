@@ -111,6 +111,16 @@ local function composer(c)
 	})
 end
 
+-- What this column is *this frame*. Mid-drag the width comes from pointer state and the doc is not
+-- touched; on release the model writes it once. Same shape as the card and column drags above —
+-- nothing goes to the CRDT until the gesture finishes, so a drag is one op and not sixty.
+local function width_of(c)
+	if S.resize and S.resize.id == c.id then
+		return S.resize.w
+	end
+	return c.w or C.col_w
+end
+
 local function column_of(c, list)
 	local body = {}
 	local slot = drop_slot(c, list)
@@ -126,7 +136,12 @@ local function column_of(c, list)
 	local lifting = S.drag ~= nil and S.drag.kind == "col" and S.drag.id == c.id
 	return ui.col({
 		id = c.id,
-		w = 300,
+		w = width_of(c),
+		-- The clamp in `actions.resize` is what the drag obeys; these are what the *layout* obeys,
+		-- and they are not the same guard. A width can arrive from a peer whose theme differs, or
+		-- from a doc edited by hand, and neither went past the drag.
+		min_w = C.col_w_min,
+		max_w = C.col_w_max,
 		radius = 12,
 		fill = C.panel,
 		stroke = { 1, C.line_soft },
@@ -266,6 +281,12 @@ return function()
 		local c = columns[i]
 		col_list[#col_list + 1] = W.guide_v("gv:" .. i, col_slot == i)
 		col_list[#col_list + 1] = column_of(c, grouped[c.id])
+		-- The grip is a sibling of the column, not a child of it: it has to sit in the gutter
+		-- *between* two columns, and a child clipped to its parent's rounded panel would be a
+		-- three-point target hanging off the edge of a corner.
+		col_list[#col_list + 1] = W.grip("grip:" .. c.id, S.resize ~= nil and S.resize.id == c.id, function(phase, x)
+			update({ kind = "resize", id = c.id, phase = phase, x = x })
+		end)
 		if S.drag and S.drag.kind == "col" and S.drag.id == c.id then
 			flying = ui.col({
 				w = 300,
