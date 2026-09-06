@@ -183,8 +183,28 @@ fn expr_at(e: &Expr, depth: usize, ids: bool) -> String {
             args,
         } => {
             let m = method.as_ref().map(|m| format!(":{m}")).unwrap_or_default();
-            let a: Vec<_> = args.iter().map(|a| expr_at(a, depth, ids)).collect();
-            format!("{}{m}({})", expr_at(callee, depth, ids), a.join(", "))
+            let c = expr_at(callee, depth, ids);
+            // `multiline` only opens a table that *contains* a constructor. A call is the other
+            // way a line collects two of them — `board:set({ "columns" }, doc.list({ … }))` — and
+            // no enclosing table is involved, so the argument list has to break itself. Structural,
+            // so the second print agrees with the first. No trailing comma: Lua rejects it here.
+            if args.iter().filter(|a| has_table(a)).count() > 1 {
+                let mut s = format!("{c}{m}(\n");
+                for (i, a) in args.iter().enumerate() {
+                    indent(&mut s, depth + 1);
+                    s.push_str(&expr_at(a, depth + 1, ids));
+                    if i + 1 < args.len() {
+                        s.push(',');
+                    }
+                    s.push('\n');
+                }
+                indent(&mut s, depth);
+                s.push(')');
+                s
+            } else {
+                let a: Vec<_> = args.iter().map(|a| expr_at(a, depth, ids)).collect();
+                format!("{c}{m}({})", a.join(", "))
+            }
         }
         // `not x` needs the space that `-x` and `#x` do not.
         Expr::Un { op, expr: inner } => {
@@ -224,8 +244,31 @@ fn multiline(t: &Table) -> bool {
         || t.entries.iter().any(|e| {
             !e.leading.is_empty()
                 || e.trailing.is_some()
-                || matches!(value(e), Expr::Table(_) | Expr::Fn { .. })
+                || matches!(value(e), Expr::Fn { .. })
+                || has_table(value(e))
         })
+}
+
+/// Does this expression put a `{` on the line?
+///
+/// The old test was `matches!(value(e), Expr::Table(_))`, which looks exactly one level down and so
+/// misses the shape the kanban is written in: in `ui.col({ grow = true, ui.text({ … }) })` the
+/// inner table hides inside a call, the outer table stays on one line, and two constructors share
+/// it. Deliberately phrased over expressions rather than over `ui.*` — the printer stays a Lua
+/// printer and does not learn the DSL (nid-channel.md §1.1, §3).
+///
+/// `Expr::Fn` is not recursed into: it already forces its container open, and a body's tables are
+/// printed by `block`, a statement to a line.
+fn has_table(e: &Expr) -> bool {
+    match e {
+        Expr::Table(_) => true,
+        Expr::Call { callee, args, .. } => has_table(callee) || args.iter().any(has_table),
+        Expr::Index { base, key, .. } => has_table(base) || has_table(key),
+        Expr::Un { expr, .. } => has_table(expr),
+        Expr::Bin { lhs, rhs, .. } => has_table(lhs) || has_table(rhs),
+        Expr::Paren(inner) => has_table(inner),
+        _ => false,
+    }
 }
 
 fn value(e: &Entry) -> &Expr {

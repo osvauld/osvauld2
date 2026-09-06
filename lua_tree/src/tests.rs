@@ -5,7 +5,7 @@
 //! implementation, useful as corroboration and wrong as a fixture.
 
 use crate::schema::*;
-use crate::{parse, print};
+use crate::{parse, print, print_bare};
 use full_moon::node::Node;
 use full_moon::tokenizer::TokenType;
 
@@ -250,4 +250,50 @@ fn import_rejects_malformed_source() {
     // The reason full-moon and not tree-sitter: a typo must not become an opaque node.
     assert!(parse("local x = ").is_err());
     assert!(parse("function f()\n\treturn 1\n").is_err());
+}
+
+// ---------------------------------------------------------------- the line channel
+
+/// Read the brace positions out of the *printed* text with full-moon rather than out of our own
+/// tree, so a printer that lies about its own layout cannot make this pass.
+fn brace_lines(src: &str) -> Vec<usize> {
+    use full_moon::visitors::Visitor;
+    #[derive(Default)]
+    struct Braces(Vec<usize>);
+    impl Visitor for Braces {
+        fn visit_table_constructor(&mut self, t: &full_moon::ast::TableConstructor) {
+            self.0
+                .push(t.braces().tokens().0.token().start_position().line());
+        }
+    }
+    let mut v = Braces::default();
+    v.visit_ast(&full_moon::parse(src).expect("printed source parses"));
+    v.0.sort();
+    v.0
+}
+
+/// Every table constructor opens on a line of its own.
+///
+/// The precondition for a line->nid map (docs/design/nid-channel.md §3). The tagger's only
+/// evidence about which node it is building is the line it was called from, so two constructors
+/// sharing a line are two nodes the map cannot tell apart — and it fails silently, handing the
+/// second one the first one's identity.
+#[test]
+fn every_table_opens_on_its_own_line() {
+    for (name, src) in corpus() {
+        let out = print_bare(&parse(&src).expect(&name));
+        let lines = brace_lines(&out);
+        let text: Vec<&str> = out.lines().collect();
+        let dupes: Vec<String> = lines
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .map(|w| format!("  {}: {}", w[0], text[w[0] - 1].trim()))
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "{name}: {} lines carry more than one table constructor\n{}",
+            dupes.len(),
+            dupes.join("\n")
+        );
+    }
 }
