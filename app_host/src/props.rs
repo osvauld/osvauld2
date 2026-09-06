@@ -171,6 +171,7 @@ impl<M: 'static> Registry<M> {
         prop!(size, f32, f32),
         prop!(w, f32),
         prop!(h, f32),
+        prop!(no_shrink),
         prop!(min_w, f32),
         prop!(max_w, f32),
         prop!(min_h, f32),
