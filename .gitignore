@@ -10,3 +10,14 @@ target/
 # leaves a dangling submodule-shaped entry once the worktree is pruned.
 .claude/worktrees/
 .DS_Store
+
+# pi agent state — extensions and skills are committed; package installs and sessions are not
+.pi/npm/
+.pi/sessions/
+
+# downloaded archives that wandered into the root
+/*.tar.bz2
+/*.tar.gz
+
+# paste artifacts
+/upload.png
