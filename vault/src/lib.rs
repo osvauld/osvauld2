@@ -1,6 +1,8 @@
-//! Headless account manager: composes `identity` + `storage` into signup, login, and
-//! account-switching, holding the one unlocked `Identity` for the session. The only auth
-//! code in the tree; both `sthalam` (UI) and `kunki` (node) drive it. See `docs/vault.md`.
+//! Headless account manager: composes `identity` + `storage` into signup, login and
+//! account-switching, holds the one unlocked `Identity` for the session, and owns the account's
+//! item tree — workspaces, items, sealed src/doc records. The only auth code in the tree;
+//! `shell2` drives it today, the future node will too. Loro-free by design: snapshots are
+//! opaque sealed bytes here, Loro docs live in the caller. See `docs/vault.md`.
 
 mod account;
 mod error;

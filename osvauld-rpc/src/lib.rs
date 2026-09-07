@@ -1,3 +1,10 @@
+//! The bridge wire protocol: the `Request`/`Response` vocabulary spoken over a UDS socket —
+//! 4-byte length prefix + JSON payload (`read_msg`/`write_msg` do the framing).
+//!
+//! The surface is sthalam-era and not yet wired to shell2: the port trims the enums to the live
+//! subset and re-homes the bridge as pure transport with the UI thread as single authority
+//! (docs/status.md, item 1). The framing and the `Response::{ok, err}` shape port as-is.
+
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};

@@ -1,3 +1,7 @@
+//! stdio↔UDS shim: speaks MCP (JSON-RPC over stdin/stdout) to an agent client and forwards tool
+//! calls as framed `osvauld_rpc::Request`s to the bridge socket. The tool list is sthalam-era;
+//! the port trims it to the live surface (docs/status.md, item 1).
+
 #![recursion_limit = "512"]
 
 use std::io::{self, BufRead, Write};

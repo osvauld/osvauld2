@@ -1,7 +1,8 @@
 //! The GUI runtime: owns the winit window + event loop and the wgpu/vello GPU plumbing, lays out and
 //! paints an `El` tree, and routes input. An application implements [`App`] (`view` + `update`, the
-//! Elm/Iced shape) and calls [`run`]; everything GPU/winit/vello/layout is internal here. The
-//! headless `app_engine` does not depend on this crate.
+//! Elm/Iced shape) and calls [`run`]; everything GPU/winit/vello/layout is internal here.
+//! `shell2` (Rust screens) and `app_host` (Lua apps) are its two front-ends — one node
+//! vocabulary, same pipeline (docs/architecture.md).
 
 mod anim;
 mod drag;

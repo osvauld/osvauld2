@@ -3,7 +3,7 @@
 //! An app is an MVU app whose message = "call closure #n" (see [`LuaMsg`]). Its `view()`
 //! walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update loop
 //! is unchanged — dispatch just calls the closure the index points at.
-//! Item discovery is a prefix scan for `meta` keys; `src` and `state` are loaded on demand.
+//! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
 mod modules;
 mod props;

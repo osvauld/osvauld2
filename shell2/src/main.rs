@@ -1,5 +1,8 @@
-//! shell2 — the osvauld UI. It defines the screens (login, …) and their logic; the window, GPU,
-//! event loop, layout, and input all live in the `runtime` crate. `main` just picks the first app.
+//! shell2 — the osvauld desktop shell: accounts over `vault` (signup / unlock / mnemonic-once),
+//! workspaces and typed items, app upload, and tabs hosting `app_host::LuaApp`s — one running
+//! instance per item, ids namespaced per tab. The kanban app in `src/kanban/` is the reference
+//! corpus. The window, GPU, event loop, layout and input live in `runtime`; this crate only
+//! describes screens and state. The UDS bridge is not wired yet (docs/status.md, item 1).
 
 mod app_src;
 mod item;
