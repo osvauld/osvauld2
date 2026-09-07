@@ -14,6 +14,7 @@ Store::open_readonly(path) // open an existing db without creating or initializi
 store.get(key)    -> Option<Vec<u8>>   // key = a sortable path string
 store.put(key, &[u8])                  // one atomic, durable commit
 store.delete(key)
+store.list_prefixed(prefix) -> Vec<String>   // ordered key listing for a prefix
 ```
 
 - **Keys** are `&str` — the full hierarchical path, e.g. `"space/page/layer/shard"`.
@@ -27,7 +28,7 @@ Everything else lives **above** this layer:
 | Concern | Where it lives |
 |---|---|
 | Serialization (bincode) | the domain layer that owns the type |
-| Encryption at rest | the service layer (per-doc AES key, ECIES-wrapped) — like the old butler |
+| Encryption at rest | the service layer — `vault`'s `seal`/`unseal` over `identity::encrypt_for` is the live example |
 | Dirty-tracking ("only write actual changes") | the scribe/cache layer |
 | Time-sharding of documents | the document layer (encodes the shard into the key) |
 | Namespacing | a prefix convention inside the key |
@@ -56,7 +57,6 @@ durability, footprint, maintenance, and ordered-key range scans.
 
 ## Deferred (add when a consumer needs them)
 
-- `scan_prefix(prefix)` — list a page's layers / a layer's shards.
 - `scan_range(start, end)` — a time window of shards (needs lexicographically sortable
   shard keys: ISO dates, zero-padded counters, or big-endian epoch).
 - reverse / `last(prefix)` — "newest shard" for open-doc loads.
