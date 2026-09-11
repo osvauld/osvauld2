@@ -5,6 +5,7 @@ use std::rc::Rc;
 mod reload;
 mod require;
 mod round_trip;
+mod scratch;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
@@ -2279,4 +2280,122 @@ fn a_resize_that_never_moved_writes_nothing() {
     resize(&app, "c-todo", 0.0, 40.0);
     app.flush(puts.recorder()).unwrap();
     assert!(!puts.take().is_empty(), "a real resize wrote nothing");
+}
+
+// ── the tally demo app, from disk ─────────────────────────────────────────────
+
+/// The app a fresh demo seeds (`demo_apps/tally/`), loaded the way the shell loads every app:
+/// from the files map of a source doc. Reads the real file from disk so the test cannot drift
+/// from what ships.
+fn tally_app() -> LuaApp<LuaMsg> {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main_text =
+        std::fs::read_to_string("../demo_apps/tally/main.lua").expect("tally/main.lua on disk");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, &main_text).unwrap();
+    src.commit();
+    LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap()
+}
+
+#[test]
+fn tally_loads_views_and_clicks() {
+    let mut app = tally_app();
+    assert_eq!(app.error, None, "the app must load: {:?}", app.error);
+
+    let _ = app.view();
+
+    // Handlers are registered in document order: pill("−") is 0, pill("+") is 1, reset is 2.
+    // A frame between each click, the way the real loop delivers them: the mirror is a frame
+    // behind the doc, so clicks with no frame between them all read the same stale count.
+    for _ in 0..3 {
+        app.update(LuaMsg::Call(1));
+        let _ = app.view();
+    }
+
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    let saved = puts.take();
+    let (name, bytes) = saved.first().expect("the tally doc should have been saved");
+    assert_eq!(name, "tally");
+
+    let back = LoroDoc::new();
+    back.import(bytes).unwrap();
+    let v = back.get_deep_value();
+    let Some(LoroValue::Map(m)) = at(&v, &["count"]).cloned() else {
+        panic!("no count map in the saved doc: {v:?}");
+    };
+    match m.get("n") {
+        Some(LoroValue::Double(n)) => assert_eq!(*n, 3.0, "three clicks of +"),
+        other => panic!("count.n is not a number: {other:?}"),
+    }
+}
+
+#[test]
+fn console_captures_view_and_handler_errors() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		ui.text({ id = "t1", bogus_prop = true, "hi" }),
+		ui.button({ id = "boom", on_click = function() error("kaboom") end, ui.text{ "go" } }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    let once = app.console(100);
+    assert!(
+        once.iter().any(|l| l.contains("bogus_prop")),
+        "unknown prop must land in the console: {once:?}"
+    );
+    let _ = app.view();
+    assert_eq!(
+        app.console(100),
+        once,
+        "a persistent per-frame error must not repeat per frame"
+    );
+
+    let mut tree = app.view();
+    let msg = tree.trigger("boom", runtime::Action::Click).unwrap();
+    app.update(msg);
+    let c = app.console(100);
+    assert!(
+        c.last()
+            .is_some_and(|l| l.contains("handler error") && l.contains("kaboom")),
+        "handler error must land in the console: {c:?}"
+    );
+}
+
+#[test]
+fn docs_json_reads_live_core_state() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+local s = doc:open("state")
+if not s.map then s:set({ "map" }, doc.map({ count = 0 })) end
+return function()
+	local m = s.map
+	return ui.col{
+		ui.button({ id = "inc", on_click = function() s:set({ "map", "count" }, m.count + 1) end, ui.text{ "+" } }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    // The core is read directly, not through the one-frame-behind mirror. Lua numbers are
+    // doubles all the way down — the JSON carries 0.0, not 0.
+    assert_eq!(app.docs_json()["state"]["map"]["count"].as_f64(), Some(0.0));
+    let mut tree = app.view();
+    app.update(tree.trigger("inc", runtime::Action::Click).unwrap());
+    assert_eq!(app.docs_json()["state"]["map"]["count"].as_f64(), Some(1.0));
 }

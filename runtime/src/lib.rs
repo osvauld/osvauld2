@@ -28,7 +28,7 @@ use std::ops::Fn;
 use std::sync::Arc;
 use std::time::Instant;
 use vello::Scene;
-use vello::kurbo::{Insets, Point, Rect};
+use vello::kurbo::{Affine, Insets, Point, Rect};
 use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -40,10 +40,10 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Anchor, El, Placement, PlacementAlign, PlacementSide, col, custom, rich, row, text, text_area,
-    text_input,
+    Action, Anchor, El, ElInfo, Placement, PlacementAlign, PlacementSide, col, custom, rich, row,
+    text, text_area, text_input,
 };
-pub use render::Render;
+pub use render::{CapturedImage, Render};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use vello;
@@ -52,6 +52,15 @@ const LINE_STEP: f32 = 30.0;
 /// An application: a tree-of-elements `view` derived from state, plus an `update` that mutates state
 /// in response to messages. The runtime calls `view` to paint and `update` when a click hits an
 /// element carrying a message. `Msg: Clone` because a laid-out region owns its message.
+/// One deferred screenshot. The app supplies only the completion mapping; Runner owns when and
+/// how pixels are produced. A request is consumed once, on the next frame after `update`.
+pub struct ScreenshotRequest<M> {
+    /// Custom logical viewport and physical scale. Both `None` means the live window target.
+    pub viewport: Option<(f32, f32)>,
+    pub scale: Option<f32>,
+    pub complete: Box<dyn FnOnce(Result<CapturedImage, String>) -> M>,
+}
+
 pub trait App {
     type Msg: Clone + Send + 'static;
 
@@ -61,11 +70,22 @@ pub trait App {
     /// Apply a message (e.g. from a click) to the state. The next frame re-derives `view`.
     fn update(&mut self, msg: Self::Msg);
 
+    /// Called once after the window and renderer exist and the event loop is active. Services
+    /// that expose an [`EventLoopProxy`] externally must start here, never in the `run_with`
+    /// builder where requests can arrive before `run_app` begins polling.
+    fn ready(&mut self) {}
+
     /// Canvas clear color — the page background. Default opaque black.
     fn clear(&self) -> Color {
         Color::from_rgba8(0, 0, 0, 0xFF)
     }
     fn reload(&mut self) {}
+
+    /// Take a pending screenshot request, if any. The default keeps non-automation apps unaware
+    /// of capture; implementations must remove the request when returning it.
+    fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Self::Msg>> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -186,12 +206,27 @@ impl<A: App> Runner<A> {
         let Some(render) = self.render.as_ref() else {
             return;
         };
+        let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
         let now = self.start.elapsed().as_secs_f64();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).min(0.1)) as f32;
         self.last_frame = Some(now);
-        let viewport = render.viewport();
-        let t = render.transform();
+        let custom_capture = screenshot
+            .as_ref()
+            .is_some_and(|r| r.viewport.is_some() || r.scale.is_some());
+        let viewport = screenshot
+            .as_ref()
+            .and_then(|r| r.viewport)
+            .unwrap_or_else(|| render.viewport());
+        let capture_scale = screenshot
+            .as_ref()
+            .and_then(|r| r.scale)
+            .unwrap_or(render.scale() as f32);
+        let t = if custom_capture {
+            Affine::scale(capture_scale as f64)
+        } else {
+            render.transform()
+        };
         let clear = self.app.clear();
         self.scene.reset();
         let app = &self.app;
@@ -364,8 +399,36 @@ impl<A: App> Runner<A> {
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
-        self.render.as_mut().unwrap().present(clear, &self.scene);
-        let dispatched = !done_msgs.is_empty();
+        let captured = if custom_capture {
+            // This frame ran the normal layout/hit/paint path against the requested viewport,
+            // but its pixels never reach the surface. Temporary hit geometry must not accept
+            // input before the normal restorative frame requested below.
+            let result = self.render.as_mut().unwrap().capture_scene(
+                clear,
+                &self.scene,
+                viewport,
+                capture_scale,
+            );
+            self.hits.clear();
+            Some(result)
+        } else {
+            let render = self.render.as_mut().unwrap();
+            let presented = render.present(clear, &self.scene);
+            screenshot.as_ref().map(|_| {
+                if presented {
+                    render.capture()
+                } else {
+                    // Surface loss must not turn a requested shot into the previous frame.
+                    render.capture_scene(clear, &self.scene, viewport, capture_scale)
+                }
+            })
+        };
+        let mut dispatched = !done_msgs.is_empty();
+        if let Some(request) = screenshot {
+            self.app
+                .update((request.complete)(captured.expect("capture result")));
+            dispatched = true;
+        }
         for m in done_msgs {
             self.app.update(m);
         }
@@ -853,6 +916,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         render.request_redraw(); // paint the first frame; after that we only repaint on demand
         render.set_ime_allowed(true);
         self.render = Some(render);
+        self.app.ready();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

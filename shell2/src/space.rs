@@ -22,6 +22,11 @@ pub enum SpaceScreenMsg {
 }
 
 impl SpaceScreen {
+    /// The workspace metas this screen snapshots — read access for tests and the bridge.
+    pub fn spaces(&self) -> &[WorkspaceMeta] {
+        &self.spaces
+    }
+
     pub fn new(vault: &Vault) -> Self {
         let (spaces, error) = match vault.workspaces() {
             Ok(s) => (s, None),

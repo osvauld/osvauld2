@@ -20,8 +20,9 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
   doc say what's real. When code and doc disagree, code wins and the doc gets fixed.
 - **The Lua surface is strict.** Unknown props are errors; the doc mirror is a frame behind
   your own write; `on_drag`/`on_drop`/scroll need an `id`. The guide says all of it — read it.
-- **`.mcp.json` is wired but dead** until the bridge port lands (status item 1). The
-  osvauld tools will not respond.
+- **The bridge is live.** `$OSVAULD_SOCKET` (default `/tmp/osvauld.sock`, `0600`) answers
+  `osvauld-rpc` requests — drive the shell from `scripts/osvauld/` (see `scripts/smoke_bridge.py`).
+  The MCP shim and `.mcp.json` are gone; an MCP face would rebuild over the bridge.
 
 ## How we work — the process rules
 

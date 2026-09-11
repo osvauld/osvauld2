@@ -1,13 +1,30 @@
 //! The bridge wire protocol: the `Request`/`Response` vocabulary spoken over a UDS socket —
 //! 4-byte length prefix + JSON payload (`read_msg`/`write_msg` do the framing).
 //!
-//! The surface is sthalam-era and not yet wired to shell2: the port trims the enums to the live
-//! subset and re-homes the bridge as pure transport with the UI thread as single authority
-//! (docs/status.md, item 1). The framing and the `Response::{ok, err}` shape port as-is.
+//! Rewritten 2026-09-09 for shell2's automation story — the port of the old repo's control
+//! server (`osvauld/scripts/osvauld/`, lessons only): a Python client logs in, builds
+//! workspaces and app items, opens them, and drives/observes the running app. The
+//! sthalam-era families (block docs, per-block `.lua` edits, imports/tables, PDF, pixel
+//! screenshots) are gone — this shell hosts Lua apps.
+//!
+//! Nothing here executes anything: the shell's UI thread is the single authority
+//! (docs/status.md item 1). The listener binds `$OSVAULD_SOCKET` (default `/tmp/osvauld.sock`)
+//! and must create the socket `0600` — `Signup`/`Unlock` carry passphrases, so the socket is
+//! as sensitive as they are.
+//!
+//! Items are addressed by id alone (ids are 128-bit random — unique in practice); the shell
+//! resolves the owning workspace. `kind` is the lower-case item tag (`doc`, `app`, …).
 
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
+
+/// One vault account on this device ([`Request::ListAccounts`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSummary {
+    pub id: String,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSummary {
@@ -23,288 +40,152 @@ pub struct ItemSummary {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlockSummary {
-    pub id: String,
-    pub kind: String,
-    pub text: String,
-    pub depth: usize,
-    /// Checked state — present only on `todo` blocks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done: Option<bool>,
-    /// Language tag — present only on `code` blocks that have one set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lang: Option<String>,
-    /// Inline formatting spans over the block's text (empty when unformatted).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub marks: Vec<MarkSpan>,
+/// A passphrase on the wire. Serialises as a plain string (the protocol's shape) but never
+/// prints: `Debug` is redacted, so request logs and test failures cannot leak credentials.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Passphrase(String);
+
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Passphrase(<redacted>)")
+    }
 }
 
-/// One inline-mark span over `[start, end)` code-point offsets of a block's text. `value` carries
-/// a valued mark's payload (a `link`'s URL); it is `None` for flag marks (bold/italic/strike/code).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarkSpan {
-    pub start: usize,
-    pub end: usize,
-    pub mark: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+impl From<String> for Passphrase {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl From<&str> for Passphrase {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl std::ops::Deref for Passphrase {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for Passphrase {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Request {
+    /// Liveness probe — also how a test harness waits for the socket.
+    Ping,
+
+    // ── auth ────────────────────────────────────────────────────────────────────
+    /// Accounts known to this device (the login screen's list).
+    ListAccounts,
+    /// Create an account. The response carries the recovery mnemonic — shown once, never again.
+    Signup {
+        name: String,
+        passphrase: Passphrase,
+    },
+    /// Open the vault. `account` is an id or a name from [`Request::ListAccounts`].
+    Unlock {
+        account: String,
+        passphrase: Passphrase,
+    },
+    /// Close the vault; the shell returns to its login screen.
+    Lock,
+
+    // ── workspaces ──────────────────────────────────────────────────────────────
     ListWorkspaces,
+    CreateWorkspace {
+        name: String,
+    },
+
+    // ── items ───────────────────────────────────────────────────────────────────
     ListItems {
         ws_id: String,
     },
-    ReadDoc {
-        ws_id: String,
-        item_id: String,
-    },
-    SetBlockText {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        text: String,
-    },
-    /// Insert a new block (`kind` is a block tag: `paragraph`, `h1`..`h3`, `li`, `ol`, `todo`,
-    /// `quote`, `code`, `divider`). It lands right after `after`; when `after` is `None` it is
-    /// appended at the end. Returns the new block's id.
-    InsertBlock {
-        ws_id: String,
-        item_id: String,
-        after: Option<String>,
-        kind: String,
-        text: String,
-    },
-    /// Change an existing block's kind (e.g. turn a paragraph into a heading or list item).
-    SetBlockKind {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        kind: String,
-    },
-    /// Delete a block. Its children (if any) are promoted into its slot, not deleted with it.
-    DeleteBlock {
-        ws_id: String,
-        item_id: String,
-        block: String,
-    },
-    /// Indent a block one level (nest it under its previous sibling). Returns whether it moved.
-    IndentBlock {
-        ws_id: String,
-        item_id: String,
-        block: String,
-    },
-    /// Outdent a block one level (promote it out of its parent). Returns whether it moved.
-    OutdentBlock {
-        ws_id: String,
-        item_id: String,
-        block: String,
-    },
-    /// Move a block relative to `target`. `position` is `before`, `after`, or `into` (as the
-    /// last child of `target`).
-    MoveBlock {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        position: String,
-        target: String,
-    },
-    /// Set a `todo` block's checked state.
-    SetTodoDone {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        done: bool,
-    },
-    /// Set a `code` block's language tag (e.g. `rust`, `python`).
-    SetCodeLang {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        lang: String,
-    },
-    /// Apply a flag mark (`bold`, `italic`, `strike`, `code`) over `[start, end)` code points.
-    ApplyMark {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        start: usize,
-        end: usize,
-        mark: String,
-    },
-    /// Apply a `link` mark carrying `url` over `[start, end)` code points.
-    ApplyLink {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        start: usize,
-        end: usize,
-        url: String,
-    },
-    /// Remove a mark (`bold`/`italic`/`strike`/`code`/`link`) over `[start, end)` code points.
-    ClearMark {
-        ws_id: String,
-        item_id: String,
-        block: String,
-        start: usize,
-        end: usize,
-        mark: String,
-    },
-    /// Create a new item (`kind` is the lower-case tag: `doc`, `app`, `table`, `canvas`).
+    /// `kind` is the lower-case item tag: `doc`, `app`, …
     CreateItem {
         ws_id: String,
         name: String,
         kind: String,
     },
-    /// List the source-file paths of an item's folder tree (an .app's `main.lua`, etc.).
-    ListFiles {
-        ws_id: String,
+    /// Open (or focus) the item's tab — a running app is what the senses below address.
+    OpenItem {
         item_id: String,
     },
-    /// Read one source file's text content.
+
+    // ── files (an .app's source doc) ────────────────────────────────────────────
+    /// The item's source-file paths (`main.lua`, …).
+    ListFiles {
+        item_id: String,
+    },
     ReadFile {
-        ws_id: String,
         item_id: String,
         path: String,
     },
-    /// Write (create or overwrite) one source file's text content.
+    /// Write one source file. If the item's tab is open, its VM reloads — the doc survives.
     WriteFile {
-        ws_id: String,
         item_id: String,
         path: String,
         content: String,
     },
-    /// Read a `.lua` file as its blocks (one per top-level construct), with stable IDs — the
-    /// per-block counterpart of [`Request::ReadFile`], so an agent can target a single construct.
-    ReadFileBlocks {
-        ws_id: String,
-        item_id: String,
-        path: String,
-    },
-    /// Replace the text of one block of a `.lua` file, identified by its stable block ID (from
-    /// [`Request::ReadFileBlocks`]). Block identity — and any other block — is preserved.
-    SetFileBlockText {
-        ws_id: String,
-        item_id: String,
-        path: String,
-        block: String,
-        text: String,
-    },
-    /// Insert a new block into a `.lua` file, right after `after` (or appended when `after` is
-    /// `None`). `kind` is a free structural tag (`statement`, `comment`, `function`); returns the
-    /// new block's id.
-    InsertFileBlock {
-        ws_id: String,
-        item_id: String,
-        path: String,
-        after: Option<String>,
-        kind: String,
-        text: String,
-    },
-    /// Delete one block of a `.lua` file by its stable block ID.
-    DeleteFileBlock {
-        ws_id: String,
-        item_id: String,
-        path: String,
-        block: String,
-    },
-    /// Read an .app's runtime data CRDT (named top-level containers) as a deep JSON value.
-    AppDataGet {
-        ws_id: String,
+    /// Force the item's staged reload: a whole second VM; doc cores and scratch survive.
+    ReloadItem {
         item_id: String,
     },
-    /// Replace the content of one top-level text container in an .app's runtime data CRDT — the
-    /// same operation the app's own `ui.editor` makes, so an open run pane updates live.
-    AppDataSetText {
-        ws_id: String,
-        item_id: String,
-        name: String,
-        text: String,
-    },
-    /// Add a row (a JSON object of scalar fields) to a top-level list in an .app's runtime data
-    /// CRDT — the same op the app's Lua `list:add` makes. Stamps a stable `id` unless one is
-    /// supplied; returns `{ id }`.
-    AppDataRowAdd {
-        ws_id: String,
-        item_id: String,
-        list: String,
-        fields: serde_json::Value,
-    },
-    /// Set scalar fields (JSON `null` deletes a field) on the row with stable id `row` in a
-    /// top-level list.
-    AppDataRowSet {
-        ws_id: String,
-        item_id: String,
-        list: String,
-        row: String,
-        fields: serde_json::Value,
-    },
-    /// Remove the row with stable id `row` from a top-level list.
-    AppDataRowRemove {
-        ws_id: String,
-        item_id: String,
-        list: String,
-        row: String,
-    },
-    /// Export a page-declaring .app to PDF. Returns the written file's path.
-    ExportPdf {
-        ws_id: String,
+
+    // ── app senses ──────────────────────────────────────────────────────────────
+    /// The running app's `El` tree as JSON, no rects. The `id`s in it are `Click`'s targets.
+    DumpTree {
         item_id: String,
     },
-    /// Render an .app off-screen and return it as base64 PNG. `width`/`height` are logical px
-    /// (default: the app's page, else 900×700); `scale` is px per logical px (default 2).
+    /// Click the element with `el_id` — by id, not by coordinates.
+    Click {
+        item_id: String,
+        el_id: String,
+    },
+    /// Set an input's value: fires the element's `on_input` map with `content`, exactly as
+    /// typing-and-committing would.
+    Type {
+        item_id: String,
+        el_id: String,
+        content: String,
+    },
+    /// Press the input's `key`: `"enter"` or `"esc"`.
+    Key {
+        item_id: String,
+        el_id: String,
+        key: String,
+    },
+    /// The app's console (errors, newest last) — at most `last` lines.
+    ReadConsole {
+        item_id: String,
+        last: usize,
+    },
+    /// Capture the next live frame. With no dimensions this is the exact visible window;
+    /// width/height are logical points and scale controls physical pixels per point.
     Screenshot {
-        ws_id: String,
         item_id: String,
         width: Option<f32>,
         height: Option<f32>,
         scale: Option<f32>,
     },
-    /// Open an .xlsx into migration staging (calamine → Polars), returning a handle plus a
-    /// per-sheet summary (rows, cols, inferred column dtypes). Dev: `path` is a host filesystem
-    /// path; the eventual model is a user-selected upload buffer (no arbitrary path read).
-    ImportOpen {
-        path: String,
-    },
-    /// The first `n` rows of a staged sheet as a text table (omit `sheet` for the first sheet).
-    ImportHead {
-        handle: String,
-        sheet: Option<String>,
-        n: usize,
-    },
-    /// Run SQL over a staged sheet (registered as table `data`) — the profiling escape hatch
-    /// (DISTINCT / GROUP BY / COUNT / aggregates) the agent uses to understand the data.
-    ImportSql {
-        handle: String,
-        sheet: Option<String>,
-        query: String,
-    },
-    /// Drop a staged workbook (the .xlsx is transient migration input).
-    ImportClose {
-        handle: String,
-    },
-    /// Run Polars SQL over a *stored* `.table` item (registered both as `t` and under its item
-    /// name) — the live-table profiling tool the agent uses to design dashboards over real data.
-    TableSql {
-        ws_id: String,
+
+    // ── app data (the running app's CRDT) ───────────────────────────────────────
+    /// The runtime-data CRDT's named top-level containers as one deep JSON value.
+    /// (A write family — SetText/RowAdd/RowSet/RowRemove — was specced here once and cut:
+    /// writes that bypass the app's own handlers skip its checks and side effects. If a
+    /// seeding/escape-hatch need ever becomes real, re-spec it against that need.)
+    AppDataGet {
         item_id: String,
-        query: String,
-    },
-    /// Materialize a staged sheet into a new `.table` item in `ws_id`. `columns` is the agent's
-    /// plan — a JSON array of `{ source, key, label, type }` (type = text/number/decimal/check/
-    /// select/date) — typed-coerced into a stored schema + rows. Returns the new item.
-    ImportToLayer {
-        handle: String,
-        sheet: Option<String>,
-        ws_id: String,
-        name: String,
-        columns: serde_json::Value,
     },
 }
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum Response {

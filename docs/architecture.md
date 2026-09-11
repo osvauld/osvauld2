@@ -46,6 +46,14 @@ Rust screen: El builders (typed M) ───────────────
   runtime — this is what keeps "apps off the UI thread" a door that stays open.
 - **The CRDT is document truth** (Loro). Ephemeral per-viewer state (scroll, drags, drafts)
   never enters it. An app's *source* and its *data* are separate docs.
+- **External event sources start at `App::ready`.** Runner calls it once after winit has a
+  window/renderer and is actively polling. Publishing a bridge socket from `run_with`'s builder
+  creates a startup race: `EventLoopProxy::send_event` can succeed before events are deliverable.
+- **Screenshots are deferred frames.** An app hands Runner a one-shot completion mapping;
+  Runner paints before replying. Normal capture reads the live Vello target. A custom viewport
+  runs the same layout/paint pipeline with the live text engine and retained store against a
+  temporary target, never a second app/VM/device; temporary hit geometry is discarded and a
+  normal frame restores the window.
 
 ## Crates
 
@@ -53,13 +61,13 @@ Rust screen: El builders (typed M) ───────────────
 
 | crate | what it is |
 |---|---|
-| `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint. |
+| `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme; the kanban reference app in `src/kanban/`. |
 | `lua_tree` | full-moon (Luau) parse → 22-kind semantic tree → printer; the substrate for surgical agent edits and nids. See [`design/code-as-tree.md`](design/code-as-tree.md). |
 | `vault` | headless account manager: identity + storage over redb (one file per DID), workspaces, items, sealed source/doc storage. Loro-free by design. |
 | `cryptography` `identity` `storage` | backend crates, unchanged by the rebuild. Contracts in [`identity.md`](identity.md), [`storage.md`](storage.md), [`vault.md`](vault.md). |
-| `osvauld-rpc` `osvauld-mcp` | UDS wire protocol + stdio↔UDS MCP shim. **sthalam-era surface, not yet integrated** — the port is status item 1. |
+| `osvauld-rpc` | UDS wire vocabulary for shell2 automation — auth, workspaces/items, source files, app senses (`DumpTree`/`ReadConsole`/`AppDataGet`) and actions (`Click`/`Type`/`Key`). Wired by `shell2/src/bridge.rs` (status item 1). The sthalam-era `osvauld-mcp` shim (and `.mcp.json`) was removed 2026-09-10, unused — an MCP face, if ever wanted, is a thin rebuild over the bridge. |
 
 **Reference-only — not workspace members, port lessons never code:**
 
@@ -119,5 +127,6 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 | [`design/runtime-rebuild-plan.md`](design/runtime-rebuild-plan.md) | plan of record: M2–M4, library verdicts |
 | [`design/code-as-tree.md`](design/code-as-tree.md), [`design/nid-channel.md`](design/nid-channel.md) | the tree-as-artifact design and the provenance channel |
 | [`design/loro-notes.md`](design/loro-notes.md) | Loro mechanics, read out of their source |
+| [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) | design baseline (unbuilt): workspace data across apps, namespace capabilities, grant/key bundles, discovery, sync, and sovereign node |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | code/test/doc conventions |
 | [`archive/README.md`](archive/README.md) | everything historical, and why |

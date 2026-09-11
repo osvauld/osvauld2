@@ -22,6 +22,12 @@ pub enum ItemsScreenMsg {
 }
 
 impl ItemsScreen {
+    /// The workspace whose items this screen snapshots — the bridge's refresh needs it to
+    /// decide whether a write concerns the screen that is showing.
+    pub fn ws(&self) -> &WorkspaceMeta {
+        &self.ws
+    }
+
     pub fn new(vault: &Vault, ws: WorkspaceMeta) -> Self {
         let (items, error) = match vault.items(&ws.id) {
             Ok(i) => (i, None),

@@ -9,12 +9,14 @@ mod modules;
 mod props;
 pub use crdt::{Cores, Docs, Resolve, Wake};
 
-use loro::{Container, EventTriggerKind, ExportMode, LoroDoc, Subscription, ValueOrContainer};
+use loro::{
+    Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
+};
 use mlua::{Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{El, col, row, text, text_area, text_input};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,8 +108,29 @@ pub struct LuaApp<M> {
     src: Rc<Source>,
     docs: Docs,
     cores: Cores,
+    /// The app's console: errors from view builds, handler runs and reloads — newest last,
+    /// a repeat of the previous line collapses (a broken source re-errors every frame).
+    /// Shared like [`Self::cores`] so the whole-struct swap in [`reload`](Self::reload) keeps
+    /// the log: the console, like the cores, outlives the VM it reports on.
+    console: Rc<RefCell<VecDeque<String>>>,
     resolve: Resolve,
     wake: Wake,
+}
+
+pub fn write_source_file(doc: &LoroDoc, path: &str, content: &str) -> Result<Vec<u8>, String> {
+    let files = doc.get_map("files");
+    let text = match files.get(path) {
+        Some(ValueOrContainer::Container(Container::Text(t))) => t,
+        Some(_) => return Err(format!("{path} is not a text source file")),
+        None => files
+            .insert_container(path, LoroText::new())
+            .map_err(|e| e.to_string())?,
+    };
+    text.delete(0, text.len_unicode())
+        .map_err(|e| e.to_string())?;
+    text.insert(0, content).map_err(|e| e.to_string())?;
+    doc.commit();
+    doc.export(ExportMode::Snapshot).map_err(|e| e.to_string())
 }
 
 impl<M: 'static> LuaApp<M> {
@@ -119,7 +142,12 @@ impl<M: 'static> LuaApp<M> {
     ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
-        Self::build(src, cores, resolve, wake, to_msg)
+        let app = Self::build(src, cores, resolve, wake, to_msg)?;
+        // A source that never loaded is rendered by every view; log it once, here.
+        if let Some(e) = &app.error {
+            app.log(e.clone());
+        }
+        Ok(app)
     }
 
     /// Everything that makes a VM, with the doc cores and the source watch handed in rather than
@@ -173,6 +201,7 @@ impl<M: 'static> LuaApp<M> {
             cores,
             resolve,
             wake,
+            console: Rc::new(RefCell::new(VecDeque::new())),
         })
     }
 
@@ -191,32 +220,62 @@ impl<M: 'static> LuaApp<M> {
     /// `main.lua` that compiles and returns a closure which throws on its first call is the
     /// ordinary case, and without the trial frame we would have swapped before finding out.
     pub fn reload(&mut self) -> Result<(), String> {
-        let staged = Self::build(
+        let mut staged = match Self::build(
             self.src.clone(),
             self.cores.clone(),
             self.resolve.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let e = e.to_string();
+                self.log(format!("reload error: {e}"));
+                return Err(e);
+            }
+        };
         if let Some(e) = &staged.error {
+            self.log(format!("reload error: {e}"));
             return Err(e.clone());
         }
-        let dropped = carry_state(&self.vm, &staged.vm).map_err(|e| e.to_string())?;
-        let view_fn = staged.view_fn.as_ref().ok_or("no view loaded")?;
-        view_fn.call::<Table>(()).map_err(|e| e.to_string())?;
+        let dropped = match carry_state(&self.vm, &staged.vm) {
+            Ok(d) => d,
+            Err(e) => {
+                let e = e.to_string();
+                self.log(format!("reload error: {e}"));
+                return Err(e);
+            }
+        };
+        let view_fn = staged.view_fn.as_ref().ok_or_else(|| {
+            self.log("reload error: no view loaded".to_string());
+            "no view loaded".to_string()
+        })?;
+        if let Err(e) = view_fn.call::<Table>(()) {
+            let e = e.to_string();
+            self.log(format!("reload error: {e}"));
+            return Err(e);
+        }
         // A real frame, not half of one. `_sweep` is what drops carried state belonging to an
         // element the new source no longer draws — skip it and that state lingers until whenever
         // the next frame happens to be.
         if let Ok(f) = staged.vm.globals().get::<Function>("_sweep") {
-            f.call::<()>(()).map_err(|e| e.to_string())?;
+            if let Err(e) = f.call::<()>(()) {
+                let e = e.to_string();
+                self.log(format!("reload error: {e}"));
+                return Err(e);
+            }
         }
         // The trial frame filled the staged app's handler table with closures nothing will ever
         // dispatch to; clear it so the first real frame starts from an empty one.
         staged.handlers.borrow_mut().clear();
+        // The console reports on VMs; it must not be reset by swapping to a new one.
+        staged.console = self.console.clone();
         *self = staged;
         for name in dropped {
-            eprintln!("reload: dropped ui.state({name:?}) — it holds a value tied to the old VM");
+            let note =
+                format!("reload: dropped ui.state({name:?}) — it holds a value tied to the old VM");
+            eprintln!("{note}");
+            self.log(note);
         }
         Ok(())
     }
@@ -244,6 +303,84 @@ impl<M: 'static> LuaApp<M> {
         self.src_seen = self.src_seen.max(v);
         self.reload_error = r.as_ref().err().cloned();
         Some(r)
+    }
+
+    pub fn source_files(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .src
+            .doc
+            .get_map("files")
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
+        out.sort();
+        out
+    }
+
+    pub fn read_source_file(&self, path: &str) -> Option<String> {
+        match self.src.doc.get_map("files").get(path) {
+            Some(ValueOrContainer::Container(Container::Text(t))) => Some(t.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn write_source_file(&self, path: &str, content: &str) -> Result<Vec<u8>, String> {
+        write_source_file(&self.src.doc, path, content)
+    }
+
+    pub fn source_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.src
+            .doc
+            .export(ExportMode::Snapshot)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Append one console line. A line identical to the current last one collapses — the
+    /// per-frame paths (`view`, handlers) would otherwise flood the log on a persistent
+    /// error — and the log is bounded: it is a console, not a history.
+    fn log(&self, line: String) {
+        let mut c = self.console.borrow_mut();
+        if c.back() != Some(&line) {
+            c.push_back(line);
+        }
+        while c.len() > 512 {
+            c.pop_front();
+        }
+    }
+
+    /// The last `last` console lines, newest last.
+    pub fn console(&self, last: usize) -> Vec<String> {
+        self.console
+            .borrow()
+            .iter()
+            .rev()
+            .take(last)
+            .rev()
+            .cloned()
+            .collect()
+    }
+
+    /// Every open runtime-data doc as `{ name: deep JSON }`. Names sorted, so two dumps of
+    /// the same state are byte-comparable. This is the *live* core state — writes the app
+    /// has not flushed to the vault yet are already visible here. (loro's own `ToJson`
+    /// trait is exactly `serde_json::to_value`, used directly here — one less import that
+    /// lives behind an internal-crate re-export.)
+    pub fn docs_json(&self) -> serde_json::Value {
+        let cores = self.cores.borrow();
+        let mut names: Vec<&String> = cores.keys().collect();
+        names.sort();
+        serde_json::Value::Object(
+            names
+                .into_iter()
+                .map(|n| {
+                    (
+                        n.clone(),
+                        serde_json::to_value(cores[n].doc.get_deep_value())
+                            .unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect(),
+        )
     }
 
     pub fn view(&self) -> El<M> {
@@ -285,7 +422,10 @@ impl<M: 'static> LuaApp<M> {
         }
         let tree = match view_fn.call::<Table>(()) {
             Ok(t) => t,
-            Err(e) => return text(format!("View error: {e}")),
+            Err(e) => {
+                self.log(format!("View error: {e}"));
+                return text(format!("View error: {e}"));
+            }
         };
         if let Ok(f) = self.vm.globals().get::<Function>("_sweep") {
             let _ = f.call::<()>(());
@@ -302,6 +442,7 @@ impl<M: 'static> LuaApp<M> {
         };
         for e in &context.errors {
             eprintln!("{e}");
+            self.log(e.clone());
         }
         el
     }
@@ -323,6 +464,7 @@ impl<M: 'static> LuaApp<M> {
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
+            self.log(format!("handler error: {e}"));
         }
     }
 

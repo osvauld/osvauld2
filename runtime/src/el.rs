@@ -793,4 +793,232 @@ impl<M> El<M> {
         });
         self
     }
+
+    // ── bridge introspection ─────────────────────────────────────────────
+    /// Plain-data mirror of a subtree, for hosts that inspect a view instead of painting
+    /// it (the bridge's DumpTree). No serde here — the runtime stays lean, and wire shapes
+    /// are the caller's business. Handlers are presence flags: the messages themselves are
+    /// not `Clone`, and a caller that wants one should be firing [`Action`], not reading.
+    pub fn info(&self) -> ElInfo {
+        let mut handlers = Vec::new();
+        if self.behaviour.on_click.is_some() {
+            handlers.push("on_click");
+        }
+        if self.behaviour.on_right_click.is_some() {
+            handlers.push("on_right_click");
+        }
+        if let Some(inp) = &self.behaviour.input {
+            if inp.map.is_some() {
+                handlers.push("on_input");
+            }
+            if inp.on_enter.is_some() {
+                handlers.push("on_enter");
+            }
+            if inp.on_esc.is_some() {
+                handlers.push("on_esc");
+            }
+        }
+        if self.behaviour.on_drag.is_some() {
+            handlers.push("on_drag");
+        }
+        if self.behaviour.on_drop.is_some() {
+            handlers.push("on_drop");
+        }
+        let kind = if self.appearance.custom.is_some() {
+            "custom"
+        } else if self.appearance.text.is_some() {
+            match &self.behaviour.input {
+                Some(i) if i.multiline => "textarea",
+                Some(_) => "input",
+                None => "text",
+            }
+        } else if self.layout.flex_direction == FlexDirection::Row {
+            "row"
+        } else {
+            "col"
+        };
+        let mut children: Vec<ElInfo> = self.children.iter().map(El::info).collect();
+        if let Some(o) = &self.behaviour.overlay {
+            children.push(o.panel.info());
+        }
+        ElInfo {
+            kind,
+            id: self.id.as_deref().map(str::to_string),
+            text: self.appearance.text.as_ref().map(|t| t.text.clone()),
+            handlers,
+            children,
+        }
+    }
+
+    /// Find the element with this id and fire it, returning the message the runtime itself
+    /// would have dispatched for that interaction. Resolution is by the author's `id` — the
+    /// same identity scroll and drag already require. Depth-first, first match; ids are the
+    /// author's continuity key, so a duplicate is their bug (the store would collide too).
+    pub fn trigger(&mut self, id: &str, act: Action) -> Result<M, String> {
+        match self.walk(id, act) {
+            Walk::Found(m) => Ok(m),
+            // The id matched but the handler didn't — reported as-is, never masked by the
+            // enclosing walk's "not here" the way a plain `Result` cascade would.
+            Walk::Fired(e) => Err(e),
+            Walk::Missed => Err(format!("no element with id '{id}'")),
+        }
+    }
+
+    fn walk(&mut self, id: &str, act: Action) -> Walk<M> {
+        if self.id.as_deref() == Some(id) {
+            return self.fire(id, act);
+        }
+        for c in &mut self.children {
+            match c.walk(id, act) {
+                Walk::Missed => continue,
+                other => return other,
+            }
+        }
+        if let Some(o) = self.behaviour.overlay.as_mut() {
+            match o.panel.walk(id, act) {
+                Walk::Missed => {}
+                other => return other,
+            }
+        }
+        Walk::Missed
+    }
+
+    /// Messages are consumed (`take`), not cloned: this tree is built fresh per frame and
+    /// discarded after extraction — the same economy the hit-test extraction uses.
+    fn fire(&mut self, id: &str, act: Action) -> Walk<M> {
+        match act {
+            Action::Click => match self.behaviour.on_click.take() {
+                Some(m) => Walk::Found(m),
+                None => Walk::Fired(format!("'{id}' has no on_click")),
+            },
+            Action::RightClick(at) => match self.behaviour.on_right_click.take() {
+                Some(f) => Walk::Found(f(at)),
+                None => Walk::Fired(format!("'{id}' has no on_right_click")),
+            },
+            Action::Enter => {
+                let Some(inp) = self.behaviour.input.as_mut() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                match inp.on_enter.take() {
+                    Some(m) => Walk::Found(m),
+                    None => Walk::Fired(format!("'{id}' has no on_enter")),
+                }
+            }
+            Action::Esc => {
+                let Some(inp) = self.behaviour.input.as_mut() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                match inp.on_esc.take() {
+                    Some(m) => Walk::Found(m),
+                    None => Walk::Fired(format!("'{id}' has no on_esc")),
+                }
+            }
+            Action::Type(s) => {
+                let Some(inp) = self.behaviour.input.as_ref() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                let Some(map) = inp.map.as_ref() else {
+                    return Walk::Fired(format!("'{id}' has no on_input"));
+                };
+                Walk::Found(map(s.to_string()))
+            }
+        }
+    }
+}
+
+/// The walk's three outcomes: dispatched, id-matched-but-unarmed, or id unseen.
+enum Walk<M> {
+    Found(M),
+    Fired(String),
+    Missed,
+}
+
+/// What the bridge asks an element to do. The variants mirror the runtime's real input
+/// surface — nothing here synthesizes an interaction the window can't produce.
+#[derive(Clone, Copy)]
+pub enum Action<'a> {
+    Click,
+    RightClick((f32, f32)),
+    Enter,
+    Esc,
+    Type(&'a str),
+}
+
+/// The plain-data view description [`El::info`] produces. `text` on an input is its value.
+pub struct ElInfo {
+    pub kind: &'static str,
+    pub id: Option<String>,
+    pub text: Option<String>,
+    pub handlers: Vec<&'static str>,
+    pub children: Vec<ElInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(PartialEq, Debug)]
+    enum M {
+        Hit,
+        Enter,
+        Typed(String),
+    }
+
+    #[test]
+    fn info_reports_kind_id_text_handlers() {
+        let el = col()
+            .id("root")
+            .child(row().id("bar").child(text("hi").id("lbl")))
+            .child(text_input("v", "field", M::Typed));
+        let i = el.info();
+        assert_eq!((i.kind, i.id.as_deref()), ("col", Some("root")));
+        assert!(i.handlers.is_empty());
+        let bar = &i.children[0];
+        assert_eq!(bar.kind, "row");
+        let lbl = &bar.children[0];
+        assert_eq!((lbl.kind, lbl.text.as_deref()), ("text", Some("hi")));
+        let field = &i.children[1];
+        assert_eq!((field.kind, field.text.as_deref()), ("input", Some("v")));
+        assert_eq!(field.handlers, vec!["on_input"]);
+    }
+
+    #[test]
+    fn trigger_fires_by_id_and_reports_missing() {
+        let mut el = col()
+            .id("root")
+            .child(text("x").id("a").on_click(M::Hit))
+            .child(text_input("v", "f", M::Typed));
+        assert_eq!(el.trigger("a", Action::Click).unwrap(), M::Hit);
+        // Consumed, not cloned — a second fire on the same tree says so honestly.
+        assert!(
+            el.trigger("a", Action::Click)
+                .unwrap_err()
+                .contains("no on_click")
+        );
+        assert_eq!(
+            el.trigger("f", Action::Type("hi")).unwrap(),
+            M::Typed("hi".into())
+        );
+        assert!(
+            el.trigger("zz", Action::Click)
+                .unwrap_err()
+                .contains("no element")
+        );
+        assert!(
+            el.trigger("a", Action::Type("x"))
+                .unwrap_err()
+                .contains("not an input")
+        );
+    }
+
+    #[test]
+    fn enter_esc_come_from_the_input() {
+        let mut el = text_input("v", "f", M::Typed).on_enter(M::Enter);
+        assert_eq!(el.trigger("f", Action::Enter).unwrap(), M::Enter);
+        assert!(
+            el.trigger("f", Action::Esc)
+                .unwrap_err()
+                .contains("no on_esc")
+        );
+    }
 }

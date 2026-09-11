@@ -186,6 +186,7 @@ dependencies = [
  "lua_tree",
  "mlua",
  "runtime",
+ "serde_json",
  "uuid",
 ]
 
@@ -269,6 +270,12 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64ct"
@@ -2752,15 +2759,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "osvauld-mcp"
-version = "0.1.0"
-dependencies = [
- "osvauld-rpc",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "osvauld-rpc"
 version = "0.1.0"
 dependencies = [
@@ -3412,6 +3410,7 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "parley",
+ "png",
  "pollster 1.0.1",
  "taffy",
  "vello",
@@ -3605,10 +3604,13 @@ name = "shell2"
 version = "0.1.0"
 dependencies = [
  "app_host",
+ "base64",
  "identity",
  "loro",
+ "osvauld-rpc",
  "rfd",
  "runtime",
+ "serde_json",
  "tempfile",
  "vault",
  "vello",
@@ -4197,6 +4199,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "identity",
+ "loro",
  "rand",
  "serde",
  "serde_json",
