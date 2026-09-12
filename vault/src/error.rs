@@ -16,6 +16,8 @@ pub enum VaultError {
     Locked,
     #[error("not a valid name: {0}")]
     InvalidName(String),
+    #[error("not a valid identifier: {0}")]
+    InvalidId(String),
     #[error(transparent)]
     Identity(IdentityError),
     #[error(transparent)]

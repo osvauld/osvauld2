@@ -32,7 +32,14 @@ pub(crate) fn meta_key(id: &str) -> String {
 /// requiring exactly `ws/<id>/meta` rejects those.
 pub(crate) fn id_from_meta_key(key: &str) -> Option<&str> {
     let id = key.strip_prefix(WS_PREFIX)?.strip_suffix("/meta")?;
-    (!id.is_empty() && !id.contains('/')).then_some(id)
+    valid_id(id).then_some(id)
+}
+
+pub(crate) fn valid_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// A fresh opaque workspace id: 16 random bytes, hex-encoded.

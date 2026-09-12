@@ -61,9 +61,10 @@ are excluded by tests. Everything below remains unbuilt: workspace namespaces sh
 apps, capability permits bundled with recipient-encrypted keys,
 bounded node issuance by roles/DIDs, permit upgrades over sync, CRDT discovery indexes,
 local-only data, sharding, and document-based submission/results. The old `osvauld` and
-`agent_x` are research references, not compatibility contracts. The next implementation
-slice hardens existing Vault identifier validation before adding typed resource storage;
-Vault remains an opaque sealed store rather than an authorization engine. The broader design
+`agent_x` are research references, not compatibility contracts. **Third slice landed
+2026-09-12:** Vault rejects malformed workspace/item ids and ambiguous document names at
+public key-building boundaries, and listing scans ignore malformed stored keys; Vault remains
+an opaque sealed store rather than an authorization engine. The broader design
 checkpoint is the shop's namespace/capability/processing table, challenged against
 booking and chat; exact rules, grant/key formats, index hierarchy, and backend ownership
 remain to be designed. Work packages and acceptance scenarios are in the design note.
