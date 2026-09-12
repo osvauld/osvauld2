@@ -2406,15 +2406,48 @@ end
     );
 }
 
-/// With breadcrumbs off (`dev = false`, the production setting) the path is empty and the
+/// `build`'s unknown-tag arm used to return its card directly — past the `children`
+/// boundary, so the tag never reached `Ctx.errors` (or the console), never gained a
+/// breadcrumb, and its message ran the tag into the words (`unknown tagfoo`). It raises
+/// like every other `build` failure now, and the boundary does the card. No `ui.*`
+/// constructor mints an unknown tag, so the child is a hand-written table — carrying its
+/// own `line`, or the breadcrumb read would fail first and this would pin breadcrumb
+/// validation instead of the unknown-tag branch.
+#[test]
+fn an_unknown_tag_is_recorded_with_a_breadcrumb_and_siblings_survive() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		{ tag = "flurb", line = 4 },
+		ui.button({ id = "ok", on_click = function() end, ui.text{ "sibling stays alive" } }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let mut tree = app.view();
+    assert_eq!(
+        app.console(100),
+        &["col:[3] > [1] > flurb:[4] > unknown tag flurb"],
+        "the unknown tag is recorded with its breadcrumb"
+    );
+    assert!(
+        tree.trigger("ok", runtime::Action::Click).is_ok(),
+        "the sibling button is alive in the frame"
+    );
+}
+
+/// With breadcrumbs disabled (`dev = false`) the path is empty and the
 /// message used to arrive with a leading ` > ` — an arrow pointing at nothing.
 #[test]
 fn a_breadcrumb_less_card_has_no_leading_separator() {
     let (lua, _fires) = sandboxed_vm().unwrap();
-    let node: Table = lua
-        .load(r#"return ui.col{ ui.text{} }"#)
-        .eval()
-        .unwrap();
+    let node: Table = lua.load(r#"return ui.col{ ui.text{} }"#).eval().unwrap();
     let mut handlers = Vec::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     ctx.dev = false;
@@ -2422,6 +2455,127 @@ fn a_breadcrumb_less_card_has_no_leading_separator() {
     assert_eq!(
         ctx.errors,
         vec!["needs its label as child 1, got  nil - has ".to_string()]
+    );
+}
+
+/// A drag or drop bind without an `id` used to leak mlua's nil-to-string conversion
+/// (`invalid type: nil to string`) into the card. The guide says "needs an `id`" — so the
+/// card must too. One test per bind; both cards coexist, siblings stay alive.
+#[test]
+fn drag_binds_without_an_id_name_the_bind_not_the_plumbing() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		ui.button({ on_drag = function() end, ui.text{ "card" } }),
+		ui.button({ on_drop = function() end, ui.text{ "card" } }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    let lines = app.console(100);
+    assert_eq!(
+        lines,
+        &[
+            "col:[3] > [1] > button:[4] > on_drag needs an id",
+            "col:[3] > [2] > button:[5] > on_drop needs an id",
+        ],
+        "each bind names itself, and both cards coexist"
+    );
+}
+
+/// `ui.input` and `ui.text_area` had the same nil-to-string leak. Each names its own tag;
+/// `value` and `on_input` are present so only the `id` is missing.
+#[test]
+fn input_and_text_area_without_an_id_name_the_tag_not_the_plumbing() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		ui.input({ value = "", on_input = function() end }),
+		ui.text_area({ value = "", on_input = function() end }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    assert_eq!(
+        app.console(100),
+        &[
+            "col:[3] > [1] > input:[4] > input needs an id",
+            "col:[3] > [2] > text_area:[5] > text_area needs an id",
+        ],
+        "each element names itself, and both cards coexist"
+    );
+}
+
+/// The missing-id fix's last sibling: `value` and `on_input` are the other two mandatory
+/// props, and a missing one used to leak mlua's nil conversion (`invalid type: nil to
+/// string` / `nil to function`). One test for both tags; the last element pins the read
+/// order — when `value` and `on_input` are both absent, the `value` card surfaces.
+#[test]
+fn input_and_text_area_name_their_missing_mandatory_props() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		ui.input({ id = "a", on_input = function() end }),
+		ui.input({ value = "", id = "b" }),
+		ui.text_area({ id = "c", on_input = function() end }),
+		ui.text_area({ value = "", id = "d" }),
+		ui.input({ id = "e" }),
+	}
+end
+"#,
+    )
+    .unwrap();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    assert_eq!(
+        app.console(100),
+        &[
+            "col:[3] > [1] > input#a:[4] > input needs a value",
+            "col:[3] > [2] > input#b:[5] > input needs on_input",
+            "col:[3] > [3] > text_area#c:[6] > text_area needs a value",
+            "col:[3] > [4] > text_area#d:[7] > text_area needs on_input",
+            "col:[3] > [5] > input#e:[8] > input needs a value",
+        ],
+        "each element names its missing prop; value outranks on_input"
+    );
+}
+
+/// The `Option` read is for nil, not leniency: a `id` that cannot convert (numbers do
+/// coerce, both before and after) must keep its conversion error, not become a card-less
+/// success or a missing-id message.
+#[test]
+fn a_non_string_id_on_an_input_still_reports_the_type() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(r#"return ui.col{ ui.input({ value = "", id = {}, on_input = function() end }) }"#)
+        .eval()
+        .unwrap();
+    let mut handlers = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    ctx.dev = false;
+    assert!(walk(node, &mut ctx).is_ok(), "a card replaces the element");
+    assert_eq!(
+        ctx.errors,
+        vec!["error converting Lua table to String (expected string or number)".to_string()],
+        "the Option read must not swallow type errors"
     );
 }
 
@@ -2451,4 +2605,21 @@ end
     let mut tree = app.view();
     app.update(tree.trigger("inc", runtime::Action::Click).unwrap());
     assert_eq!(app.docs_json()["state"]["map"]["count"].as_f64(), Some(1.0));
+}
+
+/// `keys` feeds error cards (and the console), and pairs iteration order is unspecified —
+/// so its output must be deterministic or those messages can't be pinned. Children
+/// ascending even when built out of order, names alphabetical and unquoted, `tag`/`line`
+/// stay hidden, and an odd key sorts after the names with its display form.
+#[test]
+fn keys_orders_children_names_and_odd_keys_deterministically() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(r#"return { [2] = "two", tag = "col", line = 9, beta = 2, "one", alpha = 1, [1.5] = 0.5 }"#)
+        .eval()
+        .unwrap();
+    assert_eq!(
+        keys(&node),
+        r#"[1] = "one",[2] = "two",alpha=1,beta=2,1.5=0.5"#
+    );
 }
