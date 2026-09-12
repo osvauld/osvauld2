@@ -2372,6 +2372,59 @@ end
     );
 }
 
+// ── error cards ─────────────────────────────────────────────────────────────
+
+/// The card text is authored, not leaked: the boundary used to render mlua's plumbing
+/// (`runtime error: …`) into every card, and the breadcrumb separators alternated
+/// (`col:[3]> [1]`). Both are pinned here in one console line.
+#[test]
+fn error_cards_show_the_reason_not_the_plumbing() {
+    let src = LoroDoc::new();
+    write_source_file(
+        &src,
+        "main.lua",
+        r#"
+return function()
+	return ui.col{
+		ui.text({ id = "t1", bogus_prop = true, "hi" }),
+		ui.text{ "sibling stays alive" },
+	}
+end
+"#,
+    )
+    .unwrap();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    let lines = app.console(100);
+    let line = lines
+        .iter()
+        .find(|l| l.contains("bogus_prop"))
+        .expect("the error must land in the console");
+    assert_eq!(
+        line.as_str(),
+        "col:[3] > [1] > text#t1:[4] > unknown prop bogus_prop"
+    );
+}
+
+/// With breadcrumbs off (`dev = false`, the production setting) the path is empty and the
+/// message used to arrive with a leading ` > ` — an arrow pointing at nothing.
+#[test]
+fn a_breadcrumb_less_card_has_no_leading_separator() {
+    let (lua, _fires) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(r#"return ui.col{ ui.text{} }"#)
+        .eval()
+        .unwrap();
+    let mut handlers = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    ctx.dev = false;
+    assert!(walk(node, &mut ctx).is_ok(), "siblings stay alive");
+    assert_eq!(
+        ctx.errors,
+        vec!["needs its label as child 1, got  nil - has ".to_string()]
+    );
+}
+
 #[test]
 fn docs_json_reads_live_core_state() {
     let src = LoroDoc::new();

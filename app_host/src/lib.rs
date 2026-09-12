@@ -436,8 +436,9 @@ impl<M: 'static> LuaApp<M> {
         let el = match walk(tree, &mut context) {
             Ok(el) => el,
             Err(e) => {
-                context.errors.push(e.to_string());
-                err_box(&e.to_string())
+                let msg = reason(&e);
+                context.errors.push(msg.clone());
+                err_box(&msg)
             }
         };
         for e in &context.errors {
@@ -666,9 +667,24 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     Ok((vm, fires))
 }
 fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
-    let msg = format!("{} > {msg}", context.path);
+    let msg = if context.path.is_empty() {
+        msg
+    } else {
+        format!("{} > {msg}", context.path)
+    };
     context.errors.push(msg.clone());
     err_box(&msg)
+}
+
+/// The text an error card shows. Every error the host itself mints — in `build`, `children`,
+/// `props` — is an [`mlua::Error::Runtime`], whose `Display` prepends `runtime error: `. That
+/// prefix is mlua's plumbing, not something an app author can act on, so it comes off here.
+/// Anything else (a Lua-raised error, carrying its `file:line`) passes through untouched.
+fn reason(e: &Error) -> String {
+    match e {
+        Error::RuntimeError(msg) => msg.clone(),
+        other => other.to_string(),
+    }
 }
 fn children<M: 'static>(
     mut el: El<M>,
@@ -679,7 +695,10 @@ fn children<M: 'static>(
     for i in 1..=max_index(node) {
         let mark = context.path.len();
         if context.dev {
-            context.path.push_str(&format!("> [{i}]"));
+            if !context.path.is_empty() {
+                context.path.push_str(" > ");
+            }
+            context.path.push_str(&format!("[{i}]"));
         }
         let child = node.get::<Value>(i)?;
         match child {
@@ -691,7 +710,7 @@ fn children<M: 'static>(
                 if t.contains_key("tag")? {
                     el = el.child(match walk(t, context) {
                         Ok(c) => c,
-                        Err(e) => fail(context, e.to_string()),
+                        Err(e) => fail(context, reason(&e)),
                     });
                     context.path.truncate(mark);
                 } else {
