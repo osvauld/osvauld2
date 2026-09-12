@@ -258,17 +258,78 @@ fn src_survives_reopen_and_relogin() {
 #[test]
 fn item_blob_ops_require_an_unlocked_account() {
     let (vault, _tmp) = fresh();
-    assert!(matches!(vault.get_src("w", "i"), Err(VaultError::Locked)));
+    let id = "0123456789abcdef0123456789abcdef";
+    assert!(matches!(vault.get_src(id, id), Err(VaultError::Locked)));
     assert!(matches!(
-        vault.put_src("w", "i", SRC),
+        vault.put_src(id, id, SRC),
         Err(VaultError::Locked)
     ));
     assert!(matches!(
-        vault.get_doc("w", "i", "test"),
+        vault.get_doc(id, id, "test"),
         Err(VaultError::Locked)
     ));
     assert!(matches!(
-        vault.put_doc("w", "i", STATE, "test"),
+        vault.put_doc(id, id, STATE, "test"),
         Err(VaultError::Locked)
     ));
+}
+
+#[test]
+fn vault_rejects_path_like_storage_ids() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let good = vault.create_workspace("ws").unwrap().id;
+
+    for bad in [
+        "",
+        "abc",
+        "0123456789abcdef0123456789abcdeg",
+        "0123456789abcdef0123456789ABCDEF",
+        "../admin",
+    ] {
+        assert!(matches!(
+            vault.create_item(bad, "app", ItemKind::App),
+            Err(VaultError::InvalidId(_))
+        ));
+        assert!(matches!(vault.items(bad), Err(VaultError::InvalidId(_))));
+        assert!(matches!(
+            vault.get_src(&good, bad),
+            Err(VaultError::InvalidId(_))
+        ));
+    }
+}
+
+#[test]
+fn vault_rejects_ambiguous_doc_names() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let (ws_id, item_id) = app_item(&vault);
+
+    for name in ["", ".", "..", "a/b", "a\\b", "café", "name with space"] {
+        assert!(matches!(
+            vault.put_doc(&ws_id, &item_id, STATE, name),
+            Err(VaultError::InvalidName(_))
+        ));
+    }
+    assert!(matches!(
+        vault.put_doc(&ws_id, &item_id, STATE, &"a".repeat(65)),
+        Err(VaultError::InvalidName(_))
+    ));
+}
+
+#[test]
+fn listings_ignore_malformed_storage_keys() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let ws = vault.create_workspace("real").unwrap();
+    let item = vault.create_item(&ws.id, "app", ItemKind::App).unwrap();
+    let store = vault.store().unwrap();
+
+    store.put("ws/not-an-id/meta", b"ignored").unwrap();
+    store
+        .put(&format!("ws/{}/item/not-an-id/meta", ws.id), b"ignored")
+        .unwrap();
+
+    assert_eq!(vault.workspaces().unwrap(), vec![ws.clone()]);
+    assert_eq!(vault.items(&ws.id).unwrap(), vec![item]);
 }

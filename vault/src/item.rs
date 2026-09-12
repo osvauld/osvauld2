@@ -57,6 +57,16 @@ impl WorkspaceItem {
 
 // ── Key helpers ───────────────────────────────────────────────────────────────
 
+pub(crate) fn valid_doc_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
 pub(crate) fn meta_key(ws_id: &str, item_id: &str) -> String {
     format!("ws/{ws_id}/item/{item_id}/meta")
 }
@@ -81,5 +91,5 @@ pub(crate) fn id_from_meta_key<'a>(ws_id: &str, key: &'a str) -> Option<&'a str>
     let rest = key
         .strip_prefix(&format!("ws/{ws_id}/item/"))?
         .strip_suffix("/meta")?;
-    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+    crate::workspace::valid_id(rest).then_some(rest)
 }
