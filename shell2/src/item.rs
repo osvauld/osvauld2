@@ -22,6 +22,12 @@ pub enum ItemsScreenMsg {
 }
 
 impl ItemsScreen {
+    /// The workspace whose items this screen snapshots — the bridge's refresh needs it to
+    /// decide whether a write concerns the screen that is showing.
+    pub fn ws(&self) -> &WorkspaceMeta {
+        &self.ws
+    }
+
     pub fn new(vault: &Vault, ws: WorkspaceMeta) -> Self {
         let (items, error) = match vault.items(&ws.id) {
             Ok(i) => (i, None),
@@ -36,23 +42,33 @@ impl ItemsScreen {
             .px(14.0)
             .radius(6.0)
             .center()
+            // Without this a narrow window folds the label into three stacked words rather than
+            // letting the title beside it give way — the spacer collapses first, then everything
+            // shrinks to min-content together.
+            .no_shrink()
             .id("add_item")
             .fill(theme::accent())
             .hover_fill(theme::accent_hover())
             .press_fill(theme::accent_press())
             .tint(120.0)
             .on_click(Msg::Items(ItemsScreenMsg::Upload))
-            .child(text("+ Add item").font_size(13.0).color(theme::bg_page()));
+            .child(
+                text("+ Add item")
+                    .font_size(13.0)
+                    .no_wrap()
+                    .color(theme::bg_page()),
+            );
         let back = row()
             .h(36.0)
             .px(10.0)
             .radius(6.0)
             .center()
+            .no_shrink()
             .id("back")
             .hover_fill(theme::bg_1())
             .tint(120.0)
             .on_click(Msg::Items(ItemsScreenMsg::Back))
-            .child(text("←").font_size(15.0).color(theme::fg_3()));
+            .child(text("←").font_size(15.0).no_wrap().color(theme::fg_3()));
         let header = row()
             .gap(12.0)
             .align_center()

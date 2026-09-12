@@ -170,7 +170,7 @@ pub(crate) fn draw<M>(
             } else {
                 // Routed on `runs` exactly as `layout::measure_text` is, so a leaf is never
                 // measured rich and painted plain — the two would disagree about its size.
-                let w = wrap_width(p.rect, p.pad);
+                let w = wrap_width(ts, p.rect, p.pad);
                 let (_, th) = measure_placed(text, ts, p.rect, p.pad);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
                 let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
@@ -189,12 +189,33 @@ pub(crate) fn draw<M>(
     }
 }
 
-/// The width a text leaf's glyphs must be shaped against: its content box, which is exactly the
-/// constraint `layout::measure_text` was given. Shaping at anything else — `None` above all — lays
-/// the string out against a width nobody reserved space for, and the glyphs leave the box.
-pub(crate) fn wrap_width(rect: Rect, pad: Insets) -> Option<f32> {
-    Some((rect.width() - pad.x0 - pad.x1).max(0.0) as f32)
+/// The width a text leaf's glyphs must be shaped against: its content box, which is *nearly*
+/// the constraint `layout::measure_text` was given. Shaping at a width nobody reserved space for
+/// lets the glyphs leave the box, so this stays anchored to the rect — but it cannot use the rect
+/// naked, for two reasons.
+///
+/// **Taffy rounds layout to whole pixels.** "+ new workspace" at 13pt measures 105.0010, so the
+/// box it is given is 105 — one thousandth of a point short of the string that sized it. Re-shaped
+/// against that, parley does the only thing it can and breaks the line, and a one-line label paints
+/// as two inside a box reserved for one. It is a sub-pixel loss, so it lands on every label whose
+/// natural width is not a whole number, at every window size. That is the bug this function had:
+/// nothing about it was narrow-window-specific, which is exactly how it was reported.
+///
+/// [`ROUNDING_SLACK`] is the fix and one point is the right size for it: rounding can never take
+/// more than a whole pixel, and no line break turns on a single point of width that was not already
+/// going to be marginal.
+///
+/// **`no_wrap` has to reach here too.** It is a property of the leaf, not of the box, and a label
+/// that refuses to fold in layout while folding in paint is the same drift in a new coat.
+pub(crate) fn wrap_width(ts: &TextSpec, rect: Rect, pad: Insets) -> Option<f32> {
+    if !ts.wrap {
+        return None;
+    }
+    Some((rect.width() - pad.x0 - pad.x1).max(0.0) as f32 + ROUNDING_SLACK)
 }
+
+/// What Taffy's integer rounding can shave off a reserved box — see [`wrap_width`].
+const ROUNDING_SLACK: f32 = 1.0;
 
 /// Shape a placed text node exactly as [`draw`] will: same width, same plain/rich routing.
 ///
@@ -207,7 +228,7 @@ pub(crate) fn measure_placed(
     rect: Rect,
     pad: Insets,
 ) -> (f32, f32) {
-    let w = wrap_width(rect, pad);
+    let w = wrap_width(ts, rect, pad);
     if ts.runs.is_empty() {
         engine.measure(&ts.text, ts.family, ts.size, w)
     } else {

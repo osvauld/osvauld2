@@ -171,7 +171,25 @@ impl<M: 'static> Registry<M> {
         prop!(size, f32, f32),
         prop!(w, f32),
         prop!(h, f32),
-        prop!(grow),
+        prop!(no_shrink),
+        prop!(min_w, f32),
+        prop!(max_w, f32),
+        prop!(min_h, f32),
+        prop!(max_h, f32),
+        // Not `prop!`: `grow` takes a bool *or* a number, and the macro's arms are keyed on one
+        // type each. `grow = true` is the flag every app already writes; `grow = 2` is the share a
+        // splitter between two elastic children has to write to both of them (§11). `false` means
+        // 0.0 rather than "skip", so an override can switch growth off the way it switches it on.
+        (
+            "grow",
+            (|el, v| {
+                let n = match v {
+                    Value::Boolean(b) => f32::from(*b),
+                    _ => f32::from_prop(v)?,
+                };
+                Ok(El::grow_by(el, n))
+            }) as Apply<M>,
+        ),
         prop!(wrap),
         // spacing
         prop!(pad, f32),
@@ -199,6 +217,7 @@ impl<M: 'static> Registry<M> {
         prop!(stroke_dash, f32, Color, f32, f32),
         prop!(opacity, f32),
         prop!(font_size, f32),
+        prop!(no_wrap),
         // hover
         prop!(hover_fill, Color),
         prop!(hover_stroke, f32, Color),

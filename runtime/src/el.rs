@@ -29,6 +29,8 @@ pub(crate) struct TextSpec {
     pub size: f32,
     pub color: Color,
     pub runs: Vec<Run>,
+    /// False for a label. See [`El::no_wrap`].
+    pub wrap: bool,
 }
 
 /// Escape hatch: draw arbitrary vello (shapes and/or text) into the element's computed rect — e.g.
@@ -314,6 +316,7 @@ pub fn text<M>(s: impl Into<String>) -> El<M> {
         size: 15.0,
         color: Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF),
         runs: Vec::new(),
+        wrap: true,
     });
     e
 }
@@ -442,6 +445,40 @@ impl<M> El<M> {
     pub fn size(self, w: f32, h: f32) -> Self {
         self.w(w).h(h)
     }
+    /// Refuse to be shrunk when the row runs out of room.
+    ///
+    /// Flex items shrink by default, and a text leaf's floor is its *min-content* width — the
+    /// longest word. So a squeezed header does not clip its button, it folds the label: "+ Add
+    /// item" becomes three stacked words inside a 36pt-tall box. A control is not a paragraph, and
+    /// `text_wraps_to_the_width_its_parent_offers` is the behaviour we want for prose and never
+    /// for a label.
+    ///
+    /// Only acts on the **main** axis — in a `col`, a child's width is the cross axis and this
+    /// does nothing to it. `build` already applies the same thing to the children of a main-axis
+    /// scroller, which is why the kanban's columns keep their width and a header's button does not.
+    pub fn no_shrink(mut self) -> Self {
+        self.layout.flex_shrink = 0.0;
+        self
+    }
+    /// Bounds, not a size. A dragged boundary needs one side elastic (see the resize table in
+    /// docs/design/code-as-tree.md §11), and elastic without a floor collapses to nothing the
+    /// first time the window is narrow — these are how a `grow` child says how far it will go.
+    pub fn min_w(mut self, v: f32) -> Self {
+        self.layout.min_size.width = length(v);
+        self
+    }
+    pub fn max_w(mut self, v: f32) -> Self {
+        self.layout.max_size.width = length(v);
+        self
+    }
+    pub fn min_h(mut self, v: f32) -> Self {
+        self.layout.min_size.height = length(v);
+        self
+    }
+    pub fn max_h(mut self, v: f32) -> Self {
+        self.layout.max_size.height = length(v);
+        self
+    }
     /// Fill the available width / height (100%).
     pub fn w_full(mut self) -> Self {
         self.layout.size.width = percent(1.0);
@@ -455,8 +492,15 @@ impl<M> El<M> {
         self.w_full().h_full()
     }
     /// Grow to absorb free space along the main axis (e.g. a spacer pushing siblings apart).
-    pub fn grow(mut self) -> Self {
-        self.layout.flex_grow = 1.0;
+    pub fn grow(self) -> Self {
+        self.grow_by(1.0)
+    }
+    /// The same knob as a share rather than a flag. Two plain `grow` siblings are permanently
+    /// 50/50, which makes the `grow`↔`grow` row of §11's resize table inexpressible: dragging the
+    /// boundary between two elastic children has to write a *ratio* to both of them. `grow_by(2.0)`
+    /// beside `grow()` is 2:1.
+    pub fn grow_by(mut self, n: f32) -> Self {
+        self.layout.flex_grow = n;
         self
     }
     /// Center children on the cross axis only (e.g. vertically centering a row's contents).
@@ -642,6 +686,24 @@ impl<M> El<M> {
         }
         self
     }
+    /// Measure at max-content and never fold, whatever width the parent offers.
+    ///
+    /// The fix for a *label*, and distinct from [`El::no_shrink`], which stops the parent being
+    /// squeezed in the first place. `no_shrink` only acts on a row's main axis, so it cannot help
+    /// a control centred in a column; this works on any axis and whatever the cause, because it
+    /// takes the decision away from the layout entirely.
+    ///
+    /// The trade is that a label too long for its box overflows rather than folding — which is the
+    /// right failure for a control. A folded label is unreadable *and* silently changes the
+    /// element's height, so a fixed-height button paints its background behind only the first
+    /// line. Prose keeps the default: `text_wraps_to_the_width_its_parent_offers` is the whole
+    /// point of the parley hook and is not what this turns off.
+    pub fn no_wrap(mut self) -> Self {
+        if let Some(t) = &mut self.appearance.text {
+            t.wrap = false;
+        }
+        self
+    }
 
     // ── interaction + nesting ───────────────────────────────────────────
     pub fn on_click(mut self, m: M) -> Self {
@@ -730,5 +792,233 @@ impl<M> El<M> {
             anchor,
         });
         self
+    }
+
+    // ── bridge introspection ─────────────────────────────────────────────
+    /// Plain-data mirror of a subtree, for hosts that inspect a view instead of painting
+    /// it (the bridge's DumpTree). No serde here — the runtime stays lean, and wire shapes
+    /// are the caller's business. Handlers are presence flags: the messages themselves are
+    /// not `Clone`, and a caller that wants one should be firing [`Action`], not reading.
+    pub fn info(&self) -> ElInfo {
+        let mut handlers = Vec::new();
+        if self.behaviour.on_click.is_some() {
+            handlers.push("on_click");
+        }
+        if self.behaviour.on_right_click.is_some() {
+            handlers.push("on_right_click");
+        }
+        if let Some(inp) = &self.behaviour.input {
+            if inp.map.is_some() {
+                handlers.push("on_input");
+            }
+            if inp.on_enter.is_some() {
+                handlers.push("on_enter");
+            }
+            if inp.on_esc.is_some() {
+                handlers.push("on_esc");
+            }
+        }
+        if self.behaviour.on_drag.is_some() {
+            handlers.push("on_drag");
+        }
+        if self.behaviour.on_drop.is_some() {
+            handlers.push("on_drop");
+        }
+        let kind = if self.appearance.custom.is_some() {
+            "custom"
+        } else if self.appearance.text.is_some() {
+            match &self.behaviour.input {
+                Some(i) if i.multiline => "textarea",
+                Some(_) => "input",
+                None => "text",
+            }
+        } else if self.layout.flex_direction == FlexDirection::Row {
+            "row"
+        } else {
+            "col"
+        };
+        let mut children: Vec<ElInfo> = self.children.iter().map(El::info).collect();
+        if let Some(o) = &self.behaviour.overlay {
+            children.push(o.panel.info());
+        }
+        ElInfo {
+            kind,
+            id: self.id.as_deref().map(str::to_string),
+            text: self.appearance.text.as_ref().map(|t| t.text.clone()),
+            handlers,
+            children,
+        }
+    }
+
+    /// Find the element with this id and fire it, returning the message the runtime itself
+    /// would have dispatched for that interaction. Resolution is by the author's `id` — the
+    /// same identity scroll and drag already require. Depth-first, first match; ids are the
+    /// author's continuity key, so a duplicate is their bug (the store would collide too).
+    pub fn trigger(&mut self, id: &str, act: Action) -> Result<M, String> {
+        match self.walk(id, act) {
+            Walk::Found(m) => Ok(m),
+            // The id matched but the handler didn't — reported as-is, never masked by the
+            // enclosing walk's "not here" the way a plain `Result` cascade would.
+            Walk::Fired(e) => Err(e),
+            Walk::Missed => Err(format!("no element with id '{id}'")),
+        }
+    }
+
+    fn walk(&mut self, id: &str, act: Action) -> Walk<M> {
+        if self.id.as_deref() == Some(id) {
+            return self.fire(id, act);
+        }
+        for c in &mut self.children {
+            match c.walk(id, act) {
+                Walk::Missed => continue,
+                other => return other,
+            }
+        }
+        if let Some(o) = self.behaviour.overlay.as_mut() {
+            match o.panel.walk(id, act) {
+                Walk::Missed => {}
+                other => return other,
+            }
+        }
+        Walk::Missed
+    }
+
+    /// Messages are consumed (`take`), not cloned: this tree is built fresh per frame and
+    /// discarded after extraction — the same economy the hit-test extraction uses.
+    fn fire(&mut self, id: &str, act: Action) -> Walk<M> {
+        match act {
+            Action::Click => match self.behaviour.on_click.take() {
+                Some(m) => Walk::Found(m),
+                None => Walk::Fired(format!("'{id}' has no on_click")),
+            },
+            Action::RightClick(at) => match self.behaviour.on_right_click.take() {
+                Some(f) => Walk::Found(f(at)),
+                None => Walk::Fired(format!("'{id}' has no on_right_click")),
+            },
+            Action::Enter => {
+                let Some(inp) = self.behaviour.input.as_mut() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                match inp.on_enter.take() {
+                    Some(m) => Walk::Found(m),
+                    None => Walk::Fired(format!("'{id}' has no on_enter")),
+                }
+            }
+            Action::Esc => {
+                let Some(inp) = self.behaviour.input.as_mut() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                match inp.on_esc.take() {
+                    Some(m) => Walk::Found(m),
+                    None => Walk::Fired(format!("'{id}' has no on_esc")),
+                }
+            }
+            Action::Type(s) => {
+                let Some(inp) = self.behaviour.input.as_ref() else {
+                    return Walk::Fired(format!("'{id}' is not an input"));
+                };
+                let Some(map) = inp.map.as_ref() else {
+                    return Walk::Fired(format!("'{id}' has no on_input"));
+                };
+                Walk::Found(map(s.to_string()))
+            }
+        }
+    }
+}
+
+/// The walk's three outcomes: dispatched, id-matched-but-unarmed, or id unseen.
+enum Walk<M> {
+    Found(M),
+    Fired(String),
+    Missed,
+}
+
+/// What the bridge asks an element to do. The variants mirror the runtime's real input
+/// surface — nothing here synthesizes an interaction the window can't produce.
+#[derive(Clone, Copy)]
+pub enum Action<'a> {
+    Click,
+    RightClick((f32, f32)),
+    Enter,
+    Esc,
+    Type(&'a str),
+}
+
+/// The plain-data view description [`El::info`] produces. `text` on an input is its value.
+pub struct ElInfo {
+    pub kind: &'static str,
+    pub id: Option<String>,
+    pub text: Option<String>,
+    pub handlers: Vec<&'static str>,
+    pub children: Vec<ElInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(PartialEq, Debug)]
+    enum M {
+        Hit,
+        Enter,
+        Typed(String),
+    }
+
+    #[test]
+    fn info_reports_kind_id_text_handlers() {
+        let el = col()
+            .id("root")
+            .child(row().id("bar").child(text("hi").id("lbl")))
+            .child(text_input("v", "field", M::Typed));
+        let i = el.info();
+        assert_eq!((i.kind, i.id.as_deref()), ("col", Some("root")));
+        assert!(i.handlers.is_empty());
+        let bar = &i.children[0];
+        assert_eq!(bar.kind, "row");
+        let lbl = &bar.children[0];
+        assert_eq!((lbl.kind, lbl.text.as_deref()), ("text", Some("hi")));
+        let field = &i.children[1];
+        assert_eq!((field.kind, field.text.as_deref()), ("input", Some("v")));
+        assert_eq!(field.handlers, vec!["on_input"]);
+    }
+
+    #[test]
+    fn trigger_fires_by_id_and_reports_missing() {
+        let mut el = col()
+            .id("root")
+            .child(text("x").id("a").on_click(M::Hit))
+            .child(text_input("v", "f", M::Typed));
+        assert_eq!(el.trigger("a", Action::Click).unwrap(), M::Hit);
+        // Consumed, not cloned — a second fire on the same tree says so honestly.
+        assert!(
+            el.trigger("a", Action::Click)
+                .unwrap_err()
+                .contains("no on_click")
+        );
+        assert_eq!(
+            el.trigger("f", Action::Type("hi")).unwrap(),
+            M::Typed("hi".into())
+        );
+        assert!(
+            el.trigger("zz", Action::Click)
+                .unwrap_err()
+                .contains("no element")
+        );
+        assert!(
+            el.trigger("a", Action::Type("x"))
+                .unwrap_err()
+                .contains("not an input")
+        );
+    }
+
+    #[test]
+    fn enter_esc_come_from_the_input() {
+        let mut el = text_input("v", "f", M::Typed).on_enter(M::Enter);
+        assert_eq!(el.trigger("f", Action::Enter).unwrap(), M::Enter);
+        assert!(
+            el.trigger("f", Action::Esc)
+                .unwrap_err()
+                .contains("no on_esc")
+        );
     }
 }

@@ -22,6 +22,11 @@ pub enum SpaceScreenMsg {
 }
 
 impl SpaceScreen {
+    /// The workspace metas this screen snapshots — read access for tests and the bridge.
+    pub fn spaces(&self) -> &[WorkspaceMeta] {
+        &self.spaces
+    }
+
     pub fn new(vault: &Vault) -> Self {
         let (spaces, error) = match vault.workspaces() {
             Ok(s) => (s, None),
@@ -62,6 +67,7 @@ impl SpaceScreen {
                 .child(
                     text("press ⏎ to create")
                         .font_size(11.0)
+                        .no_wrap()
                         .color(theme::fg_3()),
                 );
         }
@@ -71,6 +77,9 @@ impl SpaceScreen {
             .px(14.0)
             .radius(6.0)
             .center()
+            // See `item.rs` — a label is not a paragraph, and a squeezed row folds it into
+            // stacked words rather than clipping it.
+            .no_shrink()
             .id("add_space")
             .fill(theme::accent())
             .hover_fill(theme::accent_hover())
@@ -80,6 +89,7 @@ impl SpaceScreen {
             .child(
                 text("+ new workspace")
                     .font_size(13.0)
+                    .no_wrap()
                     .color(theme::bg_page()),
             );
         if self.add_space {
@@ -97,6 +107,7 @@ impl SpaceScreen {
                 .child(
                     text("⏎ create · esc cancel")
                         .font_size(11.0)
+                        .no_wrap()
                         .color(theme::fg_3()),
                 );
             add_btn = add_btn.overlay(

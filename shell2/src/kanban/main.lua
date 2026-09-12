@@ -105,10 +105,20 @@ local function composer(c)
 			center = true,
 			fill = C.accent,
 			hover_fill = C.accent_hi,
-			ui.text({ "Add card", color = "#ffffff", font_size = 13 }),
+			ui.text({ "Add card", no_wrap = true, color = "#ffffff", font_size = 13 }),
 			on_click = send,
 		}),
 	})
+end
+
+-- What this column is *this frame*. Mid-drag the width comes from pointer state and the doc is not
+-- touched; on release the model writes it once. Same shape as the card and column drags above —
+-- nothing goes to the CRDT until the gesture finishes, so a drag is one op and not sixty.
+local function width_of(c)
+	if S.resize and S.resize.id == c.id then
+		return S.resize.w
+	end
+	return c.w or C.col_w
 end
 
 local function column_of(c, list)
@@ -126,7 +136,12 @@ local function column_of(c, list)
 	local lifting = S.drag ~= nil and S.drag.kind == "col" and S.drag.id == c.id
 	return ui.col({
 		id = c.id,
-		w = 300,
+		w = width_of(c),
+		-- The clamp in `actions.resize` is what the drag obeys; these are what the *layout* obeys,
+		-- and they are not the same guard. A width can arrive from a peer whose theme differs, or
+		-- from a doc edited by hand, and neither went past the drag.
+		min_w = C.col_w_min,
+		max_w = C.col_w_max,
 		radius = 12,
 		fill = C.panel,
 		stroke = { 1, C.line_soft },
@@ -145,7 +160,7 @@ local function column_of(c, list)
 			on_drag = function(phase, x, y)
 				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = x, y = y })
 			end,
-			ui.text({ c.name, color = C.text, font_size = 14 }),
+			ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			W.badge(#list),
 			ui.col({ grow = true }),
 			W.icon_button("x", function()
@@ -180,7 +195,7 @@ local function modal()
 		stroke = { 1, C.line },
 		fade_in = 120,
 		on_click = function() end,
-		ui.text({ "New column", color = C.text, font_size = 16 }),
+		ui.text({ "New column", no_wrap = true, color = C.text, font_size = 16 }),
 		ui.input({
 			value = m.name,
 			id = "col_name",
@@ -210,7 +225,7 @@ local function modal()
 				radius = 6,
 				center = true,
 				hover_fill = C.line_soft,
-				ui.text({ "Cancel", color = C.muted, font_size = 13 }),
+				ui.text({ "Cancel", no_wrap = true, color = C.muted, font_size = 13 }),
 				on_click = function()
 					update({ kind = "close_col" })
 				end,
@@ -222,7 +237,7 @@ local function modal()
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
-				ui.text({ "Create", color = "#ffffff", font_size = 13 }),
+				ui.text({ "Create", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = create,
 			}),
 		}),
@@ -266,6 +281,12 @@ return function()
 		local c = columns[i]
 		col_list[#col_list + 1] = W.guide_v("gv:" .. i, col_slot == i)
 		col_list[#col_list + 1] = column_of(c, grouped[c.id])
+		-- The grip is a sibling of the column, not a child of it: it has to sit in the gutter
+		-- *between* two columns, and a child clipped to its parent's rounded panel would be a
+		-- three-point target hanging off the edge of a corner.
+		col_list[#col_list + 1] = W.grip("grip:" .. c.id, S.resize ~= nil and S.resize.id == c.id, function(phase, x)
+			update({ kind = "resize", id = c.id, phase = phase, x = x })
+		end)
 		if S.drag and S.drag.kind == "col" and S.drag.id == c.id then
 			flying = ui.col({
 				w = 300,
@@ -273,7 +294,7 @@ return function()
 				pad = 12,
 				fill = C.panel,
 				stroke = { 1, C.accent },
-				ui.text({ c.name, color = C.text, font_size = 14 }),
+				ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			})
 		end
 	end
@@ -309,7 +330,7 @@ return function()
 			px = 24,
 			py = 14,
 			align_center = true,
-			ui.text({ "Board", color = C.text, font_size = 18 }),
+			ui.text({ "Board", no_wrap = true, color = C.text, font_size = 18 }),
 			W.badge(#cards),
 			ui.col({ grow = true }),
 			ui.button({
@@ -319,7 +340,7 @@ return function()
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
-				ui.text({ "+  Column", color = "#ffffff", font_size = 13 }),
+				ui.text({ "+  Column", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = function()
 					update({ kind = "open_col" })
 				end,

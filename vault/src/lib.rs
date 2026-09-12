@@ -1,13 +1,15 @@
-//! Headless account manager: composes `identity` + `storage` into signup, login, and
-//! account-switching, holding the one unlocked `Identity` for the session. The only auth
-//! code in the tree; both `sthalam` (UI) and `kunki` (node) drive it. See `docs/vault.md`.
+//! Headless account manager: composes `identity` + `storage` into signup, login and
+//! account-switching, holds the one unlocked `Identity` for the session, and owns the account's
+//! item tree — workspaces, items, sealed src/doc records. The only auth code in the tree;
+//! `shell2` drives it today, the future node will too. Loro-free by design: snapshots are
+//! opaque sealed bytes here, Loro docs live in the caller. See `docs/vault.md`.
 
 mod account;
 mod error;
 mod item;
 mod workspace;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use identity::{Identity, Keystore, Mnemonic};
@@ -56,7 +58,7 @@ pub struct Vault {
 
 /// Split out so the Argon2 hashing ([`Vault::prepare_signup`]) can run off the UI thread,
 /// then be committed ([`Vault::commit_signup`]) on it.
-struct PreparedAccount {
+pub struct PreparedAccount {
     identity: Identity,
     mnemonic: Mnemonic,
     label: String,
@@ -65,7 +67,7 @@ struct PreparedAccount {
 
 /// The unlocked identity produced by [`Vault::prepare_login`] (off the UI thread), installed
 /// as the active account by [`Vault::commit_login`].
-struct UnlockedAccount {
+pub struct UnlockedAccount {
     did: String,
     label: String,
     identity: Identity,
@@ -104,7 +106,7 @@ impl Vault {
     }
 
     /// Slow half (Argon2): no `self`, no I/O — safe to run on a worker thread.
-    fn prepare_signup(label: &str, passphrase: &str) -> Result<PreparedAccount, VaultError> {
+    pub fn prepare_signup(label: &str, passphrase: &str) -> Result<PreparedAccount, VaultError> {
         let (identity, mnemonic) = identity::generate();
         let keystore = identity::seal(&identity, passphrase)?;
         Ok(PreparedAccount {
@@ -115,7 +117,7 @@ impl Vault {
         })
     }
 
-    fn commit_signup(
+    pub fn commit_signup(
         &mut self,
         prepared: PreparedAccount,
     ) -> Result<(String, Mnemonic), VaultError> {
@@ -139,18 +141,18 @@ impl Vault {
     }
 
     pub fn login(&mut self, did: &str, passphrase: &str) -> Result<(), VaultError> {
-        let unlocked = Self::prepare_login(&self.dir, did, passphrase)?;
+        let unlocked = self.prepare_login(did, passphrase)?;
         self.commit_login(unlocked)
     }
 
     /// Slow half (Argon2): opens the keystore read-only and decrypts it. Takes no `&self`, so
     /// the UI can run it on a worker thread; pair with [`Vault::commit_login`].
-    fn prepare_login(
-        dir: &Path,
+    pub fn prepare_login(
+        &self,
         did: &str,
         passphrase: &str,
     ) -> Result<UnlockedAccount, VaultError> {
-        let path = dir.join(did_to_filename(did)?);
+        let path = self.dir.join(did_to_filename(did)?);
         // Guard existence: Store::open would otherwise create a stray empty db for a bad DID.
         if !path.exists() {
             return Err(VaultError::NoSuchAccount(did.to_string()));
@@ -166,7 +168,7 @@ impl Vault {
         })
     }
 
-    fn commit_login(&mut self, unlocked: UnlockedAccount) -> Result<(), VaultError> {
+    pub fn commit_login(&mut self, unlocked: UnlockedAccount) -> Result<(), VaultError> {
         let UnlockedAccount {
             did,
             label,

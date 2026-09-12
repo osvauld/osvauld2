@@ -8,8 +8,9 @@ members = [
   "shell2",
   "runtime",
   "app_host",
+  "lua_tree",
   "osvauld-rpc",
-  "osvauld-mcp",
+  "workspace",
 ]
 
 [workspace.package]
