@@ -27,6 +27,9 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   error boundaries in `walk` (dev-gated breadcrumbs); staged `reload` (whole second VM,
   keeps doc cores + per-viewer scratch, trial frame, banner over the still-running app on
   failure)
+- **error cards**: host-minted errors omit mlua's `runtime error:` plumbing; breadcrumbs use
+  one separator; missing bind/input props name what is required; unknown tags enter the
+  recorded boundary while siblings stay alive; diagnostic key dumps are deterministic
 - **doc binding**: `doc:open(name)` mirror — plain-table reads patched in place at the top
   of `view()`, explicit writes (`:set/:insert/:delete/:move`), stable-id addressing,
   snapshot persistence, wake-on-external-write
@@ -150,10 +153,8 @@ Roughly in dependency order:
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
 2. **W4 DX**: types gate (generated `.d.luau` stubs from the one binding registry +
-   `luau-lsp analyze` before any swap), error-card polish (known gaps listed in w3 §
-   "Deliberately NOT W3": leaked `runtime error:` prefix, missing-id messages for drag
-   binds, unknown-tag not recorded, path separator inconsistency), per-block `.lua` edits
-   (needs the splitter port). *Screenshot landed 2026-09-10; see bridge item 1.*
+   `luau-lsp analyze` before any swap), and per-block `.lua` edits (needs the splitter port).
+   *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
 3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
    `reload`), but nothing writes the source doc after upload — the file watcher and the
    bridge's `WriteFile` are the missing triggers

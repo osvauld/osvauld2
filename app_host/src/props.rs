@@ -16,6 +16,15 @@ fn want(v: &Value, ty: &str) -> mlua::Error {
     mlua::Error::runtime(format!("expected {ty} got {}", v.type_name()))
 }
 
+/// A drag/drop bind's handler state is keyed by element `id`; without one the bind is
+/// unreachable. The read stays one boundary crossing — `nil` becomes `None`, not a
+/// conversion error naming Lua's plumbing instead of the missing prop.
+fn missing_id<M>(cx: &DragCtx<'_, M>, bind: &str) -> mlua::Result<String> {
+    cx.node
+        .get::<Option<String>>("id")?
+        .ok_or_else(|| mlua::Error::runtime(format!("{bind} needs an id")))
+}
+
 impl FromProp for f32 {
     fn from_prop(v: &Value) -> mlua::Result<Self> {
         v.as_f32()
@@ -128,7 +137,7 @@ pub(crate) struct Registry<M>(PhantomData<M>);
 impl<M: 'static> Registry<M> {
     pub(crate) const BINDS: &'static [(&str, Bind<M>)] = &[
         ("on_drag", |el, v, cx| {
-            let id: String = cx.node.get("id")?;
+            let id = missing_id(cx, "on_drag")?;
             let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
             let idx = cx.handlers.len() as u32;
             cx.handlers.push(handler.clone());
@@ -143,7 +152,7 @@ impl<M: 'static> Registry<M> {
             }))
         }),
         ("on_drop", |el, v, cx| {
-            let id: String = cx.node.get("id")?;
+            let id = missing_id(cx, "on_drop")?;
             let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
             let idx = cx.handlers.len() as u32;
             cx.handlers.push(handler.clone());

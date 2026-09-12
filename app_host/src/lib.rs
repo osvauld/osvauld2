@@ -436,8 +436,9 @@ impl<M: 'static> LuaApp<M> {
         let el = match walk(tree, &mut context) {
             Ok(el) => el,
             Err(e) => {
-                context.errors.push(e.to_string());
-                err_box(&e.to_string())
+                let msg = reason(&e);
+                context.errors.push(msg.clone());
+                err_box(&msg)
             }
         };
         for e in &context.errors {
@@ -666,9 +667,24 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     Ok((vm, fires))
 }
 fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
-    let msg = format!("{} > {msg}", context.path);
+    let msg = if context.path.is_empty() {
+        msg
+    } else {
+        format!("{} > {msg}", context.path)
+    };
     context.errors.push(msg.clone());
     err_box(&msg)
+}
+
+/// The text an error card shows. Every error the host itself mints — in `build`, `children`,
+/// `props` — is an [`mlua::Error::Runtime`], whose `Display` prepends `runtime error: `. That
+/// prefix is mlua's plumbing, not something an app author can act on, so it comes off here.
+/// Anything else (a Lua-raised error, carrying its `file:line`) passes through untouched.
+fn reason(e: &Error) -> String {
+    match e {
+        Error::RuntimeError(msg) => msg.clone(),
+        other => other.to_string(),
+    }
 }
 fn children<M: 'static>(
     mut el: El<M>,
@@ -679,7 +695,10 @@ fn children<M: 'static>(
     for i in 1..=max_index(node) {
         let mark = context.path.len();
         if context.dev {
-            context.path.push_str(&format!("> [{i}]"));
+            if !context.path.is_empty() {
+                context.path.push_str(" > ");
+            }
+            context.path.push_str(&format!("[{i}]"));
         }
         let child = node.get::<Value>(i)?;
         match child {
@@ -691,7 +710,7 @@ fn children<M: 'static>(
                 if t.contains_key("tag")? {
                     el = el.child(match walk(t, context) {
                         Ok(c) => c,
-                        Err(e) => fail(context, e.to_string()),
+                        Err(e) => fail(context, reason(&e)),
                     });
                     context.path.truncate(mark);
                 } else {
@@ -789,17 +808,38 @@ fn show(v: &Value) -> String {
     }
 }
 
+// Error cards only, never the hot walk — so it can sort where `pairs` promises no
+// order: children ascending, then names alphabetical and bare (quotes read as typos in
+// a key list), then any other key by its display form. `tag`/`line` stay hidden.
 fn keys(node: &Table) -> String {
-    let mut out = Vec::new();
+    let mut ints: Vec<(mlua::Integer, Value)> = Vec::new();
+    let mut names: Vec<(String, Value)> = Vec::new();
+    let mut rest: Vec<(String, Value)> = Vec::new();
     for pair in node.pairs::<Value, Value>() {
         let Ok((k, v)) = pair else { continue };
         match k {
-            Value::Integer(i) => out.push(format!("[{i}] = {}", show(&v))),
+            Value::Integer(i) if i > 0 => ints.push((i, v)),
             Value::String(s) if s == "tag" || s == "line" => {}
-            k => out.push(format!("{}={}", show(&k), show(&v))),
-        };
+            Value::String(s) => names.push((s.to_string_lossy(), v)),
+            k => rest.push((show(&k), v)),
+        }
     }
-    out.join(",")
+    ints.sort_by_key(|&(i, _)| i);
+    names.sort_by(|(a, _), (b, _)| a.cmp(b));
+    rest.sort_by(|(a, _), (b, _)| a.cmp(b));
+    ints.into_iter()
+        .map(|(i, v)| format!("[{i}] = {}", show(&v)))
+        .chain(
+            names
+                .into_iter()
+                .map(|(name, v)| format!("{name}={}", show(&v))),
+        )
+        .chain(
+            rest.into_iter()
+                .map(|(shown, v)| format!("{shown}={}", show(&v))),
+        )
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
@@ -825,9 +865,17 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                     keys(&node)
                 )));
             }
-            let value: String = node.get("value")?;
-            let id: String = node.get("id")?;
-            let f: mlua::Function = node.get("on_input")?;
+            // Three mandatory props, one boundary read each: `nil` names the tag, a wrong
+            // type keeps its conversion error. Read order decides which card surfaces.
+            let value = node
+                .get::<Option<String>>("value")?
+                .ok_or_else(|| mlua::Error::runtime(format!("{tag} needs a value")))?;
+            let id = node
+                .get::<Option<String>>("id")?
+                .ok_or_else(|| mlua::Error::runtime(format!("{tag} needs an id")))?;
+            let f = node
+                .get::<Option<mlua::Function>>("on_input")?
+                .ok_or_else(|| mlua::Error::runtime(format!("{tag} needs on_input")))?;
             let idx = context.handlers.len() as u32;
             context.handlers.push(f);
             let to_msg = context.to_msg.clone();
@@ -839,7 +887,9 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             }
         }
 
-        other => err_box(&format!("unknown tag{}", other)),
+        // Raised rather than carded here: the boundary in `children` owns the record, the
+        // breadcrumb and the sibling-alive card — a card built this deep skips all three.
+        other => return Err(mlua::Error::runtime(format!("unknown tag {other}"))),
     };
     let id: Option<String> = node.get("id")?;
     if let Some(s) = &id {
