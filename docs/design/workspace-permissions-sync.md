@@ -1,6 +1,8 @@
 # Workspace permissions, synchronization, and the sovereign node
 
-> **Status — 2026-09-11: design baseline for discussion; implementation unbuilt.**
+> **Status — 2026-09-11: design baseline; validated resource-address syntax, callable handles,
+> and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
+> node are unbuilt.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -45,6 +47,15 @@ capabilities. Do not silently grant every installed app all of its user's author
 
 ## 3. Namespaces, DIDs, and shards
 
+**2026-09-11 implementation note:** `workspace` now validates an ASCII address syntax rooted
+at `ws/<workspace-id>/…` and machine-callable handles (`orders`, `shop-v2`). Empty,
+traversal-like, wildcard, slash, backslash, percent, Unicode, and oversized input is rejected;
+colon remains valid so a DID can occupy one segment. `ResourceBinding` is only an in-memory
+handle/target pair—not an index resolver or authorization result. Exact scopes and terminal
+`/*` subtree scopes now match validated segment boundaries; a subtree excludes its own base.
+Opaque-ID shape, serialized CRDT indexes, resource kinds, display names, and vault integration
+remain unbuilt. Stable identity is the intended use of a target, not yet a semantic guarantee.
+
 **Capabilities scope actions to workspace namespaces**, including future matching data.
 Do not enumerate every future order or daily shard in a role definition. Examples:
 
@@ -55,9 +66,11 @@ ws/<ws>/channels/<channel>/<period>
 ws/<ws>/derived/fulfilment/<shard>
 ```
 
-Scopes such as `ws_id/*/test/*` are part of the intended expressibility. Exact path layout,
-canonicalization, wildcard depth, escaping, and valid identifiers remain to be specified.
-These addresses are not unchecked redb keys or filesystem paths.
+Scopes such as `ws_id/*/test/*` were part of the initial exploration. **Revised 2026-09-11:**
+the first implementation deliberately permits only an exact address or one terminal `/*`;
+interior and recursive wildcards are rejected. Broader patterns must be justified by concrete
+app policy before changing this grammar. Physical path layout and opaque-ID kinds remain to
+be specified. These addresses are not unchecked redb keys or filesystem paths.
 
 For participant-owned data, a DID segment binds to the identity authenticated at connection
 establishment. It is not a writer identity freely supplied with each update. A peer cannot
@@ -77,6 +90,12 @@ must respect its audience: filtering nested records in the UI is not access cont
 Permission to read a namespace does not require loading every shard. Index discovery,
 selected date ranges, active subscriptions, and local cache/eviction policy are separate
 from entitlement. Local-only documents never enter network discovery or transfer.
+
+A durable local-only draft (such as an unsubmitted order) is document truth: it may use
+Loro and must persist across restart. It is not transient viewer scratch such as an
+unfinished input in `ui.state`; that scratch stays outside CRDTs and need not survive
+restart. The proposed local-only designation excludes the durable document from every
+network index, advertisement, and transfer; that network enforcement is not built yet.
 
 ## 4. Policy, capabilities, and the grant bundle
 
@@ -325,8 +344,9 @@ reviewed ~100-line code slices with tests, following the repository process.
    acceptance, private chat, and shared board operations. Pin resource bindings, allowed
    actions, facts, transition checks, Lua limits, role authority, and consent. Resolve the
    canonical-order versus restricted-projection case before promising atomicity.
-2. **Namespace and grant format.** Define path matching, DID bindings, creation authority,
-   logical-record/shard addressing, canonical signed capabilities, delegation, bundled keys,
+2. **Namespace and grant format.** Challenge the built exact/terminal-subtree syntax against
+   real app policy, then define DID bindings, creation authority, logical-record/shard
+   addressing, canonical signed capabilities, delegation, bundled keys,
    recipient-key authentication, role evidence, upgrades/revocation, and version ordering.
    Include policy adoption and old-write behavior—not just happy-path issuance.
 3. **Identity/device decision.** The current mnemonic derives the same transport device key

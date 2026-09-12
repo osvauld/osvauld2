@@ -47,13 +47,21 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ### Workspace permissions, sync, and sovereign node — design baseline
 
-**2026-09-10:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
-records the agreed direction and open decisions for a fresh implementation: workspace
-namespaces shared across apps, capability permits bundled with recipient-encrypted keys,
+**2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
+records the agreed direction and open decisions for a fresh implementation. **First slice
+landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax
+and callable index handles, with ambiguous-input rejection tests; `ResourceBinding` is an
+in-memory handle/target pair. Semantic opaque IDs and CRDT index resolution remain unbuilt. **Second slice landed
+2026-09-11:** exact and terminal-`/*` subtree scopes match validated segment boundaries;
+lookalike prefixes, the subtree base, other workspaces, and non-terminal/recursive wildcards
+are excluded by tests. Everything below remains unbuilt: workspace namespaces shared across
+apps, capability permits bundled with recipient-encrypted keys,
 bounded node issuance by roles/DIDs, permit upgrades over sync, CRDT discovery indexes,
 local-only data, sharding, and document-based submission/results. The old `osvauld` and
-`agent_x` are research references, not compatibility contracts. No implementation landed.
-The next checkpoint is the shop's namespace/capability/processing table, challenged against
+`agent_x` are research references, not compatibility contracts. The next implementation
+slice hardens existing Vault identifier validation before adding typed resource storage;
+Vault remains an opaque sealed store rather than an authorization engine. The broader design
+checkpoint is the shop's namespace/capability/processing table, challenged against
 booking and chat; exact rules, grant/key formats, index hierarchy, and backend ownership
 remain to be designed. Work packages and acceptance scenarios are in the design note.
 

@@ -10,6 +10,7 @@ members = [
   "app_host",
   "lua_tree",
   "osvauld-rpc",
+  "workspace",
 ]
 
 [workspace.package]

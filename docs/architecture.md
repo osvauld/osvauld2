@@ -44,8 +44,12 @@ Rust screen: El builders (typed M) ───────────────
 - **Messages are plain data.** Lua callbacks register into a per-frame table and dispatch by
   index (`LuaMsg::Call(u32)`); Rust screens use typed enums. The VM never leaks into the
   runtime — this is what keeps "apps off the UI thread" a door that stays open.
-- **The CRDT is document truth** (Loro). Ephemeral per-viewer state (scroll, drags, drafts)
-  never enters it. An app's *source* and its *data* are separate docs.
+- **The CRDT is document truth** (Loro). Ephemeral per-viewer state (scroll, drags,
+  unfinished UI input) never enters it. An app's *source* and its *data* are separate docs.
+  **Clarified 2026-09-11:** “draft” previously meant transient viewer scratch here, not
+  a durable local-only document such as an unsubmitted order. The latter can use Loro
+  and persistence; its exclusion from network discovery/transfer is part of the unbuilt
+  [sync design](design/workspace-permissions-sync.md).
 - **External event sources start at `App::ready`.** Runner calls it once after winit has a
   window/renderer and is actively polling. Publishing a bridge socket from `run_with`'s builder
   creates a startup race: `EventLoopProxy::send_event` can succeed before events are deliverable.
@@ -67,6 +71,7 @@ Rust screen: El builders (typed M) ───────────────
 | `lua_tree` | full-moon (Luau) parse → 22-kind semantic tree → printer; the substrate for surgical agent edits and nids. See [`design/code-as-tree.md`](design/code-as-tree.md). |
 | `vault` | headless account manager: identity + storage over redb (one file per DID), workspaces, items, sealed source/doc storage. Loro-free by design. |
 | `cryptography` `identity` `storage` | backend crates, unchanged by the rebuild. Contracts in [`identity.md`](identity.md), [`storage.md`](storage.md), [`vault.md`](vault.md). |
+| `workspace` | canonical shared-resource addresses, exact/terminal-subtree scopes, and callable index handles. It names and matches targets but does not authorize, persist, sync, or interpret documents. |
 | `osvauld-rpc` | UDS wire vocabulary for shell2 automation — auth, workspaces/items, source files, app senses (`DumpTree`/`ReadConsole`/`AppDataGet`) and actions (`Click`/`Type`/`Key`). Wired by `shell2/src/bridge.rs` (status item 1). The sthalam-era `osvauld-mcp` shim (and `.mcp.json`) was removed 2026-09-10, unused — an MCP face, if ever wanted, is a thin rebuild over the bridge. |
 
 **Reference-only — not workspace members, port lessons never code:**
@@ -127,6 +132,6 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 | [`design/runtime-rebuild-plan.md`](design/runtime-rebuild-plan.md) | plan of record: M2–M4, library verdicts |
 | [`design/code-as-tree.md`](design/code-as-tree.md), [`design/nid-channel.md`](design/nid-channel.md) | the tree-as-artifact design and the provenance channel |
 | [`design/loro-notes.md`](design/loro-notes.md) | Loro mechanics, read out of their source |
-| [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) | design baseline (unbuilt): workspace data across apps, namespace capabilities, grant/key bundles, discovery, sync, and sovereign node |
+| [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) | design baseline: address/handle syntax and exact/subtree matching built; authorization, cross-app data, grant/key bundles, discovery, sync, and sovereign node unbuilt |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | code/test/doc conventions |
 | [`archive/README.md`](archive/README.md) | everything historical, and why |
