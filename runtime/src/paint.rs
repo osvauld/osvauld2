@@ -8,7 +8,7 @@ use crate::editor::Field;
 use crate::editor::Focus;
 use crate::el::TextSpec;
 use crate::id::Id;
-use crate::layout::Placed;
+use crate::layout::{Placed, PlacedKind};
 use crate::scroll::Axis;
 use crate::scroll::Scroll;
 use crate::scroll::Thumb;
@@ -38,21 +38,23 @@ pub(crate) fn draw<M>(
     pointer: Option<(f32, f32)>,
     store: &Store,
     focus: &Focus,
-    pressed: Option<Rect>,
+    pressed: Option<(Rect, Option<&Id>)>,
 ) {
     for p in placed {
-        let mut clipping = false;
-        if let Some(c) = p.clip {
-            let intersected_rect = c.intersect(p.rect);
-            if intersected_rect.width() <= 0.0 || intersected_rect.height() <= 0.0 {
+        match &p.kind {
+            PlacedKind::PushClip { rect, transform } => {
+                scene.push_clip_layer(Fill::NonZero, t * *transform, rect);
                 continue;
             }
-            clipping = true;
-            scene.push_clip_layer(Fill::NonZero, t, &c);
+            PlacedKind::PopClip => {
+                scene.pop_layer();
+                continue;
+            }
+            PlacedKind::Node => {}
         }
-
+        let hit_rect = p.transform.transform_rect_bbox(p.rect);
         let over =
-            pointer.is_some_and(|(px, py)| p.rect.contains(Point::new(px as f64, py as f64)));
+            pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
         let t_e = if let Some(spec) = &p.behaviour.tint
             && let Some(id) = &p.id
         {
@@ -67,7 +69,11 @@ pub(crate) fn draw<M>(
         };
         let (mut fill, mut stroke) = p.appearance.look.resolve_t(t_e);
 
-        let pressed_over = over && pressed.is_some_and(|pr| pr == p.rect);
+        let pressed_over = over
+            && pressed.is_some_and(|(pr, id)| match (id, p.id.as_ref()) {
+                (Some(pressed_id), Some(id)) => pressed_id == id,
+                _ => pr == hit_rect,
+            });
         if pressed_over {
             if let Some(filled) = p.appearance.look.press_fill {
                 fill = Some(filled);
@@ -80,7 +86,7 @@ pub(crate) fn draw<M>(
         let shape = RoundedRect::from_rect(p.rect, p.appearance.look.radius as f64);
         if let Some(mut c) = fill {
             c = c.multiply_alpha(p.alpha);
-            scene.fill(Fill::NonZero, t, c, None, &shape);
+            scene.fill(Fill::NonZero, t * p.transform, c, None, &shape);
         }
         if let Some(mut b) = stroke {
             b.color = b.color.multiply_alpha(p.alpha);
@@ -88,10 +94,14 @@ pub(crate) fn draw<M>(
             if let Some(d) = b.dash {
                 s = s.with_dashes(0.0, d);
             }
-            scene.stroke(&s, t, b.color, None, &shape);
+            scene.stroke(&s, t * p.transform, b.color, None, &shape);
         }
         if let Some(custom) = &p.appearance.custom {
-            custom(scene, text, p.rect, t);
+            custom(scene, text, p.rect, t * p.transform);
+        }
+        if let Some(frame) = &p.appearance.frame {
+            let origin = Affine::translate((p.rect.x0 + p.pad.x0, p.rect.y0 + p.pad.y0));
+            frame.draw(scene, t * p.transform * origin, p.alpha);
         }
         if let Some(ts) = &p.appearance.text {
             let text_color = ts.color.multiply_alpha(p.alpha);
@@ -110,7 +120,7 @@ pub(crate) fn draw<M>(
                         p.rect.y1 - p.pad.y1,
                     );
 
-                    scene.push_clip_layer(Fill::NonZero, t, &content);
+                    scene.push_clip_layer(Fill::NonZero, t * p.transform, &content);
                     let s = store
                         .get::<Scroll>(id, Slot::Scroll)
                         .copied()
@@ -124,7 +134,8 @@ pub(crate) fn draw<M>(
                         scroll_y,
                         spec.multiline,
                     );
-                    let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
+                    let origin =
+                        t * p.transform * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
                     for (bb, _line) in field.selection_geometry() {
                         let r = Rect::new(
                             p.rect.x0 + ox + bb.x0,
@@ -132,7 +143,7 @@ pub(crate) fn draw<M>(
                             p.rect.x0 + ox + bb.x1,
                             p.rect.y0 + oy + bb.y1,
                         );
-                        scene.fill(Fill::NonZero, t, SELECTION, None, &r);
+                        scene.fill(Fill::NonZero, t * p.transform, SELECTION, None, &r);
                     }
                     text.draw_layout(scene, layout, origin, Some(text_color));
                     if ts.text.is_empty()
@@ -161,7 +172,7 @@ pub(crate) fn draw<M>(
                                 p.rect.x0 + ox + bb.x1,
                                 p.rect.y0 + oy + bb.y1,
                             );
-                            scene.fill(Fill::NonZero, t, text_color, None, &r);
+                            scene.fill(Fill::NonZero, t * p.transform, text_color, None, &r);
                         }
                     }
 
@@ -173,7 +184,7 @@ pub(crate) fn draw<M>(
                 let w = wrap_width(ts, p.rect, p.pad);
                 let (_, th) = measure_placed(text, ts, p.rect, p.pad);
                 let (ox, oy) = content_offset(p.rect, p.pad, th, 0.0, 0.0, false);
-                let origin = t * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
+                let origin = t * p.transform * Affine::translate((p.rect.x0 + ox, p.rect.y0 + oy));
                 if !ts.runs.is_empty() {
                     // `p.alpha` is folded in per run rather than handed down as one brush, since
                     // the whole point is that the runs carry their own colours.
@@ -182,9 +193,6 @@ pub(crate) fn draw<M>(
                     text.draw(scene, &ts.text, ts.family, ts.size, origin, text_color, w);
                 }
             }
-        }
-        if clipping {
-            scene.pop_layer();
         }
     }
 }
@@ -263,7 +271,8 @@ pub(crate) fn scrollbars(
     for b in bars {
         let active = dragging == Some((&b.id, b.axis));
         let over = dragging.is_none()
-            && pointer.is_some_and(|(px, py)| b.rect.contains(Point::new(px as f64, py as f64)));
+            && pointer
+                .is_some_and(|(px, py)| b.hit_rect.contains(Point::new(px as f64, py as f64)));
         let color = if active {
             THUMB_DRAG
         } else if over {
@@ -272,7 +281,9 @@ pub(crate) fn scrollbars(
             THUMB
         };
         let shape = RoundedRect::from_rect(b.rect, b.rect.width().min(b.rect.height()) / 2.0);
+        scene.push_clip_layer(Fill::NonZero, t, &b.clip);
         scene.fill(Fill::NonZero, t, color, None, &shape);
+        scene.pop_layer();
     }
 }
 

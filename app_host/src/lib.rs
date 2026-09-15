@@ -5,6 +5,7 @@
 //! is unchanged — dispatch just calls the closure the index points at.
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
+mod gfx;
 mod modules;
 mod props;
 pub use crdt::{Cores, Docs, Resolve, Wake};
@@ -12,9 +13,12 @@ pub use crdt::{Cores, Docs, Resolve, Wake};
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
 };
-use mlua::{Error, Function, IntoLua, Lua, Table, Value};
+use mlua::{AnyUserData, Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
-use runtime::{El, col, row, text, text_area, text_input};
+use runtime::{
+    Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row, text,
+    text_area, text_input,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -28,6 +32,7 @@ pub enum LuaMsg {
     Call(u32),
     CallStr(u32, String),
     CallPhase(u32, &'static str, f32, f32),
+    CallDrag(u32, &'static str, f32, f32, f32, f32, f32),
 }
 
 pub struct Ctx<'a, M> {
@@ -454,7 +459,10 @@ impl<M: 'static> LuaApp<M> {
 
         // A message can outlive the frame that minted its index (queued click, landed animation),
         // so a stale index is expected — drop it rather than panicking.
-        let (LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPhase(i, _, _, _)) = msg;
+        let i = match msg {
+            LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPhase(i, _, _, _) => i,
+            LuaMsg::CallDrag(i, _, _, _, _, _, _) => i,
+        };
         let Some(h) = handlers.get(i as usize) else {
             return;
         };
@@ -462,6 +470,9 @@ impl<M: 'static> LuaApp<M> {
             LuaMsg::Call(_) => h.call::<()>(()),
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
             LuaMsg::CallPhase(_, phase, x, y) => h.call::<()>((phase, x, y)),
+            LuaMsg::CallDrag(_, phase, x, y, dx, dy, scale) => {
+                h.call::<()>((phase, x, y, dx, dy, scale))
+            }
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
@@ -628,6 +639,8 @@ ui = {
     button = tagger("button"),
     input = tagger("input"),
     text_area = tagger("text_area"),
+    frame = tagger("frame"),
+    overlay = tagger("overlay"),
 }
 
 function ui.state(id, init) 
@@ -652,6 +665,7 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     })?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;
+    gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
     let _ = vm.sandbox(true)?;
@@ -842,7 +856,59 @@ fn keys(node: &Table) -> String {
         .join(",")
 }
 
+fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+    if max_index(&node) != 2 {
+        return Err(mlua::Error::runtime(
+            "overlay needs exactly two children: anchor, then panel",
+        ));
+    }
+    for pair in node.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let allowed = match key {
+            Value::Integer(1 | 2) => true,
+            Value::String(ref key) => matches!(
+                key.to_str()?.as_ref(),
+                "tag" | "line" | "side" | "align" | "on_dismiss"
+            ),
+            _ => false,
+        };
+        if !allowed {
+            let key = match key {
+                Value::String(key) => key.to_string_lossy(),
+                other => show(&other),
+            };
+            return Err(mlua::Error::runtime(format!(
+                "overlay: unknown field {key}"
+            )));
+        }
+    }
+    let anchor = walk(node.get::<Table>(1)?, context)?;
+    let panel = walk(node.get::<Table>(2)?, context)?;
+    let side = match node.get::<Option<String>>("side")?.as_deref() {
+        None | Some("bottom") => PlacementSide::Bottom,
+        Some("top") => PlacementSide::Top,
+        Some("left") => PlacementSide::Left,
+        Some("right") => PlacementSide::Right,
+        Some(v) => return Err(mlua::Error::runtime(format!("unknown overlay side {v}"))),
+    };
+    let align = match node.get::<Option<String>>("align")?.as_deref() {
+        None | Some("start") => PlacementAlign::Start,
+        Some("center") => PlacementAlign::Center,
+        Some("end") => PlacementAlign::End,
+        Some(v) => return Err(mlua::Error::runtime(format!("unknown overlay align {v}"))),
+    };
+    let dismiss = node.get::<Option<Function>>("on_dismiss")?.map(|handler| {
+        let idx = context.handlers.len() as u32;
+        context.handlers.push(handler);
+        (context.to_msg)(LuaMsg::Call(idx))
+    });
+    Ok(anchor.overlay(panel, dismiss, Placement { side, align }, Anchor::Element))
+}
+
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
+    if tag == "overlay" {
+        return build_overlay(node, context);
+    }
     let mut el = match tag {
         "col" | "row" | "button" => {
             let el = if tag == "col" { col() } else { row() };
@@ -858,6 +924,17 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 )));
             }
         },
+        "frame" => {
+            if max_index(&node) > 0 {
+                return Err(mlua::Error::runtime("frame takes no children"));
+            }
+            let visual = node
+                .get::<AnyUserData>("visual")?
+                .borrow::<gfx::LuaFrame>()?
+                .0
+                .clone();
+            frame_el(visual)
+        }
         "input" | "text_area" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime(format!(
@@ -900,8 +977,8 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     if id.is_none() && (node.contains_key("scroll_x")? || node.contains_key("scroll_y")?) {
         return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
     }
-
-    el = props::apply(el, &node, context)?;
+    let consumed: &[&str] = if tag == "frame" { &["visual"] } else { &[] };
+    el = props::apply(el, &node, context, consumed)?;
     Ok(el)
 }
 

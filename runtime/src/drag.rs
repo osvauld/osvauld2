@@ -22,6 +22,7 @@ pub struct DragEvent {
     pub pos: (f32, f32), // current pos with origin as grabbed elements origin as (0,0)
     pub delta: (f32, f32), //pos-start
     pub grab: (f32, f32), //offset from origin rect
+    pub scale: f32,
     pub mods: Mods,
 }
 

@@ -30,6 +30,45 @@ impl Transition {
         self.target != self.progress
     }
 }
+pub struct Spring {
+    pub value: f32,
+    pub velocity: f32,
+    pub target: f32,
+}
+
+impl Spring {
+    pub fn new(target: f32) -> Self {
+        Self {
+            value: 0.0,
+            velocity: 0.0,
+            target,
+        }
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        self.target = self.target.clamp(0.0, 1.0);
+        let stiffness = 260.0;
+        let damping = 30.0;
+        let mut remaining = dt.min(0.1);
+        while remaining > 0.0 {
+            let step = remaining.min(1.0 / 120.0);
+            let force = (self.target - self.value) * stiffness;
+            self.velocity += (force - self.velocity * damping) * step;
+            self.value += self.velocity * step;
+            self.value = self.value.clamp(-0.1, 1.1);
+            remaining -= step;
+        }
+        if self.velocity.abs() < 0.001 && (self.target - self.value).abs() < 0.001 {
+            self.value = self.target;
+            self.velocity = 0.0;
+        }
+    }
+
+    pub fn in_flight(&self) -> bool {
+        self.velocity != 0.0 || self.value != self.target
+    }
+}
+
 pub enum Easing {
     Linear,
     EaseOut,
@@ -47,5 +86,6 @@ impl Easing {
 
 pub enum Driver {
     Hover,
+    Press,
     Value(f32),
 }

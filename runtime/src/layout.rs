@@ -4,27 +4,35 @@
 //! what lets a paragraph wrap. Consumes the tree (props move into `Placed`).
 
 use taffy::prelude::*;
-use vello::kurbo::{Insets, Rect};
+use vello::kurbo::{Affine, Insets, Rect};
 
-use crate::anim::Transition;
+use crate::anim::{Spring, Transition};
 use crate::col;
 use crate::el::{Anchor, Appearance, Behaviour, El, Overlay};
 use crate::id::Id;
 use crate::scroll::Scroll;
 use crate::state::{Slot, Store};
 use crate::text::{Run, TextEngine};
+use crate::zoom::Zoom;
 
 /// One positioned node, ready to paint and hit-test. `rect` is in logical points.
+pub(crate) enum PlacedKind {
+    Node,
+    PushClip { rect: Rect, transform: Affine },
+    PopClip,
+}
+
 pub(crate) struct Placed<M> {
+    pub kind: PlacedKind,
     pub id: Option<Id>,
     pub rect: Rect,
     pub pad: Insets,
     pub behaviour: Behaviour<M>,
     pub appearance: Appearance,
-    pub clip: Option<Rect>,
     pub content_size: (f32, f32),
     pub scroll_parent: Option<Id>,
     pub alpha: f32,
+    pub transform: Affine,
 }
 
 /// El props + its Taffy node id + mapped children, retained between build and emit.
@@ -34,6 +42,22 @@ struct Mapped<M> {
     appearance: Appearance,
     behaviour: Behaviour<M>,
     children: Vec<Mapped<M>>,
+    zoom_children: Vec<El<M>>,
+}
+
+fn clip_marker<M>(kind: PlacedKind) -> Placed<M> {
+    Placed {
+        kind,
+        id: None,
+        rect: Rect::ZERO,
+        pad: Insets::new(0.0, 0.0, 0.0, 0.0),
+        behaviour: Behaviour::default(),
+        appearance: Appearance::default(),
+        content_size: (0.0, 0.0),
+        scroll_parent: None,
+        alpha: 1.0,
+        transform: Affine::IDENTITY,
+    }
 }
 
 /// What a text leaf needs to answer Taffy's measure question, hung on its node as context.
@@ -57,13 +81,20 @@ pub(crate) struct TextCtx {
 /// passes `known` as empty (`leaf.rs:136`) but has already folded any resolved width into
 /// `available` as `Definite` — and subtracted padding and border, so this is the content box both
 /// ways in and out. Taffy adds the inset back at `leaf.rs:146`, which is why nothing here does.
-fn measure_text(
+enum LeafCtx {
+    Text(TextCtx),
+    Frame(Size<f32>),
+}
+
+fn measure_leaf(
     available: Size<AvailableSpace>,
-    ctx: Option<&mut TextCtx>,
+    ctx: Option<&mut LeafCtx>,
     text: &mut TextEngine,
 ) -> Size<f32> {
-    let Some(ctx) = ctx else {
-        return Size::ZERO;
+    let Some(ctx) = ctx else { return Size::ZERO };
+    let ctx = match ctx {
+        LeafCtx::Text(ctx) => ctx,
+        LeafCtx::Frame(size) => return *size,
     };
     // A label answers max-content whatever it is offered, so nothing downstream can fold it. It
     // overflows instead, which is the right failure for a control (`El::no_wrap`).
@@ -84,9 +115,9 @@ fn measure_text(
     Size { width, height }
 }
 
-/// Lay out `root` in `viewport`, letting text leaves size themselves through [`measure_text`].
+/// Lay out `root` in `viewport`, letting measured leaves size themselves through [`measure_leaf`].
 fn compute<M>(
-    tree: &mut TaffyTree<TextCtx>,
+    tree: &mut TaffyTree<LeafCtx>,
     mapped: &Mapped<M>,
     viewport: (f32, f32),
     text: &mut TextEngine,
@@ -97,12 +128,12 @@ fn compute<M>(
             width: AvailableSpace::Definite(viewport.0),
             height: AvailableSpace::Definite(viewport.1),
         },
-        |_known, available, _node, ctx, _style| measure_text(available, ctx, text),
+        |_known, available, _node, ctx, _style| measure_leaf(available, ctx, text),
     )
     .expect("compute_layout");
 }
 
-fn build<M>(mut el: El<M>, tree: &mut TaffyTree<TextCtx>) -> Mapped<M> {
+fn build<M>(mut el: El<M>, tree: &mut TaffyTree<LeafCtx>, store: &Store) -> Mapped<M> {
     let mut style = el.layout;
 
     if let Some(spec) = &el.behaviour.scroll {
@@ -121,24 +152,42 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<TextCtx>) -> Mapped<M> {
             el.children
                 .iter_mut()
                 .for_each(|c| c.layout.flex_shrink = 0.0);
+            if style.flex_grow > 0.0 {
+                style.flex_basis = length(0.0);
+            }
         }
     }
-    // A text leaf sizes itself, but not here: it is handed to Taffy as node context and asked
-    // during layout, once there is a width to wrap to. Explicit `.w()`/`.h()` still win — Taffy
-    // clamps the measured size against them. Inputs are the exception: designed sized, never text
-    // sized, so they carry no context and keep whatever the style said.
-    let text_ctx = match &el.appearance.text {
-        Some(ts) if el.behaviour.input.is_none() => Some(TextCtx {
+    // Measured leaves are handed to Taffy as node context. Text waits for an offered wrap width;
+    // Frame reports its fixed intrinsic size. Explicit `.w()`/`.h()` still win. Inputs are designed
+    // sized, never text sized, so they carry no context and keep whatever the style said.
+    let leaf_ctx = match (&el.appearance.text, &el.appearance.frame) {
+        (Some(ts), _) if el.behaviour.input.is_none() => Some(LeafCtx::Text(TextCtx {
             text: ts.text.clone(),
             family: ts.family,
             size: ts.size,
             runs: ts.runs.clone(),
             wrap: ts.wrap,
-        }),
+        })),
+        (_, Some(frame)) => {
+            let (width, height) = frame.size();
+            Some(LeafCtx::Frame(Size {
+                width: width as f32,
+                height: height as f32,
+            }))
+        }
         _ => None,
     };
-    let children: Vec<Mapped<M>> = el.children.into_iter().map(|c| build(c, tree)).collect();
-    let node = match text_ctx {
+    let zoom_children = if el.behaviour.zoom.is_some() {
+        std::mem::take(&mut el.children)
+    } else {
+        Vec::new()
+    };
+    let children: Vec<Mapped<M>> = el
+        .children
+        .into_iter()
+        .map(|c| build(c, tree, store))
+        .collect();
+    let node = match leaf_ctx {
         // Context only reaches a measure call on a childless node, so a text leaf with children
         // would silently measure nothing. Not reachable today: text and children are set by
         // different builders.
@@ -157,20 +206,23 @@ fn build<M>(mut el: El<M>, tree: &mut TaffyTree<TextCtx>) -> Mapped<M> {
         appearance: el.appearance,
         behaviour: el.behaviour,
         children,
+        zoom_children,
     }
 }
 
 fn emit<M>(
     mut m: Mapped<M>,
-    tree: &TaffyTree<TextCtx>,
+    tree: &TaffyTree<LeafCtx>,
+    text: &mut TextEngine,
     ox: f32,
     oy: f32,
     out: &mut Vec<Placed<M>>,
-    clip: Option<Rect>,
     store: &Store,
     scroll_parent: Option<Id>,
     overlays: &mut Vec<(Rect, Overlay<M>)>,
     alpha: f32,
+    transform: Affine,
+    stable_transform: Affine,
 ) {
     let l = tree.layout(m.node).expect("layout");
     // Taffy gives parent-relative locations; accumulate to absolute.
@@ -195,9 +247,34 @@ fn emit<M>(
         (y + l.size.height) as f64,
     );
 
+    let mut transform = transform;
+    let mut stable_transform = stable_transform;
+    if m.behaviour.scale != 1.0 {
+        let scale = Affine::translate((rect.x0, rect.y0))
+            * Affine::scale(m.behaviour.scale as f64)
+            * Affine::translate((-rect.x0, -rect.y0));
+        transform *= scale;
+        stable_transform *= scale;
+    }
+    if let Some((spec, target_scale)) = &m.behaviour.press_scale
+        && let Some(id) = &m.id
+    {
+        let p = store
+            .get::<Spring>(id, Slot::PressScale)
+            .map(|s| s.value.clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        let s = 1.0 + spec.easing.apply(p) * (target_scale - 1.0);
+        let c = rect.center();
+        transform = transform
+            * Affine::translate((c.x, c.y))
+            * Affine::scale(s as f64)
+            * Affine::translate((-c.x, -c.y));
+    }
+
     let content_size = (l.content_size.width, l.content_size.height);
     let (mut cx, mut cy) = (x, y);
-    let mut child_clip = clip;
+    let mut child_transform = transform;
+    let mut stable_child_transform = stable_transform;
     let mut parent_scroll = scroll_parent.clone();
     if let Some(s) = &m.behaviour.scroll
         && let Some(id) = &m.id
@@ -213,15 +290,24 @@ fn emit<M>(
         if s.y {
             cy -= scroll.y;
         }
-        child_clip = Some(match clip {
-            Some(c) => c.intersect(rect),
-            None => rect,
-        })
+    }
+    if m.behaviour.zoom.is_some()
+        && let Some(id) = &m.id
+    {
+        let zoom = store
+            .get::<Zoom>(id, Slot::Zoom)
+            .copied()
+            .unwrap_or_default();
+        let camera = Affine::translate((rect.x0 + zoom.pan.0 as f64, rect.y0 + zoom.pan.1 as f64))
+            * Affine::scale(zoom.scale as f64)
+            * Affine::translate((-rect.x0, -rect.y0));
+        child_transform = transform * camera;
+        stable_child_transform = stable_transform * camera;
     }
     let overlay = m.behaviour.overlay.take();
     if let Some(overlay) = overlay {
         let rect = match overlay.anchor {
-            Anchor::Element => rect,
+            Anchor::Element => stable_transform.transform_rect_bbox(rect),
             Anchor::Point(x, y) => Rect::new(x as f64, y as f64, x as f64, y as f64),
         };
         overlays.push((rect, overlay));
@@ -238,8 +324,10 @@ fn emit<M>(
     }
     let node_alpha = opacity * alpha;
     let behaviour = m.behaviour;
+    let clips_children = behaviour.scroll.is_some();
     let appearance = m.appearance;
     out.push(Placed {
+        kind: PlacedKind::Node,
         id: m.id,
         rect,
         scroll_parent,
@@ -251,24 +339,65 @@ fn emit<M>(
             (l.padding.right + l.border.right) as f64,
             (l.padding.bottom + l.border.bottom) as f64,
         ),
-        clip,
         content_size,
         alpha: node_alpha,
+        transform,
     });
+
+    if clips_children {
+        out.push(clip_marker(PlacedKind::PushClip { rect, transform }));
+    }
+
+    if !m.zoom_children.is_empty() {
+        out.push(clip_marker(PlacedKind::PushClip { rect, transform }));
+        let mut child_tree = TaffyTree::new();
+        let child_root = col()
+            .w(rect.width() as f32)
+            .h(rect.height() as f32)
+            .children(m.zoom_children);
+        let mapped = build(child_root, &mut child_tree, store);
+        compute(
+            &mut child_tree,
+            &mapped,
+            (rect.width() as f32, rect.height() as f32),
+            text,
+        );
+        emit(
+            mapped,
+            &child_tree,
+            text,
+            rect.x0 as f32,
+            rect.y0 as f32,
+            out,
+            store,
+            parent_scroll.clone(),
+            overlays,
+            node_alpha,
+            child_transform,
+            stable_child_transform,
+        );
+        out.push(clip_marker(PlacedKind::PopClip));
+    }
 
     for c in m.children {
         emit(
             c,
             tree,
+            text,
             cx,
             cy,
             out,
-            child_clip,
             store,
             parent_scroll.clone(),
             overlays,
             node_alpha,
+            child_transform,
+            stable_child_transform,
         );
+    }
+
+    if clips_children {
+        out.push(clip_marker(PlacedKind::PopClip));
     }
 }
 
@@ -281,28 +410,30 @@ pub(crate) fn solve<M>(
     store: &Store,
 ) -> Vec<Placed<M>> {
     let mut tree = TaffyTree::new();
-    let mapped = build(root, &mut tree);
+    let mapped = build(root, &mut tree, store);
     compute(&mut tree, &mapped, viewport, text);
     let mut out = Vec::new();
     let mut overlays = Vec::new();
     emit(
         mapped,
         &tree,
+        text,
         0.0,
         0.0,
         &mut out,
-        None,
         store,
         None,
         &mut overlays,
         1.0,
+        Affine::IDENTITY,
+        Affine::IDENTITY,
     );
 
     let mut new_overlays = Vec::new();
     for (rect, overlay) in overlays {
         let mut tree = TaffyTree::new();
 
-        let mapped = build(*overlay.panel, &mut tree);
+        let mapped = build(*overlay.panel, &mut tree, store);
         compute(&mut tree, &mapped, viewport, text);
         let pl = tree.layout(mapped.node).expect("layout");
 
@@ -312,7 +443,7 @@ pub(crate) fn solve<M>(
         if let Some(msg) = overlay.dismiss {
             let mut capture_tree = TaffyTree::new();
             let dismiss_panel = col().w(viewport.0).h(viewport.1).on_click(msg);
-            let mapped = build(dismiss_panel, &mut capture_tree);
+            let mapped = build(dismiss_panel, &mut capture_tree, store);
             let opacity = mapped.behaviour.opacity;
             compute(&mut capture_tree, &mapped, viewport, text);
 
@@ -320,14 +451,16 @@ pub(crate) fn solve<M>(
             emit(
                 mapped,
                 &capture_tree,
+                text,
                 0.0,
                 0.0,
                 &mut out,
-                None,
                 store,
                 None,
                 &mut overlays,
                 opacity,
+                Affine::IDENTITY,
+                Affine::IDENTITY,
             );
         }
         let opacity = mapped.behaviour.opacity;
@@ -335,14 +468,16 @@ pub(crate) fn solve<M>(
         emit(
             mapped,
             &tree,
+            text,
             ox,
             oy,
             &mut out,
-            None,
             store,
             None,
             &mut new_overlays,
             opacity,
+            Affine::IDENTITY,
+            Affine::IDENTITY,
         );
     }
     out
@@ -354,410 +489,4 @@ pub(crate) fn solve<M>(
 /// sans-serif, so no pixel count here is portable. What is portable is that text now fits the box
 /// it was given.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::el::{rich, row, text, text_input};
-    use vello::peniko::Color;
-
-    /// Long enough to overflow any of the widths below, with no long word to get stuck on.
-    const PARA: &str = "the quick brown fox jumps over the lazy dog and keeps on running";
-    const WHITE: Color = Color::from_rgba8(0xFF, 0xFF, 0xFF, 0xFF);
-
-    /// The rect of the one node carrying text.
-    fn text_rect(root: El<()>) -> Rect {
-        solve(root, &mut TextEngine::new(), (800.0, 600.0), &Store::new())
-            .iter()
-            .find(|p| p.appearance.text.is_some())
-            .expect("no text node")
-            .rect
-    }
-
-    /// Widths of named nodes, from one solve. Sizing tests read children by id rather than by
-    /// position, so a change to the emit order can't quietly make them assert about another node.
-    /// One call for all of them because `El` is not `Clone` — it carries handler closures.
-    fn widths_of(root: El<()>, ids: &[&str]) -> Vec<f64> {
-        let placed = solve(root, &mut TextEngine::new(), (800.0, 600.0), &Store::new());
-        ids.iter()
-            .map(|id| {
-                placed
-                    .iter()
-                    .find(|p| p.id.as_deref() == Some(*id))
-                    .unwrap_or_else(|| panic!("no node with id {id}"))
-                    .rect
-                    .width()
-            })
-            .collect()
-    }
-
-    /// The acceptance test for the whole hook, and the bug it was written against: before it, a
-    /// text leaf was shaped at max-content and frozen into `style.size` before Taffy ran, so this
-    /// string came out one line tall and far wider than the 200pt parent that contained it.
-    #[test]
-    fn text_wraps_to_the_width_its_parent_offers() {
-        let wrapped = text_rect(col().w(200.0).child(text(PARA)));
-        let loose = text_rect(col().child(text(PARA)));
-
-        assert!(
-            wrapped.width() <= 200.0,
-            "text overflowed its parent: {} > 200",
-            wrapped.width()
-        );
-        assert!(
-            loose.width() > 200.0,
-            "the test string is too short to prove anything: {}",
-            loose.width()
-        );
-        assert!(
-            wrapped.height() > loose.height(),
-            "wrapping added no height: {} vs {}",
-            wrapped.height(),
-            loose.height()
-        );
-    }
-
-    /// A narrower box is a taller one, all the way down. Guards the direction of the constraint:
-    /// passing Taffy's available width through unchanged is easy to get inverted or dropped, and
-    /// either mistake still produces *a* layout.
-    #[test]
-    fn a_narrower_parent_makes_taller_text() {
-        let heights: Vec<f64> = [400.0, 200.0, 100.0]
-            .iter()
-            .map(|w| text_rect(col().w(*w).child(text(PARA))).height())
-            .collect();
-
-        assert!(
-            heights.windows(2).all(|p| p[1] > p[0]),
-            "height did not grow as the parent shrank: {heights:?}"
-        );
-    }
-
-    /// Padding is added exactly once. It used to be added by hand here *and* by Taffy at
-    /// `leaf.rs:146`; the hand-written half is gone, so this is what proves the survivor is
-    /// counted and not the ghost.
-    #[test]
-    fn padding_is_added_once_around_the_measured_text() {
-        let bare = text_rect(text("hello"));
-        let padded = text_rect(text("hello").pad(10.0));
-
-        assert!(
-            (padded.width() - bare.width() - 20.0).abs() < 1.0,
-            "padded {} vs bare {} — expected exactly 20 more",
-            padded.width(),
-            bare.width()
-        );
-        assert!((padded.height() - bare.height() - 20.0).abs() < 1.0);
-    }
-
-    /// An explicit size still wins. Taffy clamps the measured size against `style.size`, which is
-    /// the mechanism that replaced the old `is_auto()` guards — worth pinning, because losing it
-    /// would silently make every `.w()` on a text leaf advisory.
-    #[test]
-    fn an_explicit_width_beats_the_measurement() {
-        let r = text_rect(text("hi").w(300.0));
-        assert!((r.width() - 300.0).abs() < 1.0, "got {}", r.width());
-    }
-
-    /// The layout pass and the paint pass have to shape the same way — same width, same plain/rich
-    /// routing — and only the layout pass is told either. Getting it wrong is invisible to every
-    /// test above: the box is reserved correctly and the glyphs land somewhere else, which is
-    /// exactly what shipped for one commit here.
-    ///
-    /// Asserted as the height coming *back*, not as a bound, because the two ways to get it wrong
-    /// point opposite ways. Shaping unwrapped overflows the box; shaping a rich leaf through the
-    /// plain path underfills one sized for runs it then ignored. Only equality catches both.
-    #[test]
-    fn paint_shapes_text_to_the_box_the_layout_reserved() {
-        let runs = vec![
-            Run::new(0..20, 15.0, WHITE).bold(),
-            Run::new(20..PARA.len(), 34.0, WHITE),
-        ];
-        for (name, leaf) in [("plain", text(PARA)), ("rich", rich(PARA, runs))] {
-            let placed = solve::<()>(
-                col().w(200.0).pad(12.0).child(leaf),
-                &mut TextEngine::new(),
-                (800.0, 600.0),
-                &Store::new(),
-            );
-            let p = placed
-                .iter()
-                .find(|p| p.appearance.text.is_some())
-                .expect("no text node");
-            let ts = p.appearance.text.as_ref().unwrap();
-
-            let (w, h) = crate::paint::measure_placed(&mut TextEngine::new(), ts, p.rect, p.pad);
-            let (box_w, box_h) = (
-                p.rect.width() - p.pad.x0 - p.pad.x1,
-                p.rect.height() - p.pad.y0 - p.pad.y1,
-            );
-
-            assert!(
-                w as f64 <= box_w + 1.0,
-                "{name}: glyphs run {w} wide out of a {box_w} box"
-            );
-            assert!(
-                (h as f64 - box_h).abs() < 1.0,
-                "{name}: paint shapes {h} tall into a box reserved for {box_h}"
-            );
-        }
-    }
-
-    /// A rich leaf measures through the run list, which is the whole point of carrying it into
-    /// `TextCtx`. Pinned by size rather than by inspecting the tree, because a run that never
-    /// reaches the measure hook produces a perfectly plausible box — just the plain one.
-    #[test]
-    fn a_rich_leaf_is_measured_from_its_runs() {
-        let s = "small BIG";
-        let plain = text_rect(text(s));
-        let mixed = text_rect(rich(
-            s,
-            vec![
-                Run::new(0..6, 15.0, WHITE),
-                Run::new(6..s.len(), 40.0, WHITE),
-            ],
-        ));
-
-        assert!(
-            mixed.height() > plain.height(),
-            "the large run did not make the leaf taller: {} vs {}",
-            mixed.height(),
-            plain.height()
-        );
-        assert!(
-            mixed.width() > plain.width(),
-            "the large run did not make the leaf wider: {} vs {}",
-            mixed.width(),
-            plain.width()
-        );
-    }
-
-    /// An empty run list is exactly `text`, so `rich` can be the only builder a caller reaches for
-    /// without paying for it when there is nothing to style.
-    #[test]
-    fn rich_with_no_runs_is_plain_text() {
-        assert_eq!(text_rect(rich(PARA, Vec::new())), text_rect(text(PARA)));
-    }
-
-    /// Rich leaves wrap like plain ones — the run list rides through the measure hook rather than
-    /// round it, so the width constraint still reaches parley.
-    #[test]
-    fn a_rich_leaf_still_wraps_to_its_parent() {
-        let runs = vec![
-            Run::new(0..20, 15.0, WHITE).bold(),
-            Run::new(20..PARA.len(), 15.0, WHITE),
-        ];
-        let r = text_rect(col().w(200.0).child(rich(PARA, runs)));
-
-        assert!(r.width() <= 200.0, "rich text overflowed: {}", r.width());
-        assert!(r.height() > 20.0, "rich text did not wrap: {}", r.height());
-    }
-
-    /// An input is designed sized, never text sized — the one exception `build` carves out, and
-    /// the reason it hands Taffy no context for one. Stated as "its box does not move when its
-    /// value does", which holds whatever the designed width happens to be.
-    #[test]
-    fn an_input_does_not_grow_with_its_value() {
-        let short = text_rect(text_input("hi", "field", |_| ()));
-        let long = text_rect(text_input(PARA, "field", |_| ()));
-
-        assert_eq!(
-            (short.width(), short.height()),
-            (long.width(), long.height()),
-            "an input resized itself to fit its value"
-        );
-    }
-
-    // ── elastic sizing ───────────────────────────────────────────────────────
-    // What a splitter drag has to be able to write. The `grow`↔`grow` row of the resize table in
-    // docs/design/code-as-tree.md §11 was inexpressible while `grow` set `flex_grow = 1.0` flatly:
-    // two elastic siblings were permanently 50/50, so a boundary between them had nowhere to put
-    // the drag. These say the knobs exist and that Taffy honours them.
-
-    /// A ratio, not a flag. 2:1 of 600 is 400/200.
-    #[test]
-    fn two_grow_siblings_split_by_their_ratio() {
-        let root = row()
-            .w(600.0)
-            .child(col().id("a").grow_by(2.0))
-            .child(col().id("b").grow_by(1.0));
-        let w = widths_of(root, &["a", "b"]);
-
-        assert!((w[0] - 400.0).abs() < 1.0, "a was {}, expected 400", w[0]);
-        assert!((w[1] - 200.0).abs() < 1.0, "b was {}, expected 200", w[1]);
-    }
-
-    /// The old spelling still means what it meant, so no app has to change. `grow = true` reaches
-    /// this path through `props.rs` as `grow_by(1.0)`.
-    #[test]
-    fn plain_grow_is_still_an_even_split() {
-        let root = row()
-            .w(600.0)
-            .child(col().id("a").grow())
-            .child(col().id("b").grow());
-        let w = widths_of(root, &["a", "b"]);
-
-        assert!((w[0] - 300.0).abs() < 1.0, "a was {}", w[0]);
-        assert!((w[1] - 300.0).abs() < 1.0, "b was {}", w[1]);
-    }
-
-    /// Elastic without a floor collapses. The sidebar dragged shut that cannot be dragged back is
-    /// the failure this prevents, so the floor has to beat the ratio rather than lose to it.
-    #[test]
-    fn min_w_outranks_the_grow_ratio() {
-        let root = row()
-            .w(600.0)
-            .child(col().id("a").grow_by(1.0).min_w(500.0))
-            .child(col().id("b").grow_by(5.0));
-        let w = widths_of(root, &["a"]);
-
-        assert!(
-            (w[0] - 500.0).abs() < 1.0,
-            "a was {}, expected its 500 floor",
-            w[0]
-        );
-    }
-
-    /// `shell2`'s header, small enough to reproduce the bug: back button, title, `grow` spacer,
-    /// action button. Narrow it and the spacer collapses first, then every remaining item shrinks
-    /// together — a flex item's floor being its *min-content* width, which for a text leaf is the
-    /// longest word. So the button does not clip, it folds "+ Add item" into stacked words inside
-    /// a 36pt box. Measured at 260pt before the fix: 28 wide and 53 tall, three lines.
-    fn header(action: El<()>) -> El<()> {
-        let page = col().full().pad(40.0).gap(24.0).child(
-            row()
-                .gap(12.0)
-                .align_center()
-                .child(text("My workspace").font_size(15.0))
-                .child(col().grow())
-                .child(action),
-        );
-        page
-    }
-
-    /// The label's height, which is the only portable way to say "it wrapped" — font metrics are
-    /// the OS's, so no absolute pixel count here would travel.
-    fn label_height(root: El<()>) -> f64 {
-        solve(root, &mut TextEngine::new(), (260.0, 600.0), &Store::new())
-            .iter()
-            .find(|p| {
-                p.appearance
-                    .text
-                    .as_ref()
-                    .is_some_and(|t| t.text == "+ Add item")
-            })
-            .expect("no label")
-            .rect
-            .height()
-    }
-
-    /// Paint re-shapes a string into the box the layout reserved, so the two have to agree about
-    /// how many lines that is. `paint_shapes_text_to_the_box_the_layout_reserved` above covers a
-    /// paragraph — and a paragraph is where this bug hides, because both paths wrap it identically
-    /// and the heights match. The failure needs a label that fits on *one* line and whose natural
-    /// width is fractional.
-    ///
-    /// "+ new workspace" at 13pt measures 105.0010. Taffy rounds the reserved box to 105, and paint,
-    /// handed one thousandth of a point less than the string that sized it, breaks the line: a
-    /// one-line label painted as two, in a box tall enough for one, at every window size. Reported
-    /// as "same everywhere, it has space it is not using", which is exactly right.
-    #[test]
-    fn paint_does_not_fold_a_label_the_layout_fitted_on_one_line() {
-        for label in [
-            "+ new workspace",
-            "+ Add another account",
-            "+ Add item",
-            "Add card",
-            "Create Identity",
-        ] {
-            let placed = solve::<()>(
-                row()
-                    .h(36.0)
-                    .px(14.0)
-                    .center()
-                    .child(text(label).font_size(13.0)),
-                &mut TextEngine::new(),
-                (800.0, 600.0),
-                &Store::new(),
-            );
-            let p = placed
-                .iter()
-                .find(|p| p.appearance.text.is_some())
-                .expect("no text node");
-            let ts = p.appearance.text.as_ref().unwrap();
-            let (_, painted) =
-                crate::paint::measure_placed(&mut TextEngine::new(), ts, p.rect, p.pad);
-
-            assert!(
-                (painted as f64 - p.rect.height()).abs() < 1.0,
-                "{label:?}: layout reserved {:.2} tall, paint shaped {painted:.2} — it folded",
-                p.rect.height()
-            );
-        }
-    }
-
-    /// `no_wrap` outranks a definite width, which is the case `no_shrink` cannot reach: a label
-    /// centred in a *column* has its width set on the cross axis, where `flex_shrink` does nothing
-    /// at all. This is the shape of `login.rs`'s "+ Add another account", measured at 139pt.
-    #[test]
-    fn a_label_does_not_fold_however_narrow_the_box() {
-        let boxed = |el: El<()>| col().w(80.0).center().child(el);
-        let folded = text_rect(boxed(text("+ Add another account").font_size(13.0)));
-        let kept = text_rect(boxed(
-            text("+ Add another account").font_size(13.0).no_wrap(),
-        ));
-
-        assert!(
-            folded.height() > kept.height(),
-            "the 80pt box did not fold the wrapping label: {folded:?}"
-        );
-        assert!(
-            kept.width() > 80.0,
-            "no_wrap must overflow the box, not shrink into it: {kept:?}"
-        );
-    }
-
-    /// And prose still wraps — the parley hook is the point of the whole measure path, and
-    /// `no_wrap` is opt-in precisely so this keeps working.
-    #[test]
-    fn no_wrap_is_opt_in_and_prose_still_wraps() {
-        let r = text_rect(col().w(200.0).child(text(PARA)));
-        assert!(r.width() <= 200.0, "prose stopped wrapping: {r:?}");
-    }
-
-    #[test]
-    fn a_squeezed_row_folds_a_button_label_without_no_shrink() {
-        let bare = row()
-            .h(36.0)
-            .px(14.0)
-            .center()
-            .child(text("+ Add item").font_size(13.0));
-        let held = row()
-            .h(36.0)
-            .px(14.0)
-            .center()
-            .no_shrink()
-            .child(text("+ Add item").font_size(13.0));
-
-        let (folded, kept) = (label_height(header(bare)), label_height(header(held)));
-        assert!(
-            kept < folded,
-            "no_shrink changed nothing: {kept} vs {folded} — is the row wide enough to prove it?"
-        );
-        assert!(
-            folded > kept * 1.5,
-            "the label did not actually fold, so this test proves nothing: {folded} vs {kept}"
-        );
-    }
-
-    /// And a ceiling holds against a child that would otherwise take everything.
-    #[test]
-    fn max_w_caps_a_full_width_child() {
-        let root = row().w(600.0).child(col().id("a").w_full().max_w(150.0));
-        let w = widths_of(root, &["a"]);
-
-        assert!(
-            (w[0] - 150.0).abs() < 1.0,
-            "a was {}, expected its 150 cap",
-            w[0]
-        );
-    }
-}
+mod tests;

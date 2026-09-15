@@ -5,9 +5,12 @@
 //! vocabulary, same pipeline (docs/architecture.md).
 
 mod anim;
+pub mod coords;
 mod drag;
 mod editor;
 mod el;
+pub mod frame;
+mod geometry;
 mod id;
 mod layout;
 mod paint;
@@ -15,12 +18,17 @@ mod render;
 mod scroll;
 mod state;
 mod text;
-use crate::anim::{Driver, Transition};
+mod zoom;
+use crate::anim::{Driver, Spring, Transition};
+use crate::coords::ScreenPoint;
 use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
 use crate::el::Binding;
+use crate::geometry::{Clip, Geometry};
 use crate::id::Id;
+use crate::layout::PlacedKind;
 use crate::state::Slot;
+use crate::zoom::Zoom;
 use editor::Field;
 use scroll::*;
 use std::collections::HashSet;
@@ -40,8 +48,8 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, El, ElInfo, Placement, PlacementAlign, PlacementSide, col, custom, rich, row,
-    text, text_area, text_input,
+    Action, Anchor, El, ElInfo, Placement, PlacementAlign, PlacementSide, col, custom, frame, rich,
+    row, text, text_area, text_input,
 };
 pub use render::{CapturedImage, Render};
 use state::Store;
@@ -49,6 +57,11 @@ pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
+
+fn pan_axes((x, y): (f32, f32), (ax, ay): (bool, bool)) -> (f32, f32) {
+    (if ax { x } else { 0.0 }, if ay { y } else { 0.0 })
+}
+
 /// An application: a tree-of-elements `view` derived from state, plus an `update` that mutates state
 /// in response to messages. The runtime calls `view` to paint and `update` when a click hits an
 /// element carrying a message. `Msg: Clone` because a laid-out region owns its message.
@@ -92,8 +105,9 @@ pub trait App {
 enum Capture {
     App {
         id: Id,
-        origin: (f32, f32),
-        start: (f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
     },
     Thumb {
         thumb: Thumb,
@@ -102,13 +116,21 @@ enum Capture {
     },
     Text {
         id: Id,
-        rect: Rect,
+        geometry: Geometry,
         pad: Insets,
+    },
+    Zoom {
+        id: Id,
+        rect: Rect,
+        content: (f32, f32),
+        axes: (bool, bool),
+        last: (f32, f32),
     },
     Pending {
         id: Id,
-        origin: (f32, f32),
-        start: (f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
         press: (f32, f32),
     },
 }
@@ -121,7 +143,10 @@ impl Capture {
         }
     }
     fn is_grab(&self) -> bool {
-        matches!(self, Capture::App { .. } | Capture::Thumb { .. })
+        matches!(
+            self,
+            Capture::App { .. } | Capture::Thumb { .. } | Capture::Zoom { .. }
+        )
     }
 }
 
@@ -141,20 +166,21 @@ struct Runner<A: App> {
     start: Instant,
     last_frame: Option<f64>,
     hits: Hits<A::Msg>,
-    pressed: Option<(Rect, A::Msg)>,
+    pressed: Option<(Geometry, Option<Id>, A::Msg)>,
 }
 
 struct Hits<M> {
-    click: Vec<(Rect, M)>,
-    input: Vec<(Rect, Id, Insets)>,
+    click: Vec<(Geometry, Option<Id>, M)>,
+    input: Vec<(Geometry, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
-    drag: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> M>)>,
-    drop: Vec<(Rect, Id, Box<dyn Fn(DropEvent) -> M>)>,
+    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>)>,
+    drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
     bar: Vec<Thumb>,
+    zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -170,6 +196,7 @@ impl<M> Default for Hits<M> {
             enter: Vec::new(),
             esc: Vec::new(),
             bar: Vec::new(),
+            zoom: Vec::new(),
         }
     }
 }
@@ -187,6 +214,7 @@ impl<M> Hits<M> {
             enter,
             esc,
             bar,
+            zoom,
         } = self;
         click.clear();
         input.clear();
@@ -198,6 +226,7 @@ impl<M> Hits<M> {
         enter.clear();
         esc.clear();
         bar.clear();
+        zoom.clear();
     }
 }
 
@@ -234,7 +263,10 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let store = &mut self.store;
         let focused = &mut self.focused;
-        let pressed = self.pressed.as_ref().map(|(rect, _)| rect.clone());
+        let pressed = self
+            .pressed
+            .as_ref()
+            .map(|(geometry, id, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
@@ -242,21 +274,51 @@ impl<A: App> Runner<A> {
         let mut placed = layout::solve(app.view(), text, viewport, store);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         hits.clear();
+        let mut clips = Vec::new();
         for p in placed.iter_mut() {
-            let hit_rect = match p.clip {
-                Some(c) => c.intersect(p.rect),
-                None => p.rect,
-            };
-
+            match p.kind {
+                PlacedKind::PushClip { rect, transform } => {
+                    clips.push(Clip {
+                        rect,
+                        to_screen: transform,
+                    });
+                    continue;
+                }
+                PlacedKind::PopClip => {
+                    clips.pop();
+                    continue;
+                }
+                PlacedKind::Node => {}
+            }
+            let geometry = Geometry::resolve(p.rect, p.transform, clips.iter().copied());
+            let visible = geometry.visible_rect_kurbo();
             let over =
-                pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
+                pointer.is_some_and(|(px, py)| geometry.contains(Point::new(px as f64, py as f64)));
             if p.appearance.repaint {
                 any_in_flight = true;
+            }
+            if let Some(axes) = p.behaviour.zoom
+                && let Some(id) = &p.id
+            {
+                store.get_or::<Zoom>(id, Slot::Zoom);
+                if let Some(hit_rect) = visible {
+                    hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
+                }
+            }
+
+            if let Some((_b, _scale)) = &p.behaviour.press_scale
+                && let Some(id) = &p.id
+            {
+                let pressed_id = pressed.and_then(|(_, id)| id);
+                if Self::drive_spring(store, dt, pressed_id == Some(id), id) {
+                    any_in_flight = true;
+                }
             }
 
             for (b, slot) in p.behaviour.bindings() {
                 if let Some(id) = &p.id {
-                    let (fl, landed) = Self::drive(b, slot, store, dt, over, id);
+                    let pressed_id = pressed.and_then(|(_, id)| id);
+                    let (fl, landed) = Self::drive(b, slot, store, dt, over, pressed_id, id);
                     if fl {
                         any_in_flight = true;
                     }
@@ -269,17 +331,25 @@ impl<A: App> Runner<A> {
                 }
             }
 
-            if let Some(msg) = p.behaviour.on_click.take() {
-                hits.click.push((hit_rect, msg));
+            if let Some(msg) = p.behaviour.on_click.take()
+                && geometry.visible_rect.is_some()
+            {
+                hits.click.push((geometry, p.id.clone(), msg));
             }
-            if let Some((id, handler)) = p.behaviour.on_drag.take() {
-                hits.drag.push((hit_rect, id, handler));
+            if let Some((id, handler)) = p.behaviour.on_drag.take()
+                && visible.is_some()
+            {
+                hits.drag.push((geometry, id, handler));
             }
 
-            if let Some((id, handler)) = p.behaviour.on_drop.take() {
-                hits.drop.push((hit_rect, id, handler));
+            if let Some((id, handler)) = p.behaviour.on_drop.take()
+                && visible.is_some()
+            {
+                hits.drop.push((geometry, id, handler));
             }
-            if let Some(h) = p.behaviour.on_right_click.take() {
+            if let Some(h) = p.behaviour.on_right_click.take()
+                && let Some(hit_rect) = visible
+            {
                 hits.context.push((hit_rect, h));
             }
 
@@ -303,7 +373,9 @@ impl<A: App> Runner<A> {
                         store,
                     );
                 }
-                hits.input.push((hit_rect, id.clone(), p.pad));
+                if visible.is_some() {
+                    hits.input.push((geometry, id.clone(), p.pad));
+                }
                 if spec.autofocus && !prev_inputs.contains(id) {
                     focused.set(id.clone());
                     let field = focused.focused_field(store);
@@ -357,7 +429,9 @@ impl<A: App> Runner<A> {
                 } else {
                     None
                 };
-            if let Some((id, content, (ax, ay))) = scroll_vals {
+            if let Some((id, content, (ax, ay))) = scroll_vals
+                && let Some(hit_rect) = visible
+            {
                 hits.scroll.push(ScrollHit {
                     hit_rect,
                     rect: p.rect,
@@ -368,12 +442,12 @@ impl<A: App> Runner<A> {
                 let s = store.get_or::<Scroll>(id, Slot::Scroll);
                 if ay {
                     if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
-                        hits.bar.push(v);
+                        hits.bar.push(v.to_screen(p.transform, hit_rect));
                     }
                 }
                 if ax {
                     if let Some(h) = axis_thumb(p.rect, id, Axis::X, iw, content.0, s.x) {
-                        hits.bar.push(h);
+                        hits.bar.push(h.to_screen(p.transform, hit_rect));
                     }
                 }
             }
@@ -442,6 +516,7 @@ impl<A: App> Runner<A> {
         store: &mut Store,
         dt: f32,
         over: bool,
+        pressed: Option<&Id>,
         id: &Id,
     ) -> (bool, Option<f32>) {
         let target = match b.driver {
@@ -452,6 +527,7 @@ impl<A: App> Runner<A> {
                     0.0
                 }
             }
+            Driver::Press => (pressed == Some(id)) as u8 as f32,
             Driver::Value(f) => f,
         };
         let tr = store.get_or_with(id, s, || Transition::new(target, b.duration));
@@ -459,6 +535,14 @@ impl<A: App> Runner<A> {
         let was = tr.in_flight();
         tr.tick(dt);
         (tr.in_flight(), (was && !tr.in_flight()).then_some(target))
+    }
+
+    fn drive_spring(store: &mut Store, dt: f32, pressed: bool, id: &Id) -> bool {
+        let target = pressed as u8 as f32;
+        let spring = store.get_or_with(id, Slot::PressScale, || Spring::new(target));
+        spring.target = target;
+        spring.tick(dt);
+        spring.in_flight()
     }
 
     fn redraw(&self) {
@@ -475,7 +559,7 @@ impl<A: App> Runner<A> {
             .bar
             .iter()
             .rev()
-            .find(|thumb| thumb.rect.contains(p))
+            .find(|thumb| thumb.hit_rect.contains(p))
         {
             let bar = self
                 .store
@@ -490,32 +574,43 @@ impl<A: App> Runner<A> {
             self.redraw();
             return;
         }
-        if let Some((rect, id, _handler)) =
-            self.hits.drag.iter().rev().find(|(r, _, _)| r.contains(p))
+        if let Some((geometry, id, _handler)) = self
+            .hits
+            .drag
+            .iter()
+            .rev()
+            .find(|(geometry, _, _)| geometry.contains(p))
         {
-            let origin = (rect.x0 as f32, rect.y0 as f32);
-            let start = (px - origin.0, py - origin.1);
-
+            let content = geometry.content_point(ScreenPoint::new(p.x, p.y));
             self.drag = Some(Capture::Pending {
                 id: id.clone(),
-                origin,
-                start,
+                geometry: *geometry,
+                local_press: (content.x as f32, content.y as f32),
+                screen_grab: (
+                    px - geometry.screen_rect.min_x() as f32,
+                    py - geometry.screen_rect.min_y() as f32,
+                ),
                 press: (px, py),
             });
             self.redraw();
         }
-        let hit = self.hits.input.iter().rev().find(|(r, _, _)| r.contains(p));
+        let hit = self
+            .hits
+            .input
+            .iter()
+            .rev()
+            .find(|(geometry, _, _)| geometry.contains(p));
         match hit {
-            Some((rect, id, pad)) => {
+            Some((geometry, id, pad)) => {
                 self.focused.set(id.clone());
-                let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
+                let (lx, ly) = self.local_point(id, *geometry, *pad, px, py);
                 let field = self.store.get_mut::<Field>(id, Slot::Editor);
                 if let Some(field) = field {
                     field.click_at(lx, ly, &mut self.text);
                 }
                 self.drag = Some(Capture::Text {
                     id: id.clone(),
-                    rect: *rect,
+                    geometry: *geometry,
                     pad: *pad,
                 });
             }
@@ -523,9 +618,30 @@ impl<A: App> Runner<A> {
                 self.focused.blur();
             }
         }
-        if let Some((rect, msg)) = self.hits.click.iter().rev().find(|(r, _)| r.contains(p)) {
+        if let Some((geometry, id, msg)) = self
+            .hits
+            .click
+            .iter()
+            .rev()
+            .find(|(geometry, _, _)| geometry.contains(p))
+        {
             let msg = msg.clone();
-            self.pressed = Some((rect.clone(), msg));
+            self.pressed = Some((*geometry, id.clone(), msg));
+        } else if self.drag.is_none()
+            && let Some((rect, id, content, axes)) = self
+                .hits
+                .zoom
+                .iter()
+                .rev()
+                .find(|(r, _, _, _)| r.contains(p))
+        {
+            self.drag = Some(Capture::Zoom {
+                id: id.clone(),
+                rect: *rect,
+                content: *content,
+                axes: *axes,
+                last: (px, py),
+            });
         }
 
         self.redraw();
@@ -541,7 +657,15 @@ impl<A: App> Runner<A> {
         }
     }
 
-    fn local_point(&self, id: &str, rect: Rect, pad: Insets, px: f32, py: f32) -> (f32, f32) {
+    fn local_point(
+        &self,
+        id: &str,
+        geometry: Geometry,
+        pad: Insets,
+        px: f32,
+        py: f32,
+    ) -> (f32, f32) {
+        let point = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
         let field = self.store.get::<Field>(&Id::from(id), Slot::Editor);
         let line_h = field
             .and_then(|f| f.layout_of())
@@ -558,9 +682,16 @@ impl<A: App> Runner<A> {
             .map(|f| f.is_multiline())
             .unwrap_or(false);
 
-        let (ox, oy) = paint::content_offset(rect, pad, line_h, scroll.x, scroll.y, multiline);
-        let lx = (px as f64 - rect.x0 - ox) as f32;
-        let ly = (py as f64 - rect.y0 - oy) as f32;
+        let (ox, oy) = paint::content_offset(
+            geometry.content_rect_kurbo(),
+            pad,
+            line_h,
+            scroll.x,
+            scroll.y,
+            multiline,
+        );
+        let lx = (point.x - ox) as f32;
+        let ly = (point.y - oy) as f32;
         (lx, ly)
     }
 
@@ -619,17 +750,23 @@ impl<A: App> Runner<A> {
         px: f32,
         py: f32,
         handle_id: Id,
-        origin: &(f32, f32),
-        start: &(f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
     ) {
         let pos = (px, py);
         let mods = self.mods();
-        let delta = (px - origin.0 - start.0, py - origin.1 - start.1);
+        let content = geometry.content_point(ScreenPoint::new(px as f64, py as f64));
+        let delta = (
+            content.x as f32 - local_press.0,
+            content.y as f32 - local_press.1,
+        );
         let event = DragEvent {
             pos,
             delta,
             mods,
-            grab: *start,
+            grab: screen_grab,
+            scale: geometry.scale(),
             phase: DragPhase::Move,
         };
         if let Some((_, _, handler)) = self
@@ -642,19 +779,23 @@ impl<A: App> Runner<A> {
             self.redraw();
         }
 
-        if let Some((rect, _, handler)) = self
+        if let Some((geometry, _, handler)) = self
             .hits
             .drop
             .iter()
             .rev()
-            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+            .find(|(geometry, _, _)| geometry.contains(Point::new(px as f64, py as f64)))
         {
+            let local = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
             let drop_event = DropEvent {
-                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                pos: (local.x as f32, local.y as f32),
                 mods: self.mods(),
                 dragged: handle_id,
                 phase: DropPhase::Over,
-                size: (rect.size().width as f32, rect.size().height as f32),
+                size: (
+                    geometry.content_rect.width() as f32,
+                    geometry.content_rect.height() as f32,
+                ),
             };
             self.app.update(handler(drop_event));
         }
@@ -663,24 +804,38 @@ impl<A: App> Runner<A> {
     fn on_cursor_release(&mut self) {
         if let Some(cap) = self.drag.take() {
             match cap {
-                Capture::App { id, origin, start } => {
+                Capture::App {
+                    id,
+                    geometry,
+                    local_press,
+                    screen_grab,
+                } => {
                     if let Some((px, py)) = self.pointer {
                         let pos = (px, py);
-                        let delta = (pos.0 - origin.0 - start.0, pos.1 - origin.1 - start.1);
+                        let content =
+                            geometry.content_point(ScreenPoint::new(px as f64, py as f64));
+                        let delta = (
+                            content.x as f32 - local_press.0,
+                            content.y as f32 - local_press.1,
+                        );
 
-                        if let Some((rect, _, handler)) = self
+                        if let Some((target, _, handler)) = self
                             .hits
                             .drop
                             .iter()
                             .rev()
-                            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+                            .find(|(g, _, _)| g.contains(Point::new(px as f64, py as f64)))
                         {
+                            let local = target.node_point(ScreenPoint::new(px as f64, py as f64));
                             let drop_event = DropEvent {
-                                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                                pos: (local.x as f32, local.y as f32),
                                 mods: self.mods(),
                                 dragged: id.clone(),
                                 phase: DropPhase::Release,
-                                size: (rect.size().width as f32, rect.size().height as f32),
+                                size: (
+                                    target.content_rect.width() as f32,
+                                    target.content_rect.height() as f32,
+                                ),
                             };
                             self.app.update(handler(drop_event));
                         }
@@ -691,7 +846,8 @@ impl<A: App> Runner<A> {
                                 pos,
                                 delta,
                                 mods: self.mods(),
-                                grab: start,
+                                grab: screen_grab,
+                                scale: geometry.scale(),
                                 phase: DragPhase::End,
                             };
                             self.app.update(handler(event));
@@ -699,15 +855,15 @@ impl<A: App> Runner<A> {
                     }
                 }
                 // scrollbar + text selection have no "End" message — take() already cleared them
-                Capture::Thumb { .. } | Capture::Text { .. } => {}
+                Capture::Thumb { .. } | Capture::Text { .. } | Capture::Zoom { .. } => {}
                 Capture::Pending { .. } => {}
             }
         }
-        if let Some((rect, msg)) = self.pressed.take()
+        if let Some((geometry, _, msg)) = self.pressed.take()
             && let Some((px, py)) = self.pointer
         {
             let point = Point::new(px as f64, py as f64);
-            if rect.contains(point) {
+            if geometry.contains(point) {
                 self.app.update(msg);
             }
         }
@@ -730,21 +886,44 @@ impl<A: App> Runner<A> {
                     scroll,
                     press_point,
                 } => self.drag_thumb(lx, ly, thumb, scroll, press_point),
-                Capture::App { id, origin, start } => {
-                    self.on_drag_move(lx, ly, id.clone(), &origin, &start)
-                }
-                Capture::Text { id, rect, pad } => {
-                    let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
+                Capture::App {
+                    id,
+                    geometry,
+                    local_press,
+                    screen_grab,
+                } => self.on_drag_move(lx, ly, id.clone(), *geometry, *local_press, *screen_grab),
+                Capture::Text { id, geometry, pad } => {
+                    let (lx, ly) = self.local_point(id, *geometry, *pad, lx, ly);
                     let text = &mut self.text;
                     let field = self.store.get_mut::<Field>(id, Slot::Editor);
                     if let Some(field) = field {
                         field.extend_to(lx, ly, text);
                     }
                 }
+                Capture::Zoom {
+                    id,
+                    rect,
+                    content,
+                    axes,
+                    last,
+                } => {
+                    let delta = pan_axes((lx - last.0, ly - last.1), *axes);
+                    self.store
+                        .get_or::<Zoom>(id, Slot::Zoom)
+                        .pan_by(*rect, *content, delta);
+                    self.drag = Some(Capture::Zoom {
+                        id: id.clone(),
+                        rect: *rect,
+                        content: *content,
+                        axes: *axes,
+                        last: (lx, ly),
+                    });
+                }
                 Capture::Pending {
                     id,
-                    origin,
-                    start,
+                    geometry,
+                    local_press,
+                    screen_grab,
                     press,
                 } => {
                     let dx = press.0 - lx;
@@ -752,14 +931,16 @@ impl<A: App> Runner<A> {
                     if dx.abs() > 5.0 || dy.abs() > 5.0 {
                         self.drag = Some(Capture::App {
                             id: id.clone(),
-                            origin: *origin,
-                            start: *start,
+                            geometry: *geometry,
+                            local_press: *local_press,
+                            screen_grab: *screen_grab,
                         });
                         let event = DragEvent {
                             delta: (0.0, 0.0),
                             phase: DragPhase::Start,
                             pos: (lx, ly),
-                            grab: *start,
+                            grab: *screen_grab,
+                            scale: geometry.scale(),
                             mods: self.mods(),
                         };
                         let handler = self
@@ -770,7 +951,14 @@ impl<A: App> Runner<A> {
                             .map(|(_, _, handler)| handler);
                         if let Some(handler) = handler {
                             self.app.update(handler(event));
-                            self.on_drag_move(lx, ly, id.clone(), origin, start);
+                            self.on_drag_move(
+                                lx,
+                                ly,
+                                id.clone(),
+                                *geometry,
+                                *local_press,
+                                *screen_grab,
+                            );
                         }
                         self.pressed = None;
                     };
@@ -778,7 +966,11 @@ impl<A: App> Runner<A> {
             };
         }
 
-        let over_input = self.hits.input.iter().any(|(r, _, _)| r.contains(p));
+        let over_input = self
+            .hits
+            .input
+            .iter()
+            .any(|(geometry, _, _)| geometry.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
         if let Some(r) = &self.render {
             r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
@@ -797,6 +989,7 @@ impl<A: App> Runner<A> {
         let Some((px, py)) = self.pointer else { return };
         let p = Point::new(px as f64, py as f64);
         let shift = self.modifiers.shift_key();
+        let ctrl_zoom = self.modifiers.control_key();
 
         //normalize to logical content-pixels
         let (dx, dy) = match delta {
@@ -808,7 +1001,25 @@ impl<A: App> Runner<A> {
         };
         let (dh, dv) = if shift { (-dy, 0.0) } else { (-dx, -dy) };
         let (mut rem_h, mut rem_v) = (dh, dv);
-        //innermost scroll contenxt under the pointer wins
+        if ctrl_zoom {
+            if let Some((rect, id, content, _axes)) = self
+                .hits
+                .zoom
+                .iter()
+                .rev()
+                .find(|(r, _, _, _)| r.contains(p))
+            {
+                self.store.get_or::<Zoom>(id, Slot::Zoom).at(
+                    *rect,
+                    *content,
+                    p,
+                    -rem_v / LINE_STEP,
+                );
+                self.redraw();
+            }
+            return;
+        }
+        // The innermost scroller consumes first; only its remainder reaches the viewport camera.
         for s in self.hits.scroll.iter().rev() {
             if !s.hit_rect.contains(p) {
                 continue;
@@ -833,6 +1044,19 @@ impl<A: App> Runner<A> {
             if rem_h.abs() < 0.5 && rem_v.abs() < 0.5 {
                 break;
             }
+        }
+        if let Some((rect, id, content, axes)) = self
+            .hits
+            .zoom
+            .iter()
+            .rev()
+            .find(|(r, _, _, _)| r.contains(p))
+        {
+            self.store.get_or::<Zoom>(id, Slot::Zoom).pan_by(
+                *rect,
+                *content,
+                pan_axes((-rem_h, -rem_v), *axes),
+            );
         }
         self.redraw();
     }

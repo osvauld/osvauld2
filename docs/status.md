@@ -13,9 +13,24 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 ### M0 — runtime plumbing (done, W1)
 - ids + keyed state store (`get_or`, register-by-frame, sweep)
 - scroll containers with hit-testing that respects clip
-- drag gesture: phases + pointer capture, element-relative coords
-- overlay layer: anchored, catcher + click-away dismiss, flip/clamp
-- animation: external wakeup (`EventLoopProxy`), timer wheel, retained transitions
+- drag gesture: phases + pointer capture; current experimental callback separates screen ghost
+  position, content-space movement delta, and captured visual scale
+- overlay layer: root-painted fixed-size portals, transformed element anchors, catcher + click-away
+  dismiss, flip/clamp; strict Lua `ui.overlay` combinator
+- animation: external wakeup (`EventLoopProxy`), timer wheel, retained transitions, and
+  id-keyed spring press-scale for click feedback (Lua prop included)
+- experimental zoomable runtime viewports: retained per-id Ctrl+wheel zoom, free pan, stable
+  child layout, and Lua `zoomable`. **Geometry rebuild in progress 2026-09-11:** paint and the hit
+  resolver interpret the same explicit clip/transform boundaries; editor and drag/drop map through
+  the inverse; nested wheel scroll chains into camera pan; transformed scrollbars share
+  paint/hit/drag geometry. Euclid-backed screen/viewport/content/node units type the camera and
+  Geometry's screen/content rectangles, with Kurbo erasure at rendering boundaries. Growing
+  scrollers now use remaining main-axis space and kanban's definite board height prevents card
+  content from enlarging every column. Lua portal overlays and transformed element anchors are
+  built, including stable anchors that ignore transient press-scale (live-verified). Gesture
+  occlusion and current-geometry capture are explicitly deferred while Frame planning proceeds;
+  neither is implemented. Final event types and motion also remain before product-ready use. See
+  [viewport geometry rebuild](design/viewport-geometry-rebuild.md).
 - Field/Focus (click + autofocus), single-style text, `PlainEditor` island
 - rich runs exist **runtime-side** (`El::rich` + `text::Run`) — not yet a Lua prop (W8's
   rich-text leaf is where it gets exposed)
@@ -67,6 +82,50 @@ Vault remains an opaque sealed store rather than an authorization engine. The br
 checkpoint is the shop's namespace/capability/processing table, challenged against
 booking and chat; exact rules, grant/key formats, index hierarchy, and backend ownership
 remain to be designed. Work packages and acceptance scenarios are in the design note.
+
+### Frame — Lua-programmable visuals
+
+**Planning draft 2026-09-11:** [Frame implementation plan](design/frame-implementation-plan.md)
+records the complete capability roadmap, proposed Lua/resource/geometry contracts, open decisions
+and phased acceptance gates. Frame and its Lua API remain unbuilt. The first milestone is a
+Lua-authored labeled vector visual with nested groups, animation and a hit region inside zoom;
+background/foreground, effects, simulation, robust capture, math and export remain required later
+work, not silently cut scope. The original visual-substrate research is retained with revision
+notes. A 2026-09-11 feasibility pass pins current Euclid/Kurbo/Vello/mlua support, adds the complete
+Lua geometry/path toolkit and selects an evolving orbital-diagram proof; notably, safe public mlua
+buffer extraction currently copies rather than providing the previously claimed zero-copy slice.
+Phase A now has a concrete review candidate: batched `gfx.path`/`gfx.frame` compilation, pure-Lua
+item/geometry helpers, immutable shared Path/Frame values, exact M/L/Q/C/arc/close grammar,
+Group/Instance semantics, intrinsic baseline rules, and initial expanded-work limits. Next: user
+acceptance of that checkpoint. **First implementation slice landed:** runtime exposes an immutable
+validated cubic-Bézier `Path`, true local bounds and command count; it rejects invalid sequencing,
+non-finite/out-of-range coordinates and more than 65,536 commands. Tests live in
+`runtime/src/frame/tests.rs`. **Second implementation slice landed:** immutable measured `Frame`,
+solid `Fill`, transformed `Group`, shared `Instance`, optional bounded baseline, and recursive
+expanded item/path/depth budgets. Repeated instances count repeatedly. **Third implementation
+slice landed:** reusable validated solid and linear-gradient Brushes, bounded ordered stops with
+hard-edge duplicates, explicit pad/repeat/reflect policy, and Fill migrated from color to Brush.
+**Fourth implementation slice landed:** recursive Vello Fill rendering for solid/linear Brushes;
+Group and shared Instance transforms compose with the supplied outer transform, pinned against
+Vello's encoded paths, stops and matrices. **Fifth implementation slice landed:** a Rust
+`frame(Arc<Frame>)` El leaf measures from intrinsic content dimensions, honors explicit allocation,
+paints from the padded content origin, and enters the ordinary Geometry transform/clip pipeline.
+Radial/sweep brushes and Stroke remain unbuilt. **Sixth implementation slice landed:** sandboxed
+Lua now has strict batched `gfx.path` compilation for M/L/Q/C/close into immutable runtime Path
+userdata; malformed commands, sparse/named fields and runtime sequencing errors are pinned.
+**Seventh implementation slice landed:** Lua now constructs reusable solid/linear-gradient
+Brushes, compiles strict Fill/Group/Instance trees with `gfx.frame`, and displays them through the
+normal strict `ui.frame` leaf. `demo_apps/frame_orbits/` is the live proof: cubic/even-odd paths,
+gradients, nested transforms, repeated immutable instances, intrinsic sizing, clipping, and camera
+zoom. `scripts/screenshot_frame_orbits.py` uploads it into a fresh shell, rejects console errors,
+dumps the resolved tree on request, and captures a real bridge screenshot. The 1000×700 capture
+exposed and fixed a viewport-centering error in the app and a 2pt moon-center/orbit mismatch.
+Live zoom inspection remains manual until bridge gestures land. **Stroke vertical slice landed:**
+runtime validates positive bounded width, caps/joins, miter limit and a 64-entry dash pattern before
+Vello; Stroke is budgeted and rendered through nested Group/Instance transforms with outer alpha;
+Lua exposes strict `gfx.stroke`; and `frame_orbits` now uses solid and dashed real strokes instead
+of even-odd filled rings. `scripts/screenshot_frame_orbits.py` produced a clean-console 1000×700
+live capture (`frame-orbits-stroke.png`). Next: radial/sweep brushes as another app-visible slice.
 
 ### Runtime and app milestones
 
@@ -123,7 +182,9 @@ Roughly in dependency order:
      removed unwired — re-spec against a real seeding need. `osvauld-mcp` (the sthalam-era
      MCP shim) and `.mcp.json` were deleted the same day, unused — an MCP face rebuilds over
      the bridge if ever wanted. Still open from the survey: right-click (runtime ready, one
-     arm), `Drag`/`Drop` synthesis, and ids on kanban's un-id'd buttons.
+     arm), `Drag`/`Drop` synthesis, and fresh-view-validated action locators for un-id'd controls.
+     *Revised 2026-09-11:* locators supersede a blanket id retrofit for ordinary buttons; stable
+     ids remain preferred for scripts and required wherever retained or multi-phase identity matters.
    - **landed 2026-09-10, live screenshots**: `Screenshot` defers its RPC reply until Runner
      paints the next frame. With no dimensions it reads the exact live Vello target; a custom
      logical width/height and physical scale run the same layout/hit/paint path against a
@@ -133,6 +194,17 @@ Roughly in dependency order:
      encodes PNG, and returns base64 plus physical dimensions; custom output is capped at 16
      megapixels. `Bridge.save_screenshot` writes it directly. The smoke proves both the live
      window capture and an exact 320×240 custom capture.
+   - **designed 2026-09-11, app discovery and invocation:**
+     [`design/app-discovery-and-invocation.md`](design/app-discovery-and-invocation.md) separates
+     untrusted app prose/source from host instructions, current UI action locators from stable ids,
+     and optional explicit app commands from forbidden arbitrary Lua evaluation. These additions
+     are unbuilt; a future MCP face remains a thin client of the same RPC surface.
+   - **designed 2026-09-11, resolved UI senses and gestures:** keep pre-layout `DumpTree` intact;
+     Runner instead answers bounded, fresh-frame element/subtree and screen hit-stack queries with
+     explicit content/screen geometry, clips, computed layout, scroll/thumb, and camera state.
+     Pointer sequences and wheel modifiers route through normal eligibility for zoom/pan/drag tests;
+     optional screenshot annotations share the snapshot. This is unbuilt; see
+     [`design/app-discovery-and-invocation.md` §7](design/app-discovery-and-invocation.md).
    - **ports as-is**: the wire transport (`read_msg`/`write_msg`, 4-byte length prefix;
    `Response::{ok,err}`) and the MCP shim's stdio↔UDS *shape*
    - **is replaced**: bridge becomes pure transport — a `UnixListener` thread on

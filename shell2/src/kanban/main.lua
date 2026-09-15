@@ -45,6 +45,7 @@ end
 local function card_of(c, ghost)
 	local dragging = S.drag ~= nil and S.drag.kind == "card" and S.drag.id == c.id
 	local t = ui.row({
+		w_full = true,
 		gap = 8,
 		px = 10,
 		py = 9,
@@ -61,30 +62,57 @@ local function card_of(c, ghost)
 	t.hover_fill = C.card_hi
 	t.hover_stroke = { 1, C.line }
 	t.opacity = dragging and 0.3 or 1.0
-	t.on_drag = function(phase, x, y)
-		update({ kind = "drag", what = "card", id = c.id, phase = phase, x = x, y = y })
+	t.on_drag = function(phase, x, y, dx, dy, scale)
+		update({ kind = "drag", what = "card", id = c.id, phase = phase, x = x, y = y, scale = scale })
 	end
 	t.on_drop = function(phase, x, y)
 		update({ kind = "drop", id = c.id, phase = phase, x = x, y = y })
 	end
-	t[#t + 1] = W.icon_button("x", function()
+	t[#t + 1] = W.icon_button("del-card:" .. c.id, "x", function()
 		update({ kind = "delete", id = c.id })
 	end, C.danger)
 	return t
 end
 
 local function composer(c)
-	local s = ui.state("draft:" .. c.id, { text = "" })
-	local send = function()
-		update({ kind = "add", col = c.id })
+	local s = ui.state("draft:" .. c.id, { text = "", open = false })
+	local close = function()
+		s.open = false
 	end
-	return ui.col({
+	local send = function()
+		if s.text ~= "" then
+			close()
+			update({ kind = "add", col = c.id })
+		end
+	end
+	local anchor = ui.button({
+		id = "add-card:" .. c.id,
+		w_full = true,
+		h = 32,
+		radius = 6,
+		center = true,
+		fill = C.accent,
+		hover_fill = C.accent_hi,
+		press_scale = 0.97,
+		ui.text({ "Add card", no_wrap = true, color = "#ffffff", font_size = 13 }),
+		on_click = function()
+			s.open = true
+		end,
+	})
+	if not s.open then
+		return ui.col({ px = 10, py = 10, anchor })
+	end
+	local panel = ui.col({
+		w = 280,
 		gap = 8,
-		px = 10,
-		py = 10,
+		pad = 10,
+		radius = 8,
+		fill = C.panel,
+		stroke = { 1, C.line },
 		ui.input({
 			value = s.text,
 			id = "draft:" .. c.id,
+			autofocus = true,
 			w_full = true,
 			h = 34,
 			px = 10,
@@ -99,15 +127,21 @@ local function composer(c)
 			on_enter = send,
 		}),
 		ui.button({
-			w_full = true,
+			id = "submit-card:" .. c.id,
 			h = 32,
 			radius = 6,
 			center = true,
 			fill = C.accent,
 			hover_fill = C.accent_hi,
-			ui.text({ "Add card", no_wrap = true, color = "#ffffff", font_size = 13 }),
+			press_scale = 0.97,
+			ui.text({ "Create card", no_wrap = true, color = "#ffffff", font_size = 13 }),
 			on_click = send,
 		}),
+	})
+	return ui.col({
+		px = 10,
+		py = 10,
+		ui.overlay({ side = "top", align = "start", on_dismiss = close, anchor, panel }),
 	})
 end
 
@@ -137,6 +171,7 @@ local function column_of(c, list)
 	return ui.col({
 		id = c.id,
 		w = width_of(c),
+		no_shrink = true,
 		-- The clamp in `actions.resize` is what the drag obeys; these are what the *layout* obeys,
 		-- and they are not the same guard. A width can arrive from a peer whose theme differs, or
 		-- from a doc edited by hand, and neither went past the drag.
@@ -157,13 +192,13 @@ local function column_of(c, list)
 			py = 11,
 			align_center = true,
 			hover_fill = C.line_soft,
-			on_drag = function(phase, x, y)
-				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = x, y = y })
+			on_drag = function(phase, x, y, dx, dy, scale)
+				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = x, y = y, scale = scale })
 			end,
 			ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			W.badge(#list),
 			ui.col({ grow = true }),
-			W.icon_button("x", function()
+			W.icon_button("del-col:" .. c.id, "x", function()
 				update({ kind = "delete_col", id = c.id })
 			end, C.danger),
 		}),
@@ -220,23 +255,27 @@ local function modal()
 			gap = 8,
 			ui.col({ grow = true }),
 			ui.button({
+				id = "cancel-col",
 				h = 34,
 				px = 14,
 				radius = 6,
 				center = true,
 				hover_fill = C.line_soft,
+				press_scale = 0.97,
 				ui.text({ "Cancel", no_wrap = true, color = C.muted, font_size = 13 }),
 				on_click = function()
 					update({ kind = "close_col" })
 				end,
 			}),
 			ui.button({
+				id = "create-col",
 				h = 34,
 				px = 16,
 				radius = 6,
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
+				press_scale = 0.97,
 				ui.text({ "Create", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = create,
 			}),
@@ -284,8 +323,8 @@ return function()
 		-- The grip is a sibling of the column, not a child of it: it has to sit in the gutter
 		-- *between* two columns, and a child clipped to its parent's rounded panel would be a
 		-- three-point target hanging off the edge of a corner.
-		col_list[#col_list + 1] = W.grip("grip:" .. c.id, S.resize ~= nil and S.resize.id == c.id, function(phase, x)
-			update({ kind = "resize", id = c.id, phase = phase, x = x })
+		col_list[#col_list + 1] = W.grip("grip:" .. c.id, S.resize ~= nil and S.resize.id == c.id, function(phase, x, y, dx)
+			update({ kind = "resize", id = c.id, phase = phase, x = x, dx = dx })
 		end)
 		if S.drag and S.drag.kind == "col" and S.drag.id == c.id then
 			flying = ui.col({
@@ -317,6 +356,7 @@ return function()
 			left = S.drag.x,
 			top = S.drag.y,
 			w = 300,
+			scale = S.drag.scale or 1,
 			opacity = 0.9,
 			flying,
 		})
@@ -334,12 +374,14 @@ return function()
 			W.badge(#cards),
 			ui.col({ grow = true }),
 			ui.button({
+				id = "open-col",
 				h = 32,
 				px = 14,
 				radius = 8,
 				center = true,
 				fill = C.accent,
 				hover_fill = C.accent_hi,
+				press_scale = 0.97,
 				ui.text({ "+  Column", no_wrap = true, color = "#ffffff", font_size = 13 }),
 				on_click = function()
 					update({ kind = "open_col" })
@@ -348,14 +390,20 @@ return function()
 		}),
 		ui.col({ h = 1, w_full = true, fill = C.line_soft }),
 		-- board
-		ui.row({
-			id = "board",
-			scroll_x = true,
+		ui.col({
+			id = "board_zoom",
+			zoomable = true,
 			grow = true,
-			stretch = true,
-			px = 13,
-			py = 20,
-			col_list,
+			w_full = true,
+			fill = C.bg,
+			ui.row({
+				id = "board",
+				h_full = true,
+				stretch = true,
+				px = 13,
+				py = 20,
+				col_list,
+			}),
 		}),
 		ghost or false,
 		S.col_modal and modal(),

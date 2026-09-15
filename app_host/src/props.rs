@@ -143,11 +143,14 @@ impl<M: 'static> Registry<M> {
             cx.handlers.push(handler.clone());
             let to_msg = cx.to_msg.clone();
             Ok(el.on_drag(id, move |e| {
-                to_msg(LuaMsg::CallPhase(
+                to_msg(LuaMsg::CallDrag(
                     idx,
                     e.phase.as_str(),
                     e.pos.0 - e.grab.0,
                     e.pos.1 - e.grab.1,
+                    e.delta.0,
+                    e.delta.1,
+                    e.scale,
                 ))
             }))
         }),
@@ -231,10 +234,16 @@ impl<M: 'static> Registry<M> {
         prop!(hover_fill, Color),
         prop!(hover_stroke, f32, Color),
         prop!(tint, f32),
+        prop!(press_fill, Color),
+        prop!(press_stroke, f32, Color),
+        prop!(press_scale, f32),
         // animation
         prop!(fade_in, f32),
         prop!(fade, f32, f32),
         prop!(slide_in, (f32, f32), f32),
+        prop!(scale, f32),
+        prop!(zoomable),
+        prop!(zoom_x),
         // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
         prop!(scroll_x),
         prop!(scroll_y),
@@ -260,6 +269,7 @@ pub(crate) fn apply<M: 'static>(
     mut el: El<M>,
     node: &Table,
     context: &mut Ctx<M>,
+    consumed: &[&str],
 ) -> mlua::Result<El<M>> {
     let pairs = node.pairs::<Value, Value>();
     let mut found = Vec::new();
@@ -270,6 +280,29 @@ pub(crate) fn apply<M: 'static>(
             .iter()
             .position(|(name, _)| *name == &*k)
         {
+            if k == "zoomable" || k == "zoom_x" {
+                missing_id(
+                    &DragCtx {
+                        handlers: context.handlers,
+                        node,
+                        to_msg: context.to_msg.clone(),
+                    },
+                    &k,
+                )?;
+            }
+            if k == "press_scale" {
+                missing_id(
+                    &DragCtx {
+                        handlers: context.handlers,
+                        node,
+                        to_msg: context.to_msg.clone(),
+                    },
+                    "press_scale",
+                )?;
+                if !node.contains_key("on_click")? {
+                    return Err(mlua::Error::runtime("press_scale needs on_click"));
+                }
+            }
             found.push((i, v));
         } else if let Some((_, build)) = Registry::<M>::CALLBACKS.iter().find(|(h, _f)| *h == &*k) {
             let f = v
@@ -288,7 +321,7 @@ pub(crate) fn apply<M: 'static>(
                     to_msg: context.to_msg.clone(),
                 },
             )?;
-        } else if !STRUCTURAL.contains(&&*k) {
+        } else if !STRUCTURAL.contains(&&*k) && !consumed.contains(&&*k) {
             return Err(mlua::Error::runtime(format!("unknown prop {k}")));
         }
     }

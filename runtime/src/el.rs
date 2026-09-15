@@ -6,6 +6,8 @@
 //! NOTE: this mirrors `app_engine`'s `Node` design but is its own type — app_engine still depends on
 //! egui, so importing it here would contaminate `runtime`. Converging the two is a later refactor.
 
+use std::sync::Arc;
+
 use taffy::prelude::*; // Style, Display, FlexDirection, length(), auto(), Size, Rect (geometry), …
 use vello::Scene;
 use vello::kurbo::Affine;
@@ -13,6 +15,7 @@ use vello::peniko::Color;
 
 use crate::anim::{Driver, Easing};
 use crate::drag::{DragEvent, DropEvent};
+use crate::frame::Frame;
 use crate::id::Id;
 use crate::state::Slot;
 use crate::text::Run;
@@ -134,6 +137,7 @@ pub struct ScrollSpec {
 pub(crate) struct Appearance {
     pub look: Look,
     pub text: Option<TextSpec>,
+    pub frame: Option<Arc<Frame>>,
     pub custom: Option<CustomFn>,
     pub repaint: bool,
 }
@@ -253,9 +257,12 @@ pub(crate) struct Behaviour<M> {
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
     pub opacity: f32,
+    pub scale: f32,
+    pub zoom: Option<(bool, bool)>,
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
+    pub press_scale: Option<(Binding<M>, f32)>,
 }
 impl<M> Behaviour<M> {
     /// Every store-backed transition on this node, paired with the slot it lives under.
@@ -281,9 +288,12 @@ impl<M> Default for Behaviour<M> {
             on_right_click: None,
             offset: (0.0, 0.0),
             opacity: 1.0,
+            scale: 1.0,
+            zoom: None,
             slide: None,
             fade: None,
             tint: None,
+            press_scale: None,
             on_drop: None,
         }
     }
@@ -370,8 +380,14 @@ pub fn text_area<M>(
     input(value, id, map, true)
 }
 
-/// A leaf that paints itself via `f`, given the scene, text engine, its computed rect, and the
-/// scene transform.
+/// A measured visual leaf. Frame coordinates begin at the element's content origin.
+pub fn frame<M>(visual: Arc<Frame>) -> El<M> {
+    let mut e = El::new(Style::default());
+    e.appearance.frame = Some(visual);
+    e
+}
+
+/// A leaf that paints itself via `f`, given its computed rect and scene transform.
 pub fn custom<M>(
     f: impl Fn(&mut Scene, &mut crate::text::TextEngine, vello::kurbo::Rect, Affine) + 'static,
 ) -> El<M> {
@@ -380,8 +396,8 @@ pub fn custom<M>(
     e
 }
 
-/// One node of the view tree. Layout style + paint decoration + optional text/custom content +
-/// optional click message + children. Built via the free fns below and the chained setters.
+/// One node of the view tree. Layout style + paint decoration + optional text/Frame/custom content
+/// + optional click message + children. Built via the free fns below and chained setters.
 pub struct El<M> {
     pub(crate) id: Option<Id>,
     pub(crate) layout: Style,
@@ -488,6 +504,14 @@ impl<M> El<M> {
         self.layout.size.height = percent(1.0);
         self
     }
+    pub fn w_pct(mut self, ratio: f32) -> Self {
+        self.layout.size.width = percent(ratio);
+        self
+    }
+    pub fn h_pct(mut self, ratio: f32) -> Self {
+        self.layout.size.height = percent(ratio);
+        self
+    }
     pub fn full(self) -> Self {
         self.w_full().h_full()
     }
@@ -582,6 +606,18 @@ impl<M> El<M> {
         self.appearance.look.press_fill = Some(c);
         self
     }
+    pub fn press_scale(mut self, scale: f32) -> Self {
+        self.behaviour.press_scale = Some((
+            Binding {
+                driver: Driver::Press,
+                duration: 0.12,
+                easing: Easing::EaseOut,
+                on_done: None,
+            },
+            scale,
+        ));
+        self
+    }
     pub fn hover_stroke(mut self, w: f32, c: Color) -> Self {
         self.appearance.look.hover_stroke = Some(Border {
             width: w,
@@ -619,6 +655,18 @@ impl<M> El<M> {
     }
     pub fn offset(mut self, offset: (f32, f32)) -> Self {
         self.behaviour.offset = offset;
+        self
+    }
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.behaviour.scale = scale;
+        self
+    }
+    pub fn zoomable(mut self) -> Self {
+        self.behaviour.zoom = Some((true, true));
+        self
+    }
+    pub fn zoom_x(mut self) -> Self {
+        self.behaviour.zoom = Some((true, false));
         self
     }
 
@@ -824,7 +872,9 @@ impl<M> El<M> {
         if self.behaviour.on_drop.is_some() {
             handlers.push("on_drop");
         }
-        let kind = if self.appearance.custom.is_some() {
+        let kind = if self.appearance.frame.is_some() {
+            "frame"
+        } else if self.appearance.custom.is_some() {
             "custom"
         } else if self.appearance.text.is_some() {
             match &self.behaviour.input {

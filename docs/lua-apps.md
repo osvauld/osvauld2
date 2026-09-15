@@ -77,6 +77,29 @@ nests it whole).
 A bare string child becomes a text element; `false` drops out (`ghost or false` is the idiom
 for conditional children).
 
+## Frame visuals (experimental foundation)
+
+`gfx.path(commands)` compiles an immutable, reusable local vector path from one batched Lua
+declaration. Commands are `{"move", x, y}`, `{"line", x, y}`, `{"quad", cx, cy, x, y}`,
+`{"cubic", c1x, c1y, c2x, c2y, x, y}`, and `{"close"}`. Every command is positional with exact
+arity; named/sparse fields and drawing before `move` are errors.
+
+Brushes are reusable resources: `gfx.solid("#rrggbb")` or
+`gfx.linear_gradient({from={x,y}, to={x,y}, stops={{offset,color},...}, extend="pad"})`.
+`extend` may be `pad`, `repeat`, or `reflect`.
+
+A visual is assembled once with `gfx.frame({width=..., height=..., baseline=..., items...})`.
+Items are `gfx.fill({path=..., brush=..., rule="nonzero"})`,
+`gfx.stroke({path=..., brush=..., width=..., cap=..., join=..., miter_limit=...,
+dashes={...}, dash_offset=...})`, `gfx.group({transform={xx,yx,xy,yy,dx,dy}, items...})`, and
+`gfx.instance({visual=another_frame, transform={...}})`. `evenodd` is the other fill rule. Stroke
+caps are `butt` (default), `square`, or `round`; joins are `miter` (default), `bevel`, or `round`.
+Miter defaults to 4, while dashes and offset default to an empty pattern and zero.
+Publish it as a normal leaf with `ui.frame({visual=visual, ...normal El props...})`. Frame dimensions
+are intrinsic layout claims, not an implicit clip or scale. Instances are placed by their local
+origin (normally the resource's top-left), so account for a centered shape's radius when placing it.
+Arc commands and internal Frame clips are not exposed yet.
+
 ## Layout
 
 Flexbox: `ui.col` stacks children vertically, `ui.row` lays them out horizontally. Children
@@ -94,19 +117,37 @@ to be squeezed: labels, badges).
 margins.
 
 **Scrolling** — `scroll_x`/`scroll_y` on a container makes it scrollable on that axis;
-children keep their natural size there. **Needs an `id`.**
+children keep their natural size there. A scrolling container with `grow` uses the remaining
+main-axis space instead of letting its content enlarge its viewport. **Needs an `id`.**
 
 **Overlay positioning** — `absolute` takes the element out of the flow; `top`/`left`/
 `right`/`bottom` position it in viewport coordinates. This is how kanban draws its drag ghost
-and its modal scrim.
+and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
+anchor then the root-painted panel. `side` is `bottom` (default), `top`, `left`, or `right`;
+`align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher:
+
+```lua
+ui.overlay({
+    side = "top",
+    align = "start",
+    on_dismiss = function() open = false end,
+    ui.button({ "Add" }),
+    ui.col({ ui.text({ "Popover" }) }),
+})
+```
+
+The panel escapes ancestor clips and stays screen-sized. Its element anchor follows stable
+placement through zoom, pan, authored scale, and offset, but ignores transient press-scale so an
+opening popover does not wobble while its button settles. A point anchor supplied by Rust is
+already screen-space.
 
 **Text** — `ui.text({ "label", … })` needs its label as child 1. It wraps like a paragraph by
 default; `no_wrap` makes a label. Measure happens for you.
 
 **When the window resizes** — nothing to handle: relayout is automatic. An app is responsive
 exactly to the extent its tree uses `full`, `grow`, `stretch` and scroll instead of fixed
-sizes — kanban fills the viewport (`full = true`) and lets the board row grow, so window
-drags just work.
+sizes — kanban fills the viewport, gives its board row a definite `h_full`, and lets only the
+cards region scroll, so window drags and added cards do not enlarge the board.
 
 **Buttons have no defaults** — `ui.button` is a `ui.row` and nothing more; the fill, hover
 states, padding and centering are all yours to declare.
@@ -129,10 +170,11 @@ the shorthand applies first (`pad` before `px`/`py`, `full` before `w`/`h`).
 | box | `full` · `w_full` · `h_full` · `size = {w, h}` · `w` · `h` · `min_w` `max_w` `min_h` `max_h` · `grow` (bool or share) · `no_shrink` · `wrap` |
 | spacing | `pad` · `px` · `py` · `gap` · `mt` · `mb` |
 | alignment | `center` · `align_center` · `stretch` |
-| positioning | `absolute` · `top` `left` `right` `bottom` · `offset = {x, y}` |
+| positioning | `absolute` · `top` `left` `right` `bottom` · `offset = {x, y}` · `scale` |
 | paint | `fill` · `color` (text) · `radius` · `stroke = {width, color}` · `stroke_dash = {width, color, dash, gap}` · `opacity` · `font_size` · `no_wrap` |
-| hover | `hover_fill` · `hover_stroke = {width, color}` · `tint` |
+| hover / press | `hover_fill` · `hover_stroke = {width, color}` · `tint` · `press_fill` · `press_stroke = {width, color}` · `press_scale` |
 | animation | `fade_in = ms` · `fade = {target, ms}` · `slide_in = {dx, dy, ms}` |
+| viewport | `zoomable` (Ctrl+wheel zooms children around the pointer; needs `id`) |
 | scroll | `scroll_x` · `scroll_y` (need `id`) |
 | input | `autofocus` · `value` |
 
@@ -140,8 +182,10 @@ the shorthand applies first (`pad` before `px`/`py`, `full` before `w`/`h`).
 
 - `on_click`, `on_enter`, `on_esc`, `on_faded_out` — plain callbacks.
 - `on_input = function(v)` — an input's new text.
-- `on_drag = function(phase, x, y)` — phases `"start"` / `"move"` / `"end"`; `x, y` are
-  relative to where the grab started. **Needs an `id`.**
+- `on_drag = function(phase, x, y, dx, dy, scale)` — phases `"start"` / `"move"` / `"end"`;
+  `x, y` are the dragged element's screen-space origin (for root-level ghosts), `dx, dy` are
+  movement in its local content space, and `scale` lets a root ghost match zoomed content.
+  **Needs an `id`.**
 - `on_drop = function(phase, x, y)` — phases `"over"` (while hovering) / `"release"`; `x, y`
   are normalized to the drop target (0–1), so `msg.y < 0.5` means "above the midline".
   **Needs an `id`.**
@@ -207,6 +251,9 @@ Two kinds, both declarative:
 
 - **Hover feedback animates itself.** `hover_fill`, `hover_stroke` and `tint` are transitions
   bound to hover state — declare the color, the fade is automatic.
+- **Press feedback is declarative for clickable elements.** `press_fill` / `press_stroke` apply
+  while the pointer is down; `press_scale = 0.96` scales an `on_click` element subtree around
+  its centre. `press_scale` needs an `id` and does not change layout.
 - **Value animations go to a declared target.** `fade = {target, ms}` animates opacity,
   `fade_in = ms` fades in on first appearance, `slide_in = {dx, dy, ms}` slides in from an
   offset. `opacity` is the static version with no tween.
@@ -243,12 +290,12 @@ function actions.resize(msg)
 	if msg.phase == "start" then
 		local c = find(board.columns, msg.id)
 		local w = c and c.w or C.col_w
-		S.resize = { id = msg.id, from = w, x0 = msg.x, w = w }
+		S.resize = { id = msg.id, from = w, w = w }
 		return
 	end
 	if not (S.resize and S.resize.id == msg.id) then return end   -- a stale drag
 	if msg.phase == "move" then
-		local w = S.resize.from + msg.x - S.resize.x0
+		local w = S.resize.from + msg.dx
 		S.resize.w = math.max(C.col_w_min, math.min(C.col_w_max, w))
 	else -- "end"
 		board:set({ "columns", msg.id, "w" }, S.resize.w)

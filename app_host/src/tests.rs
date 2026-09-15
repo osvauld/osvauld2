@@ -44,6 +44,94 @@ fn now() {
 }
 
 #[test]
+fn gfx_path_compiles_one_batched_lua_declaration() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let value: mlua::AnyUserData = lua
+        .load(
+            r#"return gfx.path({
+                { "move", 0, 0 },
+                { "quad", 10, 20, 30, 0 },
+                { "cubic", 40, -10, 50, 10, 60, 0 },
+                { "close" },
+            })"#,
+        )
+        .eval()
+        .unwrap();
+    let path = value.borrow::<gfx::LuaPath>().unwrap();
+    assert_eq!(path.0.command_count(), 4);
+}
+
+#[test]
+fn lua_builds_a_nested_gradient_frame_element() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(
+            r##"
+            local p = gfx.path({ { "move", 0, 0 }, { "line", 40, 0 }, { "line", 20, 30 }, { "close" } })
+            local gradient = gfx.linear_gradient({
+                from = { 0, 0 }, to = { 40, 30 },
+                stops = { { 0, "#ff507a" }, { 1, "#5865f2" } }, extend = "reflect",
+            })
+            local triangle = gfx.frame({ width = 40, height = 30,
+                gfx.fill({ path = p, brush = gradient }),
+                gfx.stroke({ path = p, brush = gfx.solid("#ffffff"), width = 2,
+                    cap = "round", join = "bevel", dashes = { 4, 2 }, dash_offset = 1 })
+            })
+            local picture = gfx.frame({ width = 100, height = 80,
+                gfx.group({ transform = { 1, 0, 0, 1, 10, 20 },
+                    gfx.instance({ visual = triangle, transform = { 1.5, 0, 0, 1.5, 0, 0 } })
+                })
+            })
+            return ui.frame({ id = "picture", visual = picture })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    let info = walk(node, &mut ctx).unwrap().info();
+
+    assert_eq!(info.kind, "frame");
+    assert_eq!(info.id.as_deref(), Some("picture"));
+}
+
+#[test]
+fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let setup = r##"
+        local p = gfx.path({ { "move", 0, 0 }, { "line", 1, 1 } })
+        local b = gfx.solid("#ffffff")
+        return gfx.frame({ width = 1, height = 1, REPLACE })
+    "##;
+    for declaration in [
+        "gfx.stroke({ path=p, brush=b, width=1, cap='triangle' })",
+        "gfx.stroke({ path=p, brush=b, width=1, join='sharp' })",
+        "gfx.stroke({ path=p, brush=b, width=1, dashes={ 2, named=3 } })",
+    ] {
+        let source = setup.replace("REPLACE", declaration);
+        assert!(
+            lua.load(&source).eval::<Value>().is_err(),
+            "accepted {declaration}"
+        );
+    }
+}
+
+#[test]
+fn gfx_path_rejects_unknown_sparse_and_badly_sequenced_commands() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    for source in [
+        r#"return gfx.path({ { "arc", 1, 2 } })"#,
+        r#"return gfx.path({ { "move", 0, 0, named = true } })"#,
+        r#"return gfx.path({ { "line", 1, 2 } })"#,
+    ] {
+        assert!(
+            lua.load(source).eval::<Value>().is_err(),
+            "accepted {source}"
+        );
+    }
+}
+
+#[test]
 fn prelude_tags_tables() {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua.load(r#"return ui.col{ui.text{"hi"}}"#).eval().unwrap();
@@ -117,6 +205,34 @@ fn walk_collects_handlers() {
     let _el = walk(node, &mut ctx).unwrap();
     assert_eq!(handlers.len(), 1);
     assert!(handlers[0].call::<()>(()).is_ok());
+}
+
+#[test]
+fn lua_overlay_wraps_an_anchor_and_panel() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node = lua
+        .load(
+            r#"return ui.overlay{side="top", align="end", on_dismiss=function() end,
+            ui.button{"add"}, ui.col{ui.text{"composer"}}}"#,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Vec::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+
+    assert!(walk(node, &mut ctx).is_ok());
+    assert_eq!(handlers.len(), 1);
+}
+
+#[test]
+fn lua_overlay_rejects_unknown_fields() {
+    let err = walk_props(
+        r#"return ui.overlay{floating=true, ui.button{"add"}, ui.col{ui.text{"composer"}}}"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("overlay: unknown field floating"), "{err}");
 }
 
 // ── crdt::patch_into ──────────────────────────────────────────────────────────
@@ -2164,16 +2280,16 @@ fn the_kanban_draws_a_grip_for_every_column() {
     );
 }
 
-/// Drive a resize gesture: grab at `from`, release at `to`, both in the same coordinates the
-/// runtime hands a drag handler (`pos - grab`, so their difference is the pointer's travel).
+/// Drive a resize gesture using the local-space delta supplied by the runtime.
 fn resize(app: &LuaApp<LuaMsg>, id: &str, from: f64, to: f64) {
+    let dx = to - from;
     app.vm
         .load(format!(
             r#"
             local m = require('model')
-            m.update({{ kind = 'resize', id = '{id}', phase = 'start', x = {from} }})
-            m.update({{ kind = 'resize', id = '{id}', phase = 'move', x = {to} }})
-            m.update({{ kind = 'resize', id = '{id}', phase = 'end', x = {to} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'start', dx = 0 }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'move', dx = {dx} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'end', dx = {dx} }})
             "#
         ))
         .exec()
@@ -2213,9 +2329,9 @@ fn a_resize_in_flight_writes_nothing_to_the_doc() {
         .load(
             r#"
             local m = require('model')
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 0 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', dx = 0 })
             for i = 1, 60 do
-                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', x = i })
+                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', dx = i })
             end
             "#,
         )
@@ -2267,8 +2383,8 @@ fn a_resize_that_never_moved_writes_nothing() {
         .load(
             r#"
             local m = require('model')
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 42 })
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', x = 42 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', dx = 0 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', dx = 0 })
             "#,
         )
         .exec()
@@ -2280,6 +2396,33 @@ fn a_resize_that_never_moved_writes_nothing() {
     resize(&app, "c-todo", 0.0, 40.0);
     app.flush(puts.recorder()).unwrap();
     assert!(!puts.take().is_empty(), "a real resize wrote nothing");
+}
+
+#[test]
+fn frame_orbits_demo_loads_and_builds_its_frame_leaf() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "geom.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/frame_orbits/{name}"))
+            .unwrap_or_else(|_| panic!("frame_orbits/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    let info = app.view().info();
+    assert!(
+        info.children[1].children[0]
+            .children
+            .iter()
+            .any(|child| child.kind == "frame"),
+        "demo did not produce a Frame leaf"
+    );
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
 }
 
 // ── the tally demo app, from disk ─────────────────────────────────────────────

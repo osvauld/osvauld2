@@ -1,0 +1,329 @@
+//! Lua declarations for immutable runtime Frame resources. This module validates and compiles
+//! aggregate values; it never renders or retains VM callbacks.
+
+use std::sync::Arc;
+
+use mlua::{AnyUserData, Error, Lua, Table, UserData, Value};
+use runtime::frame::{
+    Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
+    MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
+};
+use runtime::vello::kurbo::{Affine, PathEl, Point};
+use runtime::vello::peniko::Fill;
+
+#[derive(Clone)]
+#[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
+pub(crate) struct LuaPath(pub Arc<Path>);
+impl UserData for LuaPath {}
+
+#[derive(Clone)]
+pub(crate) struct LuaBrush(pub Arc<Brush>);
+impl UserData for LuaBrush {}
+
+#[derive(Clone)]
+pub(crate) struct LuaFrame(pub Arc<Frame>);
+impl UserData for LuaFrame {}
+
+pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
+    let gfx = lua.create_table()?;
+    gfx.set(
+        "path",
+        lua.create_function(|lua, commands: Table| {
+            let len = positional_len(&commands, "path")?;
+            if len > MAX_PATH_COMMANDS {
+                return Err(Error::runtime(format!(
+                    "path has {len} commands; maximum is {MAX_PATH_COMMANDS}"
+                )));
+            }
+            let mut elements = Vec::with_capacity(len);
+            for index in 1..=len {
+                elements.push(command(commands.get(index)?, index)?);
+            }
+            let path = Path::new(elements).map_err(Error::external)?;
+            lua.create_userdata(LuaPath(Arc::new(path)))
+        })?,
+    )?;
+    gfx.set(
+        "solid",
+        lua.create_function(|lua, color: String| {
+            let brush = Brush::solid(crate::parse_color(&color)?).map_err(Error::external)?;
+            lua.create_userdata(LuaBrush(Arc::new(brush)))
+        })?,
+    )?;
+    gfx.set(
+        "linear_gradient",
+        lua.create_function(|lua, spec: Table| {
+            named_fields(&spec, "linear_gradient", &["from", "to", "stops", "extend"])?;
+            let start = point(spec.get("from")?, "linear_gradient.from")?;
+            let end = point(spec.get("to")?, "linear_gradient.to")?;
+            let stop_table: Table = spec.get("stops")?;
+            let len = positional_len(&stop_table, "linear_gradient.stops")?;
+            if len > MAX_GRADIENT_STOPS {
+                return Err(Error::runtime(format!(
+                    "linear_gradient has too many stops: {len}"
+                )));
+            }
+            let mut stops = Vec::with_capacity(len);
+            for index in 1..=len {
+                let stop: Table = stop_table.get(index)?;
+                if positional_len(&stop, &format!("linear_gradient stop {index}"))? != 2 {
+                    return Err(Error::runtime(format!(
+                        "linear_gradient stop {index} needs offset and color"
+                    )));
+                }
+                stops.push(
+                    GradientStop::new(stop.get(1)?, crate::parse_color(&stop.get::<String>(2)?)?)
+                        .map_err(Error::external)?,
+                );
+            }
+            let extend = match spec.get::<Option<String>>("extend")?.as_deref() {
+                None | Some("pad") => Extend::Pad,
+                Some("repeat") => Extend::Repeat,
+                Some("reflect") => Extend::Reflect,
+                Some(value) => {
+                    return Err(Error::runtime(format!("unknown gradient extend {value:?}")));
+                }
+            };
+            let brush = Brush::linear(start, end, stops, extend).map_err(Error::external)?;
+            lua.create_userdata(LuaBrush(Arc::new(brush)))
+        })?,
+    )?;
+    gfx.set(
+        "frame",
+        lua.create_function(|lua, spec: Table| {
+            frame_fields(&spec)?;
+            let items = items(&spec)?;
+            let frame = Frame::new(
+                spec.get("width")?,
+                spec.get("height")?,
+                spec.get("baseline")?,
+                items,
+            )
+            .map_err(Error::external)?;
+            lua.create_userdata(LuaFrame(Arc::new(frame)))
+        })?,
+    )?;
+    lua.globals().set("gfx", gfx)?;
+    lua.load(
+        r#"
+        function gfx.fill(t) t._gfx = "fill" return t end
+        function gfx.stroke(t) t._gfx = "stroke" return t end
+        function gfx.group(t) t._gfx = "group" return t end
+        function gfx.instance(t) t._gfx = "instance" return t end
+        "#,
+    )
+    .exec()
+}
+
+fn command(command: Table, index: usize) -> mlua::Result<PathEl> {
+    let len = positional_len(&command, &format!("path command {index}"))?;
+    let name = command.get::<String>(1)?;
+    let arity = match name.as_str() {
+        "move" | "line" => 3,
+        "quad" => 5,
+        "cubic" => 7,
+        "close" => 1,
+        _ => {
+            return Err(Error::runtime(format!(
+                "path command {index}: unknown {name:?}"
+            )));
+        }
+    };
+    if len != arity {
+        return Err(Error::runtime(format!(
+            "path command {index} ({name}) needs {} values, got {}",
+            arity - 1,
+            len.saturating_sub(1)
+        )));
+    }
+    let point = |x, y| -> mlua::Result<Point> { Ok(Point::new(command.get(x)?, command.get(y)?)) };
+    Ok(match name.as_str() {
+        "move" => PathEl::MoveTo(point(2, 3)?),
+        "line" => PathEl::LineTo(point(2, 3)?),
+        "quad" => PathEl::QuadTo(point(2, 3)?, point(4, 5)?),
+        "cubic" => PathEl::CurveTo(point(2, 3)?, point(4, 5)?, point(6, 7)?),
+        "close" => PathEl::ClosePath,
+        _ => unreachable!(),
+    })
+}
+
+fn items(table: &Table) -> mlua::Result<Vec<Item>> {
+    (1..=table.raw_len())
+        .map(|index| item(table.get(index)?, index))
+        .collect()
+}
+
+fn item(spec: Table, index: usize) -> mlua::Result<Item> {
+    let kind = spec.get::<String>("_gfx")?;
+    match kind.as_str() {
+        "fill" => {
+            named_fields(&spec, "fill", &["_gfx", "path", "brush", "rule"])?;
+            let path = spec
+                .get::<AnyUserData>("path")?
+                .borrow::<LuaPath>()?
+                .0
+                .clone();
+            let brush = spec
+                .get::<AnyUserData>("brush")?
+                .borrow::<LuaBrush>()?
+                .0
+                .clone();
+            let rule = match spec.get::<Option<String>>("rule")?.as_deref() {
+                None | Some("nonzero") => Fill::NonZero,
+                Some("evenodd") => Fill::EvenOdd,
+                Some(value) => return Err(Error::runtime(format!("unknown fill rule {value:?}"))),
+            };
+            Ok(Item::fill(path, brush, rule))
+        }
+        "stroke" => {
+            named_fields(
+                &spec,
+                "stroke",
+                &[
+                    "_gfx",
+                    "path",
+                    "brush",
+                    "width",
+                    "cap",
+                    "join",
+                    "miter_limit",
+                    "dashes",
+                    "dash_offset",
+                ],
+            )?;
+            let path = spec
+                .get::<AnyUserData>("path")?
+                .borrow::<LuaPath>()?
+                .0
+                .clone();
+            let brush = spec
+                .get::<AnyUserData>("brush")?
+                .borrow::<LuaBrush>()?
+                .0
+                .clone();
+            Ok(Item::stroke(path, brush, stroke_style(&spec)?))
+        }
+        "group" => {
+            item_fields(&spec, "group", &["_gfx", "transform"])?;
+            Ok(Item::group(transform(&spec)?, items(&spec)?).map_err(Error::external)?)
+        }
+        "instance" => {
+            named_fields(&spec, "instance", &["_gfx", "visual", "transform"])?;
+            let frame = spec
+                .get::<AnyUserData>("visual")?
+                .borrow::<LuaFrame>()?
+                .0
+                .clone();
+            Ok(Item::instance(transform(&spec)?, frame).map_err(Error::external)?)
+        }
+        _ => Err(Error::runtime(format!(
+            "Frame item {index}: unknown kind {kind:?}"
+        ))),
+    }
+}
+
+fn stroke_style(spec: &Table) -> mlua::Result<StrokeStyle> {
+    let cap = match spec.get::<Option<String>>("cap")?.as_deref() {
+        None | Some("butt") => StrokeCap::Butt,
+        Some("square") => StrokeCap::Square,
+        Some("round") => StrokeCap::Round,
+        Some(value) => return Err(Error::runtime(format!("unknown stroke cap {value:?}"))),
+    };
+    let join = match spec.get::<Option<String>>("join")?.as_deref() {
+        None | Some("miter") => StrokeJoin::Miter,
+        Some("bevel") => StrokeJoin::Bevel,
+        Some("round") => StrokeJoin::Round,
+        Some(value) => return Err(Error::runtime(format!("unknown stroke join {value:?}"))),
+    };
+    let dashes = match spec.get::<Option<Table>>("dashes")? {
+        None => Vec::new(),
+        Some(values) => {
+            let len = positional_len(&values, "stroke.dashes")?;
+            if len > MAX_STROKE_DASHES {
+                return Err(Error::runtime(format!("stroke has too many dashes: {len}")));
+            }
+            (1..=len)
+                .map(|index| values.get(index))
+                .collect::<mlua::Result<Vec<f64>>>()?
+        }
+    };
+    StrokeStyle::new(
+        spec.get("width")?,
+        cap,
+        join,
+        spec.get::<Option<f64>>("miter_limit")?.unwrap_or(4.0),
+        dashes,
+        spec.get::<Option<f64>>("dash_offset")?.unwrap_or(0.0),
+    )
+    .map_err(Error::external)
+}
+
+fn transform(spec: &Table) -> mlua::Result<Affine> {
+    let Some(values) = spec.get::<Option<Table>>("transform")? else {
+        return Ok(Affine::IDENTITY);
+    };
+    if positional_len(&values, "transform")? != 6 {
+        return Err(Error::runtime("transform needs six coefficients"));
+    }
+    Ok(Affine::new([
+        values.get(1)?,
+        values.get(2)?,
+        values.get(3)?,
+        values.get(4)?,
+        values.get(5)?,
+        values.get(6)?,
+    ]))
+}
+
+fn frame_fields(spec: &Table) -> mlua::Result<()> {
+    item_fields(spec, "frame", &["width", "height", "baseline"])
+}
+
+fn item_fields(table: &Table, owner: &str, allowed: &[&str]) -> mlua::Result<()> {
+    let len = table.raw_len();
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        match key {
+            Value::Integer(i) if i > 0 && i as usize <= len => {}
+            Value::String(key) if allowed.contains(&key.to_str()?.as_ref()) => {}
+            _ => return Err(Error::runtime(format!("{owner}: unknown or sparse field"))),
+        }
+    }
+    Ok(())
+}
+
+fn point(table: Table, owner: &str) -> mlua::Result<Point> {
+    if positional_len(&table, owner)? != 2 {
+        return Err(Error::runtime(format!("{owner} needs x and y")));
+    }
+    Ok(Point::new(table.get(1)?, table.get(2)?))
+}
+
+fn named_fields(table: &Table, owner: &str, allowed: &[&str]) -> mlua::Result<()> {
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(key) = key else {
+            return Err(Error::runtime(format!(
+                "{owner}: positional fields are not allowed"
+            )));
+        };
+        let key = key.to_str()?;
+        if !allowed.contains(&key.as_ref()) {
+            return Err(Error::runtime(format!("{owner}: unknown field {key}")));
+        }
+    }
+    Ok(())
+}
+
+fn positional_len(table: &Table, owner: &str) -> mlua::Result<usize> {
+    let len = table.raw_len();
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        if !matches!(key, Value::Integer(i) if i > 0 && i as usize <= len) {
+            return Err(Error::runtime(format!(
+                "{owner}: named or sparse fields are not allowed"
+            )));
+        }
+    }
+    Ok(len)
+}

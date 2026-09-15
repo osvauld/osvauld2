@@ -3409,10 +3409,14 @@ name = "runtime"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "euclid",
+ "kurbo",
  "parley",
+ "peniko",
  "png",
  "pollster 1.0.1",
  "taffy",
+ "thiserror 2.0.18",
  "vello",
  "wgpu",
  "winit",

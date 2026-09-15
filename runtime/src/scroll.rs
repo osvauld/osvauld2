@@ -1,5 +1,5 @@
 use crate::{editor::KeepInView, id::Id};
-use vello::kurbo::Rect;
+use vello::kurbo::{Affine, Rect};
 
 const BAR_W: f64 = 8.0;
 const BAR_GAP: f64 = 2.0;
@@ -7,11 +7,31 @@ const MIN_THUMB: f64 = 24.0;
 #[derive(Clone)]
 pub(crate) struct Thumb {
     pub rect: Rect,
+    pub hit_rect: Rect,
+    pub clip: Rect,
     pub id: Id, //scroll context for drag
     pub axis: Axis,
     pub gain: f32, // inverse projection: cursor px -> offset px
     pub viewport: f32,
     pub content: f32,
+}
+
+impl Thumb {
+    pub fn to_screen(mut self, transform: Affine, clip: Rect) -> Self {
+        let local_len = match self.axis {
+            Axis::X => self.rect.width(),
+            Axis::Y => self.rect.height(),
+        };
+        self.rect = transform.transform_rect_bbox(self.rect);
+        let screen_len = match self.axis {
+            Axis::X => self.rect.width(),
+            Axis::Y => self.rect.height(),
+        };
+        self.gain *= (local_len / screen_len) as f32;
+        self.hit_rect = self.rect.intersect(clip);
+        self.clip = clip;
+        self
+    }
 }
 
 pub(crate) struct ScrollHit {
@@ -59,6 +79,8 @@ pub(crate) fn axis_thumb(
     };
     Some(Thumb {
         rect: r,
+        hit_rect: r,
+        clip: rect,
         id: id.clone(),
         axis,
         gain,
@@ -109,3 +131,6 @@ impl Scroll {
         delta - (next - cur)
     }
 }
+
+#[cfg(test)]
+mod tests;
