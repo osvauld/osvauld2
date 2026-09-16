@@ -50,6 +50,12 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ### Workspace permissions, sync, and sovereign node — design baseline
 
+**2026-09-15:** `kunki` exists as the first sovereign-node slice: it creates or loads a
+passphrase-sealed node identity, uses the identity device public key as the transport node id,
+and prints a base64url JSON connection ticket carrying node public material plus a node-signed
+bootstrap claim token. No desktop claim handler, admin store, QUIC protocol, workspace publish,
+or sync exists yet.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax

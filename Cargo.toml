@@ -11,6 +11,7 @@ members = [
   "lua_tree",
   "osvauld-rpc",
   "workspace",
+  "kunki",
 ]
 
 [workspace.package]
