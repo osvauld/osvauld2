@@ -12,6 +12,7 @@ members = [
   "osvauld-rpc",
   "workspace",
   "kunki",
+  "courier",
 ]
 
 [workspace.package]

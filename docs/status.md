@@ -53,8 +53,15 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 **2026-09-15:** `kunki` exists as the first sovereign-node slice: it creates or loads a
 passphrase-sealed node identity, uses the identity device public key as the transport node id,
 and prints a base64url JSON connection ticket carrying node public material plus a node-signed
-bootstrap claim token. No desktop claim handler, admin store, QUIC protocol, workspace publish,
-or sync exists yet.
+bootstrap claim token. The follow-up `courier` slice adds the transport-free protocol core for
+claim and reconnect: desktop relationship permits, node admin permits, first-admin bootstrap
+rejection once an admin exists, node-issued reconnect challenges, desktop-signed reconnect proofs,
+and replay rejection are covered by automated tests (branch `kunki-initial`). Tests pass message
+structs directly between node and desktop functions, so no transport is needed to exercise the
+protocol. Next slices: (1) one test that encodes/decodes every message between steps, so wire
+round-trips are covered without a transport crate; (2) a durable node admin store — `admins` is an
+in-memory `Vec` today and is lost on restart. QUIC/Iroh wiring comes after. No desktop UI claim
+handler, durable admin store, QUIC protocol, workspace publish, or sync exists yet.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
