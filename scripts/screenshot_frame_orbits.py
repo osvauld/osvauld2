@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from osvauld.session import Session
@@ -16,6 +17,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=ROOT / "frame-orbits.png")
     parser.add_argument("--size", nargs=2, type=float, default=(1000, 700), metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--delay", type=float, default=0.75, help="seconds between motion proofs")
     parser.add_argument("--tree", type=Path, help="optional DumpTree JSON destination")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -36,11 +38,14 @@ def main() -> None:
         tree = session.rpc.dump_tree(item["id"])
         if args.tree:
             args.tree.write_text(json.dumps(tree, indent=2), encoding="utf-8")
-        dimensions = session.rpc.save_screenshot(
-            item["id"], output, width=args.size[0], height=args.size[1], scale=args.scale
-        )
+        size = {"width": args.size[0], "height": args.size[1], "scale": args.scale}
+        before = output.with_name(f"{output.stem}-before{output.suffix}")
+        session.rpc.save_screenshot(item["id"], before, **size)
+        time.sleep(args.delay)
+        dimensions = session.rpc.save_screenshot(item["id"], output, **size)
         print(f"uploaded {len(files)} files: {', '.join(files)}")
-        print(f"screenshot: {output} ({dimensions['width_px']}x{dimensions['height_px']} px)")
+        print(f"motion proof: {before} -> {output} ({args.delay:.2f}s)")
+        print(f"final size: {dimensions['width_px']}x{dimensions['height_px']} px")
 
 
 if __name__ == "__main__":

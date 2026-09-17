@@ -48,7 +48,15 @@ for i = 1, 34 do
 	}))
 end
 
-local scene = gfx.frame({
+local angle = 0
+
+local function build_scene()
+	local planet_x, planet_y = 220 * math.cos(angle), 132 * math.sin(angle)
+	local moon_angle = angle * 4
+	local moon_x, moon_y = 48 * math.cos(moon_angle), 31 * math.sin(moon_angle)
+	local outer_angle = angle * 0.55 - 0.8
+	local outer_x, outer_y = 308 * math.cos(outer_angle), 194 * math.sin(outer_angle)
+	return gfx.frame({
 	width = 800, height = 520,
 	gfx.fill({ path = bg, brush = sky }),
 	gfx.group(stars),
@@ -61,21 +69,20 @@ local scene = gfx.frame({
 		}),
 		gfx.instance({ visual = sun, transform = geom.translate(-52, -52) }),
 		gfx.group({
-			transform = geom.rotate(0.62),
-			gfx.group({
-				transform = geom.translate(220, 0),
-				gfx.stroke({ path = moon_orbit, brush = orbit_brush, width = 1.5 }),
-				gfx.instance({ visual = planet, transform = geom.translate(-22, -22) }),
-				-- Instance transforms place the resource's top-left; subtract its 8pt radius.
-				gfx.instance({ visual = moon, transform = geom.translate(40, -8) }),
-			}),
+			transform = geom.translate(planet_x, planet_y),
+			gfx.stroke({ path = moon_orbit, brush = orbit_brush, width = 1.5 }),
+			gfx.instance({ visual = planet, transform = geom.translate(-22, -22) }),
+			-- Instances use their top-left origin, so subtract the moon's 8pt radius.
+			gfx.instance({ visual = moon, transform = geom.translate(moon_x - 8, moon_y - 8) }),
 		}),
-		gfx.group({
-			transform = geom.rotate(-0.38),
-			gfx.instance({ visual = moon, transform = geom.translate(300, -8) }),
-		}),
+		gfx.instance({ visual = moon, transform = geom.translate(outer_x - 8, outer_y - 8) }),
 	}),
-})
+	})
+end
+
+local function tick(dt)
+	angle = (angle + dt * 0.42) % (math.pi * 2)
+end
 
 return function()
 	return ui.col({
@@ -90,7 +97,7 @@ return function()
 			-- viewport-sized child rather than asking the camera to move that origin.
 			ui.col({
 				full = true, center = true,
-				ui.frame({ id = "orbit-frame", visual = scene }),
+				ui.frame({ id = "orbit-frame", visual = build_scene(), on_frame = tick }),
 			}),
 		}),
 	})

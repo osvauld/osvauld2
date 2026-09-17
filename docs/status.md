@@ -85,19 +85,14 @@ remain to be designed. Work packages and acceptance scenarios are in the design 
 
 ### Frame — Lua-programmable visuals
 
-**Planning draft 2026-09-11:** [Frame implementation plan](design/frame-implementation-plan.md)
-records the complete capability roadmap, proposed Lua/resource/geometry contracts, open decisions
-and phased acceptance gates. Frame and its Lua API remain unbuilt. The first milestone is a
-Lua-authored labeled vector visual with nested groups, animation and a hit region inside zoom;
-background/foreground, effects, simulation, robust capture, math and export remain required later
-work, not silently cut scope. The original visual-substrate research is retained with revision
-notes. A 2026-09-11 feasibility pass pins current Euclid/Kurbo/Vello/mlua support, adds the complete
-Lua geometry/path toolkit and selects an evolving orbital-diagram proof; notably, safe public mlua
-buffer extraction currently copies rather than providing the previously claimed zero-copy slice.
-Phase A now has a concrete review candidate: batched `gfx.path`/`gfx.frame` compilation, pure-Lua
-item/geometry helpers, immutable shared Path/Frame values, exact M/L/Q/C/arc/close grammar,
-Group/Instance semantics, intrinsic baseline rules, and initial expanded-work limits. Next: user
-acceptance of that checkpoint. **First implementation slice landed:** runtime exposes an immutable
+**Implementation in progress since 2026-09-11:** the
+[Frame implementation plan](design/frame-implementation-plan.md) records the 2D capability roadmap,
+Lua/resource/geometry contracts and acceptance gates. Frame is now a shipped but incomplete 2D
+visual resource; the landed slices are listed below. Arcs, radial/sweep brushes, shaped Frame text,
+internal clips, identity/hits, dynamic buffers and export remain unbuilt. Safe public mlua buffer
+extraction still copies rather than providing a claimed zero-copy slice. The broader retained 3D
+world is intentionally not being folded into Frame; see the new
+[Environment runtime plan](design/environment-runtime.md). **First implementation slice landed:** runtime exposes an immutable
 validated cubic-Bézier `Path`, true local bounds and command count; it rejects invalid sequencing,
 non-finite/out-of-range coordinates and more than 65,536 commands. Tests live in
 `runtime/src/frame/tests.rs`. **Second implementation slice landed:** immutable measured `Frame`,
@@ -125,7 +120,32 @@ runtime validates positive bounded width, caps/joins, miter limit and a 64-entry
 Vello; Stroke is budgeted and rendered through nested Group/Instance transforms with outer alpha;
 Lua exposes strict `gfx.stroke`; and `frame_orbits` now uses solid and dashed real strokes instead
 of even-odd filled rings. `scripts/screenshot_frame_orbits.py` produced a clean-console 1000×700
-live capture (`frame-orbits-stroke.png`). Next: radial/sweep brushes as another app-visible slice.
+live capture (`frame-orbits-stroke.png`). **Experimental Lua visual clock slice landed:** any
+stable-id El can opt into `on_frame(dt, elapsed)`; time is monotonic Runner time, stalls clamp to
+0.1s, callbacks dispatch after the current snapshot, and omission stops its redraw request. Only
+Runner's first frame is guaranteed zero `dt`; custom screenshots currently dispatch callbacks;
+stable callback generation, error quarantine and fixed-step world scheduling remain unbuilt. The orbital demo now computes its
+motion in Lua, and the bridge script captured before/after images one second apart with a clean
+console (`frame-orbits-motion-before.png`, `frame-orbits-motion.png`). This is an explicit
+simulation exception to declaration-only presentation animation. The first motion proof also found
+an app-math bug: rotating a radius traced a circle around an elliptical orbit. The demo now places
+both planets and the moon parametrically (`x=rx*cos(t)`, `y=ry*sin(t)`); before/after bridge captures
+(`frame-orbits-ellipse-before.png`, `frame-orbits-ellipse.png`) verify every body remains on its
+painted path. The earlier next step—scaffolding a force graph and Frame-local hits—is superseded pending the
+Environment rendering/lifetime gates below.
+
+### Environment — composable 3D interfaces and worlds
+
+**Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
+handover and plan of record for the newly required Lua-authored retained environment. No World,
+ECS, 3D mesh/depth renderer, physics binding, PBD cloth, projected UI surface or world picking is
+built. Frame remains 2D; Taffy/Parley remain candidates for logical UI surfaces. Two GPT Sol
+research passes recommend first testing a narrow same-device WGPU compositor while treating Bevy
+0.19/Vello 0.9 as a measured challenger—not selecting either by prose. Rapier2D/3D is reserved for
+rigid bodies; PBD/XPBD is the candidate for cloth/deformables; custom/Lua systems remain valid where
+bounded. Immediate gates: repair/pin callback scheduling semantics, then render and ray-pick two
+depth-intersecting Y-rotated Vello/Taffy panels with a bridge screenshot and no CPU texture
+readback. Dependency and public World API decisions wait for those results.
 
 ### Runtime and app milestones
 

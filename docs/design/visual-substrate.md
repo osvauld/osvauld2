@@ -7,8 +7,10 @@ Companions: `animation.md` (rev 3 — the timeline/binding layer this builds on)
 `runtime-rebuild-plan.md` §2.5 (rich text leaf — the first thing that needed this),
 `w3.md` (the current week; none of this is W3 work).
 
-Status: **historical research/design notes; Frame itself remains unbuilt.** Some prerequisite
-observations below have been superseded (rich runs, require, press-scale and viewport transforms).
+Status: **historical research/design notes.** The original 2026-08-28 claim that Frame was
+unbuilt is superseded: the shipped subset is recorded in [status](../status.md) and the
+[Frame plan](frame-implementation-plan.md). Other prerequisite observations below have also been
+superseded (rich runs, require, press-scale and viewport transforms).
 
 **Revision 2026-09-11:** the [Frame implementation plan](frame-implementation-plan.md) is the
 companion delivery roadmap: complete capability scope, Lua-first vertical slices, proposed
@@ -16,6 +18,12 @@ contracts, dependencies and acceptance gates. Earlier research and estimates rem
 history, not as current implementation claims. Frame is planned to support internal group clips; Geometry owns
 external placement and ancestor/viewport clips. Lua authoring is part of the first milestone,
 not a later optional binding.
+
+**Revision 2026-09-12:** the product direction now includes a retained, composable 3D environment
+for interfaces and simulations. Frame stays 2D; world lifetime, Rapier/PBD composition,
+perspective/deformable surfaces and renderer-selection spikes live in the
+[Environment runtime plan](environment-runtime.md). The physics survey below remains evidence and
+history, not the complete world architecture.
 
 ---
 

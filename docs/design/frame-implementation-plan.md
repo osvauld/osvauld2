@@ -8,7 +8,13 @@ brushes, shaped text, internal clips, animation, hits, simulation and export rem
 document records agreed scope and phased contracts; unresolved later-phase spellings are not
 shipped API. No production implementation is authorized merely by listing a phase here.
 
+**Revision 2026-09-12:** Frame remains an immutable **2D** visual resource. The newly required
+retained 3D world, cameras, depth, projective UI surfaces and physics lifetime belong to the
+[Environment runtime](environment-runtime.md), which may consume Frame surfaces rather than
+expanding Frame into a world or 3D scene tree.
+
 Companions:
+- [Environment runtime](environment-runtime.md): retained 3D/world seam and rendering gates.
 - [Visual substrate](visual-substrate.md): original vision and research, retained as history.
 - [Viewport geometry rebuild](viewport-geometry-rebuild.md): placement, inverse input and clips.
 - [Animation](animation.md): retained drivers, scheduling and compositing design.
@@ -457,7 +463,10 @@ Gate: a Lua library produces a labeled vector diagram without custom Rust drawin
 ### C — first interactive animated milestone
 
 Add monotonic frame time and bounded scheduling, then simple tagged hit regions and plain events.
-A Lua demo animates a group and responds to a mark click inside a zoom viewport. It also appears
+**Animation foundation landed 2026-09-11:** stable-id `on_frame(dt, elapsed)` callbacks receive
+clamped monotonic time, keep redraw alive only while declared, and drive the Lua orbital demo with
+bridge-captured before/after proof. Pointer hits and events are next. A Lua demo animates a group
+and responds to a mark click inside a zoom viewport. It also appears
 in a normal row and fixed-size overlay. Verify clipped-out marks cannot fire and idle animation
 stops scheduling. Avoid implying multi-phase capture is solved by this click milestone.
 
