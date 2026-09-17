@@ -2,7 +2,7 @@
 
 > **Status — 2026-09-11: design baseline; validated resource-address syntax, callable handles,
 > and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
-> node are unbuilt.**
+> node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -154,6 +154,73 @@ receiver must possess valid authority/key material before accepting dependent co
 A sender checks current authorization before disclosure. Exact grant IDs, generations,
 rollback prevention, expiry, revocation ordering, and historical-write treatment are open.
 
+### Decided 2026-09-17: role tokens, signed updates, Lua rules
+
+Agreed with the user; supersedes the "Permit" row above (tokens carry roles, not concrete
+capabilities) and the open manifest/Lua split in §7. Nothing below is built yet.
+
+**The node is the root authority; tokens carry roles.** Fields: `iss`, `aud`, `sub` (node
+DID), `role`, `scope`, `delegable`, `nonce`, `iat`, `exp`, `prf`. `prf` embeds the full parent
+token inside the signed payload; the root has none and `iss == sub`. Semantics follow UCAN 1.0
+delegation, encoding is courier's own: only our node verifies, so DAG-CBOR/varsig and
+per-action invocation tokens buy nothing (and `rs-ucan` is marked work-in-progress/unaudited).
+
+Chain check on the node, leaf to root: depth cap before any crypto; every link's signature,
+`sub == node`, unexpired, unrevoked; `child.iss == parent.aud`; parent `delegable`; a child
+never widens role or scope; root `iss == sub`; leaf `aud` equals the session's proven DID.
+
+- **Node admin** = create workspaces and appoint admins (delegate the admin role). Publishing
+  an app is write on a workspace, not admin. The bootstrap claim creates the first admin and
+  is refused once one exists — kunki prints a fresh ticket on every start.
+- **Reissue keeps chains short**, but a flattened node-signed token no longer contains the
+  intermediate issuer: the node must record lineage or revoking that issuer stops cascading.
+- **Keys stay out of tokens.** Device/encryption keys live in the relationship permit;
+  wrapped content keys travel beside the token (`prf` would copy them into every child).
+- **Role meaning lives in the manifest**, so a policy change reinterprets existing role
+  tokens by design. That is acceptable only because a policy change is an explicit signed
+  publish, never a side effect of a code edit (§5).
+
+**Authorship is a signed update.** The desktop sends `{author DID, update bytes, sig}`. The
+node verifies the signature and that every Loro peer id in the update is bound to that DID
+(clients choose peer ids; without the binding one peer can write as another). Signed updates
+are kept in the node log, so authorship stays verifiable later. `record.author` is the signer
+of the creating update; clients cannot set it.
+
+**Rules are Lua in the signed manifest; there is no custom rule vocabulary.** The node is
+trusted, so a DSL adds a language without adding security. Kunki runs the rules on merge. The
+manifest also declares data shapes — the node needs them to map changed containers to
+records and fields. A manifest is accepted only if the publisher's chain reaches the node and
+allows publishing there; node-run functions act with the publisher's authority, not the node's.
+
+Rust proves, Lua decides. A rule receives only verified facts and returns `true` or
+`false, reason`:
+
+| fact | contents |
+|---|---|
+| `update` | `id`, `author` (verified), `signed_at` (the author's claim, not trusted) |
+| `change` | this record's slice: `record`, `kind` (create/edit/delete/move), `fields` old/new |
+| `roles` | from the verified token chain, **as of merge**, not signing |
+| `record` | pre-state: `author`, `created_at` (node clock), `parent`, own fields |
+| `now` | node clock |
+| `workspace` | `id`, `get` (reads are tracked), `members` only if the manifest requests it and it is granted |
+
+No tokens, keys, network, writes, or other workspaces. One update is accepted or rejected
+whole; the rule runs once per touched record. Desktops may run the same rules before sending
+as a courtesy; the node is the authority. Read is per doc, so a data-dependent read rule must
+re-run when a field it read changes — record reads during evaluation. The Luau sandbox and
+interrupt budget move into a headless crate shared by `app_host` and kunki (`app_host`
+depends on `runtime`).
+
+Checklist the Lua rule API must support, from shop, chat, subreddit, and expense-approval
+walkthroughs: nearest ancestor by type (`post.locked`), directory relations
+(`author.manager`), separation of duties, thresholds, status transitions, lock after a
+state, per-field privacy (the node splits private fields into their own doc), soft delete as
+the default. Uniqueness and bounds rely on the node merging one update at a time and need a
+client-side pending state. Computation such as auto-moderation is a node function.
+
+Open: who may revoke a link (node only, or also its issuer); the creator's initial authority
+on a new workspace; client rollback/pending UX for rejected updates.
+
 ## 5. Trust, consent, and updates
 
 Connection tickets bootstrap the initial relationship/install-or-join flow. They must bind
@@ -239,9 +306,9 @@ authorized effects, and subsequent rules. Candidate manifest rules include actor
 immutable fields, and `pending -> confirmed`; calculations, integrations, and derivations
 may use Lua, but must not bypass the protected write/action boundary.
 
-The exact manifest/Lua split is **open**. Do not prematurely reduce the rule vocabulary to
-role/path checks or adopt a general-purpose inference engine as authorization. Rules must
-specify their authenticated inputs and enforcement point. A booking acceptance needs a
+**Decided 2026-09-17 (§4):** rules are Lua in the signed manifest, run by the node over
+verified facts; no custom rule vocabulary. Rules must still specify their authenticated
+inputs and enforcement point. A booking acceptance needs a
 serialized availability check and commit at an authority; CRDT convergence cannot make two
 concurrent reservations both exclusive. Readable policy should explain allow/deny decisions.
 
