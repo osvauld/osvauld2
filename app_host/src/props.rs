@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use crate::{Ctx, LuaMsg, parse_color};
-use mlua::{Function, Table, Value};
+use crate::{Ctx, Handlers, Key, LuaMsg, parse_color, register};
+use mlua::{Table, Value};
 use runtime::El;
 use runtime::vello::peniko::Color;
 use std::marker::PhantomData;
@@ -16,13 +16,10 @@ fn want(v: &Value, ty: &str) -> mlua::Error {
     mlua::Error::runtime(format!("expected {ty} got {}", v.type_name()))
 }
 
-/// A drag/drop bind's handler state is keyed by element `id`; without one the bind is
-/// unreachable. The read stays one boundary crossing — `nil` becomes `None`, not a
-/// conversion error naming Lua's plumbing instead of the missing prop.
-fn missing_id<M>(cx: &DragCtx<'_, M>, bind: &str) -> mlua::Result<String> {
-    cx.node
-        .get::<Option<String>>("id")?
-        .ok_or_else(|| mlua::Error::runtime(format!("{bind} needs an id")))
+/// Handlers, drag state, zoom and press springs are all keyed by element `id`; without one they
+/// are unreachable.
+fn missing_id<'a>(id: Option<&'a str>, prop: &str) -> mlua::Result<&'a str> {
+    id.ok_or_else(|| mlua::Error::runtime(format!("{prop} needs an id")))
 }
 
 impl FromProp for f32 {
@@ -62,9 +59,17 @@ impl<A: FromProp, B: FromProp> FromProp for (A, B) {
 }
 
 pub(crate) struct DragCtx<'a, M> {
-    pub handlers: &'a mut Vec<Function>,
-    pub node: &'a Table,
+    pub handlers: &'a mut Handlers,
+    pub id: Option<&'a str>,
     pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+}
+impl<M> DragCtx<'_, M> {
+    /// Register the prop's function under this element's id — the key its messages carry.
+    fn register(&mut self, name: &'static str, v: &Value) -> mlua::Result<Key> {
+        let id = missing_id(self.id, name)?;
+        let f = v.as_function().ok_or_else(|| want(v, "function"))?;
+        register(self.handlers, id, name, f.clone())
+    }
 }
 
 /// Every prop erased to one signature, so arity stops being part of the type.
@@ -136,15 +141,25 @@ macro_rules! prop {
 pub(crate) struct Registry<M>(PhantomData<M>);
 impl<M: 'static> Registry<M> {
     pub(crate) const BINDS: &'static [(&str, Bind<M>)] = &[
-        ("on_drag", |el, v, cx| {
-            let id = missing_id(cx, "on_drag")?;
-            let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
-            let idx = cx.handlers.len() as u32;
-            cx.handlers.push(handler.clone());
+        // Element-local, zoom undone: the numbers the app placed the element's contents with.
+        ("on_click", |el, v, cx| {
+            let key = cx.register("on_click", v)?;
             let to_msg = cx.to_msg.clone();
-            Ok(el.on_drag(id, move |e| {
+            Ok(el.on_click_at(move |(x, y)| to_msg(LuaMsg::CallAt(key.clone(), x, y))))
+        }),
+        ("on_frame", |el, v, cx| {
+            let key = cx.register("on_frame", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_frame(key.id.to_string(), move |event| {
+                to_msg(LuaMsg::CallFrame(key.clone(), event.dt, event.elapsed))
+            }))
+        }),
+        ("on_drag", |el, v, cx| {
+            let key = cx.register("on_drag", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_drag(key.id.to_string(), move |e| {
                 to_msg(LuaMsg::CallDrag(
-                    idx,
+                    key.clone(),
                     e.phase.as_str(),
                     e.pos.0 - e.grab.0,
                     e.pos.1 - e.grab.1,
@@ -155,18 +170,27 @@ impl<M: 'static> Registry<M> {
             }))
         }),
         ("on_drop", |el, v, cx| {
-            let id = missing_id(cx, "on_drop")?;
-            let handler = v.as_function().ok_or_else(|| want(v, "function"))?;
-            let idx = cx.handlers.len() as u32;
-            cx.handlers.push(handler.clone());
-
+            let key = cx.register("on_drop", v)?;
             let to_msg = cx.to_msg.clone();
-            Ok(el.on_drop(id, move |e| {
+            Ok(el.on_drop(key.id.to_string(), move |e| {
                 to_msg(LuaMsg::CallPhase(
-                    idx,
+                    key.clone(),
                     e.phase.as_str(),
                     e.pos.0 / e.size.0,
                     e.pos.1 / e.size.1,
+                ))
+            }))
+        }),
+        // Element-local, like on_click.
+        ("on_hover", |el, v, cx| {
+            let key = cx.register("on_hover", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_hover(key.id.to_string(), move |e| {
+                to_msg(LuaMsg::CallPhase(
+                    key.clone(),
+                    e.phase.as_str(),
+                    e.pos.0,
+                    e.pos.1,
                 ))
             }))
         }),
@@ -251,10 +275,10 @@ impl<M: 'static> Registry<M> {
         prop!(autofocus),
     ];
 
-    /// Props whose value is a Lua function. Each is registered into `handlers` and reaches the app as
-    /// `LuaMsg::Call(idx)`; these builders all take a plain `M`, so one fn-pointer shape covers them.
+    /// Props whose value is a Lua function taking no arguments. Each is registered into `handlers`
+    /// and reaches the app as `LuaMsg::Call(key)`; these builders all take a plain `M`, so one
+    /// fn-pointer shape covers them.
     pub(crate) const CALLBACKS: &'static [(&'static str, fn(El<M>, M) -> El<M>)] = &[
-        ("on_click", El::on_click),
         ("on_enter", El::on_enter),
         ("on_esc", El::on_esc),
         ("on_faded_out", El::on_faded_out),
@@ -269,6 +293,7 @@ pub(crate) fn apply<M: 'static>(
     mut el: El<M>,
     node: &Table,
     context: &mut Ctx<M>,
+    id: Option<&str>,
     consumed: &[&str],
 ) -> mlua::Result<El<M>> {
     let pairs = node.pairs::<Value, Value>();
@@ -281,43 +306,32 @@ pub(crate) fn apply<M: 'static>(
             .position(|(name, _)| *name == &*k)
         {
             if k == "zoomable" || k == "zoom_x" {
-                missing_id(
-                    &DragCtx {
-                        handlers: context.handlers,
-                        node,
-                        to_msg: context.to_msg.clone(),
-                    },
-                    &k,
-                )?;
+                missing_id(id, &k)?;
             }
             if k == "press_scale" {
-                missing_id(
-                    &DragCtx {
-                        handlers: context.handlers,
-                        node,
-                        to_msg: context.to_msg.clone(),
-                    },
-                    "press_scale",
-                )?;
+                missing_id(id, "press_scale")?;
                 if !node.contains_key("on_click")? {
                     return Err(mlua::Error::runtime("press_scale needs on_click"));
                 }
             }
             found.push((i, v));
-        } else if let Some((_, build)) = Registry::<M>::CALLBACKS.iter().find(|(h, _f)| *h == &*k) {
-            let f = v
-                .as_function()
-                .ok_or_else(|| mlua::Error::runtime(format!("{k} expects a function")))?;
-            let idx = context.handlers.len() as u32;
-            context.handlers.push(f.clone());
-            el = build(el, (context.to_msg)(LuaMsg::Call(idx)));
+        } else if let Some((name, build)) =
+            Registry::<M>::CALLBACKS.iter().find(|(h, _f)| *h == &*k)
+        {
+            let key = DragCtx {
+                handlers: context.handlers,
+                id,
+                to_msg: context.to_msg.clone(),
+            }
+            .register(name, &v)?;
+            el = build(el, (context.to_msg)(LuaMsg::Call(key)));
         } else if let Some((_, bind)) = Registry::<M>::BINDS.iter().find(|(b, _v)| *b == &*k) {
             el = bind(
                 el,
                 &v,
                 &mut DragCtx {
                     handlers: context.handlers,
-                    node,
+                    id,
                     to_msg: context.to_msg.clone(),
                 },
             )?;

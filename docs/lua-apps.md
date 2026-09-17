@@ -29,7 +29,7 @@ return function()
         fill = C.bg,
         ui.text({ tostring(n), color = C.text, font_size = 72, no_wrap = true }),
         ui.button({
-            h = 34, radius = 8, center = true, fill = C.accent,
+            id = "inc", h = 34, radius = 8, center = true, fill = C.accent,
             ui.text({ "+1", color = "#ffffff", font_size = 13 }),
             on_click = function() t:set({ "count", "n" }, n + 1) end,
         }),
@@ -124,10 +124,12 @@ main-axis space instead of letting its content enlarge its viewport. **Needs an 
 `right`/`bottom` position it in viewport coordinates. This is how kanban draws its drag ghost
 and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
 anchor then the root-painted panel. `side` is `bottom` (default), `top`, `left`, or `right`;
-`align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher:
+`align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher and,
+like every handler, needs an `id`:
 
 ```lua
 ui.overlay({
+    id = "add-menu",
     side = "top",
     align = "start",
     on_dismiss = function() open = false end,
@@ -173,14 +175,29 @@ the shorthand applies first (`pad` before `px`/`py`, `full` before `w`/`h`).
 | positioning | `absolute` · `top` `left` `right` `bottom` · `offset = {x, y}` · `scale` |
 | paint | `fill` · `color` (text) · `radius` · `stroke = {width, color}` · `stroke_dash = {width, color, dash, gap}` · `opacity` · `font_size` · `no_wrap` |
 | hover / press | `hover_fill` · `hover_stroke = {width, color}` · `tint` · `press_fill` · `press_stroke = {width, color}` · `press_scale` |
-| animation | `fade_in = ms` · `fade = {target, ms}` · `slide_in = {dx, dy, ms}` |
+| animation | `fade_in = ms` · `fade = {target, ms}` · `slide_in = {dx, dy, ms}` · `on_frame` |
 | viewport | `zoomable` (Ctrl+wheel zooms children around the pointer; needs `id`) |
 | scroll | `scroll_x` · `scroll_y` (need `id`) |
 | input | `autofocus` · `value` |
 
 ## Handlers
 
-- `on_click`, `on_enter`, `on_esc`, `on_faded_out` — plain callbacks.
+**Every handler needs an `id`**, and no two elements may share an id and a handler. A handler is
+found by id + name when its event is delivered, not when the view was built, so a click still
+reaches its element when a peer edit lands between press and release — and is dropped if the
+element is gone.
+
+- `on_click = function(x, y)` — where the click landed, from the element's top-left corner in
+  its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
+  whatever the camera is doing. Handlers that don't care can ignore the arguments. Fired from
+  the bridge, with no layout, `x, y` is `0, 0`. Inside a `zoomable`, a press that travels past 5pt
+  pans instead.
+- `on_hover = function(phase, x, y)` — phases `"enter"` / `"move"` / `"leave"`, `x, y` as
+  `on_click` (outside the element on `"leave"`). An element is hovered while the pointer is
+  inside it, like `hover_fill`: a parent stays hovered over its children, and an element painted
+  on top doesn't hide the one below — check your own geometry if that matters. It fires only
+  when the pointer moves.
+- `on_enter`, `on_esc`, `on_faded_out` — plain callbacks.
 - `on_input = function(v)` — an input's new text.
 - `on_drag = function(phase, x, y, dx, dy, scale)` — phases `"start"` / `"move"` / `"end"`;
   `x, y` are the dragged element's screen-space origin (for root-level ghosts), `dx, dy` are
@@ -189,6 +206,10 @@ the shorthand applies first (`pad` before `px`/`py`, `full` before `w`/`h`).
 - `on_drop = function(phase, x, y)` — phases `"over"` (while hovering) / `"release"`; `x, y`
   are normalized to the drop target (0–1), so `msg.y < 0.5` means "above the midline".
   **Needs an `id`.**
+- `on_frame = function(dt, elapsed)` — an **experimental visual/prototyping loop**. `elapsed` is
+  monotonic Runner time and `dt` is clamped to 0.1 seconds after stalls; only Runner's first frame
+  is guaranteed zero. Presence keeps repainting, so omit it to stop that request. Custom
+  screenshots currently dispatch it too; it is not a fixed-step world scheduler. **Needs an `id`.**
 
 Handlers run after the frame. A gesture should accumulate in your own state during
 `"start"`/`"move"` and commit to the document once at the end — a drag is **one write**, not
@@ -247,7 +268,7 @@ The rules that bite, once each:
 
 ## Animation
 
-Two kinds, both declarative:
+Presentation animation is declarative:
 
 - **Hover feedback animates itself.** `hover_fill`, `hover_stroke` and `tint` are transitions
   bound to hover state — declare the color, the fade is automatic.
@@ -263,6 +284,11 @@ Retargeting mid-flight reverses smoothly instead of jumping: kanban's drop guide
 `fade = { on and 1 or 0, 140 }` on an `id` that never changes, so the line fades in and out
 as the pointer moves. `on_faded_out` fires when a fade completes — the hook for removing an
 element after it fades away.
+
+Authored simulations are the deliberate exception: `on_frame(dt, elapsed)` runs Lua after each
+presented frame and schedules the next while declared. Keep transient positions and velocities in
+module locals, perform no document writes per tick, avoid allocations in inner numeric loops, and
+remove the handler when settled. Routine UI effects must use the declarative transitions above.
 
 ## Patterns from kanban
 

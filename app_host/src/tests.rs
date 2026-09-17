@@ -1,5 +1,6 @@
 use super::*;
 use mlua::{FromLua, Table};
+use runtime::HoverPhase;
 use std::rc::Rc;
 
 mod reload;
@@ -87,7 +88,7 @@ fn lua_builds_a_nested_gradient_frame_element() {
         )
         .eval()
         .unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     let info = walk(node, &mut ctx).unwrap().info();
 
@@ -114,6 +115,45 @@ fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
             "accepted {declaration}"
         );
     }
+}
+
+#[test]
+fn on_frame_delivers_runtime_time_to_lua() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"return function()
+            return ui.col({ id="sim", on_frame=function(dt, elapsed)
+                _tick = { dt, elapsed }
+            end })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    app.update(LuaMsg::CallFrame(Key::new("sim", "on_frame"), 0.025, 3.5));
+
+    let tick: Table = app.vm.globals().get("_tick").unwrap();
+    assert_eq!(tick.get::<f32>(1).unwrap(), 0.025);
+    assert_eq!(tick.get::<f64>(2).unwrap(), 3.5);
+}
+
+#[test]
+fn on_frame_requires_a_stable_element_id() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load("return ui.col({ on_frame = function() end })")
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+
+    let error = walk(node, &mut ctx).err().expect("missing id was accepted");
+    assert!(error.to_string().contains("on_frame needs an id"));
 }
 
 #[test]
@@ -151,7 +191,7 @@ fn walk_builds_el() {
         .load(r#"return ui.col{ui.text{"a"}, ui.row{ui.text{"b"}, ui.text{"c"}}}"#)
         .eval()
         .unwrap();
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     assert!(walk(node, &mut ctx).is_ok());
 }
@@ -159,7 +199,7 @@ fn walk_builds_el() {
 fn walk_props(src: &str) -> mlua::Result<()> {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua.load(src).eval().unwrap();
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     walk(node, &mut ctx).map(|_| ())
 }
@@ -196,15 +236,103 @@ fn size_bounds_are_props() {
 fn walk_collects_handlers() {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua
-        .load(r#"return ui.button{"add", on_click = function() end }"#)
+        .load(r#"return ui.button{"add", id = "add", on_click = function() end }"#)
         .eval()
         .unwrap();
 
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     let _el = walk(node, &mut ctx).unwrap();
     assert_eq!(handlers.len(), 1);
-    assert!(handlers[0].call::<()>(()).is_ok());
+    assert!(
+        handlers[&Key::new("add", "on_click")]
+            .call::<()>(())
+            .is_ok()
+    );
+}
+
+/// The bug keys fix: a click is minted at press and delivered at release, and the view rebuilds
+/// in between. A slot index would then call whichever handler moved into the slot.
+#[test]
+fn a_click_reaches_its_element_across_rebuilds() {
+    let src = LoroDoc::new();
+    let main = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    main.insert(
+        0,
+        r#"hits = {}
+        local names = { "b" }
+        function set_names(t) names = t end
+        return function()
+            local kids = {}
+            for _, name in ipairs(names) do
+                table.insert(kids, ui.button({ id = name, on_click = function(x, y)
+                    table.insert(hits, name .. "@" .. x .. "," .. y)
+                end, ui.text({ name }) }))
+            end
+            return ui.row(kids)
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let set_names = |app: &LuaApp<LuaMsg>, names: &[&str]| {
+        let f: Function = app.vm.globals().get("set_names").unwrap();
+        f.call::<()>(names.to_vec()).unwrap();
+    };
+    let hits = |app: &LuaApp<LuaMsg>| {
+        let t: Table = app.vm.globals().get("hits").unwrap();
+        t.sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()
+            .unwrap()
+    };
+
+    // Pressed on "b"; before release a peer edit puts "a" ahead of it.
+    let press = app.view().trigger("b", runtime::Action::Click).unwrap();
+    set_names(&app, &["a", "b"]);
+    let _ = app.view();
+    app.update(press.clone());
+    assert_eq!(hits(&app), vec!["b@0,0"]);
+
+    // "b" is gone by release: dropped, not handed to whoever is there now.
+    set_names(&app, &["a"]);
+    let _ = app.view();
+    app.update(press);
+    assert_eq!(hits(&app), vec!["b@0,0"]);
+
+    app.update(LuaMsg::CallAt(Key::new("a", "on_click"), 12.5, 4.0));
+    assert_eq!(hits(&app), vec!["b@0,0", "a@12.5,4"]);
+}
+
+#[test]
+fn handlers_need_a_unique_id() {
+    let err = walk_props(r#"return ui.button{"go", on_click = function() end }"#)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("on_click needs an id"), "{err}");
+
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(
+            r#"return ui.row{
+                ui.button{"a", id = "go", on_click = function() end },
+                ui.button{"b", id = "go", on_click = function() end },
+            }"#,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    walk(node, &mut ctx).unwrap();
+    assert!(
+        ctx.errors
+            .iter()
+            .any(|e| e.contains("duplicate id go: another element already has on_click")),
+        "{:?}",
+        ctx.errors
+    );
 }
 
 #[test]
@@ -212,12 +340,12 @@ fn lua_overlay_wraps_an_anchor_and_panel() {
     let (lua, _) = sandboxed_vm().unwrap();
     let node = lua
         .load(
-            r#"return ui.overlay{side="top", align="end", on_dismiss=function() end,
+            r#"return ui.overlay{id="composer", side="top", align="end", on_dismiss=function() end,
             ui.button{"add"}, ui.col{ui.text{"composer"}}}"#,
         )
         .eval()
         .unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
 
     assert!(walk(node, &mut ctx).is_ok());
@@ -1008,7 +1136,7 @@ fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
         spent = fires.load(Ordering::Relaxed);
 
         // Fresh handlers per rep — the vec grows as callbacks are collected.
-        let mut handlers: Vec<Function> = Vec::new();
+        let mut handlers = Handlers::new();
         let mut ctx = Ctx::new(&mut handlers, identity());
         ctx.dev = dev;
         let t1 = Instant::now();
@@ -2415,13 +2543,250 @@ fn frame_orbits_demo_loads_and_builds_its_frame_leaf() {
     let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
 
     let info = app.view().info();
-    assert!(
-        info.children[1].children[0]
-            .children
-            .iter()
-            .any(|child| child.kind == "frame"),
-        "demo did not produce a Frame leaf"
+    let frame = &info.children[1].children[0].children[0];
+    assert_eq!(frame.kind, "frame", "demo did not produce a Frame leaf");
+    assert_eq!(frame.handlers, vec!["on_frame"]);
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
+}
+
+#[test]
+fn node_graph_demo_edits_a_graph_end_to_end() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "graph.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/node_graph/{name}"))
+            .unwrap_or_else(|_| panic!("node_graph/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    // Handlers are addressed the way the runtime addresses them: element id + prop name.
+    let click = |app: &mut LuaApp<LuaMsg>, id: &str, x: f32, y: f32| {
+        app.update(LuaMsg::CallAt(Key::new(id, "on_click"), x, y))
+    };
+    let drag = |app: &mut LuaApp<LuaMsg>, id: &str, phase: &'static str, dx: f32, dy: f32| {
+        app.update(LuaMsg::CallDrag(
+            Key::new(id, "on_drag"),
+            phase,
+            0.0,
+            0.0,
+            dx,
+            dy,
+            1.0,
+        ))
+    };
+    let input = |app: &mut LuaApp<LuaMsg>, id: &str, v: &str| {
+        app.update(LuaMsg::CallStr(Key::new(id, "on_input"), v.into()))
+    };
+    // Through the built element, so the binding's phase names are covered too.
+    let hover = |app: &mut LuaApp<LuaMsg>, phase, x: f32, y: f32| {
+        let msg = app
+            .view()
+            .trigger("graph-canvas", runtime::Action::Hover(phase, (x, y)));
+        app.update(msg.unwrap())
+    };
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+    // Text of the first child of `label:<node>` or `body:<node>`.
+    let text = |app: &LuaApp<LuaMsg>, id: &str| {
+        let info = app.view().info();
+        find(&info, id).and_then(|el| el.children[0].text.clone())
+    };
+    let status = |app: &LuaApp<LuaMsg>| app.view().info().children[0].children[1].text.clone();
+    let canvas_len =
+        |app: &LuaApp<LuaMsg>| app.view().info().children[1].children[0].children.len();
+    // Edges are Frame strokes, not elements, so ask the app's own module.
+    let edges = |app: &LuaApp<LuaMsg>| {
+        app.vm
+            .load(r#"return #require("graph").edges"#)
+            .eval::<usize>()
+            .unwrap()
+    };
+    let mid = |app: &LuaApp<LuaMsg>, edge: &str| {
+        app.vm
+            .load(format!(
+                r#"local g = require("graph"); local e = g.get("{edge}")
+                return g.point_at(0.5, g.curve(g.get(e.from), g.get(e.to)))"#
+            ))
+            .eval::<(f32, f32)>()
+            .unwrap()
+    };
+
+    let info = app.view().info();
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
+    let c = &info.children[1].children[0];
+    assert_eq!(
+        c.children.len(),
+        1 + 10 * 3,
+        "edges frame, then a node, port and grip per node"
     );
+    assert_eq!(c.children[0].kind, "frame");
+
+    // Ingest seeds at (60, 380); deltas are cumulative from the press.
+    drag(&mut app, "node:ingest", "start", 4.0, 0.0);
+    // Real deltas are fractional; `%d` must truncate rather than raise.
+    drag(&mut app, "node:ingest", "move", 50.5, -20.25);
+    assert_eq!(status(&app).as_deref(), Some("dragging Ingest @ 110, 359"));
+    drag(&mut app, "node:ingest", "move", -500.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("dragging Ingest @ 0, 380"),
+        "clamped to canvas"
+    );
+    drag(&mut app, "node:ingest", "end", -500.0, 0.0);
+
+    // Edge picking is the canvas click's position against the curves. Ingest → Parse bends
+    // vertically through its midpoint, so 5 across is near the stroke and 30 across is not.
+    let (mx, my) = mid(&app, "e1");
+    let idle = |app: &LuaApp<LuaMsg>| status(app).unwrap().starts_with("drag nodes");
+    // Hover previews the pick a click would make.
+    hover(&mut app, HoverPhase::Enter, mx + 30.0, my);
+    assert!(idle(&app), "nothing under the pointer");
+    hover(&mut app, HoverPhase::Move, mx, my);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("Ingest → Parse · click to select")
+    );
+    hover(&mut app, HoverPhase::Leave, mx, my);
+    assert!(idle(&app), "leave clears the hover");
+    // Ingest's out-port is (160, 412): 2 inside the node is near the edge but hidden by the node.
+    hover(&mut app, HoverPhase::Move, 158.0, 412.0);
+    assert!(idle(&app), "a node covers the edges under it");
+    click(&mut app, "graph-canvas", mx, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Parse"));
+    click(&mut app, "graph-canvas", mx + 30.0, my);
+    assert!(
+        status(&app).unwrap().starts_with("drag nodes"),
+        "a click off every edge deselects"
+    );
+    click(&mut app, "graph-canvas", mx + 5.0, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Parse"));
+
+    // Nodes are 160×64. Ingest's out-port is now (160, 412); Store's box covers (826, 522).
+    // The press itself is over Ingest, which is not a valid target.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "move", 666.0, 110.0);
+    assert_eq!(status(&app).as_deref(), Some("connecting Ingest → Store"));
+    drag(&mut app, "port:ingest", "end", 666.0, 110.0);
+    assert_eq!(edges(&app), 13, "release created an edge");
+
+    // Ingest → Parse already exists.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    drag(&mut app, "port:ingest", "move", 140.0, -172.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "end", 140.0, -172.0);
+    assert_eq!(edges(&app), 13, "duplicate edge was created");
+
+    let (mx, my) = mid(&app, "e13");
+    click(&mut app, "graph-canvas", mx, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Store"));
+    click(&mut app, "delete-edge", 0.0, 0.0);
+    assert_eq!(edges(&app), 12, "Delete edge removed it");
+
+    // Empty canvas: a release just past the port is a fumble; a real one spawns a connected
+    // node whose in-port sits under the pointer. (400, 800) is clear of every seed node.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    drag(&mut app, "port:ingest", "move", 10.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "move", 240.0, 388.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → new node")
+    );
+    assert_eq!(canvas_len(&app), 1 + 30 + 1, "ghost node previews");
+    drag(&mut app, "port:ingest", "end", 240.0, 388.0);
+    assert_eq!(canvas_len(&app), 1 + 33, "node created");
+    assert_eq!(edges(&app), 13, "and connected");
+
+    // The spawned node is live: it renders its name and empty-notes hint, and drags from
+    // (400, 768).
+    assert_eq!(text(&app, "label:n11").as_deref(), Some("Node 11"));
+    assert_eq!(text(&app, "body:n11").as_deref(), Some("Add notes…"));
+    drag(&mut app, "node:n11", "start", 0.0, 0.0);
+    drag(&mut app, "node:n11", "move", 10.0, 10.0);
+    assert_eq!(status(&app).as_deref(), Some("dragging Node 11 @ 410, 778"));
+    drag(&mut app, "node:n11", "end", 10.0, 10.0);
+
+    click(&mut app, "add-node", 0.0, 0.0);
+    assert_eq!(canvas_len(&app), 1 + 36, "Add node placed a free node");
+
+    // Rename: a label click opens the field, typing drafts, and a canvas click saves the
+    // trimmed text.
+    click(&mut app, "label:parse", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("renaming Parse · enter saves · esc cancels")
+    );
+    input(&mut app, "label-input:parse", "  Parser ");
+    click(&mut app, "graph-canvas", 700.0, 20.0);
+    assert_eq!(text(&app, "label:parse").as_deref(), Some("Parser"));
+    assert!(status(&app).unwrap().starts_with("drag nodes"));
+
+    // A blank draft keeps the old name, and opening another rename saves the first.
+    click(&mut app, "label:parse", 0.0, 0.0);
+    input(&mut app, "label-input:parse", "   ");
+    click(&mut app, "label:store", 0.0, 0.0);
+    assert_eq!(text(&app, "label:parse").as_deref(), Some("Parser"));
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("renaming Store · enter saves · esc cancels")
+    );
+
+    // Notes: opening them saves the open rename; newlines survive, outer space is trimmed.
+    click(&mut app, "body:ingest", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("editing notes of Ingest · click outside saves · esc cancels")
+    );
+    input(&mut app, "body-input:ingest", "Pulls events\nretries 3x  ");
+    click(&mut app, "graph-canvas", 700.0, 20.0);
+    assert_eq!(
+        text(&app, "body:ingest").as_deref(),
+        Some("Pulls events\nretries 3x")
+    );
+
+    // Resize from Parser's (280, 220) corner: floor 96×48, capped by the canvas edge.
+    drag(&mut app, "grip:parse", "start", 0.0, 0.0);
+    drag(&mut app, "grip:parse", "move", 40.0, 36.0);
+    assert_eq!(status(&app).as_deref(), Some("resizing Parser · 200 × 100"));
+    drag(&mut app, "grip:parse", "move", -500.0, -500.0);
+    assert_eq!(status(&app).as_deref(), Some("resizing Parser · 96 × 48"));
+    drag(&mut app, "grip:parse", "move", 2000.0, 2000.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("resizing Parser · 1120 × 680")
+    );
+    drag(&mut app, "grip:parse", "end", 40.0, 36.0);
+
+    // The new size is live geometry: (470, 310) was outside the 160×64 Parser and is inside
+    // the 200×100 one. Validate's out-port is (440, 572).
+    drag(&mut app, "port:validate", "start", 0.0, 0.0);
+    drag(&mut app, "port:validate", "move", 30.0, -262.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Validate → Parser")
+    );
+    drag(&mut app, "port:validate", "end", 30.0, -262.0);
+    assert_eq!(edges(&app), 14, "connected into the grown area");
     assert!(app.error.is_none(), "demo failed: {:?}", app.error);
 }
 
@@ -2448,11 +2813,10 @@ fn tally_loads_views_and_clicks() {
 
     let _ = app.view();
 
-    // Handlers are registered in document order: pill("−") is 0, pill("+") is 1, reset is 2.
     // A frame between each click, the way the real loop delivers them: the mirror is a frame
     // behind the doc, so clicks with no frame between them all read the same stale count.
     for _ in 0..3 {
-        app.update(LuaMsg::Call(1));
+        app.update(LuaMsg::CallAt(Key::new("plus", "on_click"), 0.0, 0.0));
         let _ = app.view();
     }
 
@@ -2591,7 +2955,7 @@ end
 fn a_breadcrumb_less_card_has_no_leading_separator() {
     let (lua, _fires) = sandboxed_vm().unwrap();
     let node: Table = lua.load(r#"return ui.col{ ui.text{} }"#).eval().unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     ctx.dev = false;
     assert!(walk(node, &mut ctx).is_ok(), "siblings stay alive");
@@ -2711,7 +3075,7 @@ fn a_non_string_id_on_an_input_still_reports_the_type() {
         .load(r#"return ui.col{ ui.input({ value = "", id = {}, on_input = function() end }) }"#)
         .eval()
         .unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     ctx.dev = false;
     assert!(walk(node, &mut ctx).is_ok(), "a card replaces the element");

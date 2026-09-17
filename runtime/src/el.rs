@@ -6,6 +6,7 @@
 //! NOTE: this mirrors `app_engine`'s `Node` design but is its own type — app_engine still depends on
 //! egui, so importing it here would contaminate `runtime`. Converging the two is a later refactor.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use taffy::prelude::*; // Style, Display, FlexDirection, length(), auto(), Size, Rect (geometry), …
@@ -16,6 +17,7 @@ use vello::peniko::Color;
 use crate::anim::{Driver, Easing};
 use crate::drag::{DragEvent, DropEvent};
 use crate::frame::Frame;
+use crate::hover::{HoverEvent, HoverPhase};
 use crate::id::Id;
 use crate::state::Slot;
 use crate::text::Run;
@@ -247,12 +249,39 @@ pub(crate) struct Binding<M> {
     pub on_done: Option<(f32, M)>, // fire M when the transition settles at this value
 }
 
+/// One bounded application-driven simulation step. `elapsed` is monotonic runtime time;
+/// `dt` is clamped after stalls so integrators do not teleport.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameTick {
+    pub dt: f32,
+    pub elapsed: f64,
+}
+
+/// What a click delivers: a message built in advance, or one built from where the click landed.
+#[derive(Clone)]
+pub(crate) enum Click<M> {
+    Msg(M),
+    /// Rc, not Box: a press holds its click until release, while the next frame's hits own theirs.
+    At(Rc<dyn Fn((f32, f32)) -> M>),
+}
+impl<M> Click<M> {
+    /// `at` is element-local: from its top-left corner, with zoom and scroll undone.
+    pub fn fire(self, at: (f32, f32)) -> M {
+        match self {
+            Click::Msg(m) => m,
+            Click::At(f) => f(at),
+        }
+    }
+}
+
 pub(crate) struct Behaviour<M> {
-    pub on_click: Option<M>,
+    pub on_click: Option<Click<M>>,
+    pub on_frame: Option<(Id, Box<dyn Fn(FrameTick) -> M>)>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
+    pub on_hover: Option<(Id, Box<dyn Fn(HoverEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
@@ -281,6 +310,7 @@ impl<M> Default for Behaviour<M> {
     fn default() -> Self {
         Self {
             on_click: None,
+            on_frame: None,
             input: None,
             scroll: None,
             on_drag: None,
@@ -295,6 +325,7 @@ impl<M> Default for Behaviour<M> {
             tint: None,
             press_scale: None,
             on_drop: None,
+            on_hover: None,
         }
     }
 }
@@ -755,7 +786,18 @@ impl<M> El<M> {
 
     // ── interaction + nesting ───────────────────────────────────────────
     pub fn on_click(mut self, m: M) -> Self {
-        self.behaviour.on_click = Some(m);
+        self.behaviour.on_click = Some(Click::Msg(m));
+        self
+    }
+
+    /// A click that reports where it landed, in the element's own units.
+    pub fn on_click_at(mut self, map: impl Fn((f32, f32)) -> M + 'static) -> Self {
+        self.behaviour.on_click = Some(Click::At(Rc::new(map)));
+        self
+    }
+
+    pub fn on_frame(mut self, id: impl Into<Id>, map: impl Fn(FrameTick) -> M + 'static) -> Self {
+        self.behaviour.on_frame = Some((id.into(), Box::new(map)));
         self
     }
 
@@ -766,6 +808,13 @@ impl<M> El<M> {
 
     pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DropEvent) -> M + 'static) -> Self {
         self.behaviour.on_drop = Some((id.into(), Box::new(map)));
+        self
+    }
+
+    /// Pointer enter, move and leave, element-local. Fires on pointer movement only, so an element
+    /// that slides under a still pointer enters on the next move.
+    pub fn on_hover(mut self, id: impl Into<Id>, map: impl Fn(HoverEvent) -> M + 'static) -> Self {
+        self.behaviour.on_hover = Some((id.into(), Box::new(map)));
         self
     }
 
@@ -866,11 +915,17 @@ impl<M> El<M> {
                 handlers.push("on_esc");
             }
         }
+        if self.behaviour.on_frame.is_some() {
+            handlers.push("on_frame");
+        }
         if self.behaviour.on_drag.is_some() {
             handlers.push("on_drag");
         }
         if self.behaviour.on_drop.is_some() {
             handlers.push("on_drop");
+        }
+        if self.behaviour.on_hover.is_some() {
+            handlers.push("on_hover");
         }
         let kind = if self.appearance.frame.is_some() {
             "frame"
@@ -937,13 +992,18 @@ impl<M> El<M> {
     /// discarded after extraction — the same economy the hit-test extraction uses.
     fn fire(&mut self, id: &str, act: Action) -> Walk<M> {
         match act {
+            // No layout here, so a positional click lands on the element's origin.
             Action::Click => match self.behaviour.on_click.take() {
-                Some(m) => Walk::Found(m),
+                Some(c) => Walk::Found(c.fire((0.0, 0.0))),
                 None => Walk::Fired(format!("'{id}' has no on_click")),
             },
             Action::RightClick(at) => match self.behaviour.on_right_click.take() {
                 Some(f) => Walk::Found(f(at)),
                 None => Walk::Fired(format!("'{id}' has no on_right_click")),
+            },
+            Action::Hover(phase, pos) => match &self.behaviour.on_hover {
+                Some((_, f)) => Walk::Found(f(HoverEvent { phase, pos })),
+                None => Walk::Fired(format!("'{id}' has no on_hover")),
             },
             Action::Enter => {
                 let Some(inp) = self.behaviour.input.as_mut() else {
@@ -989,6 +1049,8 @@ enum Walk<M> {
 pub enum Action<'a> {
     Click,
     RightClick((f32, f32)),
+    /// Element-local, like the window's own.
+    Hover(HoverPhase, (f32, f32)),
     Enter,
     Esc,
     Type(&'a str),
@@ -1018,11 +1080,12 @@ mod tests {
     fn info_reports_kind_id_text_handlers() {
         let el = col()
             .id("root")
+            .on_frame("root", |_| M::Enter)
             .child(row().id("bar").child(text("hi").id("lbl")))
             .child(text_input("v", "field", M::Typed));
         let i = el.info();
         assert_eq!((i.kind, i.id.as_deref()), ("col", Some("root")));
-        assert!(i.handlers.is_empty());
+        assert_eq!(i.handlers, vec!["on_frame"]);
         let bar = &i.children[0];
         assert_eq!(bar.kind, "row");
         let lbl = &bar.children[0];

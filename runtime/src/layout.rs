@@ -31,6 +31,8 @@ pub(crate) struct Placed<M> {
     pub appearance: Appearance,
     pub content_size: (f32, f32),
     pub scroll_parent: Option<Id>,
+    /// The nearest zoomable ancestor, so a press inside a camera can still pan it.
+    pub zoom_parent: Option<Id>,
     pub alpha: f32,
     pub transform: Affine,
 }
@@ -55,6 +57,7 @@ fn clip_marker<M>(kind: PlacedKind) -> Placed<M> {
         appearance: Appearance::default(),
         content_size: (0.0, 0.0),
         scroll_parent: None,
+        zoom_parent: None,
         alpha: 1.0,
         transform: Affine::IDENTITY,
     }
@@ -219,6 +222,7 @@ fn emit<M>(
     out: &mut Vec<Placed<M>>,
     store: &Store,
     scroll_parent: Option<Id>,
+    zoom_parent: Option<Id>,
     overlays: &mut Vec<(Rect, Overlay<M>)>,
     alpha: f32,
     transform: Affine,
@@ -276,6 +280,7 @@ fn emit<M>(
     let mut child_transform = transform;
     let mut stable_child_transform = stable_transform;
     let mut parent_scroll = scroll_parent.clone();
+    let mut parent_zoom = zoom_parent.clone();
     if let Some(s) = &m.behaviour.scroll
         && let Some(id) = &m.id
     {
@@ -303,6 +308,7 @@ fn emit<M>(
             * Affine::translate((-rect.x0, -rect.y0));
         child_transform = transform * camera;
         stable_child_transform = stable_transform * camera;
+        parent_zoom = Some(id.clone());
     }
     let overlay = m.behaviour.overlay.take();
     if let Some(overlay) = overlay {
@@ -331,6 +337,7 @@ fn emit<M>(
         id: m.id,
         rect,
         scroll_parent,
+        zoom_parent,
         appearance,
         behaviour,
         pad: Insets::new(
@@ -371,6 +378,7 @@ fn emit<M>(
             out,
             store,
             parent_scroll.clone(),
+            parent_zoom.clone(),
             overlays,
             node_alpha,
             child_transform,
@@ -389,6 +397,7 @@ fn emit<M>(
             out,
             store,
             parent_scroll.clone(),
+            parent_zoom.clone(),
             overlays,
             node_alpha,
             child_transform,
@@ -422,6 +431,7 @@ pub(crate) fn solve<M>(
         0.0,
         &mut out,
         store,
+        None,
         None,
         &mut overlays,
         1.0,
@@ -457,6 +467,7 @@ pub(crate) fn solve<M>(
                 &mut out,
                 store,
                 None,
+                None,
                 &mut overlays,
                 opacity,
                 Affine::IDENTITY,
@@ -473,6 +484,7 @@ pub(crate) fn solve<M>(
             oy,
             &mut out,
             store,
+            None,
             None,
             &mut new_overlays,
             opacity,

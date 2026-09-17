@@ -141,7 +141,7 @@ local function composer(c)
 	return ui.col({
 		px = 10,
 		py = 10,
-		ui.overlay({ side = "top", align = "start", on_dismiss = close, anchor, panel }),
+		ui.overlay({ id = "composer:" .. c.id, side = "top", align = "start", on_dismiss = close, anchor, panel }),
 	})
 end
 
@@ -222,6 +222,7 @@ local function modal()
 		update({ kind = "add_col" })
 	end
 	local panel = ui.col({
+		id = "col-modal",
 		w = 360,
 		gap = 14,
 		pad = 20,
@@ -287,6 +288,7 @@ local function modal()
 		left = 0,
 		right = 0,
 		bottom = 0,
+		id = "col-modal-backdrop",
 		center = true,
 		fill = "rgba(1,4,9,0.72)",
 		on_click = function()

@@ -31,8 +31,9 @@ local function bump(d)
 	t:set({ "count", "n" }, math.max(0, n + d))
 end
 
-local function pill(label, delta, fill, hover)
+local function pill(id, label, delta, fill, hover)
 	return ui.button({
+		id = id,
 		w = 44,
 		h = 44,
 		radius = 10,
@@ -69,10 +70,11 @@ return function()
 		ui.row({
 			gap = 12,
 			align_center = true,
-			pill("−", -1, C.sunken, C.card_hi),
-			pill("+", 1, C.accent, C.accent_hi),
+			pill("minus", "−", -1, C.sunken, C.card_hi),
+			pill("plus", "+", 1, C.accent, C.accent_hi),
 		}),
 		ui.button({
+			id = "reset",
 			h = 30,
 			px = 14,
 			radius = 8,

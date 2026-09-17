@@ -11,6 +11,7 @@ mod editor;
 mod el;
 pub mod frame;
 mod geometry;
+mod hover;
 mod id;
 mod layout;
 mod paint;
@@ -23,8 +24,9 @@ use crate::anim::{Driver, Spring, Transition};
 use crate::coords::ScreenPoint;
 use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
-use crate::el::Binding;
+use crate::el::{Binding, Click};
 use crate::geometry::{Clip, Geometry};
+use crate::hover::Hovered;
 use crate::id::Id;
 use crate::layout::PlacedKind;
 use crate::state::Slot;
@@ -48,9 +50,10 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, El, ElInfo, Placement, PlacementAlign, PlacementSide, col, custom, frame, rich,
-    row, text, text_area, text_input,
+    Action, Anchor, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col, custom,
+    frame, rich, row, text, text_area, text_input,
 };
+pub use hover::{HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
@@ -125,6 +128,8 @@ enum Capture {
         content: (f32, f32),
         axes: (bool, bool),
         last: (f32, f32),
+        /// Set while the press also armed a click inside this camera: no pan until it travels.
+        click_at: Option<(f32, f32)>,
     },
     Pending {
         id: Id,
@@ -166,16 +171,19 @@ struct Runner<A: App> {
     start: Instant,
     last_frame: Option<f64>,
     hits: Hits<A::Msg>,
-    pressed: Option<(Geometry, Option<Id>, A::Msg)>,
+    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>)>,
+    hovered: Hovered,
 }
 
 struct Hits<M> {
-    click: Vec<(Geometry, Option<Id>, M)>,
+    /// The last field is the element's nearest zoomable ancestor.
+    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>)>,
     input: Vec<(Geometry, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
     drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>)>,
     drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -192,6 +200,7 @@ impl<M> Default for Hits<M> {
             context: Vec::new(),
             drag: Vec::new(),
             drop: Vec::new(),
+            hover: Vec::new(),
             scroll: Vec::new(),
             enter: Vec::new(),
             esc: Vec::new(),
@@ -210,6 +219,7 @@ impl<M> Hits<M> {
             context,
             drag,
             drop,
+            hover,
             scroll,
             enter,
             esc,
@@ -222,6 +232,7 @@ impl<M> Hits<M> {
         context.clear();
         drag.clear();
         drop.clear();
+        hover.clear();
         scroll.clear();
         enter.clear();
         esc.clear();
@@ -331,10 +342,16 @@ impl<A: App> Runner<A> {
                 }
             }
 
-            if let Some(msg) = p.behaviour.on_click.take()
+            if let Some((_id, map)) = p.behaviour.on_frame.take() {
+                done_msgs.push(map(FrameTick { dt, elapsed: now }));
+                any_in_flight = true;
+            }
+
+            if let Some(click) = p.behaviour.on_click.take()
                 && geometry.visible_rect.is_some()
             {
-                hits.click.push((geometry, p.id.clone(), msg));
+                hits.click
+                    .push((geometry, p.id.clone(), click, p.zoom_parent.clone()));
             }
             if let Some((id, handler)) = p.behaviour.on_drag.take()
                 && visible.is_some()
@@ -346,6 +363,11 @@ impl<A: App> Runner<A> {
                 && visible.is_some()
             {
                 hits.drop.push((geometry, id, handler));
+            }
+            if let Some((id, handler)) = p.behaviour.on_hover.take()
+                && visible.is_some()
+            {
+                hits.hover.push((geometry, id, handler));
             }
             if let Some(h) = p.behaviour.on_right_click.take()
                 && let Some(hit_rect) = visible
@@ -618,22 +640,30 @@ impl<A: App> Runner<A> {
                 self.focused.blur();
             }
         }
-        if let Some((geometry, id, msg)) = self
+        let clicked = self
             .hits
             .click
             .iter()
             .rev()
-            .find(|(geometry, _, _)| geometry.contains(p))
-        {
-            let msg = msg.clone();
-            self.pressed = Some((*geometry, id.clone(), msg));
-        } else if self.drag.is_none()
+            .find(|(geometry, _, _, _)| geometry.contains(p));
+        if let Some((geometry, id, click, _)) = clicked {
+            self.pressed = Some((*geometry, id.clone(), click.clone()));
+        }
+        // A click inside a camera may still pan it. A button floating over the canvas is not
+        // inside, and dragging off that button must not move the canvas.
+        let pans = |camera: &Id| {
+            clicked.is_none_or(|(_, id, _, parent)| {
+                parent.as_ref() == Some(camera) || id.as_ref() == Some(camera)
+            })
+        };
+        if self.drag.is_none()
             && let Some((rect, id, content, axes)) = self
                 .hits
                 .zoom
                 .iter()
                 .rev()
                 .find(|(r, _, _, _)| r.contains(p))
+            && pans(id)
         {
             self.drag = Some(Capture::Zoom {
                 id: id.clone(),
@@ -641,10 +671,35 @@ impl<A: App> Runner<A> {
                 content: *content,
                 axes: *axes,
                 last: (px, py),
+                click_at: clicked.is_some().then_some((px, py)),
             });
         }
 
         self.redraw();
+    }
+
+    /// Fires enter/move/leave against the last frame's hover regions. `in_window` is false when the
+    /// pointer has left, so everything leaves at its last position.
+    fn hover(&mut self, (px, py): (f32, f32), in_window: bool) {
+        let p = Point::new(px as f64, py as f64);
+        let hover = &self.hits.hover;
+        let phases = self.hovered.step(
+            hover
+                .iter()
+                .map(|(g, id, _)| (id, in_window && g.contains(p))),
+        );
+        let msgs: Vec<_> = hover
+            .iter()
+            .zip(phases)
+            .filter_map(|((geometry, _, handler), phase)| {
+                let local = geometry.node_point(ScreenPoint::new(p.x, p.y));
+                let pos = (local.x as f32, local.y as f32);
+                Some(handler(HoverEvent { phase: phase?, pos }))
+            })
+            .collect();
+        for m in msgs {
+            self.app.update(m);
+        }
     }
 
     fn right_click(&mut self) {
@@ -859,12 +914,14 @@ impl<A: App> Runner<A> {
                 Capture::Pending { .. } => {}
             }
         }
-        if let Some((geometry, _, msg)) = self.pressed.take()
+        if let Some((geometry, _, click)) = self.pressed.take()
             && let Some((px, py)) = self.pointer
         {
             let point = Point::new(px as f64, py as f64);
             if geometry.contains(point) {
-                self.app.update(msg);
+                let local = geometry.node_point(ScreenPoint::new(point.x, point.y));
+                self.app
+                    .update(click.fire((local.x as f32, local.y as f32)));
             }
         }
         self.redraw();
@@ -906,18 +963,28 @@ impl<A: App> Runner<A> {
                     content,
                     axes,
                     last,
+                    click_at,
                 } => {
-                    let delta = pan_axes((lx - last.0, ly - last.1), *axes);
-                    self.store
-                        .get_or::<Zoom>(id, Slot::Zoom)
-                        .pan_by(*rect, *content, delta);
-                    self.drag = Some(Capture::Zoom {
-                        id: id.clone(),
-                        rect: *rect,
-                        content: *content,
-                        axes: *axes,
-                        last: (lx, ly),
-                    });
+                    // Same 5pt slop as a drag handle. `last` stays at the press, so no travel is lost.
+                    let still_a_click = click_at
+                        .is_some_and(|(cx, cy)| (lx - cx).abs() <= 5.0 && (ly - cy).abs() <= 5.0);
+                    if !still_a_click {
+                        if click_at.is_some() {
+                            self.pressed = None;
+                        }
+                        let delta = pan_axes((lx - last.0, ly - last.1), *axes);
+                        self.store
+                            .get_or::<Zoom>(id, Slot::Zoom)
+                            .pan_by(*rect, *content, delta);
+                        self.drag = Some(Capture::Zoom {
+                            id: id.clone(),
+                            rect: *rect,
+                            content: *content,
+                            axes: *axes,
+                            last: (lx, ly),
+                            click_at: None,
+                        });
+                    }
                 }
                 Capture::Pending {
                     id,
@@ -965,6 +1032,7 @@ impl<A: App> Runner<A> {
                 }
             };
         }
+        self.hover((lx, ly), true);
 
         let over_input = self
             .hits
@@ -1163,6 +1231,9 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 // Physical → logical: hit-testing and rects are all in logical points.
             }
             WindowEvent::CursorLeft { .. } => {
+                if let Some(at) = self.pointer {
+                    self.hover(at, false);
+                }
                 self.pointer = None;
                 self.redraw();
             }
@@ -1251,6 +1322,7 @@ pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> 
         start: Instant::now(),
         last_frame: None,
         pressed: None,
+        hovered: Hovered::default(),
     };
     event_loop.run_app(&mut runner).expect("run app");
 }
