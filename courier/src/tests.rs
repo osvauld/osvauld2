@@ -1,4 +1,5 @@
 use super::*;
+use serde::de::DeserializeOwned;
 
 fn ids() -> (Identity, Identity) {
     let (node, _) = identity::generate();
@@ -6,25 +7,31 @@ fn ids() -> (Identity, Identity) {
     (node, desktop)
 }
 
+/// Bytes round-trip, standing in for a transport hop.
+fn wire<T: Serialize + DeserializeOwned>(msg: T) -> T {
+    let bytes = bincode::serialize(&msg).unwrap();
+    bincode::deserialize(&bytes).unwrap()
+}
+
 #[test]
 fn bootstrap_claim_authenticates_and_reconnects() {
     let (node, desktop) = ids();
-    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let ticket = wire(issue_connection_ticket(&node, 1, "kunki").unwrap());
     let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
     let mut admins = Vec::new();
 
-    let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
+    let welcome = node_accept_claim(wire(hello), &node, &mut admins, 3).unwrap();
     assert_eq!(admins.len(), 1);
     assert_eq!(admins[0].did, desktop.did());
 
-    let record = desktop_finish_claim(&ticket, welcome, &desktop).unwrap();
+    let record = desktop_finish_claim(&ticket, wire(welcome), &desktop).unwrap();
     assert_eq!(record.node_did, node.did());
     assert_eq!(record.node_id, ticket.node_id);
 
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
-    let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
-    assert!(node_accept_reconnect(reconnect, &node, &admins, &mut challenges).is_ok());
+    let reconnect = desktop_start_reconnect(&record, &desktop, wire(challenge)).unwrap();
+    assert!(node_accept_reconnect(wire(reconnect), &node, &admins, &mut challenges).is_ok());
 }
 
 #[test]
