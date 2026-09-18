@@ -3,6 +3,10 @@
     python3 scripts/upload_app.py                          # kanban, fresh throwaway store
     python3 scripts/upload_app.py --keep                   # reuse ./osvauld-drive-data
     python3 scripts/upload_app.py --keep demo_apps/tally   # any app folder
+    python3 scripts/upload_app.py --release demo_apps/dashboard   # optimized shell
+
+shell2 is rebuilt first (--no-build skips it): the app's Lua is uploaded live, but its Rust
+half is whatever was last compiled, and a stale one looks like an app bug.
 
 Logs in (or signs up on a fresh store), creates a workspace + app item, uploads every
 .lua/.osv file the folder holds (the GUI picker's walk, one WriteFile per file), and
@@ -17,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from osvauld.session import Session
+from osvauld.session import Session, build_shell, shell_binary
 
 DEFAULT_APP = Path(__file__).parent.parent / "shell2/src/kanban"
 
@@ -28,14 +32,21 @@ def main() -> None:
     ap.add_argument("--keep", action="store_true",
                     help="reuse ./osvauld-drive-data (unlocks 'abe' / 'correct horse')")
     ap.add_argument("--name", help="item name (default: folder name)")
+    ap.add_argument("--release", action="store_true",
+                    help="spawn target/release/shell2; debug lags under a drag")
+    ap.add_argument("--no-build", action="store_true",
+                    help="skip the cargo build and run whatever binary is there")
     args = ap.parse_args()
 
     folder = Path(args.folder).resolve()
     if not folder.is_dir():
         sys.exit(f"not a folder: {folder}")
 
+    if not args.no_build:
+        build_shell(args.release)
+
     data_dir = os.path.abspath("osvauld-drive-data") if args.keep else None
-    with Session(data_dir=data_dir) as s:
+    with Session(data_dir=data_dir, shell_binary=shell_binary(args.release)) as s:
         accounts = s.rpc.list_accounts()
         if accounts:
             print("unlock:", s.rpc.unlock(accounts[0]["name"], "correct horse" if args.keep else "test"))

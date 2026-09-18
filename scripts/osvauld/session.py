@@ -18,7 +18,31 @@ from pathlib import Path
 
 from .client import Bridge
 
-DEFAULT_SHELL_BINARY = Path(__file__).parent.parent.parent / "target" / "debug" / "shell2"
+ROOT = Path(__file__).parent.parent.parent
+DEFAULT_SHELL_BINARY = ROOT / "target" / "debug" / "shell2"
+
+
+def build_shell(release: bool = False) -> None:
+    """Compile shell2 before spawning it.
+
+    Lua is uploaded live but the Rust half is whatever was last compiled, so a stale binary
+    shows up as an app bug — handlers that get the wrong arguments, props that don't exist yet.
+    Skipped when OSVAULD_SHELL_BINARY names a binary to use as-is.
+    """
+    if os.environ.get("OSVAULD_SHELL_BINARY"):
+        return
+    cmd = ["cargo", "build", "-p", "shell2"] + (["--release"] if release else [])
+    print("building:", " ".join(cmd), flush=True)
+    if subprocess.run(cmd, cwd=ROOT).returncode != 0:
+        raise SystemExit("shell2 build failed — fix it before launching")
+
+
+def shell_binary(release: bool = False) -> Path:
+    """The binary to spawn. Debug is 5x slower per frame — measure interaction on release."""
+    override = os.environ.get("OSVAULD_SHELL_BINARY")
+    if override:
+        return Path(override)
+    return ROOT / "target" / ("release" if release else "debug") / "shell2"
 
 
 class Session:

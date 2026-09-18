@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from osvauld.session import Session
+from osvauld.session import Session, build_shell
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "demo_apps" / "frame_orbits"
@@ -24,6 +24,7 @@ def main() -> None:
 
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    build_shell()
     with Session(show_shell_output=args.verbose) as session:
         session.rpc.signup("frame-screenshot", "test")
         workspace = session.rpc.create_workspace("Frame demos")
