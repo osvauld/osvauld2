@@ -95,6 +95,12 @@ implicit clip or scale.
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
 | `gfx.instance({…})` | `visual` (another frame) · `transform` | placed by its local origin — account for a centered shape's radius |
 
+`fill`, `stroke`, `group` and `instance` also take an optional **`id`** — the name a hit will
+report, once hit-testing exists (it doesn't yet; names are accepted, validated and carried into
+the compiled visual, and nothing reads them back). A named container answers as one shape and the
+names inside it stop being reachable, which is how you choose the granularity: a whole dial, or
+each of its ticks. An id'd item with no brush would be an invisible hit region.
+
 Path commands are positional with exact arity: `{"move", x, y}`, `{"line", x, y}`,
 `{"quad", cx, cy, x, y}`, `{"cubic", c1x, c1y, c2x, c2y, x, y}`, `{"close"}`. Everywhere else in
 `gfx`, fields are named — a stray positional entry in a `fill` or a named key in a path is an

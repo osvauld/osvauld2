@@ -96,6 +96,43 @@ fn lua_builds_a_nested_gradient_frame_element() {
     assert_eq!(info.id.as_deref(), Some("picture"));
 }
 
+/// Naming shapes is how an app says which parts of a drawing are touchable. The name reaches the
+/// compiled resource; an empty one is a typo, not a shape called "".
+#[test]
+fn lua_names_the_shapes_it_wants_to_hit() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let visual: AnyUserData = lua
+        .load(
+            r##"
+            local p = gfx.path({ { "move", 0, 0 }, { "line", 10, 0 }, { "line", 5, 8 }, { "close" } })
+            local b = gfx.solid("#ffffff")
+            return gfx.frame({ width = 10, height = 10,
+                gfx.fill({ path = p, brush = b }),
+                gfx.fill({ path = p, brush = b, id = "slice:1" }),
+                gfx.stroke({ path = p, brush = b, width = 1, id = "rim" }),
+                gfx.group({ transform = { 1, 0, 0, 1, 2, 2 }, id = "dial",
+                    gfx.fill({ path = p, brush = b, id = "tick" })
+                })
+            })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let frame = visual.borrow::<gfx::LuaFrame>().unwrap().0.clone();
+
+    let names: Vec<_> = frame
+        .items()
+        .iter()
+        .map(|i| i.id().map(|id| &**id))
+        .collect();
+    assert_eq!(names, [None, Some("slice:1"), Some("rim"), Some("dial")]);
+    assert_eq!(frame.stats().hittable, 3); // "tick" hides behind the named group
+
+    let empty = r##"return gfx.frame({ width = 1, height = 1,
+        gfx.fill({ path = gfx.path({ { "move", 0, 0 } }), brush = gfx.solid("#fff"), id = "" }) })"##;
+    assert!(lua.load(empty).eval::<Value>().is_err());
+}
+
 #[test]
 fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
     let (lua, _) = sandboxed_vm().unwrap();

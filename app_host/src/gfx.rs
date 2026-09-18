@@ -157,7 +157,7 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
     let kind = spec.get::<String>("_gfx")?;
     match kind.as_str() {
         "fill" => {
-            named_fields(&spec, "fill", &["_gfx", "path", "brush", "rule"])?;
+            named_fields(&spec, "fill", &["_gfx", "id", "path", "brush", "rule"])?;
             let path = spec
                 .get::<AnyUserData>("path")?
                 .borrow::<LuaPath>()?
@@ -173,7 +173,7 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
                 Some("evenodd") => Fill::EvenOdd,
                 Some(value) => return Err(Error::runtime(format!("unknown fill rule {value:?}"))),
             };
-            Ok(Item::fill(path, brush, rule))
+            named(&spec, Item::fill(path, brush, rule))
         }
         "stroke" => {
             named_fields(
@@ -181,6 +181,7 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
                 "stroke",
                 &[
                     "_gfx",
+                    "id",
                     "path",
                     "brush",
                     "width",
@@ -201,24 +202,36 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
                 .borrow::<LuaBrush>()?
                 .0
                 .clone();
-            Ok(Item::stroke(path, brush, stroke_style(&spec)?))
+            named(&spec, Item::stroke(path, brush, stroke_style(&spec)?))
         }
         "group" => {
-            item_fields(&spec, "group", &["_gfx", "transform"])?;
-            Ok(Item::group(transform(&spec)?, items(&spec)?).map_err(Error::external)?)
+            item_fields(&spec, "group", &["_gfx", "id", "transform"])?;
+            let group = Item::group(transform(&spec)?, items(&spec)?).map_err(Error::external)?;
+            named(&spec, group)
         }
         "instance" => {
-            named_fields(&spec, "instance", &["_gfx", "visual", "transform"])?;
+            named_fields(&spec, "instance", &["_gfx", "id", "visual", "transform"])?;
             let frame = spec
                 .get::<AnyUserData>("visual")?
                 .borrow::<LuaFrame>()?
                 .0
                 .clone();
-            Ok(Item::instance(transform(&spec)?, frame).map_err(Error::external)?)
+            let instance = Item::instance(transform(&spec)?, frame).map_err(Error::external)?;
+            named(&spec, instance)
         }
         _ => Err(Error::runtime(format!(
             "Frame item {index}: unknown kind {kind:?}"
         ))),
+    }
+}
+
+/// `id` is what a hit reports back. It is optional everywhere: an unnamed shape is paint, and
+/// only named ones cost anything to hit-test.
+fn named(spec: &Table, item: Item) -> mlua::Result<Item> {
+    match spec.get::<Option<String>>("id")? {
+        Some(id) if id.is_empty() => Err(Error::runtime("Frame item id must not be empty")),
+        Some(id) => Ok(item.with_id(id)),
+        None => Ok(item),
     }
 }
 

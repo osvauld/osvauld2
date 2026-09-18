@@ -201,9 +201,55 @@ fn frame_records_intrinsics_and_expanded_nested_work() {
         FrameStats {
             expanded_items: 5,
             expanded_path_commands: 6,
-            depth: 1
+            depth: 1,
+            hittable: 0
         }
     );
+}
+
+#[test]
+fn a_name_rides_on_the_item_and_is_counted() {
+    let path = dot(2);
+    let frame = Frame::new(
+        10.0,
+        10.0,
+        None,
+        vec![fill(path.clone()), fill(path).with_id("slice:1")],
+    )
+    .unwrap();
+
+    assert_eq!(frame.items()[0].id(), None);
+    assert_eq!(frame.items()[1].id().map(|id| &**id), Some("slice:1"));
+    assert_eq!(frame.stats().hittable, 1);
+}
+
+/// The granularity rule, from both ends: a named container answers for its contents, and a
+/// reused visual never lends its names to the frame that instances it.
+#[test]
+fn a_named_container_hides_the_names_inside_it() {
+    let path = dot(2);
+    let inner = || vec![fill(path.clone()).with_id("tick"), fill(path.clone())];
+
+    let loose = Item::group(Affine::IDENTITY, inner()).unwrap();
+    let dial = Item::group(Affine::IDENTITY, inner())
+        .unwrap()
+        .with_id("dial");
+    let shared = Arc::new(Frame::new(10.0, 10.0, None, inner()).unwrap());
+    let anonymous = Item::instance(Affine::IDENTITY, shared.clone()).unwrap();
+    let named = Item::instance(Affine::IDENTITY, shared)
+        .unwrap()
+        .with_id("pin:7");
+
+    let count = |item| {
+        Frame::new(10.0, 10.0, None, vec![item])
+            .unwrap()
+            .stats()
+            .hittable
+    };
+    assert_eq!(count(loose), 1); // the tick is reachable
+    assert_eq!(count(dial), 1); // the dial is, the tick inside it isn't
+    assert_eq!(count(anonymous), 0); // nothing inside an instance is nameable
+    assert_eq!(count(named), 1);
 }
 
 #[test]

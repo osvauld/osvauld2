@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::id::Id;
 use kurbo::{Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke};
 use peniko::{
     Brush as PenikoBrush, Color, ColorStop as PenikoColorStop, Extend as PenikoExtend, Fill,
@@ -91,6 +92,9 @@ pub struct FrameStats {
     pub expanded_items: usize,
     pub expanded_path_commands: usize,
     pub depth: usize,
+    /// How many items a hit test could name. Not the count of ids in the tree: an id'd container
+    /// hides the ids inside it, because it answers as one shape.
+    pub hittable: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -239,25 +243,44 @@ enum ItemKind {
 }
 
 #[derive(Clone, Debug)]
-pub struct Item(ItemKind);
+pub struct Item {
+    kind: ItemKind,
+    id: Option<Id>,
+}
 
 impl Item {
     pub fn fill(path: Arc<Path>, brush: Arc<Brush>, rule: Fill) -> Self {
-        Self(ItemKind::Fill { path, brush, rule })
+        Self::new(ItemKind::Fill { path, brush, rule })
     }
 
     pub fn stroke(path: Arc<Path>, brush: Arc<Brush>, style: StrokeStyle) -> Self {
-        Self(ItemKind::Stroke { path, brush, style })
+        Self::new(ItemKind::Stroke { path, brush, style })
     }
 
     pub fn group(transform: Affine, items: Vec<Item>) -> Result<Self, FrameError> {
         valid_transform(transform)?;
-        Ok(Self(ItemKind::Group { transform, items }))
+        Ok(Self::new(ItemKind::Group { transform, items }))
     }
 
     pub fn instance(transform: Affine, frame: Arc<Frame>) -> Result<Self, FrameError> {
         valid_transform(transform)?;
-        Ok(Self(ItemKind::Instance { transform, frame }))
+        Ok(Self::new(ItemKind::Instance { transform, frame }))
+    }
+
+    fn new(kind: ItemKind) -> Self {
+        Self { kind, id: None }
+    }
+
+    /// Name this item, so a hit can report *which* shape it landed on. A named container answers
+    /// for everything it holds and the names inside it stop being reachable — how an author picks
+    /// the granularity they want: a whole dial, or each of its ticks.
+    pub fn with_id(mut self, id: impl Into<Id>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    pub fn id(&self) -> Option<&Id> {
+        self.id.as_ref()
     }
 }
 
@@ -345,7 +368,7 @@ impl Frame {
 
 fn draw_items(scene: &mut Scene, items: &[Item], transform: Affine, alpha: f32) {
     for item in items {
-        match &item.0 {
+        match &item.kind {
             ItemKind::Fill { path, brush, rule } => {
                 let faded;
                 let brush = if alpha == 1.0 {
@@ -392,17 +415,21 @@ fn item_stats(items: &[Item], depth: usize) -> Result<FrameStats, FrameError> {
         ..FrameStats::default()
     };
     for item in items {
-        let child = match &item.0 {
+        let child = match &item.kind {
             ItemKind::Fill { path, .. } | ItemKind::Stroke { path, .. } => FrameStats {
                 expanded_path_commands: path.command_count(),
                 ..FrameStats::default()
             },
             ItemKind::Group { items, .. } => item_stats(items, depth + 1)?,
+            // A reused visual keeps its own names to itself — fifty instances of one resource
+            // would otherwise all answer to the same ones.
             ItemKind::Instance { frame, .. } => FrameStats {
                 depth: depth + 1 + frame.stats.depth,
+                hittable: 0,
                 ..frame.stats
             },
         };
+        stats.hittable += if item.id.is_some() { 1 } else { child.hittable };
         stats.expanded_items = stats
             .expanded_items
             .checked_add(child.expanded_items)
