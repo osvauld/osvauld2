@@ -3411,3 +3411,32 @@ fn dashboard_view_cost() {
          (hover + drag + 2 views)"
     );
 }
+
+/// The reference in `docs/lua-apps.md` is what agents author against, and a prop that exists but
+/// isn't listed is invisible: unknown props are hard errors, so nobody discovers one by trying.
+/// Every name the registry accepts must appear in the guide, in backticks.
+#[test]
+fn the_guide_lists_every_prop() {
+    let guide = include_str!("../../docs/lua-apps.md");
+    let names = crate::props::Registry::<()>::PROPS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(crate::props::Registry::<()>::BINDS.iter().map(|(n, _)| *n))
+        .chain(
+            crate::props::Registry::<()>::CALLBACKS
+                .iter()
+                .map(|(n, _)| *n),
+        )
+        .chain(crate::props::STRUCTURAL.iter().copied())
+        .filter(|n| !matches!(*n, "tag" | "line" | "id"));
+
+    // A backticked name, whatever follows it — `on_hover` in the prop table, but also
+    // `on_hover = function(phase, x, y)` where the handler is spelled out.
+    let documented = |name: &str| {
+        guide.match_indices(&format!("`{name}")).any(|(i, m)| {
+            !guide[i + m.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+    };
+    let missing: Vec<_> = names.filter(|n| !documented(n)).collect();
+    assert!(missing.is_empty(), "undocumented props: {missing:?}");
+}

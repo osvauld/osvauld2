@@ -79,26 +79,29 @@ for conditional children).
 
 ## Frame visuals (experimental foundation)
 
-`gfx.path(commands)` compiles an immutable, reusable local vector path from one batched Lua
-declaration. Commands are `{"move", x, y}`, `{"line", x, y}`, `{"quad", cx, cy, x, y}`,
-`{"cubic", c1x, c1y, c2x, c2y, x, y}`, and `{"close"}`. Every command is positional with exact
-arity; named/sparse fields and drawing before `move` are errors.
+Anything you can describe with coordinates, you can draw. Paths and brushes are compiled once
+into immutable resources, assembled into a **visual**, and published as a normal leaf with
+`ui.frame({ visual = v, …normal props… })`. Frame dimensions are intrinsic layout claims, not an
+implicit clip or scale.
 
-Brushes are reusable resources: `gfx.solid("#rrggbb")` or
-`gfx.linear_gradient({from={x,y}, to={x,y}, stops={{offset,color},...}, extend="pad"})`.
-`extend` may be `pad`, `repeat`, or `reflect`.
+| call | fields | notes |
+|---|---|---|
+| `gfx.path(commands)` | positional list of commands | up to 65536; drawing before `move` is an error |
+| `gfx.solid(color)` | a CSS color string | |
+| `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
+| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required |
+| `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
+| `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
+| `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
+| `gfx.instance({…})` | `visual` (another frame) · `transform` | placed by its local origin — account for a centered shape's radius |
 
-A visual is assembled once with `gfx.frame({width=..., height=..., baseline=..., items...})`.
-Items are `gfx.fill({path=..., brush=..., rule="nonzero"})`,
-`gfx.stroke({path=..., brush=..., width=..., cap=..., join=..., miter_limit=...,
-dashes={...}, dash_offset=...})`, `gfx.group({transform={xx,yx,xy,yy,dx,dy}, items...})`, and
-`gfx.instance({visual=another_frame, transform={...}})`. `evenodd` is the other fill rule. Stroke
-caps are `butt` (default), `square`, or `round`; joins are `miter` (default), `bevel`, or `round`.
-Miter defaults to 4, while dashes and offset default to an empty pattern and zero.
-Publish it as a normal leaf with `ui.frame({visual=visual, ...normal El props...})`. Frame dimensions
-are intrinsic layout claims, not an implicit clip or scale. Instances are placed by their local
-origin (normally the resource's top-left), so account for a centered shape's radius when placing it.
-Arc commands and internal Frame clips are not exposed yet.
+Path commands are positional with exact arity: `{"move", x, y}`, `{"line", x, y}`,
+`{"quad", cx, cy, x, y}`, `{"cubic", c1x, c1y, c2x, c2y, x, y}`, `{"close"}`. Everywhere else in
+`gfx`, fields are named — a stray positional entry in a `fill` or a named key in a path is an
+error, not an ignored extra.
+
+There is no text inside a frame, no arcs, and no internal clips yet; labels are `ui.text`
+siblings positioned by layout, which is what the demo charts' axes do.
 
 ## Layout
 
@@ -162,23 +165,72 @@ states, padding and centering are all yours to declare.
 **Colors** are any CSS color string: `"#0d1117"`, `"#rrggbbaa"`, `"rgba(13,17,23,0.72)"`,
 `"hsl(212,92%,58%)"`, named colors.
 
-## Props reference
+## Reference
 
-Unknown props are **errors**, not warnings. When a shorthand and a longhand are both set,
-the shorthand applies first (`pad` before `px`/`py`, `full` before `w`/`h`).
+### Constructors
 
-| group | props |
-|---|---|
-| box | `full` · `w_full` · `h_full` · `size = {w, h}` · `w` · `h` · `min_w` `max_w` `min_h` `max_h` · `grow` (bool or share) · `no_shrink` · `wrap` |
-| spacing | `pad` · `px` · `py` · `gap` · `mt` · `mb` |
-| alignment | `center` · `align_center` · `stretch` |
-| positioning | `absolute` · `top` `left` `right` `bottom` · `offset = {x, y}` · `scale` |
-| paint | `fill` · `color` (text) · `radius` · `stroke = {width, color}` · `stroke_dash = {width, color, dash, gap}` · `opacity` · `font_size` · `no_wrap` |
-| hover / press | `hover_fill` · `hover_stroke = {width, color}` · `tint` · `press_fill` · `press_stroke = {width, color}` · `press_scale` |
-| animation | `fade_in = ms` · `fade = {target, ms}` · `slide_in = {dx, dy, ms}` · `on_frame` |
-| viewport | `zoomable` (Ctrl+wheel zooms children around the pointer; needs `id`) |
-| scroll | `scroll_x` · `scroll_y` (need `id`) |
-| input | `autofocus` · `value` |
+Eight, and no others. Anything else is `unknown tag`.
+
+| constructor | children | required | notes |
+|---|---|---|---|
+| `ui.col({…})` | any | — | vertical flex |
+| `ui.row({…})` | any | — | horizontal flex |
+| `ui.button({…})` | any | — | a `ui.row` and nothing more — no fill, padding or centering of its own |
+| `ui.text({ "label", … })` | **the label is child 1** | — | wraps like a paragraph; `no_wrap` makes it a label |
+| `ui.input({…})` | none | `value` · `id` · `on_input` | extras: `on_enter` · `on_esc` · `autofocus` |
+| `ui.text_area({…})` | none | `value` · `id` · `on_input` | same, multi-line |
+| `ui.frame({ visual = v, … })` | none | `visual` (a `gfx.frame`) | the frame's `width`/`height` are its layout claim |
+| `ui.overlay({ anchor, panel, … })` | **exactly two** | — | takes *only* `id` · `side` · `align` · `on_dismiss` — no box or paint props; style the panel child instead |
+
+`ui.state(id, init)` is not an element — it is per-viewer scratch, see [State](#state).
+
+### Props
+
+Every prop below works on every element (`ui.overlay` excepted, above). **Anything not in this
+list is an error**, not a warning — there is no silent ignore, so a typo shows up as a red box
+in place rather than as a missing effect. Types are checked too (`expected a number got string`).
+
+Shorthands are applied before the longhands that override them, whatever order the Lua table
+happens to be in: `full` before `w`/`h`, `size` before both, `pad` before `px`/`py`, `fade_in`
+before `fade`.
+
+| group | prop | value |
+|---|---|---|
+| box | `full` · `w_full` · `h_full` | bool — fill the parent on both axes / one |
+| | `size` | `{w, h}` |
+| | `w` · `h` | number |
+| | `min_w` · `max_w` · `min_h` · `max_h` | number (a `grow` child with no floor can be squeezed to nothing) |
+| | `grow` | bool, or a number for a weighted share — `grow = 2` beside `grow = true` is 2:1 |
+| | `no_shrink` | bool — refuse to be squeezed (labels, badges) |
+| | `wrap` | bool — flex children onto more lines |
+| spacing | `pad` · `px` · `py` · `gap` · `mt` · `mb` | number |
+| alignment | `center` · `align_center` · `stretch` | bool — both axes / cross axis only / children fill the cross axis |
+| positioning | `absolute` | bool — out of the flow |
+| | `top` · `left` · `right` · `bottom` | number, **viewport** coordinates |
+| | `offset` | `{dx, dy}` — shifts paint, not layout |
+| | `scale` | number — scales this subtree, layout unchanged |
+| paint | `fill` · `color` | a CSS color string (`color` is the text one) |
+| | `radius` · `opacity` · `font_size` | number |
+| | `stroke` | `{width, color}` |
+| | `stroke_dash` | `{width, color, dash, gap}` |
+| | `no_wrap` | bool |
+| hover / press | `hover_fill` · `press_fill` | color — the transition to it is automatic |
+| | `hover_stroke` · `press_stroke` | `{width, color}` |
+| | `tint` | **milliseconds** — the fade time for a hover brightening, not a color |
+| | `press_scale` | number, e.g. `0.96` — **needs `id` and `on_click`** |
+| animation | `fade_in` | ms |
+| | `fade` | `{target_opacity, ms}` |
+| | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
+| viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
+| scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
+| input | `value` · `autofocus` | string · bool |
+
+Four props need an `id` because the shell keys state by it: `scroll_*` (offset), `zoomable` /
+`zoom_x` (camera), `press_scale` (spring), and every handler (dispatch). Asking for one without
+an `id` is an error naming the prop.
+
+Not exposed to Lua yet, so don't go looking: right-click, text measurement or alignment inside a
+`gfx` frame, hit-testing individual Frame shapes, and reading back layout.
 
 ## Handlers
 
@@ -273,12 +325,13 @@ The rules that bite, once each:
 Presentation animation is declarative:
 
 - **Hover feedback animates itself.** `hover_fill`, `hover_stroke` and `tint` are transitions
-  bound to hover state — declare the color, the fade is automatic.
+  bound to hover state — declare the color, the fade is automatic. `tint` is the odd one: its
+  number is the fade duration in milliseconds, not a color or an amount.
 - **Press feedback is declarative for clickable elements.** `press_fill` / `press_stroke` apply
   while the pointer is down; `press_scale = 0.96` scales an `on_click` element subtree around
   its centre. `press_scale` needs an `id` and does not change layout.
 - **Value animations go to a declared target.** `fade = {target, ms}` animates opacity,
-  `fade_in = ms` fades in on first appearance, `slide_in = {dx, dy, ms}` slides in from an
+  `fade_in = ms` fades in on first appearance, `slide_in = {{dx, dy}, ms}` slides in from an
   offset. `opacity` is the static version with no tween.
 
 Progress is kept per element **`id`** — which is why an animated element needs a stable one.

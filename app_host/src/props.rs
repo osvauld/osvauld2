@@ -287,8 +287,7 @@ impl<M: 'static> Registry<M> {
 }
 type Bind<M> = fn(El<M>, &Value, &mut DragCtx<M>) -> mlua::Result<El<M>>;
 
-pub(crate) static STRUCTURAL: &[&str] =
-    &["tag", "id", "value", "on_input", "on_right_click", "line"];
+pub(crate) static STRUCTURAL: &[&str] = &["tag", "id", "value", "on_input", "line"];
 
 pub(crate) fn apply<M: 'static>(
     mut el: El<M>,
