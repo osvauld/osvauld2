@@ -2572,12 +2572,13 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
     let drag = |app: &mut LuaApp<LuaMsg>, id: &str, phase: &'static str, dx: f32, dy: f32| {
         app.update(LuaMsg::CallDrag(
             Key::new(id, "on_drag"),
-            phase,
-            0.0,
-            0.0,
-            dx,
-            dy,
-            1.0,
+            DragArgs {
+                phase,
+                at: (0.0, 0.0),
+                delta: (dx, dy),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+            },
         ))
     };
     let input = |app: &mut LuaApp<LuaMsg>, id: &str, v: &str| {
@@ -3128,5 +3129,285 @@ fn keys_orders_children_names_and_odd_keys_deterministically() {
     assert_eq!(
         keys(&node),
         r#"[1] = "one",[2] = "two",alpha=1,beta=2,1.5=0.5"#
+    );
+}
+
+#[test]
+fn line_chart_demo_shows_a_tooltip_on_hover() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "chart.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/line_chart/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    fn tooltip_texts(el: &runtime::ElInfo) -> Option<Vec<String>> {
+        fn texts(el: &runtime::ElInfo, out: &mut Vec<String>) {
+            out.extend(el.text.clone());
+            for c in &el.children {
+                texts(c, out);
+            }
+        }
+        if el.id.as_deref() == Some("tooltip") {
+            let mut out = Vec::new();
+            texts(el, &mut out);
+            return Some(out);
+        }
+        el.children.iter().find_map(|c| tooltip_texts(c))
+    }
+    macro_rules! tooltip {
+        () => {
+            tooltip_texts(&app.view().info())
+        };
+    }
+    macro_rules! hover {
+        ($phase:expr, $x:expr, $y:expr) => {{
+            let msg = app
+                .view()
+                .trigger("plot", runtime::Action::Hover($phase, ($x, $y)))
+                .unwrap();
+            app.update(msg);
+        }};
+    }
+
+    // Apr = 61 sits at frame (16 + 3*56, 16 + 0.39*260) = (184, 117.4).
+    assert_eq!(tooltip!(), None);
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+
+    hover!(HoverPhase::Enter, 10.0, 280.0);
+    assert_eq!(tooltip!(), None);
+
+    hover!(HoverPhase::Move, 186.0, 116.0);
+    assert_eq!(
+        tooltip!(),
+        Some(vec!["Apr 2026".to_string(), "61k users".to_string()])
+    );
+
+    // Nov = 88 at (576, 47.2): tooltip follows to the next point.
+    hover!(HoverPhase::Move, 575.0, 50.0);
+    assert_eq!(
+        tooltip!(),
+        Some(vec!["Nov 2026".to_string(), "88k users".to_string()])
+    );
+
+    hover!(HoverPhase::Move, 184.0, 280.0);
+    assert_eq!(tooltip!(), None);
+
+    hover!(HoverPhase::Move, 184.0, 117.0);
+    assert!(tooltip!().is_some());
+    hover!(HoverPhase::Leave, 700.0, 400.0);
+    assert_eq!(tooltip!(), None);
+
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+// ---- dashboard demo test (appended) ----
+#[test]
+fn dashboard_demo_links_hover_and_range_selection() {
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+    fn txt(el: &runtime::ElInfo, id: &str) -> String {
+        find(el, id)
+            .unwrap_or_else(|| panic!("no element with id {id}"))
+            .text
+            .clone()
+            .unwrap_or_default()
+    }
+
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "theme.lua", "data.lua", "chart.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/dashboard/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    // first build: clean, and the tiles summarise everything
+    let info = app.view().info();
+    assert!(
+        app.console(100).is_empty(),
+        "build errors: {:?}",
+        app.console(100)
+    );
+    assert_eq!(txt(&info, "range"), "All 24 months");
+    assert_eq!(txt(&info, "tile:users:value"), "2516");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$455500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.48%");
+
+    // the plot is one hover+drag surface with a single gfx frame inside it
+    let plot = find(&info, "plot:users").unwrap();
+    assert!(
+        plot.handlers.contains(&"on_hover"),
+        "handlers: {:?}",
+        plot.handlers
+    );
+    assert!(
+        plot.handlers.contains(&"on_drag"),
+        "handlers: {:?}",
+        plot.handlers
+    );
+    assert_eq!(plot.children.len(), 1);
+    assert_eq!(plot.children[0].kind, "frame");
+
+    // hovering month 5 (2024-05) in chart one marks it in all three
+    let x5 = 10.0 + 4.0 * (640.0 / 23.0);
+    let m = app
+        .view()
+        .trigger(
+            "plot:users",
+            runtime::Action::Hover(HoverPhase::Move, (x5, 60.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "2024-05: 1640");
+    assert_eq!(txt(&info, "readout:revenue"), "2024-05: $12100");
+    assert_eq!(txt(&info, "readout:errors"), "2024-05: 1.90%");
+    assert_eq!(txt(&info, "tile:errors:cursor"), "2024-05: 1.90%");
+
+    // drag sideways from month 5 to month 10: the pointer carries the position now
+    let dx = 5.0 * (640.0 / 23.0);
+    let sweep = |app: &mut LuaApp<LuaMsg>, phase: &'static str, travelled: f32| {
+        app.update(LuaMsg::CallDrag(
+            Key::new("plot:users", "on_drag"),
+            DragArgs {
+                phase,
+                at: (x5 + travelled, 60.0),
+                delta: (travelled, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+            },
+        ))
+    };
+    sweep(&mut app, "start", 0.0);
+    sweep(&mut app, "move", dx * 0.5);
+    sweep(&mut app, "move", dx);
+    sweep(&mut app, "end", dx);
+
+    // released selection sticks, and every tile now summarises those six months
+    let info = app.view().info();
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+    assert_eq!(txt(&info, "tile:users:value"), "1917");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$85500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.75%");
+
+    // the link runs the other way too: hover chart three, chart one follows
+    let x20 = 10.0 + 19.0 * (640.0 / 23.0);
+    let m = app
+        .view()
+        .trigger(
+            "plot:errors",
+            runtime::Action::Hover(HoverPhase::Move, (x20, 40.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "2025-08: 3400");
+    assert_eq!(txt(&info, "readout:errors"), "2025-08: 0.90%");
+    // ...and the released selection survived the hover
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+
+    // leaving drops the cursor but not the selection
+    let m = app
+        .view()
+        .trigger(
+            "plot:errors",
+            runtime::Action::Hover(HoverPhase::Leave, (x20, 400.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "-");
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+
+    // clearing puts the tiles back
+    let m = app.view().trigger("clear", runtime::Action::Click).unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "range"), "All 24 months");
+    assert_eq!(txt(&info, "tile:users:value"), "2516");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$455500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.48%");
+
+    assert!(
+        app.console(100).is_empty(),
+        "errors: {:?}",
+        app.console(100)
+    );
+}
+
+/// What one dashboard frame costs to rebuild: Lua's `view()` plus the walk into `El`. Layout,
+/// text shaping and paint are the runtime's and are not counted here. Minimum of 9, for the
+/// reasons in [`frame`]. Ignored: it measures, it doesn't assert.
+#[test]
+#[ignore]
+fn dashboard_view_cost() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "chart.lua", "data.lua", "theme.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/dashboard/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let count = |el: &runtime::ElInfo| {
+        fn walk(el: &runtime::ElInfo) -> usize {
+            1 + el.children.iter().map(walk).sum::<usize>()
+        }
+        walk(el)
+    };
+    let els = count(&app.view().info());
+
+    let mut idle = Duration::MAX;
+    let mut dragging = Duration::MAX;
+    for _ in 0..9 {
+        let t0 = Instant::now();
+        let _ = app.view();
+        idle = idle.min(t0.elapsed());
+
+        // A pointer move during a sweep: hover, drag, then the frame both of them force.
+        let t1 = Instant::now();
+        let h = app
+            .view()
+            .trigger(
+                "plot:users",
+                runtime::Action::Hover(HoverPhase::Move, (140.0, 60.0)),
+            )
+            .unwrap();
+        app.update(h);
+        app.update(LuaMsg::CallDrag(
+            Key::new("plot:users", "on_drag"),
+            DragArgs {
+                phase: "move",
+                at: (140.0, 60.0),
+                delta: (60.0, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+            },
+        ));
+        let _ = app.view();
+        dragging = dragging.min(t1.elapsed());
+    }
+    eprintln!(
+        "dashboard: {els} elements  view {idle:>8.2?}  pointer-move {dragging:>8.2?} \
+         (hover + drag + 2 views)"
     );
 }

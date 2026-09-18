@@ -62,8 +62,8 @@ local function card_of(c, ghost)
 	t.hover_fill = C.card_hi
 	t.hover_stroke = { 1, C.line }
 	t.opacity = dragging and 0.3 or 1.0
-	t.on_drag = function(phase, x, y, dx, dy, scale)
-		update({ kind = "drag", what = "card", id = c.id, phase = phase, x = x, y = y, scale = scale })
+	t.on_drag = function(phase, _, _, dx, dy, scale, ox, oy)
+		update({ kind = "drag", what = "card", id = c.id, phase = phase, x = ox, y = oy, scale = scale })
 	end
 	t.on_drop = function(phase, x, y)
 		update({ kind = "drop", id = c.id, phase = phase, x = x, y = y })
@@ -192,8 +192,8 @@ local function column_of(c, list)
 			py = 11,
 			align_center = true,
 			hover_fill = C.line_soft,
-			on_drag = function(phase, x, y, dx, dy, scale)
-				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = x, y = y, scale = scale })
+			on_drag = function(phase, _, _, dx, dy, scale, ox, oy)
+				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = ox, y = oy, scale = scale })
 			end,
 			ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),
 			W.badge(#list),

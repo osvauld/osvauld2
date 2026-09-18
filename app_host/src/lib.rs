@@ -49,13 +49,25 @@ impl Key {
 
 pub type Handlers = HashMap<Key, Function>;
 
+/// What a drag hands Lua, in order: where the pointer is in the element's own units, how far it
+/// has travelled from the press, the zoom scale, and the dragged element's screen origin — which
+/// only a root-level ghost placing itself in screen space needs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragArgs {
+    pub phase: &'static str,
+    pub at: (f32, f32),
+    pub delta: (f32, f32),
+    pub scale: f32,
+    pub origin: (f32, f32),
+}
+
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
     Call(Key),
     CallAt(Key, f32, f32),
     CallStr(Key, String),
     CallPhase(Key, &'static str, f32, f32),
-    CallDrag(Key, &'static str, f32, f32, f32, f32, f32),
+    CallDrag(Key, DragArgs),
     CallFrame(Key, f32, f64),
 }
 
@@ -504,9 +516,9 @@ impl<M: 'static> LuaApp<M> {
         // release), so a key with no handler now means the element is gone — drop it.
         let key = match &msg {
             LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _) | LuaMsg::CallStr(k, _) => k,
-            LuaMsg::CallPhase(k, _, _, _)
-            | LuaMsg::CallDrag(k, _, _, _, _, _, _)
-            | LuaMsg::CallFrame(k, _, _) => k,
+            LuaMsg::CallPhase(k, _, _, _) | LuaMsg::CallDrag(k, _) | LuaMsg::CallFrame(k, _, _) => {
+                k
+            }
         };
         let Some(h) = handlers.get(key) else {
             return;
@@ -516,9 +528,9 @@ impl<M: 'static> LuaApp<M> {
             LuaMsg::CallAt(_, x, y) => h.call::<()>((x, y)),
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
             LuaMsg::CallPhase(_, phase, x, y) => h.call::<()>((phase, x, y)),
-            LuaMsg::CallDrag(_, phase, x, y, dx, dy, scale) => {
-                h.call::<()>((phase, x, y, dx, dy, scale))
-            }
+            LuaMsg::CallDrag(_, a) => h.call::<()>((
+                a.phase, a.at.0, a.at.1, a.delta.0, a.delta.1, a.scale, a.origin.0, a.origin.1,
+            )),
             LuaMsg::CallFrame(_, dt, elapsed) => h.call::<()>((dt, elapsed)),
         };
         if let Err(e) = result {

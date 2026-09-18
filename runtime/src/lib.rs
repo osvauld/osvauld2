@@ -816,7 +816,9 @@ impl<A: App> Runner<A> {
             content.x as f32 - local_press.0,
             content.y as f32 - local_press.1,
         );
+        let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
         let event = DragEvent {
+            at: (node.x as f32, node.y as f32),
             pos,
             delta,
             mods,
@@ -897,7 +899,9 @@ impl<A: App> Runner<A> {
                         if let Some((_, _, handler)) =
                             self.hits.drag.iter().find(|(_, hid, _)| *hid == id)
                         {
+                            let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
                             let event = DragEvent {
+                                at: (node.x as f32, node.y as f32),
                                 pos,
                                 delta,
                                 mods: self.mods(),
@@ -1002,7 +1006,11 @@ impl<A: App> Runner<A> {
                             local_press: *local_press,
                             screen_grab: *screen_grab,
                         });
+                        let press_at =
+                            geometry.node_point(ScreenPoint::new(press.0 as f64, press.1 as f64));
                         let event = DragEvent {
+                            // Where the press landed, not where the slop ended.
+                            at: (press_at.x as f32, press_at.y as f32),
                             delta: (0.0, 0.0),
                             phase: DragPhase::Start,
                             pos: (lx, ly),

@@ -199,10 +199,12 @@ element is gone.
   when the pointer moves.
 - `on_enter`, `on_esc`, `on_faded_out` — plain callbacks.
 - `on_input = function(v)` — an input's new text.
-- `on_drag = function(phase, x, y, dx, dy, scale)` — phases `"start"` / `"move"` / `"end"`;
-  `x, y` are the dragged element's screen-space origin (for root-level ghosts), `dx, dy` are
-  movement in its local content space, and `scale` lets a root ghost match zoomed content.
-  **Needs an `id`.**
+- `on_drag = function(phase, x, y, dx, dy, scale, origin_x, origin_y)` — phases `"start"` /
+  `"move"` / `"end"`. `x, y` are the pointer in the element's own units, as `on_click` reports
+  them (at `"start"`, where the press landed, not where the 5pt slop ended). `dx, dy` are
+  movement since the press, `scale` lets a root ghost match zoomed content, and
+  `origin_x, origin_y` are the dragged element's screen-space origin — only a root-level ghost
+  placing itself in screen space needs those. **Needs an `id`.**
 - `on_drop = function(phase, x, y)` — phases `"over"` (while hovering) / `"release"`; `x, y`
   are normalized to the drop target (0–1), so `msg.y < 0.5` means "above the midline".
   **Needs an `id`.**

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{Ctx, Handlers, Key, LuaMsg, parse_color, register};
+use crate::{Ctx, DragArgs, Handlers, Key, LuaMsg, parse_color, register};
 use mlua::{Table, Value};
 use runtime::El;
 use runtime::vello::peniko::Color;
@@ -160,12 +160,13 @@ impl<M: 'static> Registry<M> {
             Ok(el.on_drag(key.id.to_string(), move |e| {
                 to_msg(LuaMsg::CallDrag(
                     key.clone(),
-                    e.phase.as_str(),
-                    e.pos.0 - e.grab.0,
-                    e.pos.1 - e.grab.1,
-                    e.delta.0,
-                    e.delta.1,
-                    e.scale,
+                    DragArgs {
+                        phase: e.phase.as_str(),
+                        at: e.at,
+                        delta: e.delta,
+                        scale: e.scale,
+                        origin: (e.pos.0 - e.grab.0, e.pos.1 - e.grab.1),
+                    },
                 ))
             }))
         }),

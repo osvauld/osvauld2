@@ -19,6 +19,9 @@ impl DragPhase {
 #[derive(Clone, Copy, Debug)]
 pub struct DragEvent {
     pub phase: DragPhase,
+    /// The pointer in the dragged element's own units, zoom undone — the same point a click or
+    /// hover reports. `delta` is this minus where the press landed.
+    pub at: (f32, f32),
     pub pos: (f32, f32), // current pos with origin as grabbed elements origin as (0,0)
     pub delta: (f32, f32), //pos-start
     pub grab: (f32, f32), //offset from origin rect
