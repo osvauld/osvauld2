@@ -37,11 +37,20 @@ fn vm_interrupt() {
     let res = lua.load("while true do end").exec();
     assert!(res.is_err(), "inifinite loop should have been killed")
 }
+/// Wall-clock unix seconds, with a fraction. It is for recording *when* something happened, not
+/// for measuring how long anything took — it can step under NTP. Gestures use `e.t` instead.
 #[test]
-fn now() {
+fn now_has_a_fraction() {
     let (lua, _) = sandboxed_vm().unwrap();
-    let res = lua.load("return now()").eval::<i64>();
-    assert!(res.unwrap() > 1);
+    let t = lua.load("return now()").eval::<f64>().unwrap();
+    assert!(t > 1.7e9, "not unix seconds: {t}");
+    // Whole seconds would make this exactly zero every time, which is what it used to be.
+    let mut fractional = false;
+    for _ in 0..50 {
+        let t = lua.load("return now()").eval::<f64>().unwrap();
+        fractional |= t.fract() != 0.0;
+    }
+    assert!(fractional, "now() is still whole seconds");
 }
 
 #[test]
@@ -223,6 +232,7 @@ fn a_handler_reads_its_event_by_name_not_by_position() {
                 scale: 1.0,
                 origin: (100.0, 50.0),
                 shape,
+                t: 0.0,
             },
         )
     };
@@ -252,7 +262,7 @@ fn a_drag_carries_the_shape_it_grabbed() {
                 visual = gfx.frame({ width = 10, height = 10 }),
                 on_drag = function(e)
                     seen = table.concat(
-                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil" },
+                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil", e.t },
                         " "
                     )
                 end,
@@ -273,10 +283,12 @@ fn a_drag_carries_the_shape_it_grabbed() {
             scale: 1.0,
             origin: (100.0, 50.0),
             shape: Shape(Some(("knob".into(), 5.0, 50.0))),
+            // Sub-second, because a gesture measured in whole seconds is not measured at all.
+            t: 0.25,
         },
     ));
     let seen: String = app.vm.globals().get("seen").unwrap();
-    assert_eq!(seen, "move 40 6 1 100 knob 5");
+    assert_eq!(seen, "move 40 6 1 100 knob 5 0.25");
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }
 
@@ -2833,6 +2845,7 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ))
     };
@@ -3551,6 +3564,7 @@ fn dashboard_demo_links_hover_and_range_selection() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ))
     };
@@ -3663,6 +3677,7 @@ fn dashboard_view_cost() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ));
         let _ = app.view();

@@ -178,6 +178,9 @@ struct Runner<A: App> {
     scene: Scene,
     start: Instant,
     last_frame: Option<f64>,
+    /// When the pointer event now being processed arrived, on the same monotonic clock as
+    /// `start`. Stamped once per event so everything one event fires shares it.
+    event_at: f64,
     hits: Hits<A::Msg>,
     pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, Option<Shapes>)>,
     hovered: Hovered,
@@ -652,6 +655,7 @@ impl<A: App> Runner<A> {
     }
     /// Hit-test a press against the last frame's regions; topmost (last-painted) wins.
     fn click(&mut self) {
+        self.event_at = self.start.elapsed().as_secs_f64();
         let Some((px, py)) = self.pointer else { return };
         let p = vello::kurbo::Point::new(px as f64, py as f64);
         if let Some(thumb) = self
@@ -922,6 +926,7 @@ impl<A: App> Runner<A> {
             scale: geometry.scale(),
             phase: DragPhase::Move,
             shape: shape.as_ref().map(|g| g.at(node)),
+            t: self.event_at,
         };
         if let Some((_, _, handler, _)) = self
             .hits
@@ -956,6 +961,7 @@ impl<A: App> Runner<A> {
     }
 
     fn on_cursor_release(&mut self) {
+        self.event_at = self.start.elapsed().as_secs_f64();
         if let Some(cap) = self.drag.take() {
             match cap {
                 Capture::App {
@@ -1007,6 +1013,7 @@ impl<A: App> Runner<A> {
                                 scale: geometry.scale(),
                                 phase: DragPhase::End,
                                 shape: shape.as_ref().map(|g| g.at(node)),
+                                t: self.event_at,
                             };
                             self.app.update(handler(event));
                         }
@@ -1033,6 +1040,7 @@ impl<A: App> Runner<A> {
     }
 
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.event_at = self.start.elapsed().as_secs_f64();
         let scale = self.render.as_ref().map_or(1.0, |r| r.scale());
         let PhysicalPosition { x, y } = position;
         let lx = (x / scale) as f32;
@@ -1123,6 +1131,7 @@ impl<A: App> Runner<A> {
                             scale: geometry.scale(),
                             mods: self.mods(),
                             shape: shape.as_ref().map(|g| g.at(press_at)),
+                            t: self.event_at,
                         };
                         self.drag = Some(Capture::App {
                             id: id.clone(),
@@ -1450,6 +1459,7 @@ impl<A: App> Runner<A> {
             scene: Scene::new(),
             start: Instant::now(),
             last_frame: None,
+            event_at: 0.0,
             pressed: None,
             hovered: Hovered::default(),
         }

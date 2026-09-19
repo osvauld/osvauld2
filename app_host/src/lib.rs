@@ -61,6 +61,9 @@ pub struct DragArgs {
     pub origin: (f32, f32),
     /// The shape the press grabbed, held for the whole gesture. See [`Shape`].
     pub shape: Shape,
+    /// Monotonic seconds since the app opened, stamped when the pointer event arrived. Reaches
+    /// Lua as `e.t`, and shares an epoch with `on_frame`'s `elapsed`.
+    pub t: f64,
 }
 
 /// The trailing arguments a pointer handler carries: which named shape of the element's visual
@@ -562,6 +565,7 @@ impl<M: 'static> LuaApp<M> {
                 event.set("scale", a.scale)?;
                 event.set("origin_x", a.origin.0)?;
                 event.set("origin_y", a.origin.1)?;
+                event.set("t", a.t)?;
                 a.shape.write(&event)?;
             }
             LuaMsg::CallFrame(_, dt, elapsed) => {
@@ -784,7 +788,7 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(mlua::Error::external)?
-            .as_secs() as i64;
+            .as_secs_f64();
         Ok(secs)
     })?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;

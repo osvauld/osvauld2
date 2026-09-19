@@ -305,6 +305,13 @@ end
   pointer has since slid over, and reported even once the pointer leaves it — which is what
   holding something means. **Needs an `id`.**
 
+  `e.t` is when the pointer event arrived: monotonic seconds since the app opened, on the same
+  clock as `on_frame`'s `e.elapsed`, so a release can be measured against the frames after it.
+  Keep the last two `(e.t, e.x)` and a fling is `(x - x_prev) / (t - t_prev)` on `"end"` — no
+  `on_frame` running purely to hold a stopwatch. Use `e.t` and never `now()` for this: several
+  moves usually arrive inside one frame, so anything sampled per frame divides by zero, and
+  `now()` is wall-clock and can step backwards.
+
   A press that travels past 5pt is a drag and fires **no** click. A press that travels less is a
   click, reported where it was *released*. No hand is perfectly still, so the second is ordinary.
 
@@ -478,7 +485,12 @@ The kanban split, worth copying at any size:
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
 only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `now()` (unix
-seconds), `uuid()`. A runaway loop is killed, with the line number.
+seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
+
+`now()` is for recording *when* something happened — a created-at, a last-edited. It is not for
+measuring how long something took: it follows the system clock, so it can jump, including
+backwards. Anything timing a gesture or an animation wants the monotonic clock instead, which
+reaches Lua as `e.t` on `on_drag` and `e.elapsed` on `on_frame`.
 
 Errors are for reading, not for fearing:
 
