@@ -114,7 +114,39 @@ reused visual are not reported" rule before committing a 200-instance app to it.
 state it. I wanted the design doc's `landed 2026-09-18` status line, because the guide carries no
 such marker on an experimental feature.)
 
-## 4. There is no clock, so a throw cannot be measured without the frame tick
+## 4. ~~There is no clock, so a throw cannot be measured without the frame tick~~
+
+**Resolved 2026-09-19, in part.** `on_drag` now carries `e.t` — monotonic seconds, stamped when
+the pointer event *arrived*, sharing an epoch with `on_frame`'s `elapsed`. `field.lua` computes
+throw speed in `hold_to` from consecutive events, and `M.step`'s velocity block is gone: this app
+no longer needs `on_frame` to hold a stopwatch. `now()` also gained its fraction, but it stays
+**wall clock** and is documented as being for recording when something happened, not for measuring
+how long it took — it can step backwards under NTP, which is the worse of its two problems and the
+one the whole-second reading hid.
+
+Two things worth keeping from doing it:
+
+Stamping at *frame* time would have looked right and divided by zero. Several moves usually arrive
+inside one frame; giving them the frame's time gives them all the same number, and the first thing
+any fling does is divide by the difference. The stamp has to be taken where the event arrives.
+
+Per-event sampling is spiky in the other direction. A mouse can report twice in a millisecond, and
+dividing a 1px jitter by that yields hundreds of px/s, so `hold_to` measures over at least
+`C.fling_window` rather than between the last two events. The frame clock was providing that
+smoothing for free, which is easy to miss when removing it.
+
+The harness needed a matching change to keep this checkable: offscreen time is now virtual, a
+frame being 1/60s and a pointer event landing 8ms after it, so `open --drag … --frames 3` reports
+`1 drifting` and does so identically on every machine. With real elapsed time the events were
+microseconds apart and the fling measured zero.
+
+**Still open:** the rest of the entry below. There is no monotonic clock an app can *read* — only
+one it is handed. A double-click, a press-and-hold and a "dismiss after 3s" toast are still
+unwritable, because `on_click` carries no time and nothing readable is monotonic.
+
+---
+
+*The original entry:*
 
 `now()` is listed in the sandbox section as "unix seconds", and that is exact: it returns a whole
 number. In the app:
