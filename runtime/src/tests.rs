@@ -195,3 +195,80 @@ fn a_shape_drifting_under_a_still_pointer_still_fires_hover() {
         ["enter -", "move cell@40", "move cell@10", "move -"]
     );
 }
+
+/// Records the monotonic time of every frame and every drag event, in the order they arrived.
+struct Stamped {
+    seen: Vec<(&'static str, f64)>,
+}
+
+#[derive(Clone)]
+enum Stamp {
+    Frame(f64),
+    Drag(&'static str, f64),
+}
+
+impl App for Stamped {
+    type Msg = Stamp;
+    fn view(&self) -> El<Stamp> {
+        crate::col().full().child(
+            crate::col()
+                .id("pad")
+                .w(200.0)
+                .h(200.0)
+                .on_frame("pad", |f| Stamp::Frame(f.elapsed))
+                .on_drag("pad", |d| Stamp::Drag(d.phase.as_str(), d.t)),
+        )
+    }
+    fn update(&mut self, msg: Stamp) {
+        match msg {
+            Stamp::Frame(t) => self.seen.push(("frame", t)),
+            Stamp::Drag(phase, t) => self.seen.push((phase, t)),
+        }
+    }
+}
+
+/// A drag is stamped when the pointer event arrives, not when the frame it lands in is drawn.
+/// Frame time would hand every event processed in one frame the same number, and a fling computed
+/// from two such samples divides by zero rather than looking wrong.
+#[test]
+fn a_drag_is_stamped_when_the_event_arrives_not_when_the_frame_draws() {
+    let mut h = Headless::new(Stamped { seen: Vec::new() }, (400.0, 400.0));
+    h.drag((50.0, 50.0), (150.0, 130.0), 4);
+    let seen = &h.app().seen;
+
+    assert!(
+        seen.windows(2).all(|w| w[0].1 <= w[1].1),
+        "time went backwards: {seen:?}"
+    );
+
+    // Each drag event is stamped *after* the frame before it. If the stamp were the frame's, the
+    // two would be equal — so this is the assertion that tells the two designs apart.
+    let (mut last_frame, mut drags) = (f64::NEG_INFINITY, 0);
+    for (what, t) in seen {
+        if *what == "frame" {
+            last_frame = *t;
+        } else {
+            assert!(*t > last_frame, "{what} at {t} is not after {last_frame}");
+            drags += 1;
+        }
+    }
+    assert!(drags >= 3, "expected start, moves and an end: {seen:?}");
+
+    // Offscreen the clock is virtual, so the spacing is exact and the same on every machine —
+    // which is what makes a fling measurable here at all. `"start"` and the move it fires with it
+    // share a stamp on purpose: one event, one time.
+    let mut times: Vec<f64> = seen
+        .iter()
+        .filter(|(w, _)| *w != "frame")
+        .map(|(_, t)| *t)
+        .collect();
+    times.dedup();
+    let step = 1.0 / 60.0 + 0.008;
+    for pair in times.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(
+            (gap - step).abs() < 1e-9,
+            "events {gap}s apart, expected {step}s: {seen:?}"
+        );
+    }
+}

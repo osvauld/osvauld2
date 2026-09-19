@@ -515,7 +515,7 @@ straight into a loop.
 cargo run -p app_host --example open -- demo_apps/pie
 cargo run -p app_host --example open -- demo_apps/pie --hover 180,128 --tree
 cargo run -p app_host --example open -- demo_apps/voronoi --drag 300,300:380,360
-cargo run -p app_host --example open -- demo_apps/voronoi --hover 400,250 --frames 200 --tree
+cargo run -p app_host --example open -- demo_apps/voronoi --hover 400,250 --frames 250 --tree
 ```
 
 `--hover X,Y`, `--click X,Y`, `--drag X0,Y0:X1,Y1[:steps]` and `--frames N` run in the order given,
@@ -530,7 +530,10 @@ it), so they are the same units an element's rect is in. `print()` from a handle
 
 `--frames N` is time passing with the pointer left where it was — the only way to watch an
 animating app move, and the only way to see `on_hover` follow geometry that drifts under a still
-pointer. Offscreen frames run back to back, so `N` is a count of frames, not of seconds.
+pointer. Offscreen the clock is **virtual**: a frame is 1/60s and a pointer event lands 8ms after
+the frame it is tested against, whatever the machine actually took. So `--frames 250` is a little
+over four seconds of app time, and a gesture is timed here exactly as it would be in a window —
+which is what makes a fling or a debounce checkable without one.
 
 Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
 a drag and fires **no** click, and a press that travels less is a click reported at the point it

@@ -177,6 +177,8 @@ struct Runner<A: App> {
     drag: Option<Capture>,
     scene: Scene,
     start: Instant,
+    /// Offscreen time, in seconds, advanced only by `Headless`. Unused with a window.
+    clock: f64,
     last_frame: Option<f64>,
     /// When the pointer event now being processed arrived, on the same monotonic clock as
     /// `start`. Stamped once per event so everything one event fires shares it.
@@ -310,7 +312,7 @@ impl<A: App> Runner<A> {
         };
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
-        let now = self.start.elapsed().as_secs_f64();
+        let now = self.now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).min(0.1)) as f32;
         self.last_frame = Some(now);
         let custom_capture = screenshot
@@ -655,7 +657,7 @@ impl<A: App> Runner<A> {
     }
     /// Hit-test a press against the last frame's regions; topmost (last-painted) wins.
     fn click(&mut self) {
-        self.event_at = self.start.elapsed().as_secs_f64();
+        self.event_at = self.now();
         let Some((px, py)) = self.pointer else { return };
         let p = vello::kurbo::Point::new(px as f64, py as f64);
         if let Some(thumb) = self
@@ -759,6 +761,16 @@ impl<A: App> Runner<A> {
         }
 
         self.redraw();
+    }
+
+    /// Monotonic seconds. Windowed that is the OS clock; offscreen it is only what the driver has
+    /// advanced, so a headless gesture is timed the same on every machine and a test that measures
+    /// a fling is not secretly a benchmark of the machine running it.
+    fn now(&self) -> f64 {
+        match self.offscreen {
+            None => self.start.elapsed().as_secs_f64(),
+            Some(_) => self.clock,
+        }
     }
 
     /// Fires enter/move/leave against the last frame's hover regions. `in_window` is false when the
@@ -961,7 +973,7 @@ impl<A: App> Runner<A> {
     }
 
     fn on_cursor_release(&mut self) {
-        self.event_at = self.start.elapsed().as_secs_f64();
+        self.event_at = self.now();
         if let Some(cap) = self.drag.take() {
             match cap {
                 Capture::App {
@@ -1040,7 +1052,7 @@ impl<A: App> Runner<A> {
     }
 
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
-        self.event_at = self.start.elapsed().as_secs_f64();
+        self.event_at = self.now();
         let scale = self.render.as_ref().map_or(1.0, |r| r.scale());
         let PhysicalPosition { x, y } = position;
         let lx = (x / scale) as f32;
@@ -1458,6 +1470,7 @@ impl<A: App> Runner<A> {
             drag: None,
             scene: Scene::new(),
             start: Instant::now(),
+            clock: 0.0,
             last_frame: None,
             event_at: 0.0,
             pressed: None,
