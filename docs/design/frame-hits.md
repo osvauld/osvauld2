@@ -88,6 +88,13 @@ ui.frame({
 
 Lua ignores extra arguments, so every existing handler keeps working unchanged.
 
+**Revision 2026-09-19:** the trailing arguments were the mistake this note didn't see coming.
+"Lua ignores extra arguments" cuts both ways — it also ignores a handler that reads them in the
+wrong order, silently, and `on_drag` had grown to eleven positions. Handlers carrying more than one
+value now take a single event table, `function(e)` with `e.phase`, `e.x`, `e.shape`, `e.sx` and so
+on; `on_enter`/`on_esc`/`on_faded_out` (nothing) and `on_input` (one string) keep their plain form.
+The keys below are otherwise exactly as described. See `docs/lua-apps.md` for the current shape.
+
 - `x, y` — **frame-local**, exactly as today, defined whether or not a shape was hit. `index_at(x)`
   must not change meaning.
 - `shape` — the id of the topmost id'd item containing the point, or `nil`.
@@ -173,3 +180,12 @@ to pick, which is the drift this removes. Built by an agent from the docs, like
 Text inside a frame (no `gfx.text` exists at all — every label is a sibling `ui.text` element),
 wrapping or alignment inside a frame, per-shape enter/leave, and hit-testing across frames in
 different elements. None of them are blocked by this; all of them are easier after it.
+
+**Revision 2026-09-19:** per-shape enter/leave is now derivable in Lua, though still not delivered
+as phases. Hover is sampled once per frame as well as on pointer events, and reports a `"move"`
+whenever the hit under the pointer changes — including when the shape slides rather than the
+pointer — so an app that remembers the last `e.shape` gets enter and leave by comparing. The reason
+this works without flooding is that the runtime compares the whole hit before speaking: still
+geometry under a still pointer recomputes the same point and says nothing. What is still missing is
+the runtime naming those transitions itself, which matters for a frame with many shapes where every
+app will otherwise write the same three lines.

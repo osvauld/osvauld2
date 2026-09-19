@@ -103,7 +103,7 @@ report which named shape the pointer is on and where on it:
 ui.frame({
     id = "pie",
     visual = v,
-    on_hover = function(phase, x, y, shape) hot = phase ~= "leave" and shape or nil end,
+    on_hover = function(e) hot = e.phase ~= "leave" and e.shape or nil end,
 })
 ```
 
@@ -283,8 +283,12 @@ end
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
   the element on `"leave"`). An element is hovered while the pointer is inside it, like
   `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
-  hide the one below — check your own geometry if that matters. It fires only when the pointer
-  moves, so an element that slides under a still pointer enters on the next move.
+  hide the one below — check your own geometry if that matters. It is sampled every frame as well
+  as on every pointer move, so geometry that drifts under a still pointer reports it: an element
+  that slides under one enters where it arrives, and `"move"` fires when the shape beneath the
+  pointer changes *or* slides, without the pointer having moved at all. What it will not do is
+  repeat itself — a still pointer over still geometry says nothing, so `"move"` always means
+  something actually changed.
 - `e.shape, e.sx, e.sy` on both of those name the shape inside a `ui.frame`'s visual that the
   pointer is on — see [Frame visuals](#frame-visuals-experimental-foundation). `e.shape` is the
   `id` you gave the shape, and `e.sx, e.sy` are the point in *that shape's* own coordinates, with

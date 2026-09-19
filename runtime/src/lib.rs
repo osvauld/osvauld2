@@ -26,6 +26,7 @@ use crate::coords::{NodePoint, ScreenPoint};
 use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
 use crate::el::{Binding, Click};
+use crate::frame::FrameHit;
 use crate::geometry::{Clip, Geometry};
 use crate::hover::Hovered;
 use crate::id::Id;
@@ -598,6 +599,13 @@ impl<A: App> Runner<A> {
         for m in done_msgs {
             self.app.update(m);
         }
+        // The paint above is what rebuilds the hover regions, so this is the one moment they are
+        // fresh: geometry that moved under a still pointer changes what it is on with no event to
+        // announce it. Not after a custom capture, which cleared them — every element would leave
+        // and re-enter. `Hovered` reports nothing when nothing changed, so this settles.
+        if !custom_capture && let Some(at) = self.pointer {
+            dispatched |= self.hover(at, true);
+        }
         if any_in_flight || needs_redraw || dispatched {
             self.redraw();
         }
@@ -751,30 +759,42 @@ impl<A: App> Runner<A> {
 
     /// Fires enter/move/leave against the last frame's hover regions. `in_window` is false when the
     /// pointer has left, so everything leaves at its last position.
-    fn hover(&mut self, (px, py): (f32, f32), in_window: bool) {
+    fn hover(&mut self, (px, py): (f32, f32), in_window: bool) -> bool {
         let p = Point::new(px as f64, py as f64);
         let hover = &self.hits.hover;
+        // Picked before the diff rather than with the dispatch, because whether the shape under a
+        // still pointer changed is half of what decides there is anything to report at all.
+        let at: Vec<(NodePoint, Option<FrameHit>)> = hover
+            .iter()
+            .map(|(geometry, _, _, shapes)| {
+                let local = geometry.node_point(ScreenPoint::new(p.x, p.y));
+                (local, shape_at(shapes, local))
+            })
+            .collect();
         let phases = self.hovered.step(
+            (px, py),
             hover
                 .iter()
-                .map(|(g, id, _, _)| (id, in_window && g.contains(p))),
+                .zip(&at)
+                .map(|((g, id, _, _), (_, hit))| (id, in_window && g.contains(p), hit.as_ref())),
         );
         let msgs: Vec<_> = hover
             .iter()
+            .zip(at)
             .zip(phases)
-            .filter_map(|((geometry, _, handler, shapes), phase)| {
-                let local = geometry.node_point(ScreenPoint::new(p.x, p.y));
-                let pos = (local.x as f32, local.y as f32);
+            .filter_map(|(((_, _, handler, _), (local, hit)), phase)| {
                 Some(handler(HoverEvent {
                     phase: phase?,
-                    pos,
-                    shape: shape_at(shapes, local),
+                    pos: (local.x as f32, local.y as f32),
+                    shape: hit,
                 }))
             })
             .collect();
+        let fired = !msgs.is_empty();
         for m in msgs {
             self.app.update(m);
         }
+        fired
     }
 
     fn right_click(&mut self) {
