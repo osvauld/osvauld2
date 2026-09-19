@@ -34,17 +34,26 @@ enum Action {
     Hover(f32, f32),
     Click(f32, f32),
     Drag((f32, f32), (f32, f32), usize),
+    /// Time passing with the pointer where it was left — the only way to see an animating app
+    /// move, and the only way to see hover follow geometry that moves under a still pointer.
+    Frames(usize),
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(folder) = args.next() else {
-        eprintln!("usage: open <app folder> [--size WxH] [--hover X,Y] [--click X,Y] [--drag X0,Y0:X1,Y1[:steps]] [--tree]");
+        eprintln!(
+            "usage: open <app folder> [--size WxH] [--hover X,Y] [--click X,Y] \
+             [--drag X0,Y0:X1,Y1[:steps]] [--frames N] [--tree]"
+        );
         std::process::exit(2);
     };
     let (mut size, mut actions, mut every_tree) = ((1200.0f32, 800.0f32), Vec::new(), false);
     while let Some(flag) = args.next() {
-        let mut value = || args.next().unwrap_or_else(|| die(&format!("{flag} needs a value")));
+        let mut value = || {
+            args.next()
+                .unwrap_or_else(|| die(&format!("{flag} needs a value")))
+        };
         match flag.as_str() {
             "--size" => size = pair(&value(), 'x'),
             "--hover" => {
@@ -56,6 +65,12 @@ fn main() {
                 actions.push(Action::Click(x, y));
             }
             "--drag" => actions.push(drag(&value())),
+            "--frames" => {
+                let n = value();
+                actions.push(Action::Frames(
+                    n.parse().unwrap_or_else(|_| die(&format!("--frames {n}?"))),
+                ));
+            }
             "--tree" => every_tree = true,
             other => die(&format!("unknown flag {other}")),
         }
@@ -116,6 +131,12 @@ fn main() {
                     from.0, from.1, to.0, to.1
                 );
                 driver.drag(from, to, steps);
+            }
+            Action::Frames(n) => {
+                println!("\n--- {n} frames");
+                for _ in 0..n {
+                    driver.frame();
+                }
             }
         }
         let log = driver.app().0.console(512);
@@ -214,7 +235,11 @@ fn render(el: &ElInfo) -> String {
 /// One line per element: its kind, its id, its handlers, and a clipped look at any text.
 fn show(el: &ElInfo, depth: usize, out: &RefCell<String>) {
     use std::fmt::Write;
-    let id = el.id.as_deref().map(|i| format!("#{i}")).unwrap_or_default();
+    let id = el
+        .id
+        .as_deref()
+        .map(|i| format!("#{i}"))
+        .unwrap_or_default();
     let handlers = match el.handlers.as_slice() {
         [] => String::new(),
         hs => format!("  [{}]", hs.join(" ")),

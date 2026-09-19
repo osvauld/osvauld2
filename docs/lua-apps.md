@@ -503,16 +503,22 @@ straight into a loop.
 cargo run -p app_host --example open -- demo_apps/pie
 cargo run -p app_host --example open -- demo_apps/pie --hover 180,128 --tree
 cargo run -p app_host --example open -- demo_apps/voronoi --drag 300,300:380,360
+cargo run -p app_host --example open -- demo_apps/voronoi --hover 400,250 --frames 200 --tree
 ```
 
-`--hover X,Y`, `--click X,Y` and `--drag X0,Y0:X1,Y1[:steps]` run in the order given, and after
-each one it reports new console lines and whether the view changed. These are not simulated: the
+`--hover X,Y`, `--click X,Y`, `--drag X0,Y0:X1,Y1[:steps]` and `--frames N` run in the order given,
+and after each one it reports new console lines and whether the view changed. These are not
+simulated: the
 same layout, the same hit regions, the same handler call the window makes. The only thing supplied
 by hand is the pointer coordinate — which is also the limit, since scaling, event timing and
 painting all live below that line. A view that passes here can still look wrong.
 
 Coordinates are logical points from the top-left of a 1200×800 viewport (`--size WxH` to change
 it), so they are the same units an element's rect is in. `print()` from a handler goes to stdout.
+
+`--frames N` is time passing with the pointer left where it was — the only way to watch an
+animating app move, and the only way to see `on_hover` follow geometry that drifts under a still
+pointer. Offscreen frames run back to back, so `N` is a count of frames, not of seconds.
 
 Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
 a drag and fires **no** click, and a press that travels less is a click reported at the point it
