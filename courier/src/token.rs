@@ -25,7 +25,9 @@ pub enum Scope {
 }
 
 impl Scope {
-    fn contains(&self, other: &Self) -> bool {
+    /// Whether a role held at this scope reaches `other`. Levels nest downward and never
+    /// sideways; an app scope stops there, because its namespaces are bound at install.
+    pub fn contains(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Node, _) => true,
             (Self::Workspace(ws), Self::Workspace(other)) => ws == other,

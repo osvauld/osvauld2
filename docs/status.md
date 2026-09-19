@@ -69,7 +69,12 @@ signed payload. Scope is four levels (node, workspace, app, resource) and
 `workspace::ResourceScope::contains` decides the innermost one. **2026-09-19:** authorship
 became a signed field on the record rather than a signed update wrapper, so there is no node
 update log and Loro peer ids need no DID binding; kunki will store through `vault` as shell2
-does, with the admin store on `Vault::store`. Next slices: (1) how a
+does, with the admin store on `Vault::store`. Also built: `courier::policy` — platform
+capabilities as a closed Rust set, the `(scope level, role) -> capabilities` table pinned cell
+by cell, and `authorize` joining the chain check to scope coverage and capability. A role read
+one level down is a different role, so narrowing a token to app scope drops platform
+capabilities by design. Next slices: (1) `role.assign` — node issuance of a role token, with a
+rank check so an assigner cannot mint above itself; (2) the durable node admin store. Next slices: (1) how a
 maintainer hands out an app role — delegation cannot change a role, so role assignment needs
 node issuance under `role.assign`; (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.

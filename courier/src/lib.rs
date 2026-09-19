@@ -1,7 +1,8 @@
 //! Courier protocol: authenticated peer sessions, then workspace publish/sync messages.
 //!
-//! This first slice is transport-free. It models node bootstrap claim and reconnect as
-//! pure message transitions; QUIC/Iroh adapters will only carry these bytes later.
+//! Transport-free throughout: node bootstrap claim and reconnect are pure message
+//! transitions, [`token`] is the node-rooted role-token chain, and [`policy`] turns a
+//! verified chain into an allow/deny. QUIC/Iroh adapters will only carry these bytes later.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -10,6 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod policy;
 pub mod token;
 
 const TICKET_DOMAIN: &[u8] = b"osvauld/courier/ticket/v1\0";
@@ -46,6 +48,12 @@ pub enum CourierError {
     BrokenChain,
     #[error("token was issued to someone else")]
     WrongHolder,
+    #[error("scope is not a valid target")]
+    BadScope,
+    #[error("role does not cover the target")]
+    OutOfScope,
+    #[error("role does not carry that capability")]
+    NotPermitted,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

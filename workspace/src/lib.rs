@@ -158,6 +158,12 @@ impl ResourceBinding {
     }
 }
 
+/// One segment's rules, for callers that name a workspace or an app without building a whole
+/// address. Same grammar, so a name that passes here is usable inside one.
+pub fn valid_id(value: &str) -> bool {
+    valid_segment(value)
+}
+
 fn valid_segment(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_SEGMENT_LEN

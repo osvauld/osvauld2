@@ -3,7 +3,8 @@
 > **Status — 2026-09-11: design baseline; validated resource-address syntax, callable handles,
 > and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
 > node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4;
-> 2026-09-19: signatures are record fields and kunki stores through vault.**
+> 2026-09-19: signatures are record fields and kunki stores through vault, and the
+> platform capability table plus its authorization boundary are built in `courier::policy`.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -233,7 +234,12 @@ keeps it in the audit log. Delegation then only ever narrows scope.
 
 ### Decided 2026-09-18: roles, capabilities, rules, and how apps reach data
 
-Agreed with the user; refines the block above. Nothing here is built.
+Agreed with the user; refines the block above. **Built 2026-09-19:** `courier::policy` — the
+closed platform capability set, the `(scope level, role) -> capabilities` table, and
+`authorize` = chain check ∧ the role's scope covers the target ∧ the role carries the
+capability. Targets are syntax-checked first, because `Scope::Node` contains every variant and
+would otherwise reach addresses a narrower role could not parse. Manifest capabilities, app
+roles, and rules are still unbuilt.
 
 **Role, capability, and rule are three things with one owner each.** A *role* is a name a DID
 holds in a scope, carried by the token chain and checked in Rust. A *capability* is a named
