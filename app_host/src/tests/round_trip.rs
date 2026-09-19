@@ -194,7 +194,7 @@ fn the_printed_kanban_walks_into_elements() {
         .call::<Table>(())
         .expect("the printed view failed to build");
 
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     if let Err(e) = walk(tree, &mut ctx) {
         panic!("walk rejected the printed tree: {e}");

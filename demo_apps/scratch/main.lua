@@ -71,6 +71,7 @@ local function row_of(n)
 		ui.col({ grow = true, ui.text({ n.text, color = C.text, font_size = 13 }) }),
 		ui.text({ ago(n.ts), no_wrap = true, color = C.muted, font_size = 11 }),
 		ui.button({
+			id = "delete:" .. n.id,
 			w = 22,
 			h = 22,
 			radius = 6,
@@ -157,6 +158,7 @@ return function()
 				on_enter = add,
 			}),
 			ui.button({
+				id = "add",
 				w = 64,
 				h = 34,
 				radius = 6,

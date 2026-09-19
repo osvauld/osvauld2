@@ -14,6 +14,8 @@ pub(crate) enum Slot {
     Tint,
     Slide,
     Fade,
+    PressScale,
+    Zoom,
     Scroll,
     Editor,
 }

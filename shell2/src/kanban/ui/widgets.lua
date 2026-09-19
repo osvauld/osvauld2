@@ -73,14 +73,16 @@ function M.badge(n)
 	})
 end
 
-function M.icon_button(glyph, on_press, hover)
+function M.icon_button(id, glyph, on_press, hover)
 	return ui.button({
+		id = id,
 		w = 22,
 		h = 22,
 		radius = 6,
 		center = true,
 		no_shrink = true,
 		hover_fill = hover or C.line,
+		press_scale = 0.92,
 		ui.text({ glyph, no_wrap = true, color = C.muted, font_size = 13 }),
 		on_click = on_press,
 	})

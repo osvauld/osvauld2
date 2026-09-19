@@ -7,7 +7,23 @@ Companions: `animation.md` (rev 3 — the timeline/binding layer this builds on)
 `runtime-rebuild-plan.md` §2.5 (rich text leaf — the first thing that needed this),
 `w3.md` (the current week; none of this is W3 work).
 
-Status: **design notes from a pairing session, nothing built.** No week assigned.
+Status: **historical research/design notes.** The original 2026-08-28 claim that Frame was
+unbuilt is superseded: the shipped subset is recorded in [status](../status.md) and the
+[Frame plan](frame-implementation-plan.md). Other prerequisite observations below have also been
+superseded (rich runs, require, press-scale and viewport transforms).
+
+**Revision 2026-09-11:** the [Frame implementation plan](frame-implementation-plan.md) is the
+companion delivery roadmap: complete capability scope, Lua-first vertical slices, proposed
+contracts, dependencies and acceptance gates. Earlier research and estimates remain below for
+history, not as current implementation claims. Frame is planned to support internal group clips; Geometry owns
+external placement and ancestor/viewport clips. Lua authoring is part of the first milestone,
+not a later optional binding.
+
+**Revision 2026-09-12:** the product direction now includes a retained, composable 3D environment
+for interfaces and simulations. Frame stays 2D; world lifetime, Rapier/PBD composition,
+perspective/deformable surfaces and renderer-selection spikes live in the
+[Environment runtime plan](environment-runtime.md). The physics survey below remains evidence and
+history, not the complete world architecture.
 
 ---
 
@@ -92,6 +108,35 @@ stream generalized and given a name. Build them as one thing, not two.
   That is most of M2's actual value — the agent *builds* visuals instead of picking from three.
 - Scale invariance: a Frame under a transform zooms cleanly. Required by M4's canvas.
 
+### 1.2 Revision 2026-09-11 — Frame and resolved geometry are complementary
+
+The active viewport rebuild establishes the placement half that this draft did not name. `Frame`
+is **visual data in its own local source space**; it is not a window frame, layout result, camera,
+or hit region. Resolved `Geometry` is **where an element is in content and screen space**, including
+the inverse mapping and effective clips used by paint and input. Neither subsumes the other.
+
+The coordinate chain is:
+
+`Frame/node local → content (canvas world when one exists) → viewport → screen`
+
+Screen is logical-window space for pointers, overlays, fixed chrome, and root drag previews.
+Viewport space is relative to one camera. Content is stable under camera pan/zoom and owns layout
+movement or persisted canvas positions. Node local is for text, drop positions, handles, and Frame
+items. A camera changes the content-to-screen transform; density zoom is a separate future layout
+policy.
+
+The eventual composition is therefore `El → Taffy placement + Frame production → resolved
+Geometry → Vello`. A placed visual pairs a Frame payload with Geometry rather than baking screen
+coordinates into the Frame. This permits one Frame to be transformed, cached, exported, or painted
+as an unclipped runtime drag preview. Internal `Group` ownership is dynamic, so semantic space
+safety is enforced at the Frame/content/screen boundaries rather than pretending Rust can assign a
+unique static unit to every runtime-created group.
+
+**Implementation status:** typed screen/viewport/content/node units and typed camera/Geometry
+rectangles now exist in `runtime`; `Frame` itself and its renderer remain unbuilt. Before replacing
+paint closures, settle whether ordinary elements produce Frames immediately or Frame begins as a
+leaf/island value. Do not create a second `PaintItem` hierarchy meanwhile.
+
 ---
 
 ## 2. Math typesetting
@@ -167,6 +212,12 @@ mechanism and you've rebuilt a rigid engine and lost the reason Lua is there.
 Storage is Rust-owned, Lua holds handles. Allocate once, mutate in place, and the payload never
 enters Luau's heap. Also keeps the sandbox intact — bounds-checked ops on an opaque handle,
 never a raw pointer.
+
+**Revision 2026-09-11:** the zero-copy statement above does not describe mlua 0.10.5's safe public
+host API. Luau buffers exist, but host extraction publicly offers `to_vec()` (a copy) or bounded
+reads; its slice accessor is private. Initial bulk design may accept one aggregate copy or use
+Rust-owned opaque storage with bulk methods. Any zero-copy claim needs a measured, safe mechanism
+rather than relying on private mlua internals.
 
 ### 3.4 Precision
 
@@ -353,8 +404,9 @@ without touching Frame, buffers, or any dependency. Good way to test the feel be
 
 ## 9. Open questions
 
-- **Does `Frame` subsume `animation.md`'s `PaintItem`, or sit above it?** They overlap heavily.
-  Deciding this wrong means building the same thing twice.
+- ~~**Does `Frame` subsume `animation.md`'s `PaintItem`, or sit above it?**~~ They overlap heavily.
+  **Resolved 2026-09-11:** Frame is the generalized visual stream; do not build a parallel
+  `PaintItem` hierarchy. Geometry places and clips it but does not become part of its payload.
 - **Interrupt budget for animated apps.** 1M/frame is sized for UI. Tier 2 dies around ~50k
   elements for a reason unrelated to rendering. Raise it, or make it per-app?
 - **When does `Frame` land?** The argument for before M2 is that M2's value *is* agent-built
@@ -366,6 +418,8 @@ without touching Frame, buffers, or any dependency. Good way to test the feel be
 ## 10. Decisions log
 
 - **Frame over closures.** Closures can't be measured, nested, cached, diffed, or exported.
+- **Frame is payload; Geometry is placement.** Frame stays node-local and reusable; resolved typed
+  transforms and clips map it through content/viewport space to the screen.
 - **Glyph ids over strings** in Frame — stretchy delimiters need unencoded glyphs.
 - **Own the math engine** rather than typst/ReX — `ttf-parser` removes the reason to depend.
 - **MathML Core over the TeXbook** — written against the same MATH constants.

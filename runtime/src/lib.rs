@@ -5,9 +5,14 @@
 //! vocabulary, same pipeline (docs/architecture.md).
 
 mod anim;
+pub mod coords;
 mod drag;
 mod editor;
 mod el;
+pub mod frame;
+mod geometry;
+mod headless;
+mod hover;
 mod id;
 mod layout;
 mod paint;
@@ -15,12 +20,19 @@ mod render;
 mod scroll;
 mod state;
 mod text;
-use crate::anim::{Driver, Transition};
+mod zoom;
+use crate::anim::{Driver, Spring, Transition};
+use crate::coords::{NodePoint, ScreenPoint};
 use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
-use crate::el::Binding;
+use crate::el::{Binding, Click};
+use crate::frame::FrameHit;
+use crate::geometry::{Clip, Geometry};
+use crate::hover::Hovered;
 use crate::id::Id;
+use crate::layout::PlacedKind;
 use crate::state::Slot;
+use crate::zoom::Zoom;
 use editor::Field;
 use scroll::*;
 use std::collections::HashSet;
@@ -40,15 +52,22 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, El, ElInfo, Placement, PlacementAlign, PlacementSide, col, custom, rich, row,
-    text, text_area, text_input,
+    Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col,
+    custom, frame, rich, row, text, text_area, text_input,
 };
+pub use headless::Headless;
+pub use hover::{HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
+
+fn pan_axes((x, y): (f32, f32), (ax, ay): (bool, bool)) -> (f32, f32) {
+    (if ax { x } else { 0.0 }, if ay { y } else { 0.0 })
+}
+
 /// An application: a tree-of-elements `view` derived from state, plus an `update` that mutates state
 /// in response to messages. The runtime calls `view` to paint and `update` when a click hits an
 /// element carrying a message. `Msg: Clone` because a laid-out region owns its message.
@@ -92,8 +111,10 @@ pub trait App {
 enum Capture {
     App {
         id: Id,
-        origin: (f32, f32),
-        start: (f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
     },
     Thumb {
         thumb: Thumb,
@@ -102,13 +123,24 @@ enum Capture {
     },
     Text {
         id: Id,
-        rect: Rect,
+        geometry: Geometry,
         pad: Insets,
+    },
+    Zoom {
+        id: Id,
+        rect: Rect,
+        content: (f32, f32),
+        axes: (bool, bool),
+        last: (f32, f32),
+        /// Set while the press also armed a click inside this camera: no pan until it travels.
+        click_at: Option<(f32, f32)>,
     },
     Pending {
         id: Id,
-        origin: (f32, f32),
-        start: (f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
         press: (f32, f32),
     },
 }
@@ -121,7 +153,10 @@ impl Capture {
         }
     }
     fn is_grab(&self) -> bool {
-        matches!(self, Capture::App { .. } | Capture::Thumb { .. })
+        matches!(
+            self,
+            Capture::App { .. } | Capture::Thumb { .. } | Capture::Zoom { .. }
+        )
     }
 }
 
@@ -130,6 +165,9 @@ impl Capture {
 struct Runner<A: App> {
     app: A,
     render: Option<Render>,
+    /// Set only when there is no window: the viewport to lay out against, so `frame` still runs
+    /// the whole layout/hit/paint path and fills `hits`. The scene it builds is thrown away.
+    offscreen: Option<(f32, f32)>,
     pointer: Option<(f32, f32)>,
     text: TextEngine,
     focused: Focus,
@@ -141,20 +179,71 @@ struct Runner<A: App> {
     start: Instant,
     last_frame: Option<f64>,
     hits: Hits<A::Msg>,
-    pressed: Option<(Rect, A::Msg)>,
+    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, Option<Shapes>)>,
+    hovered: Hovered,
+}
+
+/// A frame an element draws, and the element-local origin it is drawn at — everything a pointer
+/// event needs to name the shape beneath it. Only a `ui.frame` has one.
+#[derive(Clone)]
+struct Shapes {
+    frame: Arc<crate::frame::Frame>,
+    origin: (f64, f64),
+}
+
+impl Shapes {
+    fn at(&self, local: NodePoint) -> Option<crate::frame::FrameHit> {
+        self.frame
+            .hit(Point::new(local.x - self.origin.0, local.y - self.origin.1))
+    }
+}
+
+/// The shape a drag grabbed: what it was called, how to put a later point into its coordinates,
+/// and where its frame sits inside the element. A gesture holds this from press to release.
+#[derive(Clone)]
+struct Grabbed {
+    id: Id,
+    into: vello::kurbo::Affine,
+    origin: (f64, f64),
+}
+
+impl Grabbed {
+    fn take(shapes: &Option<Shapes>, local: NodePoint) -> Option<Self> {
+        let s = shapes.as_ref()?;
+        let hit = s.at(local)?;
+        Some(Self {
+            id: hit.id,
+            into: hit.into,
+            origin: s.origin,
+        })
+    }
+
+    /// The pointer in the grabbed shape's coordinates, wherever it has got to since.
+    fn at(&self, local: NodePoint) -> (Id, (f32, f32)) {
+        let p = self.into * Point::new(local.x - self.origin.0, local.y - self.origin.1);
+        (self.id.clone(), (p.x as f32, p.y as f32))
+    }
+}
+
+/// The shape under `local` for an element that draws a frame, and `None` for one that doesn't.
+fn shape_at(shapes: &Option<Shapes>, local: NodePoint) -> Option<crate::frame::FrameHit> {
+    shapes.as_ref().and_then(|s| s.at(local))
 }
 
 struct Hits<M> {
-    click: Vec<(Rect, M)>,
-    input: Vec<(Rect, Id, Insets)>,
+    /// The last field is the element's nearest zoomable ancestor.
+    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, Option<Shapes>)>,
+    input: Vec<(Geometry, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
-    drag: Vec<(Rect, Id, Box<dyn Fn(DragEvent) -> M>)>,
-    drop: Vec<(Rect, Id, Box<dyn Fn(DropEvent) -> M>)>,
+    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
+    drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
     bar: Vec<Thumb>,
+    zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -166,10 +255,12 @@ impl<M> Default for Hits<M> {
             context: Vec::new(),
             drag: Vec::new(),
             drop: Vec::new(),
+            hover: Vec::new(),
             scroll: Vec::new(),
             enter: Vec::new(),
             esc: Vec::new(),
             bar: Vec::new(),
+            zoom: Vec::new(),
         }
     }
 }
@@ -183,10 +274,12 @@ impl<M> Hits<M> {
             context,
             drag,
             drop,
+            hover,
             scroll,
             enter,
             esc,
             bar,
+            zoom,
         } = self;
         click.clear();
         input.clear();
@@ -194,17 +287,23 @@ impl<M> Hits<M> {
         context.clear();
         drag.clear();
         drop.clear();
+        hover.clear();
         scroll.clear();
         enter.clear();
         esc.clear();
         bar.clear();
+        zoom.clear();
     }
 }
 
 impl<A: App> Runner<A> {
     fn frame(&mut self) {
-        let Some(render) = self.render.as_ref() else {
-            return;
+        // Windowed, the surface says how big and how sharp. Offscreen, we say, at 1.0 — which
+        // makes physical and logical points the same number for anything driving it by hand.
+        let (surface, surface_scale, surface_transform) = match (&self.render, self.offscreen) {
+            (Some(r), _) => (r.viewport(), r.scale() as f32, r.transform()),
+            (None, Some(v)) => (v, 1.0, Affine::IDENTITY),
+            (None, None) => return,
         };
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
@@ -217,15 +316,15 @@ impl<A: App> Runner<A> {
         let viewport = screenshot
             .as_ref()
             .and_then(|r| r.viewport)
-            .unwrap_or_else(|| render.viewport());
+            .unwrap_or(surface);
         let capture_scale = screenshot
             .as_ref()
             .and_then(|r| r.scale)
-            .unwrap_or(render.scale() as f32);
+            .unwrap_or(surface_scale);
         let t = if custom_capture {
             Affine::scale(capture_scale as f64)
         } else {
-            render.transform()
+            surface_transform
         };
         let clear = self.app.clear();
         self.scene.reset();
@@ -234,7 +333,10 @@ impl<A: App> Runner<A> {
         let hits = &mut self.hits;
         let store = &mut self.store;
         let focused = &mut self.focused;
-        let pressed = self.pressed.as_ref().map(|(rect, _)| rect.clone());
+        let pressed = self
+            .pressed
+            .as_ref()
+            .map(|(geometry, id, _, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
@@ -242,21 +344,51 @@ impl<A: App> Runner<A> {
         let mut placed = layout::solve(app.view(), text, viewport, store);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         hits.clear();
+        let mut clips = Vec::new();
         for p in placed.iter_mut() {
-            let hit_rect = match p.clip {
-                Some(c) => c.intersect(p.rect),
-                None => p.rect,
-            };
-
+            match p.kind {
+                PlacedKind::PushClip { rect, transform } => {
+                    clips.push(Clip {
+                        rect,
+                        to_screen: transform,
+                    });
+                    continue;
+                }
+                PlacedKind::PopClip => {
+                    clips.pop();
+                    continue;
+                }
+                PlacedKind::Node => {}
+            }
+            let geometry = Geometry::resolve(p.rect, p.transform, clips.iter().copied());
+            let visible = geometry.visible_rect_kurbo();
             let over =
-                pointer.is_some_and(|(px, py)| hit_rect.contains(Point::new(px as f64, py as f64)));
+                pointer.is_some_and(|(px, py)| geometry.contains(Point::new(px as f64, py as f64)));
             if p.appearance.repaint {
                 any_in_flight = true;
+            }
+            if let Some(axes) = p.behaviour.zoom
+                && let Some(id) = &p.id
+            {
+                store.get_or::<Zoom>(id, Slot::Zoom);
+                if let Some(hit_rect) = visible {
+                    hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
+                }
+            }
+
+            if let Some((_b, _scale)) = &p.behaviour.press_scale
+                && let Some(id) = &p.id
+            {
+                let pressed_id = pressed.and_then(|(_, id)| id);
+                if Self::drive_spring(store, dt, pressed_id == Some(id), id) {
+                    any_in_flight = true;
+                }
             }
 
             for (b, slot) in p.behaviour.bindings() {
                 if let Some(id) = &p.id {
-                    let (fl, landed) = Self::drive(b, slot, store, dt, over, id);
+                    let pressed_id = pressed.and_then(|(_, id)| id);
+                    let (fl, landed) = Self::drive(b, slot, store, dt, over, pressed_id, id);
                     if fl {
                         any_in_flight = true;
                     }
@@ -269,17 +401,47 @@ impl<A: App> Runner<A> {
                 }
             }
 
-            if let Some(msg) = p.behaviour.on_click.take() {
-                hits.click.push((hit_rect, msg));
-            }
-            if let Some((id, handler)) = p.behaviour.on_drag.take() {
-                hits.drag.push((hit_rect, id, handler));
+            if let Some((_id, map)) = p.behaviour.on_frame.take() {
+                done_msgs.push(map(FrameTick { dt, elapsed: now }));
+                any_in_flight = true;
             }
 
-            if let Some((id, handler)) = p.behaviour.on_drop.take() {
-                hits.drop.push((hit_rect, id, handler));
+            // The visual is drawn at the content origin, so that is where its own coordinates
+            // start — a padded frame element is offset from its own top-left.
+            let shapes = p.appearance.frame.as_ref().map(|frame| Shapes {
+                frame: frame.clone(),
+                origin: (p.pad.x0, p.pad.y0),
+            });
+            if let Some(click) = p.behaviour.on_click.take()
+                && geometry.visible_rect.is_some()
+            {
+                hits.click.push((
+                    geometry,
+                    p.id.clone(),
+                    click,
+                    p.zoom_parent.clone(),
+                    shapes.clone(),
+                ));
             }
-            if let Some(h) = p.behaviour.on_right_click.take() {
+            if let Some((id, handler)) = p.behaviour.on_drag.take()
+                && visible.is_some()
+            {
+                hits.drag.push((geometry, id, handler, shapes.clone()));
+            }
+
+            if let Some((id, handler)) = p.behaviour.on_drop.take()
+                && visible.is_some()
+            {
+                hits.drop.push((geometry, id, handler));
+            }
+            if let Some((id, handler)) = p.behaviour.on_hover.take()
+                && visible.is_some()
+            {
+                hits.hover.push((geometry, id, handler, shapes));
+            }
+            if let Some(h) = p.behaviour.on_right_click.take()
+                && let Some(hit_rect) = visible
+            {
                 hits.context.push((hit_rect, h));
             }
 
@@ -303,7 +465,9 @@ impl<A: App> Runner<A> {
                         store,
                     );
                 }
-                hits.input.push((hit_rect, id.clone(), p.pad));
+                if visible.is_some() {
+                    hits.input.push((geometry, id.clone(), p.pad));
+                }
                 if spec.autofocus && !prev_inputs.contains(id) {
                     focused.set(id.clone());
                     let field = focused.focused_field(store);
@@ -357,7 +521,9 @@ impl<A: App> Runner<A> {
                 } else {
                     None
                 };
-            if let Some((id, content, (ax, ay))) = scroll_vals {
+            if let Some((id, content, (ax, ay))) = scroll_vals
+                && let Some(hit_rect) = visible
+            {
                 hits.scroll.push(ScrollHit {
                     hit_rect,
                     rect: p.rect,
@@ -368,12 +534,12 @@ impl<A: App> Runner<A> {
                 let s = store.get_or::<Scroll>(id, Slot::Scroll);
                 if ay {
                     if let Some(v) = axis_thumb(p.rect, id, Axis::Y, ih, content.1, s.y) {
-                        hits.bar.push(v);
+                        hits.bar.push(v.to_screen(p.transform, hit_rect));
                     }
                 }
                 if ax {
                     if let Some(h) = axis_thumb(p.rect, id, Axis::X, iw, content.0, s.x) {
-                        hits.bar.push(h);
+                        hits.bar.push(h.to_screen(p.transform, hit_rect));
                     }
                 }
             }
@@ -399,7 +565,9 @@ impl<A: App> Runner<A> {
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
-        let captured = if custom_capture {
+        let captured = if self.render.is_none() {
+            None // nothing to present to, and a screenshot request just goes unanswered
+        } else if custom_capture {
             // This frame ran the normal layout/hit/paint path against the requested viewport,
             // but its pixels never reach the surface. Temporary hit geometry must not accept
             // input before the normal restorative frame requested below.
@@ -424,13 +592,19 @@ impl<A: App> Runner<A> {
             })
         };
         let mut dispatched = !done_msgs.is_empty();
-        if let Some(request) = screenshot {
-            self.app
-                .update((request.complete)(captured.expect("capture result")));
+        if let (Some(request), Some(image)) = (screenshot, captured) {
+            self.app.update((request.complete)(image));
             dispatched = true;
         }
         for m in done_msgs {
             self.app.update(m);
+        }
+        // The paint above is what rebuilds the hover regions, so this is the one moment they are
+        // fresh: geometry that moved under a still pointer changes what it is on with no event to
+        // announce it. Not after a custom capture, which cleared them — every element would leave
+        // and re-enter. `Hovered` reports nothing when nothing changed, so this settles.
+        if !custom_capture && let Some(at) = self.pointer {
+            dispatched |= self.hover(at, true);
         }
         if any_in_flight || needs_redraw || dispatched {
             self.redraw();
@@ -442,6 +616,7 @@ impl<A: App> Runner<A> {
         store: &mut Store,
         dt: f32,
         over: bool,
+        pressed: Option<&Id>,
         id: &Id,
     ) -> (bool, Option<f32>) {
         let target = match b.driver {
@@ -452,6 +627,7 @@ impl<A: App> Runner<A> {
                     0.0
                 }
             }
+            Driver::Press => (pressed == Some(id)) as u8 as f32,
             Driver::Value(f) => f,
         };
         let tr = store.get_or_with(id, s, || Transition::new(target, b.duration));
@@ -459,6 +635,14 @@ impl<A: App> Runner<A> {
         let was = tr.in_flight();
         tr.tick(dt);
         (tr.in_flight(), (was && !tr.in_flight()).then_some(target))
+    }
+
+    fn drive_spring(store: &mut Store, dt: f32, pressed: bool, id: &Id) -> bool {
+        let target = pressed as u8 as f32;
+        let spring = store.get_or_with(id, Slot::PressScale, || Spring::new(target));
+        spring.target = target;
+        spring.tick(dt);
+        spring.in_flight()
     }
 
     fn redraw(&self) {
@@ -475,7 +659,7 @@ impl<A: App> Runner<A> {
             .bar
             .iter()
             .rev()
-            .find(|thumb| thumb.rect.contains(p))
+            .find(|thumb| thumb.hit_rect.contains(p))
         {
             let bar = self
                 .store
@@ -490,32 +674,44 @@ impl<A: App> Runner<A> {
             self.redraw();
             return;
         }
-        if let Some((rect, id, _handler)) =
-            self.hits.drag.iter().rev().find(|(r, _, _)| r.contains(p))
+        if let Some((geometry, id, _handler, shapes)) = self
+            .hits
+            .drag
+            .iter()
+            .rev()
+            .find(|(geometry, _, _, _)| geometry.contains(p))
         {
-            let origin = (rect.x0 as f32, rect.y0 as f32);
-            let start = (px - origin.0, py - origin.1);
-
+            let content = geometry.content_point(ScreenPoint::new(p.x, p.y));
             self.drag = Some(Capture::Pending {
                 id: id.clone(),
-                origin,
-                start,
+                geometry: *geometry,
+                shape: Grabbed::take(shapes, geometry.node_point(ScreenPoint::new(p.x, p.y))),
+                local_press: (content.x as f32, content.y as f32),
+                screen_grab: (
+                    px - geometry.screen_rect.min_x() as f32,
+                    py - geometry.screen_rect.min_y() as f32,
+                ),
                 press: (px, py),
             });
             self.redraw();
         }
-        let hit = self.hits.input.iter().rev().find(|(r, _, _)| r.contains(p));
+        let hit = self
+            .hits
+            .input
+            .iter()
+            .rev()
+            .find(|(geometry, _, _)| geometry.contains(p));
         match hit {
-            Some((rect, id, pad)) => {
+            Some((geometry, id, pad)) => {
                 self.focused.set(id.clone());
-                let (lx, ly) = self.local_point(id, *rect, *pad, px, py);
+                let (lx, ly) = self.local_point(id, *geometry, *pad, px, py);
                 let field = self.store.get_mut::<Field>(id, Slot::Editor);
                 if let Some(field) = field {
                     field.click_at(lx, ly, &mut self.text);
                 }
                 self.drag = Some(Capture::Text {
                     id: id.clone(),
-                    rect: *rect,
+                    geometry: *geometry,
                     pad: *pad,
                 });
             }
@@ -523,12 +719,82 @@ impl<A: App> Runner<A> {
                 self.focused.blur();
             }
         }
-        if let Some((rect, msg)) = self.hits.click.iter().rev().find(|(r, _)| r.contains(p)) {
-            let msg = msg.clone();
-            self.pressed = Some((rect.clone(), msg));
+        let clicked = self
+            .hits
+            .click
+            .iter()
+            .rev()
+            .find(|(geometry, _, _, _, _)| geometry.contains(p));
+        if let Some((geometry, id, click, _, shapes)) = clicked {
+            self.pressed = Some((*geometry, id.clone(), click.clone(), shapes.clone()));
+        }
+        // A click inside a camera may still pan it. A button floating over the canvas is not
+        // inside, and dragging off that button must not move the canvas.
+        let pans = |camera: &Id| {
+            clicked.is_none_or(|(_, id, _, parent, _)| {
+                parent.as_ref() == Some(camera) || id.as_ref() == Some(camera)
+            })
+        };
+        if self.drag.is_none()
+            && let Some((rect, id, content, axes)) = self
+                .hits
+                .zoom
+                .iter()
+                .rev()
+                .find(|(r, _, _, _)| r.contains(p))
+            && pans(id)
+        {
+            self.drag = Some(Capture::Zoom {
+                id: id.clone(),
+                rect: *rect,
+                content: *content,
+                axes: *axes,
+                last: (px, py),
+                click_at: clicked.is_some().then_some((px, py)),
+            });
         }
 
         self.redraw();
+    }
+
+    /// Fires enter/move/leave against the last frame's hover regions. `in_window` is false when the
+    /// pointer has left, so everything leaves at its last position.
+    fn hover(&mut self, (px, py): (f32, f32), in_window: bool) -> bool {
+        let p = Point::new(px as f64, py as f64);
+        let hover = &self.hits.hover;
+        // Picked before the diff rather than with the dispatch, because whether the shape under a
+        // still pointer changed is half of what decides there is anything to report at all.
+        let at: Vec<(NodePoint, Option<FrameHit>)> = hover
+            .iter()
+            .map(|(geometry, _, _, shapes)| {
+                let local = geometry.node_point(ScreenPoint::new(p.x, p.y));
+                (local, shape_at(shapes, local))
+            })
+            .collect();
+        let phases = self.hovered.step(
+            (px, py),
+            hover
+                .iter()
+                .zip(&at)
+                .map(|((g, id, _, _), (_, hit))| (id, in_window && g.contains(p), hit.as_ref())),
+        );
+        let msgs: Vec<_> = hover
+            .iter()
+            .zip(at)
+            .zip(phases)
+            .filter_map(|(((_, _, handler, _), (local, hit)), phase)| {
+                Some(handler(HoverEvent {
+                    phase: phase?,
+                    pos: (local.x as f32, local.y as f32),
+                    shape: hit,
+                }))
+            })
+            .collect();
+        let fired = !msgs.is_empty();
+        for m in msgs {
+            self.app.update(m);
+        }
+        fired
     }
 
     fn right_click(&mut self) {
@@ -541,7 +807,15 @@ impl<A: App> Runner<A> {
         }
     }
 
-    fn local_point(&self, id: &str, rect: Rect, pad: Insets, px: f32, py: f32) -> (f32, f32) {
+    fn local_point(
+        &self,
+        id: &str,
+        geometry: Geometry,
+        pad: Insets,
+        px: f32,
+        py: f32,
+    ) -> (f32, f32) {
+        let point = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
         let field = self.store.get::<Field>(&Id::from(id), Slot::Editor);
         let line_h = field
             .and_then(|f| f.layout_of())
@@ -558,9 +832,16 @@ impl<A: App> Runner<A> {
             .map(|f| f.is_multiline())
             .unwrap_or(false);
 
-        let (ox, oy) = paint::content_offset(rect, pad, line_h, scroll.x, scroll.y, multiline);
-        let lx = (px as f64 - rect.x0 - ox) as f32;
-        let ly = (py as f64 - rect.y0 - oy) as f32;
+        let (ox, oy) = paint::content_offset(
+            geometry.content_rect_kurbo(),
+            pad,
+            line_h,
+            scroll.x,
+            scroll.y,
+            multiline,
+        );
+        let lx = (point.x - ox) as f32;
+        let ly = (point.y - oy) as f32;
         (lx, ly)
     }
 
@@ -619,42 +900,56 @@ impl<A: App> Runner<A> {
         px: f32,
         py: f32,
         handle_id: Id,
-        origin: &(f32, f32),
-        start: &(f32, f32),
+        geometry: Geometry,
+        local_press: (f32, f32),
+        screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
     ) {
         let pos = (px, py);
         let mods = self.mods();
-        let delta = (px - origin.0 - start.0, py - origin.1 - start.1);
+        let content = geometry.content_point(ScreenPoint::new(px as f64, py as f64));
+        let delta = (
+            content.x as f32 - local_press.0,
+            content.y as f32 - local_press.1,
+        );
+        let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
         let event = DragEvent {
+            at: (node.x as f32, node.y as f32),
             pos,
             delta,
             mods,
-            grab: *start,
+            grab: screen_grab,
+            scale: geometry.scale(),
             phase: DragPhase::Move,
+            shape: shape.as_ref().map(|g| g.at(node)),
         };
-        if let Some((_, _, handler)) = self
+        if let Some((_, _, handler, _)) = self
             .hits
             .drag
             .iter()
-            .find(|(_, id, _)| *id == handle_id.clone())
+            .find(|(_, id, _, _)| *id == handle_id.clone())
         {
             self.app.update(handler(event));
             self.redraw();
         }
 
-        if let Some((rect, _, handler)) = self
+        if let Some((geometry, _, handler)) = self
             .hits
             .drop
             .iter()
             .rev()
-            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+            .find(|(geometry, _, _)| geometry.contains(Point::new(px as f64, py as f64)))
         {
+            let local = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
             let drop_event = DropEvent {
-                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                pos: (local.x as f32, local.y as f32),
                 mods: self.mods(),
                 dragged: handle_id,
                 phase: DropPhase::Over,
-                size: (rect.size().width as f32, rect.size().height as f32),
+                size: (
+                    geometry.content_rect.width() as f32,
+                    geometry.content_rect.height() as f32,
+                ),
             };
             self.app.update(handler(drop_event));
         }
@@ -663,52 +958,75 @@ impl<A: App> Runner<A> {
     fn on_cursor_release(&mut self) {
         if let Some(cap) = self.drag.take() {
             match cap {
-                Capture::App { id, origin, start } => {
+                Capture::App {
+                    id,
+                    geometry,
+                    local_press,
+                    screen_grab,
+                    shape,
+                } => {
                     if let Some((px, py)) = self.pointer {
                         let pos = (px, py);
-                        let delta = (pos.0 - origin.0 - start.0, pos.1 - origin.1 - start.1);
+                        let content =
+                            geometry.content_point(ScreenPoint::new(px as f64, py as f64));
+                        let delta = (
+                            content.x as f32 - local_press.0,
+                            content.y as f32 - local_press.1,
+                        );
 
-                        if let Some((rect, _, handler)) = self
+                        if let Some((target, _, handler)) = self
                             .hits
                             .drop
                             .iter()
                             .rev()
-                            .find(|(r, _, _)| r.contains(Point::new(px as f64, py as f64)))
+                            .find(|(g, _, _)| g.contains(Point::new(px as f64, py as f64)))
                         {
+                            let local = target.node_point(ScreenPoint::new(px as f64, py as f64));
                             let drop_event = DropEvent {
-                                pos: (px - rect.x0 as f32, py - rect.y0 as f32),
+                                pos: (local.x as f32, local.y as f32),
                                 mods: self.mods(),
                                 dragged: id.clone(),
                                 phase: DropPhase::Release,
-                                size: (rect.size().width as f32, rect.size().height as f32),
+                                size: (
+                                    target.content_rect.width() as f32,
+                                    target.content_rect.height() as f32,
+                                ),
                             };
                             self.app.update(handler(drop_event));
                         }
-                        if let Some((_, _, handler)) =
-                            self.hits.drag.iter().find(|(_, hid, _)| *hid == id)
+                        if let Some((_, _, handler, _)) =
+                            self.hits.drag.iter().find(|(_, hid, _, _)| *hid == id)
                         {
+                            let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
                             let event = DragEvent {
+                                at: (node.x as f32, node.y as f32),
                                 pos,
                                 delta,
                                 mods: self.mods(),
-                                grab: start,
+                                grab: screen_grab,
+                                scale: geometry.scale(),
                                 phase: DragPhase::End,
+                                shape: shape.as_ref().map(|g| g.at(node)),
                             };
                             self.app.update(handler(event));
                         }
                     }
                 }
                 // scrollbar + text selection have no "End" message — take() already cleared them
-                Capture::Thumb { .. } | Capture::Text { .. } => {}
+                Capture::Thumb { .. } | Capture::Text { .. } | Capture::Zoom { .. } => {}
                 Capture::Pending { .. } => {}
             }
         }
-        if let Some((rect, msg)) = self.pressed.take()
+        if let Some((geometry, _, click, shapes)) = self.pressed.take()
             && let Some((px, py)) = self.pointer
         {
             let point = Point::new(px as f64, py as f64);
-            if rect.contains(point) {
-                self.app.update(msg);
+            if geometry.contains(point) {
+                let local = geometry.node_point(ScreenPoint::new(point.x, point.y));
+                self.app.update(click.fire(At {
+                    pos: (local.x as f32, local.y as f32),
+                    shape: shape_at(&shapes, local),
+                }));
             }
         }
         self.redraw();
@@ -730,60 +1048,124 @@ impl<A: App> Runner<A> {
                     scroll,
                     press_point,
                 } => self.drag_thumb(lx, ly, thumb, scroll, press_point),
-                Capture::App { id, origin, start } => {
-                    self.on_drag_move(lx, ly, id.clone(), &origin, &start)
-                }
-                Capture::Text { id, rect, pad } => {
-                    let (lx, ly) = self.local_point(id, *rect, *pad, lx, ly);
+                Capture::App {
+                    id,
+                    geometry,
+                    local_press,
+                    screen_grab,
+                    shape,
+                } => self.on_drag_move(
+                    lx,
+                    ly,
+                    id.clone(),
+                    *geometry,
+                    *local_press,
+                    *screen_grab,
+                    shape.clone(),
+                ),
+                Capture::Text { id, geometry, pad } => {
+                    let (lx, ly) = self.local_point(id, *geometry, *pad, lx, ly);
                     let text = &mut self.text;
                     let field = self.store.get_mut::<Field>(id, Slot::Editor);
                     if let Some(field) = field {
                         field.extend_to(lx, ly, text);
                     }
                 }
+                Capture::Zoom {
+                    id,
+                    rect,
+                    content,
+                    axes,
+                    last,
+                    click_at,
+                } => {
+                    // Same 5pt slop as a drag handle. `last` stays at the press, so no travel is lost.
+                    let still_a_click = click_at
+                        .is_some_and(|(cx, cy)| (lx - cx).abs() <= 5.0 && (ly - cy).abs() <= 5.0);
+                    if !still_a_click {
+                        if click_at.is_some() {
+                            self.pressed = None;
+                        }
+                        let delta = pan_axes((lx - last.0, ly - last.1), *axes);
+                        self.store
+                            .get_or::<Zoom>(id, Slot::Zoom)
+                            .pan_by(*rect, *content, delta);
+                        self.drag = Some(Capture::Zoom {
+                            id: id.clone(),
+                            rect: *rect,
+                            content: *content,
+                            axes: *axes,
+                            last: (lx, ly),
+                            click_at: None,
+                        });
+                    }
+                }
                 Capture::Pending {
                     id,
-                    origin,
-                    start,
+                    geometry,
+                    local_press,
+                    screen_grab,
+                    shape,
                     press,
                 } => {
                     let dx = press.0 - lx;
                     let dy = press.1 - ly;
                     if dx.abs() > 5.0 || dy.abs() > 5.0 {
-                        self.drag = Some(Capture::App {
-                            id: id.clone(),
-                            origin: *origin,
-                            start: *start,
-                        });
+                        let press_at =
+                            geometry.node_point(ScreenPoint::new(press.0 as f64, press.1 as f64));
                         let event = DragEvent {
+                            // Where the press landed, not where the slop ended.
+                            at: (press_at.x as f32, press_at.y as f32),
                             delta: (0.0, 0.0),
                             phase: DragPhase::Start,
                             pos: (lx, ly),
-                            grab: *start,
+                            grab: *screen_grab,
+                            scale: geometry.scale(),
                             mods: self.mods(),
+                            shape: shape.as_ref().map(|g| g.at(press_at)),
                         };
+                        self.drag = Some(Capture::App {
+                            id: id.clone(),
+                            geometry: *geometry,
+                            local_press: *local_press,
+                            screen_grab: *screen_grab,
+                            shape: shape.clone(),
+                        });
                         let handler = self
                             .hits
                             .drag
                             .iter()
-                            .find(|(_, drag_id, _)| drag_id == id)
-                            .map(|(_, _, handler)| handler);
+                            .find(|(_, drag_id, _, _)| drag_id == id)
+                            .map(|(_, _, handler, _)| handler);
                         if let Some(handler) = handler {
                             self.app.update(handler(event));
-                            self.on_drag_move(lx, ly, id.clone(), origin, start);
+                            self.on_drag_move(
+                                lx,
+                                ly,
+                                id.clone(),
+                                *geometry,
+                                *local_press,
+                                *screen_grab,
+                                shape.clone(),
+                            );
                         }
                         self.pressed = None;
                     };
                 }
             };
         }
+        self.hover((lx, ly), true);
 
-        let over_input = self.hits.input.iter().any(|(r, _, _)| r.contains(p));
+        let over_input = self
+            .hits
+            .input
+            .iter()
+            .any(|(geometry, _, _)| geometry.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
         if let Some(r) = &self.render {
             r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
                 CursorIcon::Grabbing
-            } else if self.hits.drag.iter().any(|(r, _, _)| r.contains(p)) {
+            } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
                 CursorIcon::Grab
             } else if over_input {
                 CursorIcon::Text
@@ -797,6 +1179,7 @@ impl<A: App> Runner<A> {
         let Some((px, py)) = self.pointer else { return };
         let p = Point::new(px as f64, py as f64);
         let shift = self.modifiers.shift_key();
+        let ctrl_zoom = self.modifiers.control_key();
 
         //normalize to logical content-pixels
         let (dx, dy) = match delta {
@@ -808,7 +1191,25 @@ impl<A: App> Runner<A> {
         };
         let (dh, dv) = if shift { (-dy, 0.0) } else { (-dx, -dy) };
         let (mut rem_h, mut rem_v) = (dh, dv);
-        //innermost scroll contenxt under the pointer wins
+        if ctrl_zoom {
+            if let Some((rect, id, content, _axes)) = self
+                .hits
+                .zoom
+                .iter()
+                .rev()
+                .find(|(r, _, _, _)| r.contains(p))
+            {
+                self.store.get_or::<Zoom>(id, Slot::Zoom).at(
+                    *rect,
+                    *content,
+                    p,
+                    -rem_v / LINE_STEP,
+                );
+                self.redraw();
+            }
+            return;
+        }
+        // The innermost scroller consumes first; only its remainder reaches the viewport camera.
         for s in self.hits.scroll.iter().rev() {
             if !s.hit_rect.contains(p) {
                 continue;
@@ -833,6 +1234,19 @@ impl<A: App> Runner<A> {
             if rem_h.abs() < 0.5 && rem_v.abs() < 0.5 {
                 break;
             }
+        }
+        if let Some((rect, id, content, axes)) = self
+            .hits
+            .zoom
+            .iter()
+            .rev()
+            .find(|(r, _, _, _)| r.contains(p))
+        {
+            self.store.get_or::<Zoom>(id, Slot::Zoom).pan_by(
+                *rect,
+                *content,
+                pan_axes((-rem_h, -rem_v), *axes),
+            );
         }
         self.redraw();
     }
@@ -939,6 +1353,9 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 // Physical → logical: hit-testing and rects are all in logical points.
             }
             WindowEvent::CursorLeft { .. } => {
+                if let Some(at) = self.pointer {
+                    self.hover(at, false);
+                }
                 self.pointer = None;
                 self.redraw();
             }
@@ -1012,21 +1429,32 @@ pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> 
         .expect("event loop");
     let app = build(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut runner = Runner {
-        app,
-        render: None,
-        pointer: None,
-        hits: Hits::default(),
-        focused: Focus::new(),
-        text: TextEngine::new(),
-        modifiers: ModifiersState::empty(),
-        debug: false,
-        store: Store::new(),
-        drag: None,
-        scene: Scene::new(),
-        start: Instant::now(),
-        last_frame: None,
-        pressed: None,
-    };
+    let mut runner = Runner::new(app, None);
     event_loop.run_app(&mut runner).expect("run app");
 }
+
+impl<A: App> Runner<A> {
+    fn new(app: A, offscreen: Option<(f32, f32)>) -> Self {
+        Self {
+            app,
+            render: None,
+            offscreen,
+            pointer: None,
+            hits: Hits::default(),
+            focused: Focus::new(),
+            text: TextEngine::new(),
+            modifiers: ModifiersState::empty(),
+            debug: false,
+            store: Store::new(),
+            drag: None,
+            scene: Scene::new(),
+            start: Instant::now(),
+            last_frame: None,
+            pressed: None,
+            hovered: Hovered::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

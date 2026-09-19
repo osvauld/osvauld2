@@ -1,10 +1,11 @@
-# Animation system + subtree transform — design (rev 3, 2026-07-26)
+# Animation system + subtree transform — design (rev 4, 2026-09-11)
 
-> **As-built (rev 3):** Phases 0–D shipped, but **exit diverged from this doc** — we built
+> **As-built (rev 4):** Phases 0–D shipped, but **exit diverged from this doc** — we built
 > neither v1 (declare-until-done) nor v2 (tombstone) but a third approach, **deferred-message
-> (Option B)**, and split the single `TransitionSpec` into **property-keyed bindings**. See
-> **§14 — As-built** for the real shape and what's still open. §11's v1/v2 are kept as the
-> design survey that led there.
+> (Option B)**, and split the single `TransitionSpec` into **property-keyed bindings**. A
+> 2026-09-11 simulation exception now permits explicit bounded Lua `on_frame` callbacks; ordinary
+> presentation transitions remain declaration-only. See **§14 — As-built** for the real shape and
+> what's still open. §11's v1/v2 are kept as the design survey that led there.
 
 Expands w1.md §4/§5 into a build plan. Companion: `w1.md` (the week), `runtime-rebuild-plan.md`
 (the why). Rev 2 adds §1: three runtime restructures that make the rest *simpler to build* —
@@ -500,6 +501,20 @@ panel, then delivers the dismiss message. The app writes only `.fade_in` on the 
 Option B covers exits triggered by **runtime-seen input** (click, dismiss). It does **not** cover
 **data-driven** removal — a row that vanishes because a *server sync* deleted it, no click. That
 still needs **v2 (tombstone) + Phase E (retained placed)**, deferred until sync exists.
+
+### 14.4 Simulation exception — explicit app-rate ticks (2026-09-11)
+
+The declaration-only rule remains correct for presentation transitions: hover, press, enter and
+exit must not require Lua to run every frame. It was too broad for authored simulations, where the
+algorithm itself intentionally lives in Lua. An element may now opt into `on_frame(dt, elapsed)`:
+its stable `id` is mandatory, `elapsed` is monotonic Runner time, and `dt` is clamped to 0.1
+seconds after stalls. Only Runner's first frame is guaranteed a zero `dt`; a newly declared or
+resumed callback currently receives the shared Runner delta. The callback is dispatched after the
+current snapshot. Presence keeps redraw active; omitting the callback stops that redraw request.
+Custom screenshots currently dispatch callbacks too, and callback identity/error quarantine are
+not world-safe. This is an experimental visual/prototyping tradeoff under the sandbox interrupt
+budget—not a fixed-step simulation scheduler or the implementation path for routine UI animation.
+See [Environment runtime](environment-runtime.md) §7 and Gate 0.
 
 Still open:
 

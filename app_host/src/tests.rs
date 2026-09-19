@@ -1,5 +1,6 @@
 use super::*;
 use mlua::{FromLua, Table};
+use runtime::HoverPhase;
 use std::rc::Rc;
 
 mod reload;
@@ -44,6 +45,377 @@ fn now() {
 }
 
 #[test]
+fn gfx_path_compiles_one_batched_lua_declaration() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let value: mlua::AnyUserData = lua
+        .load(
+            r#"return gfx.path({
+                { "move", 0, 0 },
+                { "quad", 10, 20, 30, 0 },
+                { "cubic", 40, -10, 50, 10, 60, 0 },
+                { "close" },
+            })"#,
+        )
+        .eval()
+        .unwrap();
+    let path = value.borrow::<gfx::LuaPath>().unwrap();
+    assert_eq!(path.0.command_count(), 4);
+}
+
+#[test]
+fn lua_builds_a_nested_gradient_frame_element() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(
+            r##"
+            local p = gfx.path({ { "move", 0, 0 }, { "line", 40, 0 }, { "line", 20, 30 }, { "close" } })
+            local gradient = gfx.linear_gradient({
+                from = { 0, 0 }, to = { 40, 30 },
+                stops = { { 0, "#ff507a" }, { 1, "#5865f2" } }, extend = "reflect",
+            })
+            local triangle = gfx.frame({ width = 40, height = 30,
+                gfx.fill({ path = p, brush = gradient }),
+                gfx.stroke({ path = p, brush = gfx.solid("#ffffff"), width = 2,
+                    cap = "round", join = "bevel", dashes = { 4, 2 }, dash_offset = 1 })
+            })
+            local picture = gfx.frame({ width = 100, height = 80,
+                gfx.group({ transform = { 1, 0, 0, 1, 10, 20 },
+                    gfx.instance({ visual = triangle, transform = { 1.5, 0, 0, 1.5, 0, 0 } })
+                })
+            })
+            return ui.frame({ id = "picture", visual = picture })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    let info = walk(node, &mut ctx).unwrap().info();
+
+    assert_eq!(info.kind, "frame");
+    assert_eq!(info.id.as_deref(), Some("picture"));
+}
+
+/// Naming shapes is how an app says which parts of a drawing are touchable. The name reaches the
+/// compiled resource; an empty one is a typo, not a shape called "".
+#[test]
+fn lua_names_the_shapes_it_wants_to_hit() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let visual: AnyUserData = lua
+        .load(
+            r##"
+            local p = gfx.path({ { "move", 0, 0 }, { "line", 10, 0 }, { "line", 5, 8 }, { "close" } })
+            local b = gfx.solid("#ffffff")
+            return gfx.frame({ width = 10, height = 10,
+                gfx.fill({ path = p, brush = b }),
+                gfx.fill({ path = p, brush = b, id = "slice:1" }),
+                gfx.stroke({ path = p, brush = b, width = 1, id = "rim" }),
+                gfx.group({ transform = { 1, 0, 0, 1, 2, 2 }, id = "dial",
+                    gfx.fill({ path = p, brush = b, id = "tick" })
+                })
+            })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let frame = visual.borrow::<gfx::LuaFrame>().unwrap().0.clone();
+
+    let names: Vec<_> = frame
+        .items()
+        .iter()
+        .map(|i| i.id().map(|id| &**id))
+        .collect();
+    assert_eq!(names, [None, Some("slice:1"), Some("rim"), Some("dial")]);
+    assert_eq!(frame.stats().hittable, 3); // "tick" hides behind the named group
+
+    let empty = r##"return gfx.frame({ width = 1, height = 1,
+        gfx.fill({ path = gfx.path({ { "move", 0, 0 } }), brush = gfx.solid("#fff"), id = "" }) })"##;
+    assert!(lua.load(empty).eval::<Value>().is_err());
+}
+
+/// The shape a pointer is on rides on the end of the handler's arguments, so a handler that
+/// doesn't care never sees it. On nothing, all three are nil rather than a zero that reads like
+/// the shape's top-left corner.
+#[test]
+fn a_pointer_handler_is_told_which_shape_it_is_on() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = {}
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_hover = function(e)
+                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy }
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let seen = |app: &LuaApp<LuaMsg>| {
+        let t: Table = app.vm.globals().get("seen").unwrap();
+        (1..=6)
+            .map(|i| match t.get::<Value>(i).unwrap() {
+                Value::Nil => "nil".to_string(),
+                v => v.to_string().unwrap(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let key = Key::new("plot", "on_hover");
+    let _ = app.view(); // handlers are registered by the walk, not by the source
+
+    app.update(LuaMsg::CallPhase(
+        key.clone(),
+        "move",
+        40.0,
+        12.0,
+        Shape(Some(("slice:2".into(), 3.5, 1.0))),
+    ));
+    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1");
+
+    app.update(LuaMsg::CallPhase(key, "move", 40.0, 12.0, Shape::default()));
+    assert_eq!(seen(&app), "move 40 12 nil nil nil");
+}
+
+/// A drag's shape rides at the very end, after the seven arguments it already had.
+/// Handlers carrying more than one value take a single table, because positional arguments fail
+/// *quietly*: a signature one short of the real one slides every later argument down a slot, so
+/// `shape` receives `scale` — the number 1, which passes for a shape id and fails every lookup
+/// with nothing on the console. Keys cannot slide, and a name that isn't there is nil.
+#[test]
+fn a_handler_reads_its_event_by_name_not_by_position() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = ""
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_drag = function(e)
+                    -- `origin` and `shapes` are near misses for real keys, and both must be nil
+                    -- rather than some neighbour's value.
+                    seen = tostring(e.shape) .. " " .. tostring(e.origin) .. " " .. tostring(e.shapes)
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    let drag = |shape| {
+        LuaMsg::CallDrag(
+            Key::new("plot", "on_drag"),
+            DragArgs {
+                phase: "move",
+                at: (40.0, 12.0),
+                delta: (6.0, 0.0),
+                scale: 1.0,
+                origin: (100.0, 50.0),
+                shape,
+            },
+        )
+    };
+
+    app.update(drag(Shape(Some(("knob".into(), 5.0, 50.0)))));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "knob nil nil");
+
+    // On no shape the three keys are absent, not set to a stand-in that arithmetic would accept.
+    app.update(drag(Shape(None)));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "nil nil nil");
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
+#[test]
+fn a_drag_carries_the_shape_it_grabbed() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = ""
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_drag = function(e)
+                    seen = table.concat(
+                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil" },
+                        " "
+                    )
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    app.update(LuaMsg::CallDrag(
+        Key::new("plot", "on_drag"),
+        DragArgs {
+            phase: "move",
+            at: (40.0, 12.0),
+            delta: (6.0, 0.0),
+            scale: 1.0,
+            origin: (100.0, 50.0),
+            shape: Shape(Some(("knob".into(), 5.0, 50.0))),
+        },
+    ));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "move 40 6 1 100 knob 5");
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
+#[test]
+fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let setup = r##"
+        local p = gfx.path({ { "move", 0, 0 }, { "line", 1, 1 } })
+        local b = gfx.solid("#ffffff")
+        return gfx.frame({ width = 1, height = 1, REPLACE })
+    "##;
+    for declaration in [
+        "gfx.stroke({ path=p, brush=b, width=1, cap='triangle' })",
+        "gfx.stroke({ path=p, brush=b, width=1, join='sharp' })",
+        "gfx.stroke({ path=p, brush=b, width=1, dashes={ 2, named=3 } })",
+    ] {
+        let source = setup.replace("REPLACE", declaration);
+        assert!(
+            lua.load(&source).eval::<Value>().is_err(),
+            "accepted {declaration}"
+        );
+    }
+}
+
+/// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",
+/// which names neither the field nor the call — two different mistakes produced byte-identical
+/// text. Each message must now name what is missing, and no two may read the same.
+#[test]
+fn a_missing_gfx_field_says_which_one() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let setup = r##"
+        local p = gfx.path({ { "move", 0, 0 }, { "line", 1, 1 } })
+        local b = gfx.solid("#ffffff")
+        return REPLACE
+    "##;
+    let cases = [
+        ("gfx.frame({ height = 1 })", "frame needs width"),
+        ("gfx.frame({ width = 1 })", "frame needs height"),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ brush=b }) })",
+            "fill needs path",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=p }) })",
+            "fill needs brush",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.stroke({ path=p, brush=b }) })",
+            "stroke needs width",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.instance({}) })",
+            "instance needs visual",
+        ),
+        // A handle of the wrong kind is a borrow failure deep in mlua unless it is caught here,
+        // and "path" and "brush" are the two easiest arguments in the vocabulary to swap.
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=b, brush=b }) })",
+            "fill.path must be a gfx.path",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=p, brush=p }) })",
+            "fill.brush must be a brush",
+        ),
+    ];
+
+    let mut seen: Vec<String> = Vec::new();
+    for (declaration, wanted) in cases {
+        let source = setup.replace("REPLACE", declaration);
+        let err = lua
+            .load(&source)
+            .eval::<Value>()
+            .expect_err(&format!("accepted {declaration}"))
+            .to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        seen.push(err);
+    }
+    for (i, a) in seen.iter().enumerate() {
+        for b in &seen[i + 1..] {
+            assert_ne!(a, b, "two different mistakes report the same thing");
+        }
+    }
+}
+
+#[test]
+fn on_frame_delivers_runtime_time_to_lua() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"return function()
+            return ui.col({ id="sim", on_frame=function(e)
+                _tick = { e.dt, e.elapsed }
+            end })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    app.update(LuaMsg::CallFrame(Key::new("sim", "on_frame"), 0.025, 3.5));
+
+    let tick: Table = app.vm.globals().get("_tick").unwrap();
+    assert_eq!(tick.get::<f32>(1).unwrap(), 0.025);
+    assert_eq!(tick.get::<f64>(2).unwrap(), 3.5);
+}
+
+#[test]
+fn on_frame_requires_a_stable_element_id() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load("return ui.col({ on_frame = function() end })")
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+
+    let error = walk(node, &mut ctx).err().expect("missing id was accepted");
+    assert!(error.to_string().contains("on_frame needs an id"));
+}
+
+#[test]
+fn gfx_path_rejects_unknown_sparse_and_badly_sequenced_commands() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    for source in [
+        r#"return gfx.path({ { "arc", 1, 2 } })"#,
+        r#"return gfx.path({ { "move", 0, 0, named = true } })"#,
+        r#"return gfx.path({ { "line", 1, 2 } })"#,
+    ] {
+        assert!(
+            lua.load(source).eval::<Value>().is_err(),
+            "accepted {source}"
+        );
+    }
+}
+
+#[test]
 fn prelude_tags_tables() {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua.load(r#"return ui.col{ui.text{"hi"}}"#).eval().unwrap();
@@ -63,7 +435,7 @@ fn walk_builds_el() {
         .load(r#"return ui.col{ui.text{"a"}, ui.row{ui.text{"b"}, ui.text{"c"}}}"#)
         .eval()
         .unwrap();
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     assert!(walk(node, &mut ctx).is_ok());
 }
@@ -71,7 +443,7 @@ fn walk_builds_el() {
 fn walk_props(src: &str) -> mlua::Result<()> {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua.load(src).eval().unwrap();
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     walk(node, &mut ctx).map(|_| ())
 }
@@ -108,15 +480,136 @@ fn size_bounds_are_props() {
 fn walk_collects_handlers() {
     let (lua, _) = sandboxed_vm().unwrap();
     let node: Table = lua
-        .load(r#"return ui.button{"add", on_click = function() end }"#)
+        .load(r#"return ui.button{"add", id = "add", on_click = function() end }"#)
         .eval()
         .unwrap();
 
-    let mut handlers: Vec<Function> = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     let _el = walk(node, &mut ctx).unwrap();
     assert_eq!(handlers.len(), 1);
-    assert!(handlers[0].call::<()>(()).is_ok());
+    assert!(
+        handlers[&Key::new("add", "on_click")]
+            .call::<()>(())
+            .is_ok()
+    );
+}
+
+/// The bug keys fix: a click is minted at press and delivered at release, and the view rebuilds
+/// in between. A slot index would then call whichever handler moved into the slot.
+#[test]
+fn a_click_reaches_its_element_across_rebuilds() {
+    let src = LoroDoc::new();
+    let main = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    main.insert(
+        0,
+        r#"hits = {}
+        local names = { "b" }
+        function set_names(t) names = t end
+        return function()
+            local kids = {}
+            for _, name in ipairs(names) do
+                table.insert(kids, ui.button({ id = name, on_click = function(e)
+                    table.insert(hits, name .. "@" .. e.x .. "," .. e.y)
+                end, ui.text({ name }) }))
+            end
+            return ui.row(kids)
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let set_names = |app: &LuaApp<LuaMsg>, names: &[&str]| {
+        let f: Function = app.vm.globals().get("set_names").unwrap();
+        f.call::<()>(names.to_vec()).unwrap();
+    };
+    let hits = |app: &LuaApp<LuaMsg>| {
+        let t: Table = app.vm.globals().get("hits").unwrap();
+        t.sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()
+            .unwrap()
+    };
+
+    // Pressed on "b"; before release a peer edit puts "a" ahead of it.
+    let press = app.view().trigger("b", runtime::Action::Click).unwrap();
+    set_names(&app, &["a", "b"]);
+    let _ = app.view();
+    app.update(press.clone());
+    assert_eq!(hits(&app), vec!["b@0,0"]);
+
+    // "b" is gone by release: dropped, not handed to whoever is there now.
+    set_names(&app, &["a"]);
+    let _ = app.view();
+    app.update(press);
+    assert_eq!(hits(&app), vec!["b@0,0"]);
+
+    app.update(LuaMsg::CallAt(
+        Key::new("a", "on_click"),
+        12.5,
+        4.0,
+        Shape::default(),
+    ));
+    assert_eq!(hits(&app), vec!["b@0,0", "a@12.5,4"]);
+}
+
+#[test]
+fn handlers_need_a_unique_id() {
+    let err = walk_props(r#"return ui.button{"go", on_click = function() end }"#)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("on_click needs an id"), "{err}");
+
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(
+            r#"return ui.row{
+                ui.button{"a", id = "go", on_click = function() end },
+                ui.button{"b", id = "go", on_click = function() end },
+            }"#,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    walk(node, &mut ctx).unwrap();
+    assert!(
+        ctx.errors
+            .iter()
+            .any(|e| e.contains("duplicate id go: another element already has on_click")),
+        "{:?}",
+        ctx.errors
+    );
+}
+
+#[test]
+fn lua_overlay_wraps_an_anchor_and_panel() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node = lua
+        .load(
+            r#"return ui.overlay{id="composer", side="top", align="end", on_dismiss=function() end,
+            ui.button{"add"}, ui.col{ui.text{"composer"}}}"#,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+
+    assert!(walk(node, &mut ctx).is_ok());
+    assert_eq!(handlers.len(), 1);
+}
+
+#[test]
+fn lua_overlay_rejects_unknown_fields() {
+    let err = walk_props(
+        r#"return ui.overlay{floating=true, ui.button{"add"}, ui.col{ui.text{"composer"}}}"#,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("overlay: unknown field floating"), "{err}");
 }
 
 // ── crdt::patch_into ──────────────────────────────────────────────────────────
@@ -892,7 +1385,7 @@ fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
         spent = fires.load(Ordering::Relaxed);
 
         // Fresh handlers per rep — the vec grows as callbacks are collected.
-        let mut handlers: Vec<Function> = Vec::new();
+        let mut handlers = Handlers::new();
         let mut ctx = Ctx::new(&mut handlers, identity());
         ctx.dev = dev;
         let t1 = Instant::now();
@@ -2164,16 +2657,16 @@ fn the_kanban_draws_a_grip_for_every_column() {
     );
 }
 
-/// Drive a resize gesture: grab at `from`, release at `to`, both in the same coordinates the
-/// runtime hands a drag handler (`pos - grab`, so their difference is the pointer's travel).
+/// Drive a resize gesture using the local-space delta supplied by the runtime.
 fn resize(app: &LuaApp<LuaMsg>, id: &str, from: f64, to: f64) {
+    let dx = to - from;
     app.vm
         .load(format!(
             r#"
             local m = require('model')
-            m.update({{ kind = 'resize', id = '{id}', phase = 'start', x = {from} }})
-            m.update({{ kind = 'resize', id = '{id}', phase = 'move', x = {to} }})
-            m.update({{ kind = 'resize', id = '{id}', phase = 'end', x = {to} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'start', dx = 0 }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'move', dx = {dx} }})
+            m.update({{ kind = 'resize', id = '{id}', phase = 'end', dx = {dx} }})
             "#
         ))
         .exec()
@@ -2213,9 +2706,9 @@ fn a_resize_in_flight_writes_nothing_to_the_doc() {
         .load(
             r#"
             local m = require('model')
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 0 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', dx = 0 })
             for i = 1, 60 do
-                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', x = i })
+                m.update({ kind = 'resize', id = 'c-todo', phase = 'move', dx = i })
             end
             "#,
         )
@@ -2267,8 +2760,8 @@ fn a_resize_that_never_moved_writes_nothing() {
         .load(
             r#"
             local m = require('model')
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', x = 42 })
-            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', x = 42 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'start', dx = 0 })
+            m.update({ kind = 'resize', id = 'c-todo', phase = 'end', dx = 0 })
             "#,
         )
         .exec()
@@ -2280,6 +2773,277 @@ fn a_resize_that_never_moved_writes_nothing() {
     resize(&app, "c-todo", 0.0, 40.0);
     app.flush(puts.recorder()).unwrap();
     assert!(!puts.take().is_empty(), "a real resize wrote nothing");
+}
+
+#[test]
+fn frame_orbits_demo_loads_and_builds_its_frame_leaf() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "geom.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/frame_orbits/{name}"))
+            .unwrap_or_else(|_| panic!("frame_orbits/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    let info = app.view().info();
+    let frame = &info.children[1].children[0].children[0];
+    assert_eq!(frame.kind, "frame", "demo did not produce a Frame leaf");
+    assert_eq!(frame.handlers, vec!["on_frame"]);
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
+}
+
+#[test]
+fn node_graph_demo_edits_a_graph_end_to_end() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "graph.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/node_graph/{name}"))
+            .unwrap_or_else(|_| panic!("node_graph/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    // Handlers are addressed the way the runtime addresses them: element id + prop name.
+    let click = |app: &mut LuaApp<LuaMsg>, id: &str, x: f32, y: f32| {
+        app.update(LuaMsg::CallAt(
+            Key::new(id, "on_click"),
+            x,
+            y,
+            Shape::default(),
+        ))
+    };
+    let drag = |app: &mut LuaApp<LuaMsg>, id: &str, phase: &'static str, dx: f32, dy: f32| {
+        app.update(LuaMsg::CallDrag(
+            Key::new(id, "on_drag"),
+            DragArgs {
+                phase,
+                at: (0.0, 0.0),
+                delta: (dx, dy),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+                shape: Shape::default(),
+            },
+        ))
+    };
+    let input = |app: &mut LuaApp<LuaMsg>, id: &str, v: &str| {
+        app.update(LuaMsg::CallStr(Key::new(id, "on_input"), v.into()))
+    };
+    // Through the built element, so the binding's phase names are covered too.
+    let hover = |app: &mut LuaApp<LuaMsg>, phase, x: f32, y: f32| {
+        let msg = app
+            .view()
+            .trigger("graph-canvas", runtime::Action::Hover(phase, (x, y)));
+        app.update(msg.unwrap())
+    };
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+    // Text of the first child of `label:<node>` or `body:<node>`.
+    let text = |app: &LuaApp<LuaMsg>, id: &str| {
+        let info = app.view().info();
+        find(&info, id).and_then(|el| el.children[0].text.clone())
+    };
+    let status = |app: &LuaApp<LuaMsg>| app.view().info().children[0].children[1].text.clone();
+    let canvas_len =
+        |app: &LuaApp<LuaMsg>| app.view().info().children[1].children[0].children.len();
+    // Edges are Frame strokes, not elements, so ask the app's own module.
+    let edges = |app: &LuaApp<LuaMsg>| {
+        app.vm
+            .load(r#"return #require("graph").edges"#)
+            .eval::<usize>()
+            .unwrap()
+    };
+    let mid = |app: &LuaApp<LuaMsg>, edge: &str| {
+        app.vm
+            .load(format!(
+                r#"local g = require("graph"); local e = g.get("{edge}")
+                return g.point_at(0.5, g.curve(g.get(e.from), g.get(e.to)))"#
+            ))
+            .eval::<(f32, f32)>()
+            .unwrap()
+    };
+
+    let info = app.view().info();
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
+    let c = &info.children[1].children[0];
+    assert_eq!(
+        c.children.len(),
+        1 + 10 * 3,
+        "edges frame, then a node, port and grip per node"
+    );
+    assert_eq!(c.children[0].kind, "frame");
+
+    // Ingest seeds at (60, 380); deltas are cumulative from the press.
+    drag(&mut app, "node:ingest", "start", 4.0, 0.0);
+    // Real deltas are fractional; `%d` must truncate rather than raise.
+    drag(&mut app, "node:ingest", "move", 50.5, -20.25);
+    assert_eq!(status(&app).as_deref(), Some("dragging Ingest @ 110, 359"));
+    drag(&mut app, "node:ingest", "move", -500.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("dragging Ingest @ 0, 380"),
+        "clamped to canvas"
+    );
+    drag(&mut app, "node:ingest", "end", -500.0, 0.0);
+
+    // Edge picking is the canvas click's position against the curves. Ingest → Parse bends
+    // vertically through its midpoint, so 5 across is near the stroke and 30 across is not.
+    let (mx, my) = mid(&app, "e1");
+    let idle = |app: &LuaApp<LuaMsg>| status(app).unwrap().starts_with("drag nodes");
+    // Hover previews the pick a click would make.
+    hover(&mut app, HoverPhase::Enter, mx + 30.0, my);
+    assert!(idle(&app), "nothing under the pointer");
+    hover(&mut app, HoverPhase::Move, mx, my);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("Ingest → Parse · click to select")
+    );
+    hover(&mut app, HoverPhase::Leave, mx, my);
+    assert!(idle(&app), "leave clears the hover");
+    // Ingest's out-port is (160, 412): 2 inside the node is near the edge but hidden by the node.
+    hover(&mut app, HoverPhase::Move, 158.0, 412.0);
+    assert!(idle(&app), "a node covers the edges under it");
+    click(&mut app, "graph-canvas", mx, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Parse"));
+    click(&mut app, "graph-canvas", mx + 30.0, my);
+    assert!(
+        status(&app).unwrap().starts_with("drag nodes"),
+        "a click off every edge deselects"
+    );
+    click(&mut app, "graph-canvas", mx + 5.0, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Parse"));
+
+    // Nodes are 160×64. Ingest's out-port is now (160, 412); Store's box covers (826, 522).
+    // The press itself is over Ingest, which is not a valid target.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "move", 666.0, 110.0);
+    assert_eq!(status(&app).as_deref(), Some("connecting Ingest → Store"));
+    drag(&mut app, "port:ingest", "end", 666.0, 110.0);
+    assert_eq!(edges(&app), 13, "release created an edge");
+
+    // Ingest → Parse already exists.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    drag(&mut app, "port:ingest", "move", 140.0, -172.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "end", 140.0, -172.0);
+    assert_eq!(edges(&app), 13, "duplicate edge was created");
+
+    let (mx, my) = mid(&app, "e13");
+    click(&mut app, "graph-canvas", mx, my);
+    assert_eq!(status(&app).as_deref(), Some("selected Ingest → Store"));
+    click(&mut app, "delete-edge", 0.0, 0.0);
+    assert_eq!(edges(&app), 12, "Delete edge removed it");
+
+    // Empty canvas: a release just past the port is a fumble; a real one spawns a connected
+    // node whose in-port sits under the pointer. (400, 800) is clear of every seed node.
+    drag(&mut app, "port:ingest", "start", 0.0, 0.0);
+    drag(&mut app, "port:ingest", "move", 10.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → drop on a node")
+    );
+    drag(&mut app, "port:ingest", "move", 240.0, 388.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Ingest → new node")
+    );
+    assert_eq!(canvas_len(&app), 1 + 30 + 1, "ghost node previews");
+    drag(&mut app, "port:ingest", "end", 240.0, 388.0);
+    assert_eq!(canvas_len(&app), 1 + 33, "node created");
+    assert_eq!(edges(&app), 13, "and connected");
+
+    // The spawned node is live: it renders its name and empty-notes hint, and drags from
+    // (400, 768).
+    assert_eq!(text(&app, "label:n11").as_deref(), Some("Node 11"));
+    assert_eq!(text(&app, "body:n11").as_deref(), Some("Add notes…"));
+    drag(&mut app, "node:n11", "start", 0.0, 0.0);
+    drag(&mut app, "node:n11", "move", 10.0, 10.0);
+    assert_eq!(status(&app).as_deref(), Some("dragging Node 11 @ 410, 778"));
+    drag(&mut app, "node:n11", "end", 10.0, 10.0);
+
+    click(&mut app, "add-node", 0.0, 0.0);
+    assert_eq!(canvas_len(&app), 1 + 36, "Add node placed a free node");
+
+    // Rename: a label click opens the field, typing drafts, and a canvas click saves the
+    // trimmed text.
+    click(&mut app, "label:parse", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("renaming Parse · enter saves · esc cancels")
+    );
+    input(&mut app, "label-input:parse", "  Parser ");
+    click(&mut app, "graph-canvas", 700.0, 20.0);
+    assert_eq!(text(&app, "label:parse").as_deref(), Some("Parser"));
+    assert!(status(&app).unwrap().starts_with("drag nodes"));
+
+    // A blank draft keeps the old name, and opening another rename saves the first.
+    click(&mut app, "label:parse", 0.0, 0.0);
+    input(&mut app, "label-input:parse", "   ");
+    click(&mut app, "label:store", 0.0, 0.0);
+    assert_eq!(text(&app, "label:parse").as_deref(), Some("Parser"));
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("renaming Store · enter saves · esc cancels")
+    );
+
+    // Notes: opening them saves the open rename; newlines survive, outer space is trimmed.
+    click(&mut app, "body:ingest", 0.0, 0.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("editing notes of Ingest · click outside saves · esc cancels")
+    );
+    input(&mut app, "body-input:ingest", "Pulls events\nretries 3x  ");
+    click(&mut app, "graph-canvas", 700.0, 20.0);
+    assert_eq!(
+        text(&app, "body:ingest").as_deref(),
+        Some("Pulls events\nretries 3x")
+    );
+
+    // Resize from Parser's (280, 220) corner: floor 96×48, capped by the canvas edge.
+    drag(&mut app, "grip:parse", "start", 0.0, 0.0);
+    drag(&mut app, "grip:parse", "move", 40.0, 36.0);
+    assert_eq!(status(&app).as_deref(), Some("resizing Parser · 200 × 100"));
+    drag(&mut app, "grip:parse", "move", -500.0, -500.0);
+    assert_eq!(status(&app).as_deref(), Some("resizing Parser · 96 × 48"));
+    drag(&mut app, "grip:parse", "move", 2000.0, 2000.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("resizing Parser · 1120 × 680")
+    );
+    drag(&mut app, "grip:parse", "end", 40.0, 36.0);
+
+    // The new size is live geometry: (470, 310) was outside the 160×64 Parser and is inside
+    // the 200×100 one. Validate's out-port is (440, 572).
+    drag(&mut app, "port:validate", "start", 0.0, 0.0);
+    drag(&mut app, "port:validate", "move", 30.0, -262.0);
+    assert_eq!(
+        status(&app).as_deref(),
+        Some("connecting Validate → Parser")
+    );
+    drag(&mut app, "port:validate", "end", 30.0, -262.0);
+    assert_eq!(edges(&app), 14, "connected into the grown area");
+    assert!(app.error.is_none(), "demo failed: {:?}", app.error);
 }
 
 // ── the tally demo app, from disk ─────────────────────────────────────────────
@@ -2305,11 +3069,15 @@ fn tally_loads_views_and_clicks() {
 
     let _ = app.view();
 
-    // Handlers are registered in document order: pill("−") is 0, pill("+") is 1, reset is 2.
     // A frame between each click, the way the real loop delivers them: the mirror is a frame
     // behind the doc, so clicks with no frame between them all read the same stale count.
     for _ in 0..3 {
-        app.update(LuaMsg::Call(1));
+        app.update(LuaMsg::CallAt(
+            Key::new("plus", "on_click"),
+            0.0,
+            0.0,
+            Shape::default(),
+        ));
         let _ = app.view();
     }
 
@@ -2448,7 +3216,7 @@ end
 fn a_breadcrumb_less_card_has_no_leading_separator() {
     let (lua, _fires) = sandboxed_vm().unwrap();
     let node: Table = lua.load(r#"return ui.col{ ui.text{} }"#).eval().unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     ctx.dev = false;
     assert!(walk(node, &mut ctx).is_ok(), "siblings stay alive");
@@ -2568,7 +3336,7 @@ fn a_non_string_id_on_an_input_still_reports_the_type() {
         .load(r#"return ui.col{ ui.input({ value = "", id = {}, on_input = function() end }) }"#)
         .eval()
         .unwrap();
-    let mut handlers = Vec::new();
+    let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     ctx.dev = false;
     assert!(walk(node, &mut ctx).is_ok(), "a card replaces the element");
@@ -2622,4 +3390,386 @@ fn keys_orders_children_names_and_odd_keys_deterministically() {
         keys(&node),
         r#"[1] = "one",[2] = "two",alpha=1,beta=2,1.5=0.5"#
     );
+}
+
+#[test]
+fn line_chart_demo_shows_a_tooltip_on_hover() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "chart.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/line_chart/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    fn tooltip_texts(el: &runtime::ElInfo) -> Option<Vec<String>> {
+        fn texts(el: &runtime::ElInfo, out: &mut Vec<String>) {
+            out.extend(el.text.clone());
+            for c in &el.children {
+                texts(c, out);
+            }
+        }
+        if el.id.as_deref() == Some("tooltip") {
+            let mut out = Vec::new();
+            texts(el, &mut out);
+            return Some(out);
+        }
+        el.children.iter().find_map(|c| tooltip_texts(c))
+    }
+    macro_rules! tooltip {
+        () => {
+            tooltip_texts(&app.view().info())
+        };
+    }
+    macro_rules! hover {
+        ($phase:expr, $x:expr, $y:expr) => {{
+            let msg = app
+                .view()
+                .trigger("plot", runtime::Action::Hover($phase, ($x, $y)))
+                .unwrap();
+            app.update(msg);
+        }};
+    }
+
+    // Apr = 61 sits at frame (16 + 3*56, 16 + 0.39*260) = (184, 117.4).
+    assert_eq!(tooltip!(), None);
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+
+    hover!(HoverPhase::Enter, 10.0, 280.0);
+    assert_eq!(tooltip!(), None);
+
+    hover!(HoverPhase::Move, 186.0, 116.0);
+    assert_eq!(
+        tooltip!(),
+        Some(vec!["Apr 2026".to_string(), "61k users".to_string()])
+    );
+
+    // Nov = 88 at (576, 47.2): tooltip follows to the next point.
+    hover!(HoverPhase::Move, 575.0, 50.0);
+    assert_eq!(
+        tooltip!(),
+        Some(vec!["Nov 2026".to_string(), "88k users".to_string()])
+    );
+
+    hover!(HoverPhase::Move, 184.0, 280.0);
+    assert_eq!(tooltip!(), None);
+
+    hover!(HoverPhase::Move, 184.0, 117.0);
+    assert!(tooltip!().is_some());
+    hover!(HoverPhase::Leave, 700.0, 400.0);
+    assert_eq!(tooltip!(), None);
+
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+// ---- dashboard demo test (appended) ----
+#[test]
+fn dashboard_demo_links_hover_and_range_selection() {
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+    fn txt(el: &runtime::ElInfo, id: &str) -> String {
+        find(el, id)
+            .unwrap_or_else(|| panic!("no element with id {id}"))
+            .text
+            .clone()
+            .unwrap_or_default()
+    }
+
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "theme.lua", "data.lua", "chart.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/dashboard/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    // first build: clean, and the tiles summarise everything
+    let info = app.view().info();
+    assert!(
+        app.console(100).is_empty(),
+        "build errors: {:?}",
+        app.console(100)
+    );
+    assert_eq!(txt(&info, "range"), "All 24 months");
+    assert_eq!(txt(&info, "tile:users:value"), "2516");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$455500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.48%");
+
+    // the plot is one hover+drag surface with a single gfx frame inside it
+    let plot = find(&info, "plot:users").unwrap();
+    assert!(
+        plot.handlers.contains(&"on_hover"),
+        "handlers: {:?}",
+        plot.handlers
+    );
+    assert!(
+        plot.handlers.contains(&"on_drag"),
+        "handlers: {:?}",
+        plot.handlers
+    );
+    assert_eq!(plot.children.len(), 1);
+    assert_eq!(plot.children[0].kind, "frame");
+
+    // hovering month 5 (2024-05) in chart one marks it in all three
+    let x5 = 10.0 + 4.0 * (640.0 / 23.0);
+    let m = app
+        .view()
+        .trigger(
+            "plot:users",
+            runtime::Action::Hover(HoverPhase::Move, (x5, 60.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "2024-05: 1640");
+    assert_eq!(txt(&info, "readout:revenue"), "2024-05: $12100");
+    assert_eq!(txt(&info, "readout:errors"), "2024-05: 1.90%");
+    assert_eq!(txt(&info, "tile:errors:cursor"), "2024-05: 1.90%");
+
+    // drag sideways from month 5 to month 10: the pointer carries the position now
+    let dx = 5.0 * (640.0 / 23.0);
+    let sweep = |app: &mut LuaApp<LuaMsg>, phase: &'static str, travelled: f32| {
+        app.update(LuaMsg::CallDrag(
+            Key::new("plot:users", "on_drag"),
+            DragArgs {
+                phase,
+                at: (x5 + travelled, 60.0),
+                delta: (travelled, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+                shape: Shape::default(),
+            },
+        ))
+    };
+    sweep(&mut app, "start", 0.0);
+    sweep(&mut app, "move", dx * 0.5);
+    sweep(&mut app, "move", dx);
+    sweep(&mut app, "end", dx);
+
+    // released selection sticks, and every tile now summarises those six months
+    let info = app.view().info();
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+    assert_eq!(txt(&info, "tile:users:value"), "1917");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$85500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.75%");
+
+    // the link runs the other way too: hover chart three, chart one follows
+    let x20 = 10.0 + 19.0 * (640.0 / 23.0);
+    let m = app
+        .view()
+        .trigger(
+            "plot:errors",
+            runtime::Action::Hover(HoverPhase::Move, (x20, 40.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "2025-08: 3400");
+    assert_eq!(txt(&info, "readout:errors"), "2025-08: 0.90%");
+    // ...and the released selection survived the hover
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+
+    // leaving drops the cursor but not the selection
+    let m = app
+        .view()
+        .trigger(
+            "plot:errors",
+            runtime::Action::Hover(HoverPhase::Leave, (x20, 400.0)),
+        )
+        .unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "readout:users"), "-");
+    assert_eq!(txt(&info, "range"), "2024-05 to 2024-10  (6 mo)");
+
+    // clearing puts the tiles back
+    let m = app.view().trigger("clear", runtime::Action::Click).unwrap();
+    app.update(m);
+    let info = app.view().info();
+    assert_eq!(txt(&info, "range"), "All 24 months");
+    assert_eq!(txt(&info, "tile:users:value"), "2516");
+    assert_eq!(txt(&info, "tile:revenue:value"), "$455500");
+    assert_eq!(txt(&info, "tile:errors:value"), "1.48%");
+
+    assert!(
+        app.console(100).is_empty(),
+        "errors: {:?}",
+        app.console(100)
+    );
+}
+
+/// What one dashboard frame costs to rebuild: Lua's `view()` plus the walk into `El`. Layout,
+/// text shaping and paint are the runtime's and are not counted here. Minimum of 9, for the
+/// reasons in [`frame`]. Ignored: it measures, it doesn't assert.
+#[test]
+#[ignore]
+fn dashboard_view_cost() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "chart.lua", "data.lua", "theme.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/dashboard/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let count = |el: &runtime::ElInfo| {
+        fn walk(el: &runtime::ElInfo) -> usize {
+            1 + el.children.iter().map(walk).sum::<usize>()
+        }
+        walk(el)
+    };
+    let els = count(&app.view().info());
+
+    let mut idle = Duration::MAX;
+    let mut dragging = Duration::MAX;
+    for _ in 0..9 {
+        let t0 = Instant::now();
+        let _ = app.view();
+        idle = idle.min(t0.elapsed());
+
+        // A pointer move during a sweep: hover, drag, then the frame both of them force.
+        let t1 = Instant::now();
+        let h = app
+            .view()
+            .trigger(
+                "plot:users",
+                runtime::Action::Hover(HoverPhase::Move, (140.0, 60.0)),
+            )
+            .unwrap();
+        app.update(h);
+        app.update(LuaMsg::CallDrag(
+            Key::new("plot:users", "on_drag"),
+            DragArgs {
+                phase: "move",
+                at: (140.0, 60.0),
+                delta: (60.0, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+                shape: Shape::default(),
+            },
+        ));
+        let _ = app.view();
+        dragging = dragging.min(t1.elapsed());
+    }
+    eprintln!(
+        "dashboard: {els} elements  view {idle:>8.2?}  pointer-move {dragging:>8.2?} \
+         (hover + drag + 2 views)"
+    );
+}
+
+/// The reference in `docs/lua-apps.md` is what agents author against, and a prop that exists but
+/// isn't listed is invisible: unknown props are hard errors, so nobody discovers one by trying.
+/// Every name the registry accepts must appear in the guide, in backticks.
+#[test]
+fn the_guide_lists_every_prop() {
+    let guide = include_str!("../../docs/lua-apps.md");
+    let names = crate::props::Registry::<()>::PROPS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(crate::props::Registry::<()>::BINDS.iter().map(|(n, _)| *n))
+        .chain(
+            crate::props::Registry::<()>::CALLBACKS
+                .iter()
+                .map(|(n, _)| *n),
+        )
+        .chain(crate::props::STRUCTURAL.iter().copied())
+        .filter(|n| !matches!(*n, "tag" | "line" | "id"));
+
+    // A backticked name, whatever follows it — `on_hover` in the prop table, but also
+    // `on_hover = function(phase, x, y)` where the handler is spelled out.
+    let documented = |name: &str| {
+        guide.match_indices(&format!("`{name}")).any(|(i, m)| {
+            !guide[i + m.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+    };
+    let missing: Vec<_> = names.filter(|n| !documented(n)).collect();
+    assert!(missing.is_empty(), "undocumented props: {missing:?}");
+}
+
+/// The pie demo is the proof that a drawing can be touched: every wedge is the *same* path under
+/// a different rotation, so nothing about "which slice, and where on it" is recoverable by
+/// inverting the layout — the runtime has to say. Here the shape arguments are supplied directly,
+/// which is exactly what `Frame::hit` hands the handler in a window.
+#[test]
+fn pie_demo_reads_the_shape_the_runtime_names() {
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "theme.lua", "data.lua", "pie.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/pie/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    let info = app.view().info();
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+    assert!(find(&info, "pie").is_some());
+    assert!(find(&info, "readout").is_none()); // nothing hovered yet
+
+    // 64pt out along the wedge's own x axis, a quarter of the way up it.
+    let hover = |app: &mut LuaApp<LuaMsg>, shape: Option<&str>| {
+        app.update(LuaMsg::CallPhase(
+            Key::new("pie", "on_hover"),
+            "move",
+            0.0,
+            0.0,
+            Shape(shape.map(|s| (s.to_string(), 64.0, 16.0))),
+        ));
+    };
+
+    hover(&mut app, Some("slice:social"));
+    let text = find(&app.view().info(), "readout")
+        .and_then(|el| el.text.clone())
+        .unwrap();
+    assert!(text.starts_with("Social · 15.5% of 10560"), "{text}");
+    // atan2(16, 64) = 14°, and hypot(64, 16) is 52% of the 128pt radius — the wedge's own
+    // coordinates, which is the whole point: no slice sits at that angle on screen.
+    assert!(text.contains("14° into the wedge, 52% out"), "{text}");
+
+    // The hub is unnamed paint, so the pointer lands on no shape at all and the readout goes.
+    hover(&mut app, None);
+    assert!(find(&app.view().info(), "readout").is_none());
+
+    // Clicking keeps a slice; clicking the same one again lets it go.
+    let click = |app: &mut LuaApp<LuaMsg>, shape: &str| {
+        app.update(LuaMsg::CallAt(
+            Key::new("pie", "on_click"),
+            0.0,
+            0.0,
+            Shape(Some((shape.to_string(), 0.0, 0.0))),
+        ));
+    };
+    click(&mut app, "slice:search");
+    let _ = app.view();
+    click(&mut app, "slice:search");
+    let _ = app.view();
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }

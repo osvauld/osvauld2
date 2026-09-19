@@ -11,7 +11,14 @@ Companions: `animation.md` (rev 3 — the timeline/binding layer this extends),
 `visual-substrate.md` (Frame, math, buffers, physics — the substrate this feeds),
 `w3.md` (the current week; this is not W3 work).
 
-Status: **design notes from a pairing session. Nothing built.**
+Status: **historical design notes; several 2D interaction pieces have since landed.** Current
+truth is in [status](../status.md).
+
+**Revision 2026-09-12:** this document's decision to defer real 3D remains valid for ordinary
+`El` interaction. The newly required retained 3D scene, projected/deformable UI surfaces, camera
+rays and world picking are a separate Environment layer; see
+[environment-runtime.md](environment-runtime.md). Do not extend Kurbo `Affine` or Taffy into a
+projective world model.
 
 ---
 

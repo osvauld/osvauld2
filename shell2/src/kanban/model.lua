@@ -140,10 +140,10 @@ end
 
 function actions.drag(msg)
 	if msg.phase == "start" then
-		S.drag = { kind = msg.what, id = msg.id, x = msg.x, y = msg.y }
+		S.drag = { kind = msg.what, id = msg.id, x = msg.x, y = msg.y, scale = msg.scale }
 	elseif msg.phase == "move" then
 		if S.drag then
-			S.drag.x, S.drag.y = msg.x, msg.y
+			S.drag.x, S.drag.y, S.drag.scale = msg.x, msg.y, msg.scale
 		end
 		S.placement = nil
 	elseif msg.phase == "end" then
@@ -195,14 +195,14 @@ function actions.resize(msg)
 	if msg.phase == "start" then
 		local c = find(board.columns, msg.id)
 		local w = c and c.w or C.col_w
-		S.resize = { id = msg.id, from = w, x0 = msg.x, w = w }
+		S.resize = { id = msg.id, from = w, w = w }
 		return
 	end
 	if not (S.resize and S.resize.id == msg.id) then
 		return
 	end
 	if msg.phase == "move" then
-		local w = S.resize.from + msg.x - S.resize.x0
+		local w = S.resize.from + msg.dx
 		S.resize.w = math.max(C.col_w_min, math.min(C.col_w_max, w))
 	else
 		-- Written unconditionally, including when the press never moved. A guard here looked

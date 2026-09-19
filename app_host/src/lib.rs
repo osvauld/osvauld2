@@ -1,10 +1,11 @@
 //! Sandboxed Luau app host for the new runtime.
 //!
-//! An app is an MVU app whose message = "call closure #n" (see [`LuaMsg`]). Its `view()`
-//! walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update loop
-//! is unchanged — dispatch just calls the closure the index points at.
+//! An app is an MVU app whose message = "call the handler at this key" (see [`LuaMsg`]). Its
+//! `view()` walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update
+//! loop is unchanged — dispatch just calls whatever the latest view registered under that key.
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
+mod gfx;
 mod modules;
 mod props;
 pub use crdt::{Cores, Docs, Resolve, Wake};
@@ -12,10 +13,14 @@ pub use crdt::{Cores, Docs, Resolve, Wake};
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
 };
-use mlua::{Error, Function, IntoLua, Lua, Table, Value};
+use mlua::{AnyUserData, Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
-use runtime::{El, col, row, text, text_area, text_input};
+use runtime::{
+    Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row, text,
+    text_area, text_input,
+};
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,22 +28,104 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crdt::patch_into;
+/// Which handler a message calls: the element's `id` and the prop that set it.
+///
+/// Not a slot number. A click is minted at press and delivered at release, and views rebuild in
+/// between — a peer edit or an `on_frame` tick can add a handler above this one, and a slot would
+/// then call its neighbour. A key finds the same element's current handler, or nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Key {
+    pub id: Arc<str>,
+    pub name: &'static str,
+}
+impl Key {
+    pub fn new(id: &str, name: &'static str) -> Self {
+        Self {
+            id: id.into(),
+            name,
+        }
+    }
+}
+
+pub type Handlers = HashMap<Key, Function>;
+
+/// What a drag hands Lua, in order: where the pointer is in the element's own units, how far it
+/// has travelled from the press, the zoom scale, and the dragged element's screen origin — which
+/// only a root-level ghost placing itself in screen space needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragArgs {
+    pub phase: &'static str,
+    pub at: (f32, f32),
+    pub delta: (f32, f32),
+    pub scale: f32,
+    pub origin: (f32, f32),
+    /// The shape the press grabbed, held for the whole gesture. See [`Shape`].
+    pub shape: Shape,
+}
+
+/// The trailing arguments a pointer handler carries: which named shape of the element's visual
+/// the pointer is on, and where on that shape. All three reach Lua as `nil` when it is on none —
+/// an element that draws no Frame never has one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shape(pub Option<(String, f32, f32)>);
+
+impl From<Option<runtime::frame::FrameHit>> for Shape {
+    fn from(hit: Option<runtime::frame::FrameHit>) -> Self {
+        Self(hit.map(|h| (h.id.to_string(), h.local.x as f32, h.local.y as f32)))
+    }
+}
+
+impl Shape {
+    /// Absent on an element that draws no frame, or when the pointer is on none of its named
+    /// shapes — so the three keys are simply missing rather than present and nil.
+    fn write(self, event: &Table) -> mlua::Result<()> {
+        if let Some((id, x, y)) = self.0 {
+            event.set("shape", id)?;
+            event.set("sx", x)?;
+            event.set("sy", y)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
-    Call(u32),
-    CallStr(u32, String),
-    CallPhase(u32, &'static str, f32, f32),
+    Call(Key),
+    CallAt(Key, f32, f32, Shape),
+    CallStr(Key, String),
+    CallPhase(Key, &'static str, f32, f32, Shape),
+    CallDrag(Key, DragArgs),
+    CallFrame(Key, f32, f64),
+}
+
+/// A second element with the same id and handler would silently take the first one's events.
+pub(crate) fn register(
+    handlers: &mut Handlers,
+    id: &str,
+    name: &'static str,
+    f: Function,
+) -> mlua::Result<Key> {
+    match handlers.entry(Key::new(id, name)) {
+        Entry::Occupied(_) => Err(Error::runtime(format!(
+            "duplicate id {id}: another element already has {name}"
+        ))),
+        Entry::Vacant(slot) => {
+            let key = slot.key().clone();
+            slot.insert(f);
+            Ok(key)
+        }
+    }
 }
 
 pub struct Ctx<'a, M> {
-    pub handlers: &'a mut Vec<Function>,
+    pub handlers: &'a mut Handlers,
     pub dev: bool,
     pub errors: Vec<String>,
     pub path: String,
     pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
 }
 impl<'a, M> Ctx<'a, M> {
-    fn new(handlers: &'a mut Vec<Function>, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> Self {
+    fn new(handlers: &'a mut Handlers, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> Self {
         Self {
             handlers,
             dev: true,
@@ -90,7 +177,7 @@ impl Source {
 pub struct LuaApp<M> {
     vm: Lua, // never read, but every `Function` below borrows from it — dropping it invalidates them
     view_fn: Option<Function>, //the closure the source returns
-    handlers: RefCell<Vec<Function>>, // refilled every frame
+    handlers: RefCell<Handlers>, // refilled every frame
     error: Option<String>,
     /// The last reload that failed, rendered by `view()` as a banner *above* the still-running
     /// app. `error` is the other kind: a source that never loaded at all, which leaves nothing to
@@ -190,7 +277,7 @@ impl<M: 'static> LuaApp<M> {
         Ok(Self {
             vm,
             view_fn,
-            handlers: RefCell::new(Vec::new()),
+            handlers: RefCell::new(HashMap::new()),
             error,
             reload_error: None,
             fires,
@@ -447,21 +534,69 @@ impl<M: 'static> LuaApp<M> {
         }
         el
     }
+    /// A handler carrying more than one value is called with a single table, never positional
+    /// arguments. Positionally, a short or mis-ordered signature binds the wrong values *and
+    /// keeps running*: `shape` given `scale` arrives as the number 1, looks like a shape id, and
+    /// fails every lookup in silence. A wrong key is `nil`, which is loud the moment it is used,
+    /// and a field added later can never shift the meaning of one already there.
+    fn event(&self, msg: LuaMsg) -> mlua::Result<Table> {
+        let event = self.vm.create_table()?;
+        match msg {
+            LuaMsg::CallAt(_, x, y, shape) => {
+                event.set("x", x)?;
+                event.set("y", y)?;
+                shape.write(&event)?;
+            }
+            LuaMsg::CallPhase(_, phase, x, y, shape) => {
+                event.set("phase", phase)?;
+                event.set("x", x)?;
+                event.set("y", y)?;
+                shape.write(&event)?;
+            }
+            LuaMsg::CallDrag(_, a) => {
+                event.set("phase", a.phase)?;
+                event.set("x", a.at.0)?;
+                event.set("y", a.at.1)?;
+                event.set("dx", a.delta.0)?;
+                event.set("dy", a.delta.1)?;
+                event.set("scale", a.scale)?;
+                event.set("origin_x", a.origin.0)?;
+                event.set("origin_y", a.origin.1)?;
+                a.shape.write(&event)?;
+            }
+            LuaMsg::CallFrame(_, dt, elapsed) => {
+                event.set("dt", dt)?;
+                event.set("elapsed", elapsed)?;
+            }
+            LuaMsg::Call(_) | LuaMsg::CallStr(_, _) => {}
+        }
+        Ok(event)
+    }
+
     pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
         let handlers = self.handlers.borrow();
 
-        // A message can outlive the frame that minted its index (queued click, landed animation),
-        // so a stale index is expected — drop it rather than panicking.
-        let (LuaMsg::Call(i) | LuaMsg::CallStr(i, _) | LuaMsg::CallPhase(i, _, _, _)) = msg;
-        let Some(h) = handlers.get(i as usize) else {
+        // A message can outlive the view that registered its key (a click spans press to
+        // release), so a key with no handler now means the element is gone — drop it.
+        let key = match &msg {
+            LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _, _) | LuaMsg::CallStr(k, _) => k,
+            LuaMsg::CallPhase(k, _, _, _, _)
+            | LuaMsg::CallDrag(k, _)
+            | LuaMsg::CallFrame(k, _, _) => k,
+        };
+        let Some(h) = handlers.get(key) else {
             return;
         };
         let result = match msg {
+            // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
-            LuaMsg::CallPhase(_, phase, x, y) => h.call::<()>((phase, x, y)),
+            carried => match self.event(carried) {
+                Ok(event) => h.call::<()>(event),
+                Err(e) => Err(e),
+            },
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");
@@ -628,6 +763,8 @@ ui = {
     button = tagger("button"),
     input = tagger("input"),
     text_area = tagger("text_area"),
+    frame = tagger("frame"),
+    overlay = tagger("overlay"),
 }
 
 function ui.state(id, init) 
@@ -652,6 +789,7 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     })?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;
+    gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
     let _ = vm.sandbox(true)?;
@@ -842,7 +980,64 @@ fn keys(node: &Table) -> String {
         .join(",")
 }
 
+fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+    if max_index(&node) != 2 {
+        return Err(mlua::Error::runtime(
+            "overlay needs exactly two children: anchor, then panel",
+        ));
+    }
+    for pair in node.pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let allowed = match key {
+            Value::Integer(1 | 2) => true,
+            Value::String(ref key) => matches!(
+                key.to_str()?.as_ref(),
+                "tag" | "line" | "id" | "side" | "align" | "on_dismiss"
+            ),
+            _ => false,
+        };
+        if !allowed {
+            let key = match key {
+                Value::String(key) => key.to_string_lossy(),
+                other => show(&other),
+            };
+            return Err(mlua::Error::runtime(format!(
+                "overlay: unknown field {key}"
+            )));
+        }
+    }
+    let anchor = walk(node.get::<Table>(1)?, context)?;
+    let panel = walk(node.get::<Table>(2)?, context)?;
+    let side = match node.get::<Option<String>>("side")?.as_deref() {
+        None | Some("bottom") => PlacementSide::Bottom,
+        Some("top") => PlacementSide::Top,
+        Some("left") => PlacementSide::Left,
+        Some("right") => PlacementSide::Right,
+        Some(v) => return Err(mlua::Error::runtime(format!("unknown overlay side {v}"))),
+    };
+    let align = match node.get::<Option<String>>("align")?.as_deref() {
+        None | Some("start") => PlacementAlign::Start,
+        Some("center") => PlacementAlign::Center,
+        Some("end") => PlacementAlign::End,
+        Some(v) => return Err(mlua::Error::runtime(format!("unknown overlay align {v}"))),
+    };
+    let dismiss = match node.get::<Option<Function>>("on_dismiss")? {
+        Some(handler) => {
+            let id = node
+                .get::<Option<String>>("id")?
+                .ok_or_else(|| mlua::Error::runtime("on_dismiss needs an id"))?;
+            let key = register(context.handlers, &id, "on_dismiss", handler)?;
+            Some((context.to_msg)(LuaMsg::Call(key)))
+        }
+        None => None,
+    };
+    Ok(anchor.overlay(panel, dismiss, Placement { side, align }, Anchor::Element))
+}
+
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
+    if tag == "overlay" {
+        return build_overlay(node, context);
+    }
     let mut el = match tag {
         "col" | "row" | "button" => {
             let el = if tag == "col" { col() } else { row() };
@@ -858,6 +1053,17 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 )));
             }
         },
+        "frame" => {
+            if max_index(&node) > 0 {
+                return Err(mlua::Error::runtime("frame takes no children"));
+            }
+            let visual = node
+                .get::<AnyUserData>("visual")?
+                .borrow::<gfx::LuaFrame>()?
+                .0
+                .clone();
+            frame_el(visual)
+        }
         "input" | "text_area" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime(format!(
@@ -876,10 +1082,9 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             let f = node
                 .get::<Option<mlua::Function>>("on_input")?
                 .ok_or_else(|| mlua::Error::runtime(format!("{tag} needs on_input")))?;
-            let idx = context.handlers.len() as u32;
-            context.handlers.push(f);
+            let key = register(context.handlers, &id, "on_input", f)?;
             let to_msg = context.to_msg.clone();
-            let map = move |s| to_msg(LuaMsg::CallStr(idx, s));
+            let map = move |s| to_msg(LuaMsg::CallStr(key.clone(), s));
             if tag == "input" {
                 text_input(value, id, map)
             } else {
@@ -900,8 +1105,8 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     if id.is_none() && (node.contains_key("scroll_x")? || node.contains_key("scroll_y")?) {
         return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
     }
-
-    el = props::apply(el, &node, context)?;
+    let consumed: &[&str] = if tag == "frame" { &["visual"] } else { &[] };
+    el = props::apply(el, &node, context, id.as_deref(), consumed)?;
     Ok(el)
 }
 

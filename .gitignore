@@ -15,6 +15,9 @@ target/
 .pi/npm/
 .pi/sessions/
 
+# Python bytecode
+__pycache__/
+
 # downloaded archives that wandered into the root
 /*.tar.bz2
 /*.tar.gz

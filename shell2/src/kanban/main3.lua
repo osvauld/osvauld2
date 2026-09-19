@@ -167,10 +167,12 @@ local function cardof(c)
 		id = c.id,
 		gap = 8,
 		center = true,
-		on_drag = function(phase, x, y)
+		on_drag = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drag", id = c.id, phase = phase, x = x, y = y })
 		end,
-		on_drop = function(phase, x, y)
+		on_drop = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drop", phase = phase, x = x, y = y, id = c.id })
 		end,
 		ui.text({ c.text, color = "white" }),
@@ -225,7 +227,8 @@ local function column_of(c, list)
 			}),
 		}),
 
-		on_drop = function(phase, x, y)
+		on_drop = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drop_col", col = c.id, phase = phase })
 		end,
 	})

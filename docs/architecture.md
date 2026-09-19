@@ -133,5 +133,7 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 | [`design/code-as-tree.md`](design/code-as-tree.md), [`design/nid-channel.md`](design/nid-channel.md) | the tree-as-artifact design and the provenance channel |
 | [`design/loro-notes.md`](design/loro-notes.md) | Loro mechanics, read out of their source |
 | [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) | design baseline: address/handle syntax and exact/subtree matching built; authorization, cross-app data, grant/key bundles, discovery, sync, and sovereign node unbuilt |
+| [`design/app-discovery-and-invocation.md`](design/app-discovery-and-invocation.md) | untrusted app documentation, callable live UI actions, explicit commands, and the future thin MCP boundary |
+| [`design/environment-runtime.md`](design/environment-runtime.md) | planning baseline for the unbuilt retained 3D Environment, world lifetime, physics composition, projected UI and rendering decision spikes |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | code/test/doc conventions |
 | [`archive/README.md`](archive/README.md) | everything historical, and why |
