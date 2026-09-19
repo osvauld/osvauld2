@@ -469,3 +469,28 @@ Errors are for reading, not for fearing:
 
 The fastest authoring loop is: upload, look at the banner, fix, upload again. Keep files small
 enough that a reported line number means one obvious thing.
+
+## Checking it without a window
+
+`open` loads a folder, builds a view, and prints the element tree with each element's id and
+handlers, then the console. It exits non-zero if anything reached the console, so it drops
+straight into a loop.
+
+```
+cargo run -p app_host --example open -- demo_apps/pie
+cargo run -p app_host --example open -- demo_apps/pie --hover 180,128 --tree
+cargo run -p app_host --example open -- demo_apps/voronoi --drag 300,300:380,360
+```
+
+`--hover X,Y`, `--click X,Y` and `--drag X0,Y0:X1,Y1[:steps]` run in the order given, and after
+each one it reports new console lines and whether the view changed. These are not simulated: the
+same layout, the same hit regions, the same handler call the window makes. The only thing supplied
+by hand is the pointer coordinate — which is also the limit, since scaling, event timing and
+painting all live below that line. A view that passes here can still look wrong.
+
+Coordinates are logical points from the top-left of a 1200×800 viewport (`--size WxH` to change
+it), so they are the same units an element's rect is in. `print()` from a handler goes to stdout.
+
+Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
+a drag and fires **no** click, and a press that travels less is a click reported at the point it
+was *released*. Since no hand is perfectly still, the second is the ordinary case.

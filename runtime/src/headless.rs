@@ -1,0 +1,77 @@
+//! Drive an app without a window.
+//!
+//! This is not a second hit-test implementation and not a mock. It builds the same `Runner` the
+//! event loop builds, minus the GPU, and calls the same methods winit's `window_event` calls —
+//! the only substitution is where the pointer coordinate comes from. What it can't reach is
+//! everything below that line: physical→logical scaling, real event ordering, and pixels.
+//!
+//! Every pointer method paints a frame first, because `hits` is filled by painting and in a
+//! window you never receive an event against a frame that hasn't been drawn.
+
+use winit::dpi::PhysicalPosition;
+
+use crate::{App, Runner};
+
+pub struct Headless<A: App> {
+    runner: Runner<A>,
+}
+
+impl<A: App> Headless<A> {
+    /// `viewport` is in logical points, and offscreen the scale is 1.0 — so the numbers you pass
+    /// to the pointer methods are the same ones an element's rect is measured in.
+    pub fn new(app: A, viewport: (f32, f32)) -> Self {
+        Self {
+            runner: Runner::new(app, Some(viewport)),
+        }
+    }
+
+    /// Lay out, collect hit regions, and build a scene that is then dropped.
+    pub fn frame(&mut self) {
+        self.runner.frame();
+    }
+
+    /// Move the pointer, firing hover and — while a button is down — drag.
+    pub fn move_to(&mut self, x: f32, y: f32) {
+        self.frame();
+        self.runner
+            .on_cursor_moved(PhysicalPosition::new(x as f64, y as f64));
+    }
+
+    pub fn press(&mut self) {
+        self.frame();
+        self.runner.click();
+    }
+
+    pub fn release(&mut self) {
+        self.frame();
+        self.runner.on_cursor_release();
+    }
+
+    /// Press and release without travelling: a click, not a drag.
+    pub fn click_at(&mut self, x: f32, y: f32) {
+        self.move_to(x, y);
+        self.press();
+        self.release();
+    }
+
+    /// A press, `steps` moves, and a release. A drag only begins once the pointer has travelled
+    /// past the runtime's slop, so a short drag with few steps fires nothing — which is the
+    /// behaviour, not a limitation of this driver.
+    pub fn drag(&mut self, from: (f32, f32), to: (f32, f32), steps: usize) {
+        self.move_to(from.0, from.1);
+        self.press();
+        for i in 1..=steps.max(1) {
+            let f = i as f32 / steps.max(1) as f32;
+            self.move_to(from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f);
+        }
+        self.release();
+    }
+
+    pub fn app(&self) -> &A {
+        &self.runner.app
+    }
+
+    pub fn app_mut(&mut self) -> &mut A {
+        &mut self.runner.app
+    }
+}

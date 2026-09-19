@@ -1,5 +1,7 @@
 use super::*;
 use crate::frame::{Brush, Frame, Item, Path};
+use std::cell::RefCell;
+use std::rc::Rc;
 use vello::kurbo::PathEl;
 use vello::peniko::Fill;
 
@@ -74,3 +76,57 @@ fn a_grab_keeps_reporting_in_the_shape_it_took_hold_of() {
     assert!(Grabbed::take(&shapes, NodePoint::new(50.0, 5.0)).is_none()); // pressed on nothing
 }
 
+/// A tiny app that records the order handlers fired in, so a gesture can be read back as a list.
+struct Recorder {
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl App for Recorder {
+    type Msg = String;
+    fn view(&self) -> El<String> {
+        crate::col()
+            .full()
+            .child(
+                crate::col()
+                    .id("pad")
+                    .w(200.0)
+                    .h(200.0)
+                    .on_click_at(|at| format!("click {},{}", at.pos.0, at.pos.1))
+                    .on_drag("pad", |d| format!("drag {}", d.phase.as_str())),
+            )
+    }
+    fn update(&mut self, msg: String) {
+        self.log.borrow_mut().push(msg);
+    }
+}
+
+fn gesture(run: impl FnOnce(&mut Headless<Recorder>)) -> Vec<String> {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
+    run(&mut h);
+    let out = log.borrow().clone();
+    out
+}
+
+/// A press that travels past the slop is a drag and *only* a drag: the armed click is dropped the
+/// moment the gesture becomes one. Reading the release path alone suggests otherwise, which is
+/// exactly the mistake this test exists to keep from being made twice.
+#[test]
+fn a_drag_does_not_also_fire_the_click_it_started_from() {
+    let fired = gesture(|h| h.drag((50.0, 50.0), (140.0, 120.0), 4));
+    assert_eq!(fired.first().map(String::as_str), Some("drag start"));
+    assert_eq!(fired.last().map(String::as_str), Some("drag end"));
+    assert!(
+        !fired.iter().any(|m| m.starts_with("click")),
+        "a drag fired a click as well: {fired:?}"
+    );
+}
+
+/// The other side of the same line: a press that never travels far enough stays a click, reported
+/// where it was released. A hand is never perfectly still, so this is the common case, not an edge.
+#[test]
+fn a_press_that_barely_moves_is_still_a_click() {
+    let fired = gesture(|h| h.drag((50.0, 50.0), (53.0, 52.0), 4));
+    assert_eq!(fired, vec!["click 53,52".to_string()]);
+    assert!(!fired.iter().any(|m| m.starts_with("drag")));
+}

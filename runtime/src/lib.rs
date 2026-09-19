@@ -11,6 +11,7 @@ mod editor;
 mod el;
 pub mod frame;
 mod geometry;
+mod headless;
 mod hover;
 mod id;
 mod layout;
@@ -53,6 +54,7 @@ pub use el::{
     Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col,
     custom, frame, rich, row, text, text_area, text_input,
 };
+pub use headless::Headless;
 pub use hover::{HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
 use state::Store;
@@ -162,6 +164,9 @@ impl Capture {
 struct Runner<A: App> {
     app: A,
     render: Option<Render>,
+    /// Set only when there is no window: the viewport to lay out against, so `frame` still runs
+    /// the whole layout/hit/paint path and fills `hits`. The scene it builds is thrown away.
+    offscreen: Option<(f32, f32)>,
     pointer: Option<(f32, f32)>,
     text: TextEngine,
     focused: Focus,
@@ -292,8 +297,12 @@ impl<M> Hits<M> {
 
 impl<A: App> Runner<A> {
     fn frame(&mut self) {
-        let Some(render) = self.render.as_ref() else {
-            return;
+        // Windowed, the surface says how big and how sharp. Offscreen, we say, at 1.0 — which
+        // makes physical and logical points the same number for anything driving it by hand.
+        let (surface, surface_scale, surface_transform) = match (&self.render, self.offscreen) {
+            (Some(r), _) => (r.viewport(), r.scale() as f32, r.transform()),
+            (None, Some(v)) => (v, 1.0, Affine::IDENTITY),
+            (None, None) => return,
         };
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
@@ -306,15 +315,15 @@ impl<A: App> Runner<A> {
         let viewport = screenshot
             .as_ref()
             .and_then(|r| r.viewport)
-            .unwrap_or_else(|| render.viewport());
+            .unwrap_or(surface);
         let capture_scale = screenshot
             .as_ref()
             .and_then(|r| r.scale)
-            .unwrap_or(render.scale() as f32);
+            .unwrap_or(surface_scale);
         let t = if custom_capture {
             Affine::scale(capture_scale as f64)
         } else {
-            render.transform()
+            surface_transform
         };
         let clear = self.app.clear();
         self.scene.reset();
@@ -555,7 +564,9 @@ impl<A: App> Runner<A> {
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
-        let captured = if custom_capture {
+        let captured = if self.render.is_none() {
+            None // nothing to present to, and a screenshot request just goes unanswered
+        } else if custom_capture {
             // This frame ran the normal layout/hit/paint path against the requested viewport,
             // but its pixels never reach the surface. Temporary hit geometry must not accept
             // input before the normal restorative frame requested below.
@@ -580,9 +591,8 @@ impl<A: App> Runner<A> {
             })
         };
         let mut dispatched = !done_msgs.is_empty();
-        if let Some(request) = screenshot {
-            self.app
-                .update((request.complete)(captured.expect("capture result")));
+        if let (Some(request), Some(image)) = (screenshot, captured) {
+            self.app.update((request.complete)(image));
             dispatched = true;
         }
         for m in done_msgs {
@@ -1399,24 +1409,31 @@ pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> 
         .expect("event loop");
     let app = build(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut runner = Runner {
-        app,
-        render: None,
-        pointer: None,
-        hits: Hits::default(),
-        focused: Focus::new(),
-        text: TextEngine::new(),
-        modifiers: ModifiersState::empty(),
-        debug: false,
-        store: Store::new(),
-        drag: None,
-        scene: Scene::new(),
-        start: Instant::now(),
-        last_frame: None,
-        pressed: None,
-        hovered: Hovered::default(),
-    };
+    let mut runner = Runner::new(app, None);
     event_loop.run_app(&mut runner).expect("run app");
+}
+
+impl<A: App> Runner<A> {
+    fn new(app: A, offscreen: Option<(f32, f32)>) -> Self {
+        Self {
+            app,
+            render: None,
+            offscreen,
+            pointer: None,
+            hits: Hits::default(),
+            focused: Focus::new(),
+            text: TextEngine::new(),
+            modifiers: ModifiersState::empty(),
+            debug: false,
+            store: Store::new(),
+            drag: None,
+            scene: Scene::new(),
+            start: Instant::now(),
+            last_frame: None,
+            pressed: None,
+            hovered: Hovered::default(),
+        }
+    }
 }
 
 #[cfg(test)]
