@@ -53,6 +53,42 @@ fn now_has_a_fraction() {
     assert!(fractional, "now() is still whole seconds");
 }
 
+/// Luau's own `os.clock` is a real monotonic clock, and an app using it would time itself against
+/// the machine rather than the runtime — so offscreen, where the clock is virtual, it would report
+/// real elapsed time and differ on every machine. It is shadowed, and the freeze is what keeps it
+/// shadowed: an app that reassigns it must fail rather than quietly get the original back.
+#[test]
+fn the_machines_clocks_are_not_reachable_from_an_app() {
+    let (lua, _) = sandboxed_vm().unwrap();
+
+    for call in ["os.clock()", "os.date()", "os.date('%c', 0)"] {
+        let err = lua
+            .load(format!("return {call}"))
+            .exec()
+            .expect_err(&format!("{call} still reaches the machine"));
+        assert!(
+            err.to_string().contains("e.t") || err.to_string().contains("now()"),
+            "{call} errors without saying what to use instead: {err}"
+        );
+    }
+
+    // os.time stays, mapped onto our own wall clock: whole seconds, as Lua defines it.
+    let t = lua.load("return os.time()").eval::<f64>().unwrap();
+    assert!(t > 1.7e9, "os.time is not unix seconds: {t}");
+    assert_eq!(t.fract(), 0.0, "os.time should be whole seconds: {t}");
+
+    // difftime reads no clock — it is arithmetic on what you hand it.
+    let d = lua.load("return os.difftime(10, 4)").eval::<f64>().unwrap();
+    assert_eq!(d, 6.0);
+
+    assert!(
+        lua.load("os.clock = function() return 0 end")
+            .exec()
+            .is_err(),
+        "an app can put the machine's clock back"
+    );
+}
+
 #[test]
 fn gfx_path_compiles_one_batched_lua_declaration() {
     let (lua, _) = sandboxed_vm().unwrap();
