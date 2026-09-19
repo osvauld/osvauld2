@@ -66,7 +66,10 @@ Built: `courier::token` issues root role tokens, delegates them with the full pa
 and verifies a chain leaf-to-root — depth cap before any crypto, per-link signature/subject/
 expiry/revocation, then child-versus-parent linkage, delegability, role, and scope; ids hash the
 signed payload. Scope is four levels (node, workspace, app, resource) and
-`workspace::ResourceScope::contains` decides the innermost one. Next slices: (1) how a
+`workspace::ResourceScope::contains` decides the innermost one. **2026-09-19:** authorship
+became a signed field on the record rather than a signed update wrapper, so there is no node
+update log and Loro peer ids need no DID binding; kunki will store through `vault` as shell2
+does, with the admin store on `Vault::store`. Next slices: (1) how a
 maintainer hands out an app role — delegation cannot change a role, so role assignment needs
 node issuance under `role.assign`; (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.

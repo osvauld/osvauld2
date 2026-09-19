@@ -2,7 +2,8 @@
 
 > **Status — 2026-09-11: design baseline; validated resource-address syntax, callable handles,
 > and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
-> node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4.**
+> node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4;
+> 2026-09-19: signatures are record fields and kunki stores through vault.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -188,6 +189,10 @@ node verifies the signature and that every Loro peer id in the update is bound t
 are kept in the node log, so authorship stays verifiable later. `record.author` is the signer
 of the creating update; clients cannot set it.
 
+**Revised 2026-09-19 (§4):** the signature moved into the record as a field, so there is no
+node-side update log and no peer-id binding requirement. The paragraph above is kept for the
+reasoning that led there.
+
 **Rules are Lua in the signed manifest; there is no custom rule vocabulary.** The node is
 trusted, so a DSL adds a language without adding security. Kunki runs the rules on merge. The
 manifest also declares data shapes — the node needs them to map changed containers to
@@ -298,6 +303,43 @@ channel, and one person holding two roles at once.
 Open: who may declare a namespace (maintainer, or the publisher of an app that needs it);
 whether an update records the writing app; how a deny list is represented; re-running read
 rules and updating indexes when group membership changes.
+
+### Decided 2026-09-19: signatures are record fields; kunki stores through vault
+
+Agreed with the user. The signature half supersedes "Authorship is a signed update" above;
+the storage half is new. Nothing here is built.
+
+**A signature is a field on the record, not a wrapper around the update.** A message is
+`{id, author, text, ts, sig}` and the node verifies the field at merge. Provenance then
+replicates with the data, so any peer can check it instead of trusting the node's word, and
+no node-side log has to hold a second copy of every update. It also survives re-encoding: the
+signature covers the record's fields, not an update's bytes, which cannot be re-derived
+byte-identically from a merged doc.
+
+Two constraints come with it. **Signed fields are write-once** — a `LoroText` that merges
+concurrent edits changes the value out from under its signature, so an edit is a new version
+carrying a new signature, and collaboratively edited prose cannot be signed this way at all:
+nobody authored the merged text. **The signature covers the record's address**, not only its
+content, or a peer could move a signed message into another thread and have it still verify.
+Structural ops — delete, move, reparent — have no signed body of their own and stay
+rule-enforced at merge.
+
+This drops a requirement: Loro peer ids no longer need binding to DIDs for authorship, because
+the field answers it directly. `(PeerID, Counter)` stays what it always was — ordering, not
+identity.
+
+**Kunki stores through `vault`, the same way shell2 does**, as vault's header already intends
+("the future node will too"). The node identity moves into the account db at
+`identity/keystore`, so kunki's `identity.bin`, `load_or_create_identity`, and `write_secret`
+give way to signup-then-login with the boot passphrase. Sealing at rest means something
+weaker here than on a desktop — the node can read everything it holds, which §5's trusted-host
+assumption already grants — so it is disk-theft protection, not access control. Workspaces,
+apps, and documents use `create_workspace`/`create_item`/`put_src`/`put_doc` unchanged; the
+node's own records (tokens, lineage, revocations, per-user indexes) go on `Vault::store`
+rather than a second database.
+
+Open: the canonical encoding a record signature covers (field order, and the form of the
+address inside it); whether a signed record is ever amended in place rather than versioned.
 
 ## 5. Trust, consent, and updates
 
