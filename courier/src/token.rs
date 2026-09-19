@@ -87,7 +87,7 @@ impl Token {
 }
 
 pub fn issue_root(
-    node: &impl Signer,
+    node: &(impl Signer + ?Sized),
     aud: &str,
     role: &str,
     scope: Scope,
@@ -116,7 +116,7 @@ pub fn issue_root(
 /// delegation is minted here and refused there.
 pub fn delegate(
     parent: &Token,
-    holder: &impl Signer,
+    holder: &(impl Signer + ?Sized),
     aud: &str,
     scope: Scope,
     delegable: bool,
@@ -207,7 +207,7 @@ pub fn verify_chain(
     Ok(leaf.clone())
 }
 
-fn sign(issuer: &impl Signer, claims: Claims) -> Result<Token> {
+fn sign(issuer: &(impl Signer + ?Sized), claims: Claims) -> Result<Token> {
     let payload = bincode::serialize(&claims).map_err(|_| CourierError::Decode)?;
     Ok(Token {
         sig: issuer.sign(&[TOKEN_DOMAIN, &payload].concat()).to_vec(),

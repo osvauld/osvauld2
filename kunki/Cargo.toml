@@ -9,4 +9,9 @@ base64 = "0.22"
 courier = { path = "../courier" }
 identity = { path = "../identity" }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+vault = { path = "../vault" }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

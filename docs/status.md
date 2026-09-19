@@ -88,8 +88,16 @@ does, with the admin store on `Vault::store`. Also built: `courier::policy` — 
 capabilities as a closed Rust set, the `(scope level, role) -> capabilities` table pinned cell
 by cell, and `authorize` joining the chain check to scope coverage and capability. A role read
 one level down is a different role, so narrowing a token to app scope drops platform
-capabilities by design. Next slices: (1) `role.assign` — node issuance of a role token, with a
-rank check so an assigner cannot mint above itself; (2) the durable node admin store. Next slices: (1) how a
+capabilities by design. **Gate 1 (the node remembers), in progress:** `identity::Signer` is the outside view of an
+identity — DID, signature, the two public keys — so `courier` takes `&(impl Signer + ?Sized)`
+and never holds a private key. `vault` gained sealed `entry/` records (opaque, caller-keyed,
+reserved namespace so no name can address the keystore) and `with_signer`, which lends a
+signer for a closure and yields nothing when locked. `kunki` now keeps its identity as a vault
+account instead of its own `identity.bin`, created on first boot and unlocked from
+`OSVAULD_KUNKI_PASSPHRASE`; a second account in the node directory stops the boot rather than
+guessing which is the node. Remaining in Gate 1: the admin store over `entry/` (tokens,
+lineage, revocations), revocation with cascade, and `role.assign` — node issuance of a role
+token with a rank check so an assigner cannot mint above itself. Next slices: (1) how a
 maintainer hands out an app role — delegation cannot change a role, so role assignment needs
 node issuance under `role.assign`; (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
