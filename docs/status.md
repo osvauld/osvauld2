@@ -62,9 +62,13 @@ through bincode, so no transport is needed to exercise the protocol. **2026-09-1
 signed-update authorship, and Lua-rule decisions recorded in
 [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) §4, extended **2026-09-18** with the role/capability/rule split, structure-versus-data writes,
 namespaces owning schema and rules, install as the authorization event, and the per-user index.
-Built: `courier::token` issues root role tokens and delegations that embed their full parent;
-ids hash the signed payload. Next slices: (1) the chain check, over the four-level scope
-(node, workspace, app, resource); (2) a durable node admin store holding
+Built: `courier::token` issues root role tokens, delegates them with the full parent embedded,
+and verifies a chain leaf-to-root — depth cap before any crypto, per-link signature/subject/
+expiry/revocation, then child-versus-parent linkage, delegability, role, and scope; ids hash the
+signed payload. Scope is four levels (node, workspace, app, resource) and
+`workspace::ResourceScope::contains` decides the innermost one. Next slices: (1) how a
+maintainer hands out an app role — delegation cannot change a role, so role assignment needs
+node issuance under `role.assign`; (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
 QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
 workspace publish, or sync exists yet.

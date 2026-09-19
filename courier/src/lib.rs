@@ -32,6 +32,20 @@ pub enum CourierError {
     UnknownAdmin,
     #[error("stale reconnect challenge")]
     StaleChallenge,
+    #[error("delegation chain too long")]
+    ChainTooLong,
+    #[error("token expired")]
+    Expired,
+    #[error("token revoked")]
+    Revoked,
+    #[error("parent token forbids delegation")]
+    NotDelegable,
+    #[error("delegation widens its parent")]
+    Escalation,
+    #[error("delegation chain does not reach the node")]
+    BrokenChain,
+    #[error("token was issued to someone else")]
+    WrongHolder,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

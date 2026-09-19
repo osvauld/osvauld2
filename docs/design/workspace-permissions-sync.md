@@ -157,8 +157,9 @@ rollback prevention, expiry, revocation ordering, and historical-write treatment
 ### Decided 2026-09-17: role tokens, signed updates, Lua rules
 
 Agreed with the user; supersedes the "Permit" row above (tokens carry roles, not concrete
-capabilities) and the open manifest/Lua split in §7. Built: token issuing and delegation
-(`courier::token`); the chain check and everything else below is not.
+capabilities) and the open manifest/Lua split in §7. Built: `courier::token` — issuing,
+delegation, and the chain check below, over the four-level scope, with
+`workspace::ResourceScope::contains` for the innermost level. Everything else here is not.
 
 **The node is the root authority; tokens carry roles.** Fields: `iss`, `aud`, `sub` (node
 DID), `role`, `scope`, `delegable`, `nonce`, `iat`, `exp`, `prf`. `prf` embeds the full parent
@@ -220,7 +221,10 @@ the default. Uniqueness and bounds rely on the node merging one update at a time
 client-side pending state. Computation such as auto-moderation is a node function.
 
 Open: who may revoke a link (node only, or also its issuer); the creator's initial authority
-on a new workspace; client rollback/pending UX for rejected updates.
+on a new workspace; client rollback/pending UX for rejected updates. Surfaced while building
+the chain check: a delegation cannot change its role, so a maintainer cannot hand out an app
+role by delegating — role assignment has to be node issuance under `role.assign`, which also
+keeps it in the audit log. Delegation then only ever narrows scope.
 
 ### Decided 2026-09-18: roles, capabilities, rules, and how apps reach data
 

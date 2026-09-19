@@ -110,6 +110,24 @@ impl ResourceScope {
                 .is_some_and(|rest| rest.starts_with('/')),
         }
     }
+
+    /// Whether every address this scope covers includes every address `other` covers.
+    /// A subtree still excludes its own base, so `a/*` does not contain exactly `a`.
+    pub fn contains(&self, other: &Self) -> bool {
+        match other {
+            Self::Exact(target) => self.covers(target),
+            Self::Subtree(target) => match self {
+                Self::Exact(_) => false,
+                Self::Subtree(base) => base == target || self.covers(target),
+            },
+        }
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        match self {
+            Self::Exact(address) | Self::Subtree(address) => address.workspace_id(),
+        }
+    }
 }
 
 impl FromStr for ResourceScope {

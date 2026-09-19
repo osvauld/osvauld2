@@ -96,3 +96,29 @@ fn binding_resolves_a_handle_to_a_stable_address() {
     assert_eq!(binding.handle().as_str(), "orders");
     assert_eq!(binding.target().as_str(), "ws/8ab3/resource/01JORDERS");
 }
+
+#[test]
+fn containment_narrows_never_widens() {
+    let scope = |value: &str| ResourceScope::parse(value).unwrap();
+    let orders = scope("ws/shop/resource/orders/*");
+
+    assert!(orders.contains(&scope("ws/shop/resource/orders/*")));
+    assert!(orders.contains(&scope("ws/shop/resource/orders/shard-1/*")));
+    assert!(orders.contains(&scope("ws/shop/resource/orders/shard-1")));
+
+    // a subtree excludes its own base, and an exact scope contains nothing wider
+    assert!(!orders.contains(&scope("ws/shop/resource/orders")));
+    assert!(!orders.contains(&scope("ws/shop/resource/*")));
+    assert!(!orders.contains(&scope("ws/shop/resource/products/*")));
+    assert!(!scope("ws/shop/resource/orders").contains(&orders));
+}
+
+#[test]
+fn scope_reports_its_workspace() {
+    assert_eq!(
+        ResourceScope::parse("ws/shop/resource/orders/*")
+            .unwrap()
+            .workspace_id(),
+        "shop"
+    );
+}
