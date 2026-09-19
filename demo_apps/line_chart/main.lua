@@ -8,7 +8,8 @@ local TIP_W = 104
 
 local S = { hover = nil } -- index of the highlighted point
 
-local function on_plot_hover(phase, x, y)
+local function on_plot_hover(e)
+	local phase, x, y = e.phase, e.x, e.y
     if phase == "leave" then
         S.hover = nil
     else

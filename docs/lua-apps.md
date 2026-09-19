@@ -259,47 +259,63 @@ found by id + name when its event is delivered, not when the view was built, so 
 reaches its element when a peer edit lands between press and release — and is dropped if the
 element is gone.
 
-- `on_click = function(x, y, shape, sx, sy)` — where the click landed, from the element's top-left corner in
-  its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
-  whatever the camera is doing. Handlers that don't care can ignore the arguments. Fired from
-  the bridge, with no layout, `x, y` is `0, 0`. Inside a `zoomable`, a press that travels past 5pt
-  pans instead.
-- `on_hover = function(phase, x, y, shape, sx, sy)` — phases `"enter"` / `"move"` / `"leave"`, `x, y` as
-  `on_click` (outside the element on `"leave"`). An element is hovered while the pointer is
-  inside it, like `hover_fill`: a parent stays hovered over its children, and an element painted
-  on top doesn't hide the one below — check your own geometry if that matters. It fires only
-  when the pointer moves.
-- `shape, sx, sy` on both of those name the shape inside a `ui.frame`'s visual that the pointer is
-  on — see [Frame visuals](#frame-visuals-experimental-foundation). `shape` is the `id` you gave
-  the shape, and `sx, sy` are the point in *that shape's* own coordinates, with its `group` and
-  `instance` transforms undone. All three are `nil` on an element that draws no frame, or when the
-  pointer is on none of its named shapes. `on_drag` carries them too, with one difference: it
-  reports the shape it *grabbed*, held from press to release.
-- `on_enter`, `on_esc`, `on_faded_out` — plain callbacks.
-- `on_input = function(v)` — an input's new text.
-- `on_drag = function(phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy)` — phases `"start"` /
-  `"move"` / `"end"`. `x, y` are the pointer in the element's own units, as `on_click` reports
-  them (at `"start"`, where the press landed, not where the 5pt slop ended). `dx, dy` are
-  movement since the press, `scale` lets a root ghost match zoomed content, and
-  `origin_x, origin_y` are the dragged element's screen-space origin — only a root-level ghost
-  placing itself in screen space needs those. `shape, sx, sy` are the shape the press **grabbed**:
-  the same one for the whole gesture, whatever the pointer has since slid over, and `sx, sy` are
-  reported even once the pointer leaves it — which is what holding something means.
-  **Needs an `id`.**
+A handler that carries more than one value is called with **one table**, not positional
+arguments — `function(e)`, and every value is a named field on `e`. The two that carry nothing or
+a single value keep their plain form: `on_enter`, `on_esc`, `on_faded_out` take nothing, and
+`on_input = function(v)` takes the new text.
 
-  The coordinate space is **frozen at the press**, not recomputed each move: `sx, sy` are measured
-  in the space the shape had when you grabbed it, even if the shape has rotated or moved since.
-  That is what makes them useful — `sx, sy` is a fixed grab offset for the whole gesture, so
-  "where should this go now" is `x - sx`, computed the same way on every move. Read them as live
-  coordinates instead and you write a feedback correction that fights itself, which looks like a
-  broken drag rather than a coordinate-space mistake.
-- `on_drop = function(phase, x, y)` — phases `"over"` (while hovering) / `"release"`; `x, y`
-  are normalized to the drop target (0–1), so `msg.y < 0.5` means "above the midline".
-  **Needs an `id`.**
-- `on_frame = function(dt, elapsed)` — an **experimental visual/prototyping loop**. `elapsed` is
-  monotonic Runner time and `dt` is clamped to 0.1 seconds after stalls; only Runner's first frame
-  is guaranteed zero. Presence keeps repainting, so omit it to stop that request. Custom
-  screenshots currently dispatch it too; it is not a fixed-step world scheduler. **Needs an `id`.**
+This is why: positionally, a short or mis-ordered signature binds the wrong values *and keeps
+running*. Writing `function(phase, x, y, dx, dy, shape, sx, sy)` for `on_drag` puts `scale` into
+`shape`, so `shape` is the number 1, looks like a shape id, and fails every lookup in silence. A
+wrong key is `nil`, which is loud the moment you index it, and a field added later can never
+shift the meaning of one already there.
+
+```lua
+on_drag = function(e)
+	if e.phase == "start" then grab(e.shape, e.sx, e.sy) end
+end
+```
+
+- `on_click(e)` — `e.x, e.y` are where the click landed, from the element's top-left corner in
+  its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
+  whatever the camera is doing. Fired from the bridge, with no layout, they are `0, 0`. Inside a
+  `zoomable`, a press that travels past 5pt pans instead.
+- `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
+  the element on `"leave"`). An element is hovered while the pointer is inside it, like
+  `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
+  hide the one below — check your own geometry if that matters. It fires only when the pointer
+  moves, so an element that slides under a still pointer enters on the next move.
+- `e.shape, e.sx, e.sy` on both of those name the shape inside a `ui.frame`'s visual that the
+  pointer is on — see [Frame visuals](#frame-visuals-experimental-foundation). `e.shape` is the
+  `id` you gave the shape, and `e.sx, e.sy` are the point in *that shape's* own coordinates, with
+  its `group` and `instance` transforms undone. All three are absent on an element that draws no
+  frame, or when the pointer is on none of its named shapes.
+- `on_enter`, `on_esc`, `on_faded_out` — plain callbacks, no argument.
+- `on_input = function(v)` — an input's new text.
+- `on_drag(e)` — `e.phase` is `"start"` / `"move"` / `"end"`. `e.x, e.y` are the pointer in the
+  element's own units, as `on_click` reports them (at `"start"`, where the press landed, not where
+  the 5pt slop ended). `e.dx, e.dy` are movement since the press, `e.scale` lets a root ghost
+  match zoomed content, and `e.origin_x, e.origin_y` are the dragged element's screen-space
+  origin — only a root-level ghost placing itself in screen space needs those. `e.shape, e.sx,
+  e.sy` are the shape the press **grabbed**: the same one for the whole gesture, whatever the
+  pointer has since slid over, and reported even once the pointer leaves it — which is what
+  holding something means. **Needs an `id`.**
+
+  A press that travels past 5pt is a drag and fires **no** click. A press that travels less is a
+  click, reported where it was *released*. No hand is perfectly still, so the second is ordinary.
+
+  The coordinate space is **frozen at the press**, not recomputed each move: `e.sx, e.sy` are
+  measured in the space the shape had when you grabbed it, even if the shape has rotated or moved
+  since. That is what makes them useful — they are a fixed grab offset for the whole gesture, so
+  "where should this go now" is `e.x - e.sx`, computed the same way on every move. Read them as
+  live coordinates instead and you write a feedback correction that fights itself, which looks
+  like a broken drag rather than a coordinate-space mistake.
+- `on_drop(e)` — `e.phase` is `"over"` (while hovering) / `"release"`; `e.x, e.y` are normalized
+  to the drop target (0–1), so `e.y < 0.5` means "above the midline". **Needs an `id`.**
+- `on_frame(e)` — an **experimental visual/prototyping loop**. `e.elapsed` is monotonic Runner
+  time and `e.dt` is clamped to 0.1 seconds after stalls; only Runner's first frame is guaranteed
+  zero. Presence keeps repainting, so omit it to stop that request. Custom screenshots currently
+  dispatch it too; it is not a fixed-step world scheduler. **Needs an `id`.**
 
 Handlers run after the frame. A gesture should accumulate in your own state during
 `"start"`/`"move"` and commit to the document once at the end — a drag is **one write**, not

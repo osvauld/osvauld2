@@ -61,6 +61,8 @@ removes the coin flip.
 
 ## 3. Nothing can fire a handler headlessly
 
+**Resolved 2026-09-19.** `open --hover/--click/--drag`, through real dispatch.
+
 `cargo run -p app_host --example open` is the whole sanctioned loop, and it builds exactly one
 view. It cannot deliver a click, a hover or a drag. For this app that means **the entire point of
 the app is outside the loop**: `open` proved the tree had `frame#arm [on_drag on_hover]` and said
@@ -94,6 +96,8 @@ run, and Luau truncates a long error string at ~512 characters, so batching obse
 `error` silently cuts the tail off mid-word.
 
 ## 5. Missing required fields give raw mlua errors that name neither the field nor the call
+
+**Resolved 2026-09-19.** Missing fields are named: `frame needs width`, `fill needs brush`. Passing the wrong handle says so too: `fill.path must be a gfx.path`.
 
 The *unknown*-field path is excellent. The *missing*-field path is not. Both, verbatim:
 

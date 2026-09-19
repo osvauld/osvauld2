@@ -33,6 +33,8 @@ The original entry follows, unedited, because the mistake is the point:
 
 ## 2. Handler arity is unchecked, so a wrong signature is a silent no-op
 
+**Resolved 2026-09-19.** Handlers carrying more than one value now take a single table — `on_drag = function(e)`, read as `e.phase`, `e.shape`, `e.sx`. A wrong key is nil rather than a neighbour's value, and a field added later cannot shift one already there. Every app in `demo_apps/` and `shell2/src/kanban` was migrated with it.
+
 `on_drag` takes eleven positional parameters. To reach the three that this app is built around —
 `shape, sx, sy` — you must spell out `scale, origin_x, origin_y` first, which this app never uses
 and which the guide itself says "only a root-level ghost placing itself in screen space needs".
@@ -70,6 +72,8 @@ Two things would help, in order of value:
   this function declares 8` would convert a silent misbehaviour into a one-second fix.
 
 ## 3. The headless harness can't reach any code behind a pointer
+
+**Resolved 2026-09-19.** `open` takes `--hover X,Y`, `--click X,Y` and `--drag X0,Y0:X1,Y1[:steps]`, dispatched through the runtime's own path.
 
 `cargo run -q -p app_host --example open -- demo_apps/orbit` builds exactly one frame, with no
 pointer anywhere. So `console: clean` certifies the idle view and nothing else — and, per #1 and

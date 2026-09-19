@@ -94,7 +94,8 @@ return function()
 		pad = C.pad,
 		gap = C.gap,
 		fill = C.bg,
-		on_frame = function(dt)
+		on_frame = function(e)
+			local dt = e.dt
 			F.step(dt)
 		end,
 		ui.text({
@@ -125,7 +126,8 @@ return function()
 			fill = C.panel,
 			radius = 10,
 			mt = C.gap,
-			on_hover = function(phase, x, y, shape, sx, sy)
+			on_hover = function(e)
+				local phase, x, y, shape, sx, sy = e.phase, e.x, e.y, e.shape, e.sx, e.sy
 				if phase == "leave" or not shape then
 					F.hot = nil
 					return
@@ -133,11 +135,13 @@ return function()
 				F.hot = F.by_id[shape]
 				F.sx, F.sy = sx, sy
 			end,
-			on_click = function(x, y, shape)
+			on_click = function(e)
+				local x, y, shape = e.x, e.y, e.shape
 				local s = shape and F.by_id[shape]
 				F.pin = (s and F.pin ~= s) and s or nil
 			end,
-			on_drag = function(phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy)
+			on_drag = function(e)
+				local phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy = e.phase, e.x, e.y, e.dx, e.dy, e.scale, e.origin_x, e.origin_y, e.shape, e.sx, e.sy
 				if phase == "start" then
 					F.grab_at(shape and F.by_id[shape], sx, sy)
 				elseif phase == "move" then

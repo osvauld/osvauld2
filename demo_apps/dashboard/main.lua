@@ -20,7 +20,8 @@ local function stat_of(s, lo, hi)
 end
 
 -- shared cursor: any chart's hover sets the one index all three draw
-local function on_plot_hover(phase, x, y)
+local function on_plot_hover(e)
+	local phase, x, y = e.phase, e.x, e.y
 	if phase == "leave" then
 		if not S.drag then S.hover = nil end
 		return
@@ -29,7 +30,8 @@ local function on_plot_hover(phase, x, y)
 end
 
 -- range selection. `x` is the pointer in plot units, the same units on_hover reports.
-local function on_plot_drag(phase, x)
+local function on_plot_drag(e)
+	local phase, x = e.phase, e.x
 	if phase == "start" then
 		local i = Chart.index_at(x)
 		S.drag = { from = i, x0 = x }

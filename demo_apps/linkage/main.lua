@@ -139,7 +139,8 @@ return function()
 			ui.frame({
 				id = "arm",
 				visual = arm.build(live, S.hot),
-				on_hover = function(phase, x, y, shape, sx, sy)
+				on_hover = function(e)
+					local phase, x, y, shape, sx, sy = e.phase, e.x, e.y, e.shape, e.sx, e.sy
 					if S.drag then
 						return -- a held segment keeps the readout, whatever the pointer has slid over
 					end
@@ -149,7 +150,8 @@ return function()
 						S.hot, S.sx, S.sy = shape, sx, sy
 					end
 				end,
-				on_drag = function(phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy)
+				on_drag = function(e)
+					local phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy = e.phase, e.x, e.y, e.dx, e.dy, e.scale, e.origin_x, e.origin_y, e.shape, e.sx, e.sy
 					swing(phase, shape, sx, sy)
 				end,
 			}),
@@ -170,7 +172,8 @@ return function()
 		gap = 14,
 	}
 	if S.wave then
-		root.on_frame = function(dt, elapsed)
+		root.on_frame = function(e)
+			local dt, elapsed = e.dt, e.elapsed
 			S.t = elapsed
 		end
 	end

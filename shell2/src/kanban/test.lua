@@ -120,7 +120,8 @@ return function()
 		pad = 12,
 		fill = "#1a1a1a",
 		scroll = "y",
-		on_drop = function(phase, x, y)
+		on_drop = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drop_col", col = "todo", x = x, y = y, phase = phase })
 		end,
 	})
@@ -132,7 +133,8 @@ return function()
 		pad = 12,
 		fill = "#1a1a1a",
 
-		on_drop = function(phase, x, y)
+		on_drop = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drop_col", col = "done", x = x, y = y, phase = phase })
 		end,
 	})
@@ -181,11 +183,13 @@ return function()
 			gap = 8,
 			center = true,
 
-			on_drag = function(phase, x, y)
+			on_drag = function(e)
+				local phase, x, y = e.phase, e.x, e.y
 				update({ kind = "drag", id = t.id, phase = phase, x = x, y = y })
 			end,
 
-			on_drop = function(phase, x, y)
+			on_drop = function(e)
+				local phase, x, y = e.phase, e.x, e.y
 				update({ kind = "drop", col = "todo", x = x, y = y, phase = phase, id = t.id })
 			end,
 			ui.button({

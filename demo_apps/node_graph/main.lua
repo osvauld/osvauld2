@@ -170,7 +170,8 @@ local function node_view(n)
 		return ui.col(t)
 	end
 	t.hover_stroke = { 1, C.accent }
-	t.on_drag = function(phase, _, _, dx, dy)
+	t.on_drag = function(e)
+		local phase, dx, dy = e.phase, e.dx, e.dy
 		if phase == "start" then
 			commit_edit()
 			S.drag = { id = n.id, from_x = n.x, from_y = n.y }
@@ -196,7 +197,8 @@ local function grip_view(n)
 		absolute = true, left = n.x + n.w - 14, top = n.y + n.h - 14, w = 14, h = 14,
 		radius = 4, center = true, hover_fill = "#58a6ff33",
 		ui.frame({ visual = grip_visual }),
-		on_drag = function(phase, _, _, dx, dy)
+		on_drag = function(e)
+			local phase, dx, dy = e.phase, e.dx, e.dy
 			if phase == "start" then
 				commit_edit()
 				S.resize = { id = n.id, from_w = n.w, from_h = n.h }
@@ -218,7 +220,8 @@ local function port_view(n)
 		absolute = true, left = px - 6, top = py - 6, w = 12, h = 12, radius = 6,
 		fill = active and C.accent or C.handle,
 		hover_fill = C.accent,
-		on_drag = function(phase, _, _, dx, dy)
+		on_drag = function(e)
+			local phase, dx, dy = e.phase, e.dx, e.dy
 			if phase == "start" then
 				commit_edit()
 				S.connect = { from = n.id, x = px, y = py }
@@ -343,12 +346,14 @@ return function()
 				id = "graph-canvas", w = graph.W, h = graph.H, no_shrink = true, fill = C.canvas,
 				-- Canvas units with zoom undone, so picking an edge is geometry. Past the press slop
 				-- the press pans instead.
-				on_click = function(x, y)
+				on_click = function(e)
+					local x, y = e.x, e.y
 					commit_edit()
 					local e = pick_edge(x, y)
 					S.selected = e and e.id or nil
 				end,
-				on_hover = function(phase, x, y)
+				on_hover = function(e)
+					local phase, x, y = e.phase, e.x, e.y
 					local e = phase ~= "leave" and pick_edge(x, y)
 					S.hovered = e and e.id or nil
 				end,

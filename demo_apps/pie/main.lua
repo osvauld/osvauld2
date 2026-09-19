@@ -7,7 +7,8 @@ local Pie = require("pie")
 -- `hot` and `sel` hold shape ids the runtime gave us; `at` is the point inside the hot slice.
 local S = { hot = nil, sel = nil, at = nil }
 
-local function on_pie_hover(phase, _, _, shape, sx, sy)
+local function on_pie_hover(e)
+	local phase, shape, sx, sy = e.phase, e.shape, e.sx, e.sy
 	if phase == "leave" or not shape then
 		S.hot, S.at = nil, nil
 		return
@@ -15,7 +16,8 @@ local function on_pie_hover(phase, _, _, shape, sx, sy)
 	S.hot, S.at = shape, { sx, sy }
 end
 
-local function on_pie_click(_, _, shape)
+local function on_pie_click(e)
+	local shape = e.shape
 	S.sel = (shape ~= S.sel) and shape or nil
 end
 

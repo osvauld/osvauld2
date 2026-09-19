@@ -25,7 +25,8 @@ local function circle_path(cx, cy, r)
 	})
 end
 
-local function on_hover(phase, x, y, shape, sx, sy)
+local function on_hover(e)
+	local phase, x, y, shape, sx, sy = e.phase, e.x, e.y, e.shape, e.sx, e.sy
 	if phase == "leave" then
 		M.pointer, M.hit = nil, nil
 	else
@@ -36,7 +37,8 @@ end
 
 -- A drag past the press slop cancels the click, so selection and dragging share the frame without
 -- a guard between them.
-local function on_drag(phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy)
+local function on_drag(e)
+	local phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy = e.phase, e.x, e.y, e.dx, e.dy, e.scale, e.origin_x, e.origin_y, e.shape, e.sx, e.sy
 	if phase == "start" then
 		M.grab(shape, sx, sy)
 	end
@@ -46,7 +48,8 @@ local function on_drag(phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx
 	end
 end
 
-local function on_click(x, y, shape)
+local function on_click(e)
+	local x, y, shape = e.x, e.y, e.shape
 	local i = M.index_of(shape)
 	if not i then
 		local _, live = M.under(x, y)

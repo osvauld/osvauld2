@@ -80,7 +80,8 @@ local function build_scene()
 	})
 end
 
-local function tick(dt)
+local function tick(e)
+	local dt = e.dt
 	angle = (angle + dt * 0.42) % (math.pi * 2)
 end
 

@@ -62,10 +62,12 @@ local function card_of(c, ghost)
 	t.hover_fill = C.card_hi
 	t.hover_stroke = { 1, C.line }
 	t.opacity = dragging and 0.3 or 1.0
-	t.on_drag = function(phase, _, _, dx, dy, scale, ox, oy)
+	t.on_drag = function(e)
+		local phase, dx, dy, scale, ox, oy = e.phase, e.dx, e.dy, e.scale, e.origin_x, e.origin_y
 		update({ kind = "drag", what = "card", id = c.id, phase = phase, x = ox, y = oy, scale = scale })
 	end
-	t.on_drop = function(phase, x, y)
+	t.on_drop = function(e)
+		local phase, x, y = e.phase, e.x, e.y
 		update({ kind = "drop", id = c.id, phase = phase, x = x, y = y })
 	end
 	t[#t + 1] = W.icon_button("del-card:" .. c.id, "x", function()
@@ -181,7 +183,8 @@ local function column_of(c, list)
 		fill = C.panel,
 		stroke = { 1, C.line_soft },
 		opacity = lifting and 0.35 or 1.0,
-		on_drop = function(phase, x, y)
+		on_drop = function(e)
+			local phase, x, y = e.phase, e.x, e.y
 			update({ kind = "drop_col", col = c.id, phase = phase, x = x })
 		end,
 		-- header doubles as the column's drag handle
@@ -192,7 +195,8 @@ local function column_of(c, list)
 			py = 11,
 			align_center = true,
 			hover_fill = C.line_soft,
-			on_drag = function(phase, _, _, dx, dy, scale, ox, oy)
+			on_drag = function(e)
+				local phase, dx, dy, scale, ox, oy = e.phase, e.dx, e.dy, e.scale, e.origin_x, e.origin_y
 				update({ kind = "drag", what = "col", id = c.id, phase = phase, x = ox, y = oy, scale = scale })
 			end,
 			ui.text({ c.name, no_wrap = true, color = C.text, font_size = 14 }),

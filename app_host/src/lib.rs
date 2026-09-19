@@ -76,11 +76,15 @@ impl From<Option<runtime::frame::FrameHit>> for Shape {
 }
 
 impl Shape {
-    fn args(self) -> (Option<String>, Option<f32>, Option<f32>) {
-        match self.0 {
-            Some((id, x, y)) => (Some(id), Some(x), Some(y)),
-            None => (None, None, None),
+    /// Absent on an element that draws no frame, or when the pointer is on none of its named
+    /// shapes — so the three keys are simply missing rather than present and nil.
+    fn write(self, event: &Table) -> mlua::Result<()> {
+        if let Some((id, x, y)) = self.0 {
+            event.set("shape", id)?;
+            event.set("sx", x)?;
+            event.set("sy", y)?;
         }
+        Ok(())
     }
 }
 
@@ -530,6 +534,45 @@ impl<M: 'static> LuaApp<M> {
         }
         el
     }
+    /// A handler carrying more than one value is called with a single table, never positional
+    /// arguments. Positionally, a short or mis-ordered signature binds the wrong values *and
+    /// keeps running*: `shape` given `scale` arrives as the number 1, looks like a shape id, and
+    /// fails every lookup in silence. A wrong key is `nil`, which is loud the moment it is used,
+    /// and a field added later can never shift the meaning of one already there.
+    fn event(&self, msg: LuaMsg) -> mlua::Result<Table> {
+        let event = self.vm.create_table()?;
+        match msg {
+            LuaMsg::CallAt(_, x, y, shape) => {
+                event.set("x", x)?;
+                event.set("y", y)?;
+                shape.write(&event)?;
+            }
+            LuaMsg::CallPhase(_, phase, x, y, shape) => {
+                event.set("phase", phase)?;
+                event.set("x", x)?;
+                event.set("y", y)?;
+                shape.write(&event)?;
+            }
+            LuaMsg::CallDrag(_, a) => {
+                event.set("phase", a.phase)?;
+                event.set("x", a.at.0)?;
+                event.set("y", a.at.1)?;
+                event.set("dx", a.delta.0)?;
+                event.set("dy", a.delta.1)?;
+                event.set("scale", a.scale)?;
+                event.set("origin_x", a.origin.0)?;
+                event.set("origin_y", a.origin.1)?;
+                a.shape.write(&event)?;
+            }
+            LuaMsg::CallFrame(_, dt, elapsed) => {
+                event.set("dt", dt)?;
+                event.set("elapsed", elapsed)?;
+            }
+            LuaMsg::Call(_) | LuaMsg::CallStr(_, _) => {}
+        }
+        Ok(event)
+    }
+
     pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
@@ -547,24 +590,13 @@ impl<M: 'static> LuaApp<M> {
             return;
         };
         let result = match msg {
+            // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
-            LuaMsg::CallAt(_, x, y, shape) => {
-                let (id, sx, sy) = shape.args();
-                h.call::<()>((x, y, id, sx, sy))
-            }
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
-            LuaMsg::CallPhase(_, phase, x, y, shape) => {
-                let (id, sx, sy) = shape.args();
-                h.call::<()>((phase, x, y, id, sx, sy))
-            }
-            LuaMsg::CallDrag(_, a) => {
-                let (id, sx, sy) = a.shape.args();
-                h.call::<()>((
-                    a.phase, a.at.0, a.at.1, a.delta.0, a.delta.1, a.scale, a.origin.0, a.origin.1,
-                    id, sx, sy,
-                ))
-            }
-            LuaMsg::CallFrame(_, dt, elapsed) => h.call::<()>((dt, elapsed)),
+            carried => match self.event(carried) {
+                Ok(event) => h.call::<()>(event),
+                Err(e) => Err(e),
+            },
         };
         if let Err(e) = result {
             eprintln!("handler error: {e}");

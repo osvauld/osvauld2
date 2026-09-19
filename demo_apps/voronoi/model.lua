@@ -26,7 +26,8 @@ for i, s in ipairs(seeds) do
 	M.sites[i] = { x = s[1], y = s[2], dx = s[3] / len, dy = s[4] / len }
 end
 
-function M.step(dt, elapsed)
+function M.step(e)
+	local dt, elapsed = e.dt, e.elapsed
 	local hi_x, hi_y = C.w - C.margin, C.h - C.margin
 	local held = M.drag and M.drag.i
 	for i = 1, #M.sites do

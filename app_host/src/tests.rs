@@ -148,8 +148,8 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
             return ui.frame({
                 id = "plot",
                 visual = gfx.frame({ width = 10, height = 10 }),
-                on_hover = function(phase, x, y, shape, sx, sy)
-                    seen = { phase, x, y, shape, sx, sy }
+                on_hover = function(e)
+                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy }
                 end,
             })
         end"#,
@@ -184,6 +184,60 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
 }
 
 /// A drag's shape rides at the very end, after the seven arguments it already had.
+/// Handlers carrying more than one value take a single table, because positional arguments fail
+/// *quietly*: a signature one short of the real one slides every later argument down a slot, so
+/// `shape` receives `scale` — the number 1, which passes for a shape id and fails every lookup
+/// with nothing on the console. Keys cannot slide, and a name that isn't there is nil.
+#[test]
+fn a_handler_reads_its_event_by_name_not_by_position() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = ""
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_drag = function(e)
+                    -- `origin` and `shapes` are near misses for real keys, and both must be nil
+                    -- rather than some neighbour's value.
+                    seen = tostring(e.shape) .. " " .. tostring(e.origin) .. " " .. tostring(e.shapes)
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    let drag = |shape| {
+        LuaMsg::CallDrag(
+            Key::new("plot", "on_drag"),
+            DragArgs {
+                phase: "move",
+                at: (40.0, 12.0),
+                delta: (6.0, 0.0),
+                scale: 1.0,
+                origin: (100.0, 50.0),
+                shape,
+            },
+        )
+    };
+
+    app.update(drag(Shape(Some(("knob".into(), 5.0, 50.0)))));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "knob nil nil");
+
+    // On no shape the three keys are absent, not set to a stand-in that arithmetic would accept.
+    app.update(drag(Shape(None)));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "nil nil nil");
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
 #[test]
 fn a_drag_carries_the_shape_it_grabbed() {
     let src = LoroDoc::new();
@@ -196,8 +250,11 @@ fn a_drag_carries_the_shape_it_grabbed() {
             return ui.frame({
                 id = "plot",
                 visual = gfx.frame({ width = 10, height = 10 }),
-                on_drag = function(phase, x, y, dx, dy, scale, ox, oy, shape, sx, sy)
-                    seen = table.concat({ phase, x, dx, scale, ox, shape or "nil", sx or "nil" }, " ")
+                on_drag = function(e)
+                    seen = table.concat(
+                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil" },
+                        " "
+                    )
                 end,
             })
         end"#,
@@ -312,8 +369,8 @@ fn on_frame_delivers_runtime_time_to_lua() {
     main.insert(
         0,
         r#"return function()
-            return ui.col({ id="sim", on_frame=function(dt, elapsed)
-                _tick = { dt, elapsed }
+            return ui.col({ id="sim", on_frame=function(e)
+                _tick = { e.dt, e.elapsed }
             end })
         end"#,
     )
@@ -455,8 +512,8 @@ fn a_click_reaches_its_element_across_rebuilds() {
         return function()
             local kids = {}
             for _, name in ipairs(names) do
-                table.insert(kids, ui.button({ id = name, on_click = function(x, y)
-                    table.insert(hits, name .. "@" .. x .. "," .. y)
+                table.insert(kids, ui.button({ id = name, on_click = function(e)
+                    table.insert(hits, name .. "@" .. e.x .. "," .. e.y)
                 end, ui.text({ name }) }))
             end
             return ui.row(kids)

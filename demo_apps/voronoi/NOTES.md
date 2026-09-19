@@ -45,6 +45,8 @@ transform outlives the hit"); it just never reached the authoring guide.
 
 ## 2. An item's error is blamed on the `gfx.frame` line, and does not name the field
 
+**Resolved 2026-09-19.** Each missing field is named, and no two messages read the same.
+
 A `gfx.stroke` on line 125 with no `width`:
 
 ```
@@ -99,6 +101,8 @@ more generally useful — a view cannot read the pointer position either, so the
 cache that from the last hover event.
 
 ## 4. A pointer app cannot be tested without a GUI
+
+**Resolved 2026-09-19.** `open --hover/--click/--drag`, through real dispatch.
 
 `--example open` builds one frame and prints the tree, which proves the description compiles and
 nothing more. Every behaviour this app exists to demonstrate — the grabbed shape held across a
