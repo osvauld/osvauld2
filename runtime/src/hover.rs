@@ -1,6 +1,7 @@
 //! Pointer-over events. An element is over while the pointer is inside it — the test `hover_fill`
 //! paints with — so a parent stays over its children, and one element on top doesn't hide another.
 
+use crate::frame::FrameHit;
 use crate::id::Id;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,11 +21,13 @@ impl HoverPhase {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct HoverEvent {
     pub phase: HoverPhase,
     /// Element-local like a click; outside the element on leave.
     pub pos: (f32, f32),
+    /// The named shape under the pointer, when the element draws a Frame that has any.
+    pub shape: Option<FrameHit>,
 }
 
 /// The hover elements the pointer was inside at the last sample.

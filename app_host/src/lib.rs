@@ -52,21 +52,44 @@ pub type Handlers = HashMap<Key, Function>;
 /// What a drag hands Lua, in order: where the pointer is in the element's own units, how far it
 /// has travelled from the press, the zoom scale, and the dragged element's screen origin — which
 /// only a root-level ghost placing itself in screen space needs.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DragArgs {
     pub phase: &'static str,
     pub at: (f32, f32),
     pub delta: (f32, f32),
     pub scale: f32,
     pub origin: (f32, f32),
+    /// The shape the press grabbed, held for the whole gesture. See [`Shape`].
+    pub shape: Shape,
+}
+
+/// The trailing arguments a pointer handler carries: which named shape of the element's visual
+/// the pointer is on, and where on that shape. All three reach Lua as `nil` when it is on none —
+/// an element that draws no Frame never has one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shape(pub Option<(String, f32, f32)>);
+
+impl From<Option<runtime::frame::FrameHit>> for Shape {
+    fn from(hit: Option<runtime::frame::FrameHit>) -> Self {
+        Self(hit.map(|h| (h.id.to_string(), h.local.x as f32, h.local.y as f32)))
+    }
+}
+
+impl Shape {
+    fn args(self) -> (Option<String>, Option<f32>, Option<f32>) {
+        match self.0 {
+            Some((id, x, y)) => (Some(id), Some(x), Some(y)),
+            None => (None, None, None),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
     Call(Key),
-    CallAt(Key, f32, f32),
+    CallAt(Key, f32, f32, Shape),
     CallStr(Key, String),
-    CallPhase(Key, &'static str, f32, f32),
+    CallPhase(Key, &'static str, f32, f32, Shape),
     CallDrag(Key, DragArgs),
     CallFrame(Key, f32, f64),
 }
@@ -515,22 +538,32 @@ impl<M: 'static> LuaApp<M> {
         // A message can outlive the view that registered its key (a click spans press to
         // release), so a key with no handler now means the element is gone — drop it.
         let key = match &msg {
-            LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _) | LuaMsg::CallStr(k, _) => k,
-            LuaMsg::CallPhase(k, _, _, _) | LuaMsg::CallDrag(k, _) | LuaMsg::CallFrame(k, _, _) => {
-                k
-            }
+            LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _, _) | LuaMsg::CallStr(k, _) => k,
+            LuaMsg::CallPhase(k, _, _, _, _)
+            | LuaMsg::CallDrag(k, _)
+            | LuaMsg::CallFrame(k, _, _) => k,
         };
         let Some(h) = handlers.get(key) else {
             return;
         };
         let result = match msg {
             LuaMsg::Call(_) => h.call::<()>(()),
-            LuaMsg::CallAt(_, x, y) => h.call::<()>((x, y)),
+            LuaMsg::CallAt(_, x, y, shape) => {
+                let (id, sx, sy) = shape.args();
+                h.call::<()>((x, y, id, sx, sy))
+            }
             LuaMsg::CallStr(_, s) => h.call::<()>(s),
-            LuaMsg::CallPhase(_, phase, x, y) => h.call::<()>((phase, x, y)),
-            LuaMsg::CallDrag(_, a) => h.call::<()>((
-                a.phase, a.at.0, a.at.1, a.delta.0, a.delta.1, a.scale, a.origin.0, a.origin.1,
-            )),
+            LuaMsg::CallPhase(_, phase, x, y, shape) => {
+                let (id, sx, sy) = shape.args();
+                h.call::<()>((phase, x, y, id, sx, sy))
+            }
+            LuaMsg::CallDrag(_, a) => {
+                let (id, sx, sy) = a.shape.args();
+                h.call::<()>((
+                    a.phase, a.at.0, a.at.1, a.delta.0, a.delta.1, a.scale, a.origin.0, a.origin.1,
+                    id, sx, sy,
+                ))
+            }
             LuaMsg::CallFrame(_, dt, elapsed) => h.call::<()>((dt, elapsed)),
         };
         if let Err(e) = result {

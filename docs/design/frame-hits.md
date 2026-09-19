@@ -1,10 +1,16 @@
 # Frame hits — touching the shapes inside a visual (design, 2026-09-18)
 
-Status: **slice 1 of §7 landed 2026-09-18** — items carry an optional `Id`, `gfx` accepts it, and
-`FrameStats.hittable` counts what a hit could name. Nothing tests hits yet. Pointer events still
-reach only *elements* (`on_click`, `on_hover`, `on_drag`, all element-local); everything drawn
-inside a `ui.frame` is paint the runtime cannot address. This note specifies shape ids,
-hit-testing and the coordinates a hit reports.
+Status: **§7 fully landed 2026-09-18.** Items carry an optional `Id`, `gfx` accepts it,
+`Frame::hit` answers with the topmost named shape, the point in its own space *and the transform
+that put it there*, and `on_click`, `on_hover` and `on_drag` all deliver `shape, sx, sy` to Lua —
+a drag reporting the shape it grabbed, from press to release. The bridge's `Action::Click` and
+`Action::Hover` fire with no shape, having no layout to hit-test against.
+
+**Revision 2026-09-18, on building slice 4:** `FrameHit` carries `into: Affine`, the frame-to-shape
+transform, not just the point. §3 said a drag's `sx, sy` "track the pointer in that shape's space",
+which is only possible if the shape's transform outlives the hit — the pointer leaves the shape
+almost immediately in a real drag. The walk accumulates it anyway on the way down, so keeping it
+costs nothing.
 
 This is item (1) of the interaction direction — "anything an agent can describe mathematically is
 touchable" — and the oldest thing still unbuilt in it.
@@ -105,18 +111,26 @@ offset is the physics case, and re-picking mid-drag would mean something else en
 | question | decision | why |
 |---|---|---|
 | hit order inside a frame | topmost wins — reverse item order | Items have a real painter's z. Between elements we chose containment with no occlusion, because they don't. Different rules, both correct, documented as different. |
-| strokes | expand to an outline **at frame build time**, cache it on the item | `contains` on a hairline never hits. Frames are immutable, so expansion is paid once, not per pointer move. |
+| strokes | within half the width of the line (see the revision below) | `contains` on a hairline never hits. |
 | groups | an id'd group is one target; descend into it only if it has no id | Lets an author choose the granularity without a second mechanism. |
 | instances | an id'd instance is one target; ids **inside** a reused visual are not reported | Fifty instances of one resource would report the same inner ids. Per-instance namespacing is a later question (§6). |
 | fill rule | hit-test with the item's own `nonzero`/`evenodd` | The hit should agree with the pixels. |
 | no shape under the pointer | `shape = nil`, `x, y` still reported | An empty region of a plot is still a position. |
 
+**Revision 2026-09-18, on building slice 2:** strokes are **not** expanded to outlines. Expansion
+allocates a `BezPath` per stroke every time a visual is built — and a visual is rebuilt on every
+pointer move — to answer one point per event. The distance test is `path.bounds()` inflated by
+half the width, then `PathSeg::nearest` against each segment: no allocation, no build-time cost,
+and exact to half the width. What it gives up is caps, joins and dashes, which it does not model:
+a dashed line is still one line to the pointer, and a round cap's bulge is a butt cap's square.
+Name the shape you actually want if that distinction ever matters.
+
 ## 5. Runtime shape
 
-1. `ItemKind::{Fill,Stroke,Group,Instance}` each gain `id: Option<Id>`; `Stroke` also caches its
-   expanded outline when an id is present.
-2. `Frame::hit(&self, p: Point) -> Option<FrameHit>` walks items in reverse with the accumulated
-   affine, inverts it per candidate, tests `contains`, and returns `{ id, local: Point }`.
+1. `Item` becomes a struct carrying `kind: ItemKind` and `id: Option<Id>` — the name belongs to
+   the item, not to each of four variants. *(Landed.)*
+2. `Frame::hit(&self, p: Point) -> Option<FrameHit>` walks items in reverse, inverts each
+   container's transform, tests the geometry, and returns `{ id, local: Point }`. *(Landed.)*
    Non-invertible transforms (a zero scale) are skipped rather than erroring — they draw nothing.
 3. `FrameStats` counts id'd items so the existing budget covers hit cost too.
 4. Dispatch already has the frame-local point; it asks the frame for the rest and appends the
@@ -137,12 +151,15 @@ offset is the physics case, and re-picking mid-drag would mean something else en
 
 Each lands under the ~100-line rule in `CONVENTIONS.md`.
 
-1. **Identity.** `id` on fill/stroke/group/instance, through `gfx.rs` validation into `ItemKind`,
+1. ~~**Identity.**~~ *(landed)* `id` on fill/stroke/group/instance, through `gfx.rs` validation into `ItemKind`,
    plus `FrameStats`. No hit-testing. Tests: ids survive compilation, budgets count them.
-2. **The walk.** `Frame::hit` with transform inversion and stroke outlines. Pure geometry, unit
+2. ~~**The walk.**~~ *(landed)* `Frame::hit` with transform inversion and stroke outlines. Pure geometry, unit
    tested against rotated groups and instances — no Lua, no dispatch.
-3. **Delivery.** Trailing handler arguments, `Action` fields, docs. Tests: a headless app receives
-   `shape`/`sx`/`sy`; an existing 3-argument handler still works.
+3. **Delivery.** Trailing handler arguments, docs. Tests: a headless app receives
+   `shape`/`sx`/`sy`; an existing 3-argument handler still works. *(Landed for `on_click` and
+   `on_hover`.)*
+4. ~~**The grab.**~~ *(landed)* `on_drag` carries the shape captured at `"start"` for the whole
+   gesture, with `sx, sy` tracked in that shape's space.
 
 ## 8. Proof app
 

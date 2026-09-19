@@ -252,6 +252,187 @@ fn a_named_container_hides_the_names_inside_it() {
     assert_eq!(count(named), 1);
 }
 
+fn white() -> Arc<Brush> {
+    Arc::new(Brush::solid(Color::WHITE).unwrap())
+}
+
+fn square(x: f64, y: f64, size: f64) -> Arc<Path> {
+    Arc::new(
+        Path::new(vec![
+            PathEl::MoveTo((x, y).into()),
+            PathEl::LineTo((x + size, y).into()),
+            PathEl::LineTo((x + size, y + size).into()),
+            PathEl::LineTo((x, y + size).into()),
+            PathEl::ClosePath,
+        ])
+        .unwrap(),
+    )
+}
+
+fn hit(frame: &Frame, x: f64, y: f64) -> Option<(String, Point)> {
+    frame
+        .hit(Point::new(x, y))
+        .map(|h| (h.id.to_string(), h.local))
+}
+
+#[test]
+fn the_topmost_name_wins_and_unnamed_paint_is_transparent() {
+    let frame = Frame::new(
+        20.0,
+        20.0,
+        None,
+        vec![
+            fill(square(0.0, 0.0, 10.0)).with_id("under"),
+            fill(square(5.0, 0.0, 10.0)).with_id("over"),
+            fill(square(0.0, 0.0, 20.0)), // a sheet of paint over the whole frame
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(hit(&frame, 2.0, 2.0).unwrap().0, "under");
+    assert_eq!(hit(&frame, 7.0, 2.0).unwrap().0, "over"); // the later item covers the earlier
+    assert_eq!(hit(&frame, 18.0, 18.0), None); // only paint there
+}
+
+#[test]
+fn a_hit_lands_in_the_shapes_own_space() {
+    let place = Affine::translate((100.0, 100.0));
+    let tick = || fill(square(0.0, 0.0, 10.0)).with_id("tick");
+
+    let through = Frame::new(
+        200.0,
+        200.0,
+        None,
+        vec![Item::group(place, vec![tick()]).unwrap()],
+    )
+    .unwrap();
+    let dial = Frame::new(
+        200.0,
+        200.0,
+        None,
+        vec![Item::group(place, vec![tick()]).unwrap().with_id("dial")],
+    )
+    .unwrap();
+
+    // An unnamed group is see-through: the tick answers, in the group's coordinates.
+    assert_eq!(
+        hit(&through, 105.0, 103.0),
+        Some(("tick".into(), Point::new(5.0, 3.0)))
+    );
+    // A named one answers for its contents, in its own coordinates.
+    assert_eq!(
+        hit(&dial, 105.0, 103.0),
+        Some(("dial".into(), Point::new(5.0, 3.0)))
+    );
+    // Inside the container's space, but on none of its geometry.
+    assert_eq!(hit(&dial, 150.0, 150.0), None);
+}
+
+#[test]
+fn an_instance_is_one_shape_or_no_shape() {
+    let shared = Arc::new(
+        Frame::new(
+            10.0,
+            10.0,
+            None,
+            vec![fill(square(0.0, 0.0, 10.0)).with_id("inner")],
+        )
+        .unwrap(),
+    );
+    let place = Affine::translate((50.0, 50.0));
+    let named = Frame::new(
+        100.0,
+        100.0,
+        None,
+        vec![
+            Item::instance(place, shared.clone())
+                .unwrap()
+                .with_id("pin:7"),
+        ],
+    )
+    .unwrap();
+    let anonymous = Frame::new(
+        100.0,
+        100.0,
+        None,
+        vec![Item::instance(place, shared).unwrap()],
+    )
+    .unwrap();
+
+    assert_eq!(
+        hit(&named, 52.0, 54.0),
+        Some(("pin:7".into(), Point::new(2.0, 4.0)))
+    );
+    assert_eq!(hit(&anonymous, 52.0, 54.0), None); // "inner" belongs to the resource, not here
+}
+
+#[test]
+fn a_stroke_is_hit_within_half_its_width() {
+    let line = Arc::new(
+        Path::new(vec![
+            PathEl::MoveTo((0.0, 0.0).into()),
+            PathEl::LineTo((10.0, 0.0).into()),
+        ])
+        .unwrap(),
+    );
+    let style = StrokeStyle::new(
+        4.0,
+        StrokeCap::Butt,
+        StrokeJoin::Miter,
+        4.0,
+        vec![2.0, 2.0],
+        0.0,
+    )
+    .unwrap();
+    let frame = Frame::new(
+        20.0,
+        20.0,
+        None,
+        vec![Item::stroke(line, white(), style).with_id("axis")],
+    )
+    .unwrap();
+
+    assert_eq!(hit(&frame, 5.0, 1.5).unwrap().0, "axis");
+    assert_eq!(hit(&frame, 3.0, 1.5).unwrap().0, "axis"); // a dashed line is still one line
+    assert_eq!(hit(&frame, 5.0, 3.0), None); // past half the width
+    assert_eq!(hit(&frame, 12.0, 0.0), None); // past the end
+}
+
+/// The fill rule decides what a hole is, so the hit has to ask the same question the paint did.
+#[test]
+fn a_hole_is_a_hole_only_under_even_odd() {
+    let mut ring = square(0.0, 0.0, 20.0).bezier().clone();
+    ring.extend(square(5.0, 5.0, 10.0).bezier().iter());
+    let ring = Arc::new(Path::new(ring.elements().to_vec()).unwrap());
+    let of = |rule| {
+        Frame::new(
+            20.0,
+            20.0,
+            None,
+            vec![Item::fill(ring.clone(), white(), rule).with_id("ring")],
+        )
+        .unwrap()
+    };
+
+    assert_eq!(hit(&of(Fill::EvenOdd), 2.0, 2.0).unwrap().0, "ring");
+    assert_eq!(hit(&of(Fill::EvenOdd), 10.0, 10.0), None); // the hole
+    assert_eq!(hit(&of(Fill::NonZero), 10.0, 10.0).unwrap().0, "ring"); // same winding, no hole
+}
+
+/// A transform that collapses space draws nothing, so it can't be touched either — and the
+/// inverse it would need doesn't exist.
+#[test]
+fn a_collapsed_transform_is_untouchable() {
+    let flat = Item::group(
+        Affine::scale_non_uniform(1.0, 0.0),
+        vec![fill(square(0.0, 0.0, 10.0)).with_id("tick")],
+    )
+    .unwrap();
+    let frame = Frame::new(20.0, 20.0, None, vec![flat.with_id("dial")]).unwrap();
+
+    assert_eq!(hit(&frame, 5.0, 0.0), None);
+}
+
 #[test]
 fn frame_rejects_invalid_intrinsics_transforms_and_colors() {
     assert_eq!(

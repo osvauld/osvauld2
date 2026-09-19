@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::id::Id;
-use kurbo::{Affine, BezPath, Cap, Join, PathEl, Point, Rect, Shape, Stroke};
+use kurbo::{Affine, BezPath, Cap, Join, ParamCurveNearest, PathEl, Point, Rect, Shape, Stroke};
 use peniko::{
     Brush as PenikoBrush, Color, ColorStop as PenikoColorStop, Extend as PenikoExtend, Fill,
     Gradient,
@@ -17,6 +17,9 @@ pub const MAX_FRAME_DEPTH: usize = 32;
 pub const MAX_FRAME_ITEMS: usize = 4_096;
 pub const MAX_GRADIENT_STOPS: usize = 64;
 pub const MAX_STROKE_DASHES: usize = 64;
+
+/// Sub-pixel is plenty to decide whether a pointer is on a line.
+const HIT_ACCURACY: f64 = 0.1;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum PathError {
@@ -363,6 +366,125 @@ impl Frame {
 
     pub(crate) fn draw(&self, scene: &mut Scene, transform: Affine, alpha: f32) {
         draw_items(scene, &self.items, transform, alpha);
+    }
+
+    /// The topmost named shape under `p`, which is given in this frame's own coordinates.
+    ///
+    /// Unnamed shapes are paint: the pointer falls through them to whatever is beneath. A named
+    /// container answers for everything it holds, so the point only has to reach some geometry
+    /// inside it.
+    pub fn hit(&self, p: Point) -> Option<FrameHit> {
+        if self.stats.hittable == 0 {
+            return None; // nothing in here can be named, so nothing in here is worth walking
+        }
+        find(&self.items, p, Affine::IDENTITY)
+    }
+}
+
+/// Where a pointer landed inside a visual: which shape, and the point in *that shape's* own
+/// coordinates, with the transform of every group and instance above it undone.
+///
+/// `into` is that undoing, kept so a later point can be put in the same space — which is what a
+/// drag needs, since it keeps reporting in the shape it grabbed even after the pointer leaves it.
+/// `local` is `into * p` for the point that produced the hit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameHit {
+    pub id: Id,
+    pub local: Point,
+    pub into: Affine,
+}
+
+/// Items paint in order and later ones cover earlier ones, so the hit walk runs backwards.
+/// `into` is the frame-to-here transform accumulated on the way down.
+fn find(items: &[Item], p: Point, into: Affine) -> Option<FrameHit> {
+    for item in items.iter().rev() {
+        let descend = match &item.kind {
+            ItemKind::Group { transform, .. } | ItemKind::Instance { transform, .. } => {
+                child(*transform, p, into)
+            }
+            _ => None,
+        };
+        let hit = match (&item.kind, &item.id, descend) {
+            (kind, Some(id), None) if covers(kind, p) => Some(FrameHit {
+                id: id.clone(),
+                local: p,
+                into,
+            }),
+            (ItemKind::Group { items, .. }, Some(id), Some((q, into))) if touches(items, q) => {
+                Some(FrameHit {
+                    id: id.clone(),
+                    local: q,
+                    into,
+                })
+            }
+            (ItemKind::Group { items, .. }, None, Some((q, into))) => find(items, q, into),
+            // Only the instance itself can be named — the names inside a reused visual aren't
+            // reachable, so an anonymous one holds nothing worth descending for.
+            (ItemKind::Instance { frame, .. }, Some(id), Some((q, into)))
+                if touches(frame.items(), q) =>
+            {
+                Some(FrameHit {
+                    id: id.clone(),
+                    local: q,
+                    into,
+                })
+            }
+            _ => None,
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
+    None
+}
+
+/// Any geometry at all, named or not — the question a named container asks of its contents.
+fn touches(items: &[Item], p: Point) -> bool {
+    items.iter().any(|item| match &item.kind {
+        ItemKind::Group { transform, items } => {
+            child_point(*transform, p).is_some_and(|q| touches(items, q))
+        }
+        ItemKind::Instance { transform, frame } => {
+            child_point(*transform, p).is_some_and(|q| touches(frame.items(), q))
+        }
+        kind => covers(kind, p),
+    })
+}
+
+/// A point in a child's own space. `None` when the transform collapses space: nothing drawn
+/// through it is visible, so nothing through it is touchable either.
+fn child_point(transform: Affine, p: Point) -> Option<Point> {
+    (transform.determinant() != 0.0).then(|| transform.inverse() * p)
+}
+
+/// The same step, carrying the frame-to-child transform along with the point.
+fn child(transform: Affine, p: Point, into: Affine) -> Option<(Point, Affine)> {
+    let undo = (transform.determinant() != 0.0).then(|| transform.inverse())?;
+    Some((undo * p, undo * into))
+}
+
+fn covers(kind: &ItemKind, p: Point) -> bool {
+    match kind {
+        ItemKind::Fill { path, rule, .. } => {
+            path.bounds().contains(p)
+                && match rule {
+                    Fill::NonZero => path.bezier().winding(p) != 0,
+                    Fill::EvenOdd => path.bezier().winding(p) % 2 != 0,
+                }
+        }
+        // Within half a width of the line. Expanding the outline would be the exact answer, but
+        // it costs an allocation per stroke on every frame build to serve one point per pointer
+        // move. Caps and joins aren't modelled, and dashes aren't either: a dashed line is still
+        // one line to the pointer.
+        ItemKind::Stroke { path, style, .. } => {
+            let reach = style.0.width / 2.0;
+            path.bounds().inflate(reach, reach).contains(p)
+                && path
+                    .bezier()
+                    .segments()
+                    .any(|seg| seg.nearest(p, HIT_ACCURACY).distance_sq <= reach * reach)
+        }
+        _ => false,
     }
 }
 

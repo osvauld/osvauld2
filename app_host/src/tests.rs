@@ -133,6 +133,96 @@ fn lua_names_the_shapes_it_wants_to_hit() {
     assert!(lua.load(empty).eval::<Value>().is_err());
 }
 
+/// The shape a pointer is on rides on the end of the handler's arguments, so a handler that
+/// doesn't care never sees it. On nothing, all three are nil rather than a zero that reads like
+/// the shape's top-left corner.
+#[test]
+fn a_pointer_handler_is_told_which_shape_it_is_on() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = {}
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_hover = function(phase, x, y, shape, sx, sy)
+                    seen = { phase, x, y, shape, sx, sy }
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let seen = |app: &LuaApp<LuaMsg>| {
+        let t: Table = app.vm.globals().get("seen").unwrap();
+        (1..=6)
+            .map(|i| match t.get::<Value>(i).unwrap() {
+                Value::Nil => "nil".to_string(),
+                v => v.to_string().unwrap(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let key = Key::new("plot", "on_hover");
+    let _ = app.view(); // handlers are registered by the walk, not by the source
+
+    app.update(LuaMsg::CallPhase(
+        key.clone(),
+        "move",
+        40.0,
+        12.0,
+        Shape(Some(("slice:2".into(), 3.5, 1.0))),
+    ));
+    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1");
+
+    app.update(LuaMsg::CallPhase(key, "move", 40.0, 12.0, Shape::default()));
+    assert_eq!(seen(&app), "move 40 12 nil nil nil");
+}
+
+/// A drag's shape rides at the very end, after the seven arguments it already had.
+#[test]
+fn a_drag_carries_the_shape_it_grabbed() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(
+        0,
+        r#"seen = ""
+        return function()
+            return ui.frame({
+                id = "plot",
+                visual = gfx.frame({ width = 10, height = 10 }),
+                on_drag = function(phase, x, y, dx, dy, scale, ox, oy, shape, sx, sy)
+                    seen = table.concat({ phase, x, dx, scale, ox, shape or "nil", sx or "nil" }, " ")
+                end,
+            })
+        end"#,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+
+    app.update(LuaMsg::CallDrag(
+        Key::new("plot", "on_drag"),
+        DragArgs {
+            phase: "move",
+            at: (40.0, 12.0),
+            delta: (6.0, 0.0),
+            scale: 1.0,
+            origin: (100.0, 50.0),
+            shape: Shape(Some(("knob".into(), 5.0, 50.0))),
+        },
+    ));
+    let seen: String = app.vm.globals().get("seen").unwrap();
+    assert_eq!(seen, "move 40 6 1 100 knob 5");
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
 #[test]
 fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -339,7 +429,12 @@ fn a_click_reaches_its_element_across_rebuilds() {
     app.update(press);
     assert_eq!(hits(&app), vec!["b@0,0"]);
 
-    app.update(LuaMsg::CallAt(Key::new("a", "on_click"), 12.5, 4.0));
+    app.update(LuaMsg::CallAt(
+        Key::new("a", "on_click"),
+        12.5,
+        4.0,
+        Shape::default(),
+    ));
     assert_eq!(hits(&app), vec!["b@0,0", "a@12.5,4"]);
 }
 
@@ -2604,7 +2699,12 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
 
     // Handlers are addressed the way the runtime addresses them: element id + prop name.
     let click = |app: &mut LuaApp<LuaMsg>, id: &str, x: f32, y: f32| {
-        app.update(LuaMsg::CallAt(Key::new(id, "on_click"), x, y))
+        app.update(LuaMsg::CallAt(
+            Key::new(id, "on_click"),
+            x,
+            y,
+            Shape::default(),
+        ))
     };
     let drag = |app: &mut LuaApp<LuaMsg>, id: &str, phase: &'static str, dx: f32, dy: f32| {
         app.update(LuaMsg::CallDrag(
@@ -2615,6 +2715,7 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
                 delta: (dx, dy),
                 scale: 1.0,
                 origin: (0.0, 0.0),
+                shape: Shape::default(),
             },
         ))
     };
@@ -2854,7 +2955,12 @@ fn tally_loads_views_and_clicks() {
     // A frame between each click, the way the real loop delivers them: the mirror is a frame
     // behind the doc, so clicks with no frame between them all read the same stale count.
     for _ in 0..3 {
-        app.update(LuaMsg::CallAt(Key::new("plus", "on_click"), 0.0, 0.0));
+        app.update(LuaMsg::CallAt(
+            Key::new("plus", "on_click"),
+            0.0,
+            0.0,
+            Shape::default(),
+        ));
         let _ = app.view();
     }
 
@@ -3327,6 +3433,7 @@ fn dashboard_demo_links_hover_and_range_selection() {
                 delta: (travelled, 0.0),
                 scale: 1.0,
                 origin: (0.0, 0.0),
+                shape: Shape::default(),
             },
         ))
     };
@@ -3438,6 +3545,7 @@ fn dashboard_view_cost() {
                 delta: (60.0, 0.0),
                 scale: 1.0,
                 origin: (0.0, 0.0),
+                shape: Shape::default(),
             },
         ));
         let _ = app.view();
@@ -3476,4 +3584,75 @@ fn the_guide_lists_every_prop() {
     };
     let missing: Vec<_> = names.filter(|n| !documented(n)).collect();
     assert!(missing.is_empty(), "undocumented props: {missing:?}");
+}
+
+/// The pie demo is the proof that a drawing can be touched: every wedge is the *same* path under
+/// a different rotation, so nothing about "which slice, and where on it" is recoverable by
+/// inverting the layout — the runtime has to say. Here the shape arguments are supplied directly,
+/// which is exactly what `Frame::hit` hands the handler in a window.
+#[test]
+fn pie_demo_reads_the_shape_the_runtime_names() {
+    fn find<'a>(el: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if el.id.as_deref() == Some(id) {
+            return Some(el);
+        }
+        el.children.iter().find_map(|c| find(c, id))
+    }
+
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "theme.lua", "data.lua", "pie.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/pie/{name}")).unwrap();
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+
+    let info = app.view().info();
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+    assert!(find(&info, "pie").is_some());
+    assert!(find(&info, "readout").is_none()); // nothing hovered yet
+
+    // 64pt out along the wedge's own x axis, a quarter of the way up it.
+    let hover = |app: &mut LuaApp<LuaMsg>, shape: Option<&str>| {
+        app.update(LuaMsg::CallPhase(
+            Key::new("pie", "on_hover"),
+            "move",
+            0.0,
+            0.0,
+            Shape(shape.map(|s| (s.to_string(), 64.0, 16.0))),
+        ));
+    };
+
+    hover(&mut app, Some("slice:social"));
+    let text = find(&app.view().info(), "readout")
+        .and_then(|el| el.text.clone())
+        .unwrap();
+    assert!(text.starts_with("Social · 15.5% of 10560"), "{text}");
+    // atan2(16, 64) = 14°, and hypot(64, 16) is 52% of the 128pt radius — the wedge's own
+    // coordinates, which is the whole point: no slice sits at that angle on screen.
+    assert!(text.contains("14° into the wedge, 52% out"), "{text}");
+
+    // The hub is unnamed paint, so the pointer lands on no shape at all and the readout goes.
+    hover(&mut app, None);
+    assert!(find(&app.view().info(), "readout").is_none());
+
+    // Clicking keeps a slice; clicking the same one again lets it go.
+    let click = |app: &mut LuaApp<LuaMsg>, shape: &str| {
+        app.update(LuaMsg::CallAt(
+            Key::new("pie", "on_click"),
+            0.0,
+            0.0,
+            Shape(Some((shape.to_string(), 0.0, 0.0))),
+        ));
+    };
+    click(&mut app, "slice:search");
+    let _ = app.view();
+    click(&mut app, "slice:search");
+    let _ = app.view();
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }

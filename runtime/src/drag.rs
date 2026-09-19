@@ -16,7 +16,7 @@ impl DragPhase {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct DragEvent {
     pub phase: DragPhase,
     /// The pointer in the dragged element's own units, zoom undone — the same point a click or
@@ -27,6 +27,10 @@ pub struct DragEvent {
     pub grab: (f32, f32), //offset from origin rect
     pub scale: f32,
     pub mods: Mods,
+    /// The shape the press landed on, and the pointer in *its* coordinates. Held for the whole
+    /// gesture: a drag reports what it grabbed, not whatever has slid under the pointer since,
+    /// and it keeps reporting once the pointer leaves the shape — which is what grabbing means.
+    pub shape: Option<(Id, (f32, f32))>,
 }
 
 #[derive(Clone, Debug)]

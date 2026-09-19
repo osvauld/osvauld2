@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{Ctx, DragArgs, Handlers, Key, LuaMsg, parse_color, register};
+use crate::{Ctx, DragArgs, Handlers, Key, LuaMsg, Shape, parse_color, register};
 use mlua::{Table, Value};
 use runtime::El;
 use runtime::vello::peniko::Color;
@@ -145,7 +145,14 @@ impl<M: 'static> Registry<M> {
         ("on_click", |el, v, cx| {
             let key = cx.register("on_click", v)?;
             let to_msg = cx.to_msg.clone();
-            Ok(el.on_click_at(move |(x, y)| to_msg(LuaMsg::CallAt(key.clone(), x, y))))
+            Ok(el.on_click_at(move |at| {
+                to_msg(LuaMsg::CallAt(
+                    key.clone(),
+                    at.pos.0,
+                    at.pos.1,
+                    at.shape.clone().into(),
+                ))
+            }))
         }),
         ("on_frame", |el, v, cx| {
             let key = cx.register("on_frame", v)?;
@@ -166,6 +173,7 @@ impl<M: 'static> Registry<M> {
                         delta: e.delta,
                         scale: e.scale,
                         origin: (e.pos.0 - e.grab.0, e.pos.1 - e.grab.1),
+                        shape: Shape(e.shape.clone().map(|(id, at)| (id.to_string(), at.0, at.1))),
                     },
                 ))
             }))
@@ -179,6 +187,7 @@ impl<M: 'static> Registry<M> {
                     e.phase.as_str(),
                     e.pos.0 / e.size.0,
                     e.pos.1 / e.size.1,
+                    Shape::default(),
                 ))
             }))
         }),
@@ -192,6 +201,7 @@ impl<M: 'static> Registry<M> {
                     e.phase.as_str(),
                     e.pos.0,
                     e.pos.1,
+                    e.shape.clone().into(),
                 ))
             }))
         }),

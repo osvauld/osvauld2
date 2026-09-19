@@ -16,7 +16,7 @@ use vello::peniko::Color;
 
 use crate::anim::{Driver, Easing};
 use crate::drag::{DragEvent, DropEvent};
-use crate::frame::Frame;
+use crate::frame::{Frame, FrameHit};
 use crate::hover::{HoverEvent, HoverPhase};
 use crate::id::Id;
 use crate::state::Slot;
@@ -257,16 +257,24 @@ pub struct FrameTick {
     pub elapsed: f64,
 }
 
+/// Where a pointer event landed: the element-local point, and the named shape under it when the
+/// element draws a Frame. A bridge-fired event has neither, so `At::default()` is the honest zero.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct At {
+    pub pos: (f32, f32),
+    pub shape: Option<FrameHit>,
+}
+
 /// What a click delivers: a message built in advance, or one built from where the click landed.
 #[derive(Clone)]
 pub(crate) enum Click<M> {
     Msg(M),
     /// Rc, not Box: a press holds its click until release, while the next frame's hits own theirs.
-    At(Rc<dyn Fn((f32, f32)) -> M>),
+    At(Rc<dyn Fn(At) -> M>),
 }
 impl<M> Click<M> {
     /// `at` is element-local: from its top-left corner, with zoom and scroll undone.
-    pub fn fire(self, at: (f32, f32)) -> M {
+    pub fn fire(self, at: At) -> M {
         match self {
             Click::Msg(m) => m,
             Click::At(f) => f(at),
@@ -791,7 +799,7 @@ impl<M> El<M> {
     }
 
     /// A click that reports where it landed, in the element's own units.
-    pub fn on_click_at(mut self, map: impl Fn((f32, f32)) -> M + 'static) -> Self {
+    pub fn on_click_at(mut self, map: impl Fn(At) -> M + 'static) -> Self {
         self.behaviour.on_click = Some(Click::At(Rc::new(map)));
         self
     }
@@ -994,7 +1002,7 @@ impl<M> El<M> {
         match act {
             // No layout here, so a positional click lands on the element's origin.
             Action::Click => match self.behaviour.on_click.take() {
-                Some(c) => Walk::Found(c.fire((0.0, 0.0))),
+                Some(c) => Walk::Found(c.fire(At::default())),
                 None => Walk::Fired(format!("'{id}' has no on_click")),
             },
             Action::RightClick(at) => match self.behaviour.on_right_click.take() {
@@ -1002,7 +1010,11 @@ impl<M> El<M> {
                 None => Walk::Fired(format!("'{id}' has no on_right_click")),
             },
             Action::Hover(phase, pos) => match &self.behaviour.on_hover {
-                Some((_, f)) => Walk::Found(f(HoverEvent { phase, pos })),
+                Some((_, f)) => Walk::Found(f(HoverEvent {
+                    phase,
+                    pos,
+                    shape: None,
+                })),
                 None => Walk::Fired(format!("'{id}' has no on_hover")),
             },
             Action::Enter => {

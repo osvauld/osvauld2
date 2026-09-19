@@ -21,7 +21,7 @@ mod state;
 mod text;
 mod zoom;
 use crate::anim::{Driver, Spring, Transition};
-use crate::coords::ScreenPoint;
+use crate::coords::{NodePoint, ScreenPoint};
 use crate::drag::{DropEvent, DropPhase};
 use crate::editor::{Focus, KeepInView};
 use crate::el::{Binding, Click};
@@ -50,8 +50,8 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col, custom,
-    frame, rich, row, text, text_area, text_input,
+    Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col,
+    custom, frame, rich, row, text, text_area, text_input,
 };
 pub use hover::{HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
@@ -111,6 +111,7 @@ enum Capture {
         geometry: Geometry,
         local_press: (f32, f32),
         screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
     },
     Thumb {
         thumb: Thumb,
@@ -136,6 +137,7 @@ enum Capture {
         geometry: Geometry,
         local_press: (f32, f32),
         screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
         press: (f32, f32),
     },
 }
@@ -171,19 +173,66 @@ struct Runner<A: App> {
     start: Instant,
     last_frame: Option<f64>,
     hits: Hits<A::Msg>,
-    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>)>,
+    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, Option<Shapes>)>,
     hovered: Hovered,
+}
+
+/// A frame an element draws, and the element-local origin it is drawn at — everything a pointer
+/// event needs to name the shape beneath it. Only a `ui.frame` has one.
+#[derive(Clone)]
+struct Shapes {
+    frame: Arc<crate::frame::Frame>,
+    origin: (f64, f64),
+}
+
+impl Shapes {
+    fn at(&self, local: NodePoint) -> Option<crate::frame::FrameHit> {
+        self.frame
+            .hit(Point::new(local.x - self.origin.0, local.y - self.origin.1))
+    }
+}
+
+/// The shape a drag grabbed: what it was called, how to put a later point into its coordinates,
+/// and where its frame sits inside the element. A gesture holds this from press to release.
+#[derive(Clone)]
+struct Grabbed {
+    id: Id,
+    into: vello::kurbo::Affine,
+    origin: (f64, f64),
+}
+
+impl Grabbed {
+    fn take(shapes: &Option<Shapes>, local: NodePoint) -> Option<Self> {
+        let s = shapes.as_ref()?;
+        let hit = s.at(local)?;
+        Some(Self {
+            id: hit.id,
+            into: hit.into,
+            origin: s.origin,
+        })
+    }
+
+    /// The pointer in the grabbed shape's coordinates, wherever it has got to since.
+    fn at(&self, local: NodePoint) -> (Id, (f32, f32)) {
+        let p = self.into * Point::new(local.x - self.origin.0, local.y - self.origin.1);
+        (self.id.clone(), (p.x as f32, p.y as f32))
+    }
+}
+
+/// The shape under `local` for an element that draws a frame, and `None` for one that doesn't.
+fn shape_at(shapes: &Option<Shapes>, local: NodePoint) -> Option<crate::frame::FrameHit> {
+    shapes.as_ref().and_then(|s| s.at(local))
 }
 
 struct Hits<M> {
     /// The last field is the element's nearest zoomable ancestor.
-    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>)>,
+    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, Option<Shapes>)>,
     input: Vec<(Geometry, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
-    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>)>,
+    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
     drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
-    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -277,7 +326,7 @@ impl<A: App> Runner<A> {
         let pressed = self
             .pressed
             .as_ref()
-            .map(|(geometry, id, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
+            .map(|(geometry, id, _, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
@@ -347,16 +396,27 @@ impl<A: App> Runner<A> {
                 any_in_flight = true;
             }
 
+            // The visual is drawn at the content origin, so that is where its own coordinates
+            // start — a padded frame element is offset from its own top-left.
+            let shapes = p.appearance.frame.as_ref().map(|frame| Shapes {
+                frame: frame.clone(),
+                origin: (p.pad.x0, p.pad.y0),
+            });
             if let Some(click) = p.behaviour.on_click.take()
                 && geometry.visible_rect.is_some()
             {
-                hits.click
-                    .push((geometry, p.id.clone(), click, p.zoom_parent.clone()));
+                hits.click.push((
+                    geometry,
+                    p.id.clone(),
+                    click,
+                    p.zoom_parent.clone(),
+                    shapes.clone(),
+                ));
             }
             if let Some((id, handler)) = p.behaviour.on_drag.take()
                 && visible.is_some()
             {
-                hits.drag.push((geometry, id, handler));
+                hits.drag.push((geometry, id, handler, shapes.clone()));
             }
 
             if let Some((id, handler)) = p.behaviour.on_drop.take()
@@ -367,7 +427,7 @@ impl<A: App> Runner<A> {
             if let Some((id, handler)) = p.behaviour.on_hover.take()
                 && visible.is_some()
             {
-                hits.hover.push((geometry, id, handler));
+                hits.hover.push((geometry, id, handler, shapes));
             }
             if let Some(h) = p.behaviour.on_right_click.take()
                 && let Some(hit_rect) = visible
@@ -596,17 +656,18 @@ impl<A: App> Runner<A> {
             self.redraw();
             return;
         }
-        if let Some((geometry, id, _handler)) = self
+        if let Some((geometry, id, _handler, shapes)) = self
             .hits
             .drag
             .iter()
             .rev()
-            .find(|(geometry, _, _)| geometry.contains(p))
+            .find(|(geometry, _, _, _)| geometry.contains(p))
         {
             let content = geometry.content_point(ScreenPoint::new(p.x, p.y));
             self.drag = Some(Capture::Pending {
                 id: id.clone(),
                 geometry: *geometry,
+                shape: Grabbed::take(shapes, geometry.node_point(ScreenPoint::new(p.x, p.y))),
                 local_press: (content.x as f32, content.y as f32),
                 screen_grab: (
                     px - geometry.screen_rect.min_x() as f32,
@@ -645,14 +706,14 @@ impl<A: App> Runner<A> {
             .click
             .iter()
             .rev()
-            .find(|(geometry, _, _, _)| geometry.contains(p));
-        if let Some((geometry, id, click, _)) = clicked {
-            self.pressed = Some((*geometry, id.clone(), click.clone()));
+            .find(|(geometry, _, _, _, _)| geometry.contains(p));
+        if let Some((geometry, id, click, _, shapes)) = clicked {
+            self.pressed = Some((*geometry, id.clone(), click.clone(), shapes.clone()));
         }
         // A click inside a camera may still pan it. A button floating over the canvas is not
         // inside, and dragging off that button must not move the canvas.
         let pans = |camera: &Id| {
-            clicked.is_none_or(|(_, id, _, parent)| {
+            clicked.is_none_or(|(_, id, _, parent, _)| {
                 parent.as_ref() == Some(camera) || id.as_ref() == Some(camera)
             })
         };
@@ -686,15 +747,19 @@ impl<A: App> Runner<A> {
         let phases = self.hovered.step(
             hover
                 .iter()
-                .map(|(g, id, _)| (id, in_window && g.contains(p))),
+                .map(|(g, id, _, _)| (id, in_window && g.contains(p))),
         );
         let msgs: Vec<_> = hover
             .iter()
             .zip(phases)
-            .filter_map(|((geometry, _, handler), phase)| {
+            .filter_map(|((geometry, _, handler, shapes), phase)| {
                 let local = geometry.node_point(ScreenPoint::new(p.x, p.y));
                 let pos = (local.x as f32, local.y as f32);
-                Some(handler(HoverEvent { phase: phase?, pos }))
+                Some(handler(HoverEvent {
+                    phase: phase?,
+                    pos,
+                    shape: shape_at(shapes, local),
+                }))
             })
             .collect();
         for m in msgs {
@@ -808,6 +873,7 @@ impl<A: App> Runner<A> {
         geometry: Geometry,
         local_press: (f32, f32),
         screen_grab: (f32, f32),
+        shape: Option<Grabbed>,
     ) {
         let pos = (px, py);
         let mods = self.mods();
@@ -825,12 +891,13 @@ impl<A: App> Runner<A> {
             grab: screen_grab,
             scale: geometry.scale(),
             phase: DragPhase::Move,
+            shape: shape.as_ref().map(|g| g.at(node)),
         };
-        if let Some((_, _, handler)) = self
+        if let Some((_, _, handler, _)) = self
             .hits
             .drag
             .iter()
-            .find(|(_, id, _)| *id == handle_id.clone())
+            .find(|(_, id, _, _)| *id == handle_id.clone())
         {
             self.app.update(handler(event));
             self.redraw();
@@ -866,6 +933,7 @@ impl<A: App> Runner<A> {
                     geometry,
                     local_press,
                     screen_grab,
+                    shape,
                 } => {
                     if let Some((px, py)) = self.pointer {
                         let pos = (px, py);
@@ -896,8 +964,8 @@ impl<A: App> Runner<A> {
                             };
                             self.app.update(handler(drop_event));
                         }
-                        if let Some((_, _, handler)) =
-                            self.hits.drag.iter().find(|(_, hid, _)| *hid == id)
+                        if let Some((_, _, handler, _)) =
+                            self.hits.drag.iter().find(|(_, hid, _, _)| *hid == id)
                         {
                             let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
                             let event = DragEvent {
@@ -908,6 +976,7 @@ impl<A: App> Runner<A> {
                                 grab: screen_grab,
                                 scale: geometry.scale(),
                                 phase: DragPhase::End,
+                                shape: shape.as_ref().map(|g| g.at(node)),
                             };
                             self.app.update(handler(event));
                         }
@@ -918,14 +987,16 @@ impl<A: App> Runner<A> {
                 Capture::Pending { .. } => {}
             }
         }
-        if let Some((geometry, _, click)) = self.pressed.take()
+        if let Some((geometry, _, click, shapes)) = self.pressed.take()
             && let Some((px, py)) = self.pointer
         {
             let point = Point::new(px as f64, py as f64);
             if geometry.contains(point) {
                 let local = geometry.node_point(ScreenPoint::new(point.x, point.y));
-                self.app
-                    .update(click.fire((local.x as f32, local.y as f32)));
+                self.app.update(click.fire(At {
+                    pos: (local.x as f32, local.y as f32),
+                    shape: shape_at(&shapes, local),
+                }));
             }
         }
         self.redraw();
@@ -952,7 +1023,16 @@ impl<A: App> Runner<A> {
                     geometry,
                     local_press,
                     screen_grab,
-                } => self.on_drag_move(lx, ly, id.clone(), *geometry, *local_press, *screen_grab),
+                    shape,
+                } => self.on_drag_move(
+                    lx,
+                    ly,
+                    id.clone(),
+                    *geometry,
+                    *local_press,
+                    *screen_grab,
+                    shape.clone(),
+                ),
                 Capture::Text { id, geometry, pad } => {
                     let (lx, ly) = self.local_point(id, *geometry, *pad, lx, ly);
                     let text = &mut self.text;
@@ -995,17 +1075,12 @@ impl<A: App> Runner<A> {
                     geometry,
                     local_press,
                     screen_grab,
+                    shape,
                     press,
                 } => {
                     let dx = press.0 - lx;
                     let dy = press.1 - ly;
                     if dx.abs() > 5.0 || dy.abs() > 5.0 {
-                        self.drag = Some(Capture::App {
-                            id: id.clone(),
-                            geometry: *geometry,
-                            local_press: *local_press,
-                            screen_grab: *screen_grab,
-                        });
                         let press_at =
                             geometry.node_point(ScreenPoint::new(press.0 as f64, press.1 as f64));
                         let event = DragEvent {
@@ -1017,13 +1092,21 @@ impl<A: App> Runner<A> {
                             grab: *screen_grab,
                             scale: geometry.scale(),
                             mods: self.mods(),
+                            shape: shape.as_ref().map(|g| g.at(press_at)),
                         };
+                        self.drag = Some(Capture::App {
+                            id: id.clone(),
+                            geometry: *geometry,
+                            local_press: *local_press,
+                            screen_grab: *screen_grab,
+                            shape: shape.clone(),
+                        });
                         let handler = self
                             .hits
                             .drag
                             .iter()
-                            .find(|(_, drag_id, _)| drag_id == id)
-                            .map(|(_, _, handler)| handler);
+                            .find(|(_, drag_id, _, _)| drag_id == id)
+                            .map(|(_, _, handler, _)| handler);
                         if let Some(handler) = handler {
                             self.app.update(handler(event));
                             self.on_drag_move(
@@ -1033,6 +1116,7 @@ impl<A: App> Runner<A> {
                                 *geometry,
                                 *local_press,
                                 *screen_grab,
+                                shape.clone(),
                             );
                         }
                         self.pressed = None;
@@ -1051,7 +1135,7 @@ impl<A: App> Runner<A> {
         if let Some(r) = &self.render {
             r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
                 CursorIcon::Grabbing
-            } else if self.hits.drag.iter().any(|(r, _, _)| r.contains(p)) {
+            } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
                 CursorIcon::Grab
             } else if over_input {
                 CursorIcon::Text
@@ -1334,3 +1418,6 @@ pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> 
     };
     event_loop.run_app(&mut runner).expect("run app");
 }
+
+#[cfg(test)]
+mod tests;
