@@ -222,6 +222,79 @@ client-side pending state. Computation such as auto-moderation is a node functio
 Open: who may revoke a link (node only, or also its issuer); the creator's initial authority
 on a new workspace; client rollback/pending UX for rejected updates.
 
+### Decided 2026-09-18: roles, capabilities, rules, and how apps reach data
+
+Agreed with the user; refines the block above. Nothing here is built.
+
+**Role, capability, and rule are three things with one owner each.** A *role* is a name a DID
+holds in a scope, carried by the token chain and checked in Rust. A *capability* is a named
+action (`app.install`, `order.refund`) that policy grants to a role; capabilities never appear
+in a token. A *rule* is manifest Lua deciding one capability against one record. The node's
+check is always `actor holds a role covering the target` ∧ `capability ∈ capabilities(role)`
+∧ `rule(ctx)`.
+
+Capabilities are two closed sets: platform ones fixed in Rust (`app.install`, `app.remove`,
+`namespace.declare`, `policy.publish`, `member.invite`, `role.assign`, `workspace.delete`) and
+app ones declared by a manifest, alongside `read`/`create`/`edit`/`delete`. A rule cannot
+invent a capability; a manifest cannot declare a platform one.
+
+Roles compose by union, so a role can never deny — a ban is revocation or an explicit deny
+list the node checks first, not a negative role. Roles are also the unit of delegation: a
+narrower grant means the manifest declares a narrower role. Identity facts (`author`,
+participants, group members) reach rules as facts and never become roles; otherwise every DM
+would mint tokens.
+
+**Scope names the level a role is read against**, replacing the single address scope:
+`Node` (platform roles: owner, admin) | `Workspace(id)` (platform roles: owner, maintainer,
+member, guest) | `App { ws, app }` (roles from that app's manifest) | `Resource(ResourceScope)`
+for a deliberate one-off share.
+
+**Three token layers:** connection (the built relationship/admin permits — a session, not a
+data grant), workspace (the index and structure roles), app (manifest roles). Tokens exist
+where a human delegates. Per-document access is derived by the node from role plus rules and
+is never minted per document.
+
+**Structure writes are not data writes.** Structure — apps, namespaces, schema/rules, role
+assignment — is maintainer/owner work under the workspace token. Data is records inside an
+existing namespace, open to whoever the rules allow under an app token. Creating a namespace
+is structure; creating records inside one is data. This supersedes the earlier phrasing
+"publishing an app is a write on a workspace": it is a write to workspace *structure*.
+
+**Namespaces belong to the workspace, not to apps.** A namespace owns its schema and its
+rules; apps are lenses that request namespaces, so two apps writing the same namespace obey
+the same rules and nothing is copied. Namespaces are declared as **patterns**
+(`chat/dm/*`, `orders/<caller>`) so instances are created as data at runtime without a
+structural change — otherwise every DM would need a maintainer.
+
+**Install is the authorization event.** Publishing declares the roles an app defines and the
+namespaces it needs; a maintainer approves that list for this workspace and maps workspace
+roles to app roles. A manifest alone grants nothing, and an unresolved namespace request fails
+the install rather than launching a broken app. At runtime access is `namespaces bound at
+install` ∩ `what this user's roles allow`: an app can exceed neither its user nor its binding.
+
+**Apps are all-or-nothing (policy).** If a user's roles do not cover everything an app needs,
+the app is absent from their index; different audiences get different apps, as osvauld1 shipped
+`shop-owner` and `shop-customer` separately. Namespace access is per app, record rules are per
+role. The one surviving partial pattern is the viewer-scoped request `orders/<caller>`.
+
+**Apps hold no key.** A write is "user U via app A", and only U's signature is real. App
+identity is provenance, not authority; enforcing it would mean per-app keys, not worth it
+while every app is internal.
+
+**One index doc per (user, workspace)**, node-written and user-read (§6's recipient-specific
+case). New resources are appended to the indexes of everyone allowed to see them; the user
+then pulls content, and push is an optimization for open docs. The index diff is the
+offline catch-up list, so no separate catch-up protocol is needed.
+
+Scenarios this must satisfy, beyond §8's: storefront, my-orders, order desk, catalog editor,
+a dashboard reading node-derived `summaries`, announcements; chat as DM, group, and
+announcement. They stress patterns for instances, membership-driven reads, a separate guest
+channel, and one person holding two roles at once.
+
+Open: who may declare a namespace (maintainer, or the publisher of an app that needs it);
+whether an update records the writing app; how a deny list is represented; re-running read
+rules and updating indexes when group membership changes.
+
 ## 5. Trust, consent, and updates
 
 Connection tickets bootstrap the initial relationship/install-or-join flow. They must bind

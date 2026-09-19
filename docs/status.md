@@ -60,10 +60,11 @@ and replay rejection are covered by automated tests (branch `kunki-initial`). Te
 structs directly between node and desktop functions, and the happy path round-trips every message
 through bincode, so no transport is needed to exercise the protocol. **2026-09-17:** role-token,
 signed-update authorship, and Lua-rule decisions recorded in
-[`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) §4. Built: `courier::token` issues root role tokens and delegations that embed their full
-parent; ids hash the signed payload. Next slices: (1) the chain check — first decide how a
-token names node-wide and whole-workspace scope, which `workspace::ResourceScope` cannot
-express today; (2) a durable node admin store holding
+[`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) §4, extended **2026-09-18** with the role/capability/rule split, structure-versus-data writes,
+namespaces owning schema and rules, install as the authorization event, and the per-user index.
+Built: `courier::token` issues root role tokens and delegations that embed their full parent;
+ids hash the signed payload. Next slices: (1) the chain check, over the four-level scope
+(node, workspace, app, resource); (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
 QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
 workspace publish, or sync exists yet.
