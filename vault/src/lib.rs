@@ -261,6 +261,7 @@ impl Vault {
     ) -> Result<WorkspaceItem, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Self::check_id(ws_id)?;
         let item = WorkspaceItem::new(ws_id, name, kind);
         let plaintext = serde_json::to_vec(&item)?;
         let sealed = active.seal(&plaintext)?;
@@ -274,6 +275,7 @@ impl Vault {
     pub fn items(&self, ws_id: &str) -> Result<Vec<WorkspaceItem>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Self::check_id(ws_id)?;
         let prefix = item::items_prefix(ws_id);
         let mut out = Vec::new();
         for key in active.store.list_prefixed(&prefix)? {
@@ -294,11 +296,15 @@ impl Vault {
     //Retrieve lua src code
 
     pub fn get_src(&self, ws_id: &str, item_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        self.ensure_unlocked()?;
+        Self::check_id_pair(ws_id, item_id)?;
         self.get_sealed(&item::src_key(ws_id, item_id))
     }
 
     //update lua src code
     pub fn put_src(&self, ws_id: &str, item_id: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        self.ensure_unlocked()?;
+        Self::check_id_pair(ws_id, item_id)?;
         self.put_sealed(&item::src_key(ws_id, item_id), snapshot)
     }
 
@@ -309,6 +315,9 @@ impl Vault {
         item_id: &str,
         name: &str,
     ) -> Result<Option<Vec<u8>>, VaultError> {
+        self.ensure_unlocked()?;
+        Self::check_id_pair(ws_id, item_id)?;
+        Self::check_doc_name(name)?;
         self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
 
@@ -320,11 +329,37 @@ impl Vault {
         snapshot: &[u8],
         name: &str,
     ) -> Result<(), VaultError> {
-        if name.is_empty() || name.contains('/') {
-            return Err(VaultError::InvalidName(name.to_string()));
-        };
+        self.ensure_unlocked()?;
+        Self::check_id_pair(ws_id, item_id)?;
+        Self::check_doc_name(name)?;
         self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)
     }
+    fn ensure_unlocked(&self) -> Result<(), VaultError> {
+        self.active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|_| ())
+            .ok_or(VaultError::Locked)
+    }
+
+    fn check_id(id: &str) -> Result<(), VaultError> {
+        workspace::valid_id(id)
+            .then_some(())
+            .ok_or_else(|| VaultError::InvalidId(id.to_string()))
+    }
+
+    fn check_id_pair(ws_id: &str, item_id: &str) -> Result<(), VaultError> {
+        Self::check_id(ws_id)?;
+        Self::check_id(item_id)
+    }
+
+    fn check_doc_name(name: &str) -> Result<(), VaultError> {
+        item::valid_doc_name(name)
+            .then_some(())
+            .ok_or_else(|| VaultError::InvalidName(name.to_string()))
+    }
+
     fn get_sealed(&self, key: &str) -> Result<Option<Vec<u8>>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;

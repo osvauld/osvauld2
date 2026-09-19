@@ -30,7 +30,7 @@ vault.lock() / current() / store()                // the active account's Store
 vault.create_workspace(name) / workspaces()       // newest first
 vault.create_item(ws, name, kind) / items(ws)     // ItemKind::{Doc, Table, App, Canvas}
 vault.get_src / put_src(ws, item, snapshot)       // an .app's source doc (Loro snapshot)
-vault.get_doc / put_doc(ws, item, snapshot, name) // its state docs, name-keyed
+vault.get_doc / put_doc(ws, item, snapshot, name) // its state docs, machine-name keyed
 ```
 
 The Argon2 halves (`prepare_*`/`commit_*`) are split so hashing can run off the UI thread
@@ -50,8 +50,11 @@ identity/label                    display name (plain)
 ws/<id>/meta                      WorkspaceMeta { id, name, created }
 ws/<ws>/item/<id>/meta            WorkspaceItem { id, ws, name, kind, created }
 ws/<ws>/item/<id>/src             an .app's source doc — a Loro snapshot, sealed
-ws/<ws>/item/<id>/doc/<name>      its state docs, name-keyed (no `/`, non-empty)
+ws/<ws>/item/<id>/doc/<name>      its state docs, name-keyed (non-empty ASCII alnum/`-`/`_`, max 64)
 ```
+
+Workspace and item ids are generated as 16 random bytes, lowercase hex-encoded; public
+vault calls reject malformed ids before formatting storage keys.
 
 redb allows a single handle per file: the active account's store is held open for the
 session; any other account is opened read-only, briefly, to read its label.
