@@ -2,7 +2,9 @@
 
 > **Status — 2026-09-11: design baseline; validated resource-address syntax, callable handles,
 > and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
-> node are unbuilt.**
+> node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4;
+> 2026-09-19: signatures are record fields and kunki stores through vault, and the
+> platform capability table plus its authorization boundary are built in `courier::policy`.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -154,6 +156,197 @@ receiver must possess valid authority/key material before accepting dependent co
 A sender checks current authorization before disclosure. Exact grant IDs, generations,
 rollback prevention, expiry, revocation ordering, and historical-write treatment are open.
 
+### Decided 2026-09-17: role tokens, signed updates, Lua rules
+
+Agreed with the user; supersedes the "Permit" row above (tokens carry roles, not concrete
+capabilities) and the open manifest/Lua split in §7. Built: `courier::token` — issuing,
+delegation, and the chain check below, over the four-level scope, with
+`workspace::ResourceScope::contains` for the innermost level. Everything else here is not.
+
+**The node is the root authority; tokens carry roles.** Fields: `iss`, `aud`, `sub` (node
+DID), `role`, `scope`, `delegable`, `nonce`, `iat`, `exp`, `prf`. `prf` embeds the full parent
+token inside the signed payload; the root has none and `iss == sub`. Semantics follow UCAN 1.0
+delegation, encoding is courier's own: only our node verifies, so DAG-CBOR/varsig and
+per-action invocation tokens buy nothing (and `rs-ucan` is marked work-in-progress/unaudited).
+
+Chain check on the node, leaf to root: depth cap before any crypto; every link's signature,
+`sub == node`, unexpired, unrevoked; `child.iss == parent.aud`; parent `delegable`; a child
+never widens role or scope; root `iss == sub`; leaf `aud` equals the session's proven DID.
+
+- **Node admin** = create workspaces and appoint admins (delegate the admin role). Publishing
+  an app is write on a workspace, not admin. The bootstrap claim creates the first admin and
+  is refused once one exists — kunki prints a fresh ticket on every start.
+- **Reissue keeps chains short**, but a flattened node-signed token no longer contains the
+  intermediate issuer: the node must record lineage or revoking that issuer stops cascading.
+- **Keys stay out of tokens.** Device/encryption keys live in the relationship permit;
+  wrapped content keys travel beside the token (`prf` would copy them into every child).
+- **Role meaning lives in the manifest**, so a policy change reinterprets existing role
+  tokens by design. That is acceptable only because a policy change is an explicit signed
+  publish, never a side effect of a code edit (§5).
+
+**Authorship is a signed update.** The desktop sends `{author DID, update bytes, sig}`. The
+node verifies the signature and that every Loro peer id in the update is bound to that DID
+(clients choose peer ids; without the binding one peer can write as another). Signed updates
+are kept in the node log, so authorship stays verifiable later. `record.author` is the signer
+of the creating update; clients cannot set it.
+
+**Revised 2026-09-19 (§4):** the signature moved into the record as a field, so there is no
+node-side update log and no peer-id binding requirement. The paragraph above is kept for the
+reasoning that led there.
+
+**Rules are Lua in the signed manifest; there is no custom rule vocabulary.** The node is
+trusted, so a DSL adds a language without adding security. Kunki runs the rules on merge. The
+manifest also declares data shapes — the node needs them to map changed containers to
+records and fields. A manifest is accepted only if the publisher's chain reaches the node and
+allows publishing there; node-run functions act with the publisher's authority, not the node's.
+
+Rust proves, Lua decides. A rule receives only verified facts and returns `true` or
+`false, reason`:
+
+| fact | contents |
+|---|---|
+| `update` | `id`, `author` (verified), `signed_at` (the author's claim, not trusted) |
+| `change` | this record's slice: `record`, `kind` (create/edit/delete/move), `fields` old/new |
+| `roles` | from the verified token chain, **as of merge**, not signing |
+| `record` | pre-state: `author`, `created_at` (node clock), `parent`, own fields |
+| `now` | node clock |
+| `workspace` | `id`, `get` (reads are tracked), `members` only if the manifest requests it and it is granted |
+
+No tokens, keys, network, writes, or other workspaces. One update is accepted or rejected
+whole; the rule runs once per touched record. Desktops may run the same rules before sending
+as a courtesy; the node is the authority. Read is per doc, so a data-dependent read rule must
+re-run when a field it read changes — record reads during evaluation. The Luau sandbox and
+interrupt budget move into a headless crate shared by `app_host` and kunki (`app_host`
+depends on `runtime`).
+
+Checklist the Lua rule API must support, from shop, chat, subreddit, and expense-approval
+walkthroughs: nearest ancestor by type (`post.locked`), directory relations
+(`author.manager`), separation of duties, thresholds, status transitions, lock after a
+state, per-field privacy (the node splits private fields into their own doc), soft delete as
+the default. Uniqueness and bounds rely on the node merging one update at a time and need a
+client-side pending state. Computation such as auto-moderation is a node function.
+
+Open: who may revoke a link (node only, or also its issuer); the creator's initial authority
+on a new workspace; client rollback/pending UX for rejected updates. Surfaced while building
+the chain check: a delegation cannot change its role, so a maintainer cannot hand out an app
+role by delegating — role assignment has to be node issuance under `role.assign`, which also
+keeps it in the audit log. Delegation then only ever narrows scope.
+
+### Decided 2026-09-18: roles, capabilities, rules, and how apps reach data
+
+Agreed with the user; refines the block above. **Built 2026-09-19:** `courier::policy` — the
+closed platform capability set, the `(scope level, role) -> capabilities` table, and
+`authorize` = chain check ∧ the role's scope covers the target ∧ the role carries the
+capability. Targets are syntax-checked first, because `Scope::Node` contains every variant and
+would otherwise reach addresses a narrower role could not parse. Manifest capabilities, app
+roles, and rules are still unbuilt.
+
+**Role, capability, and rule are three things with one owner each.** A *role* is a name a DID
+holds in a scope, carried by the token chain and checked in Rust. A *capability* is a named
+action (`app.install`, `order.refund`) that policy grants to a role; capabilities never appear
+in a token. A *rule* is manifest Lua deciding one capability against one record. The node's
+check is always `actor holds a role covering the target` ∧ `capability ∈ capabilities(role)`
+∧ `rule(ctx)`.
+
+Capabilities are two closed sets: platform ones fixed in Rust (`app.install`, `app.remove`,
+`namespace.declare`, `policy.publish`, `member.invite`, `role.assign`, `workspace.delete`) and
+app ones declared by a manifest, alongside `read`/`create`/`edit`/`delete`. A rule cannot
+invent a capability; a manifest cannot declare a platform one.
+
+Roles compose by union, so a role can never deny — a ban is revocation or an explicit deny
+list the node checks first, not a negative role. Roles are also the unit of delegation: a
+narrower grant means the manifest declares a narrower role. Identity facts (`author`,
+participants, group members) reach rules as facts and never become roles; otherwise every DM
+would mint tokens.
+
+**Scope names the level a role is read against**, replacing the single address scope:
+`Node` (platform roles: owner, admin) | `Workspace(id)` (platform roles: owner, maintainer,
+member, guest) | `App { ws, app }` (roles from that app's manifest) | `Resource(ResourceScope)`
+for a deliberate one-off share.
+
+**Three token layers:** connection (the built relationship/admin permits — a session, not a
+data grant), workspace (the index and structure roles), app (manifest roles). Tokens exist
+where a human delegates. Per-document access is derived by the node from role plus rules and
+is never minted per document.
+
+**Structure writes are not data writes.** Structure — apps, namespaces, schema/rules, role
+assignment — is maintainer/owner work under the workspace token. Data is records inside an
+existing namespace, open to whoever the rules allow under an app token. Creating a namespace
+is structure; creating records inside one is data. This supersedes the earlier phrasing
+"publishing an app is a write on a workspace": it is a write to workspace *structure*.
+
+**Namespaces belong to the workspace, not to apps.** A namespace owns its schema and its
+rules; apps are lenses that request namespaces, so two apps writing the same namespace obey
+the same rules and nothing is copied. Namespaces are declared as **patterns**
+(`chat/dm/*`, `orders/<caller>`) so instances are created as data at runtime without a
+structural change — otherwise every DM would need a maintainer.
+
+**Install is the authorization event.** Publishing declares the roles an app defines and the
+namespaces it needs; a maintainer approves that list for this workspace and maps workspace
+roles to app roles. A manifest alone grants nothing, and an unresolved namespace request fails
+the install rather than launching a broken app. At runtime access is `namespaces bound at
+install` ∩ `what this user's roles allow`: an app can exceed neither its user nor its binding.
+
+**Apps are all-or-nothing (policy).** If a user's roles do not cover everything an app needs,
+the app is absent from their index; different audiences get different apps, as osvauld1 shipped
+`shop-owner` and `shop-customer` separately. Namespace access is per app, record rules are per
+role. The one surviving partial pattern is the viewer-scoped request `orders/<caller>`.
+
+**Apps hold no key.** A write is "user U via app A", and only U's signature is real. App
+identity is provenance, not authority; enforcing it would mean per-app keys, not worth it
+while every app is internal.
+
+**One index doc per (user, workspace)**, node-written and user-read (§6's recipient-specific
+case). New resources are appended to the indexes of everyone allowed to see them; the user
+then pulls content, and push is an optimization for open docs. The index diff is the
+offline catch-up list, so no separate catch-up protocol is needed.
+
+Scenarios this must satisfy, beyond §8's: storefront, my-orders, order desk, catalog editor,
+a dashboard reading node-derived `summaries`, announcements; chat as DM, group, and
+announcement. They stress patterns for instances, membership-driven reads, a separate guest
+channel, and one person holding two roles at once.
+
+Open: who may declare a namespace (maintainer, or the publisher of an app that needs it);
+whether an update records the writing app; how a deny list is represented; re-running read
+rules and updating indexes when group membership changes.
+
+### Decided 2026-09-19: signatures are record fields; kunki stores through vault
+
+Agreed with the user. The signature half supersedes "Authorship is a signed update" above;
+the storage half is new. Nothing here is built.
+
+**A signature is a field on the record, not a wrapper around the update.** A message is
+`{id, author, text, ts, sig}` and the node verifies the field at merge. Provenance then
+replicates with the data, so any peer can check it instead of trusting the node's word, and
+no node-side log has to hold a second copy of every update. It also survives re-encoding: the
+signature covers the record's fields, not an update's bytes, which cannot be re-derived
+byte-identically from a merged doc.
+
+Two constraints come with it. **Signed fields are write-once** — a `LoroText` that merges
+concurrent edits changes the value out from under its signature, so an edit is a new version
+carrying a new signature, and collaboratively edited prose cannot be signed this way at all:
+nobody authored the merged text. **The signature covers the record's address**, not only its
+content, or a peer could move a signed message into another thread and have it still verify.
+Structural ops — delete, move, reparent — have no signed body of their own and stay
+rule-enforced at merge.
+
+This drops a requirement: Loro peer ids no longer need binding to DIDs for authorship, because
+the field answers it directly. `(PeerID, Counter)` stays what it always was — ordering, not
+identity.
+
+**Kunki stores through `vault`, the same way shell2 does**, as vault's header already intends
+("the future node will too"). The node identity moves into the account db at
+`identity/keystore`, so kunki's `identity.bin`, `load_or_create_identity`, and `write_secret`
+give way to signup-then-login with the boot passphrase. Sealing at rest means something
+weaker here than on a desktop — the node can read everything it holds, which §5's trusted-host
+assumption already grants — so it is disk-theft protection, not access control. Workspaces,
+apps, and documents use `create_workspace`/`create_item`/`put_src`/`put_doc` unchanged; the
+node's own records (tokens, lineage, revocations, per-user indexes) go on `Vault::store`
+rather than a second database.
+
+Open: the canonical encoding a record signature covers (field order, and the form of the
+address inside it); whether a signed record is ever amended in place rather than versioned.
+
 ## 5. Trust, consent, and updates
 
 Connection tickets bootstrap the initial relationship/install-or-join flow. They must bind
@@ -240,8 +433,10 @@ immutable fields, and `pending -> confirmed`; calculations, integrations, and de
 may use Lua, but must not bypass the protected write/action boundary.
 
 The exact manifest/Lua split is **open**. Do not prematurely reduce the rule vocabulary to
-role/path checks or adopt a general-purpose inference engine as authorization. Rules must
-specify their authenticated inputs and enforcement point. A booking acceptance needs a
+role/path checks or adopt a general-purpose inference engine as authorization.
+**Revised 2026-09-17 (§4):** rules are Lua in the signed manifest, run by the node over
+verified facts; no custom rule vocabulary. Rules must specify their authenticated inputs and
+enforcement point. A booking acceptance needs a
 serialized availability check and commit at an authority; CRDT convergence cannot make two
 concurrent reservations both exclusive. Readable policy should explain allow/deny decisions.
 

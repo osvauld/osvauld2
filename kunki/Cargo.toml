@@ -1,0 +1,12 @@
+[package]
+name = "kunki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+courier = { path = "../courier" }
+identity = { path = "../identity" }
+serde_json = { workspace = true }
+zeroize = { workspace = true }

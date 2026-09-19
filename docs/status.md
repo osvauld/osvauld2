@@ -65,6 +65,37 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ### Workspace permissions, sync, and sovereign node — design baseline
 
+**2026-09-15:** `kunki` exists as the first sovereign-node slice: it creates or loads a
+passphrase-sealed node identity, uses the identity device public key as the transport node id,
+and prints a base64url JSON connection ticket carrying node public material plus a node-signed
+bootstrap claim token. The follow-up `courier` slice adds the transport-free protocol core for
+claim and reconnect: desktop relationship permits, node admin permits, first-admin bootstrap
+rejection once an admin exists, node-issued reconnect challenges, desktop-signed reconnect proofs,
+and replay rejection are covered by automated tests (branch `kunki-initial`). Tests pass message
+structs directly between node and desktop functions, and the happy path round-trips every message
+through bincode, so no transport is needed to exercise the protocol. **2026-09-17:** role-token,
+signed-update authorship, and Lua-rule decisions recorded in
+[`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) §4, extended **2026-09-18** with the role/capability/rule split, structure-versus-data writes,
+namespaces owning schema and rules, install as the authorization event, and the per-user index.
+Built: `courier::token` issues root role tokens, delegates them with the full parent embedded,
+and verifies a chain leaf-to-root — depth cap before any crypto, per-link signature/subject/
+expiry/revocation, then child-versus-parent linkage, delegability, role, and scope; ids hash the
+signed payload. Scope is four levels (node, workspace, app, resource) and
+`workspace::ResourceScope::contains` decides the innermost one. **2026-09-19:** authorship
+became a signed field on the record rather than a signed update wrapper, so there is no node
+update log and Loro peer ids need no DID binding; kunki will store through `vault` as shell2
+does, with the admin store on `Vault::store`. Also built: `courier::policy` — platform
+capabilities as a closed Rust set, the `(scope level, role) -> capabilities` table pinned cell
+by cell, and `authorize` joining the chain check to scope coverage and capability. A role read
+one level down is a different role, so narrowing a token to app scope drops platform
+capabilities by design. Next slices: (1) `role.assign` — node issuance of a role token, with a
+rank check so an assigner cannot mint above itself; (2) the durable node admin store. Next slices: (1) how a
+maintainer hands out an app role — delegation cannot change a role, so role assignment needs
+node issuance under `role.assign`; (2) a durable node admin store holding
+tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
+QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
+workspace publish, or sync exists yet.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax
