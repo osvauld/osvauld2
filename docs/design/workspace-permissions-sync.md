@@ -157,7 +157,8 @@ rollback prevention, expiry, revocation ordering, and historical-write treatment
 ### Decided 2026-09-17: role tokens, signed updates, Lua rules
 
 Agreed with the user; supersedes the "Permit" row above (tokens carry roles, not concrete
-capabilities) and the open manifest/Lua split in §7. Nothing below is built yet.
+capabilities) and the open manifest/Lua split in §7. Built: token issuing and delegation
+(`courier::token`); the chain check and everything else below is not.
 
 **The node is the root authority; tokens carry roles.** Fields: `iss`, `aud`, `sub` (node
 DID), `role`, `scope`, `delegable`, `nonce`, `iat`, `exp`, `prf`. `prf` embeds the full parent
@@ -306,9 +307,11 @@ authorized effects, and subsequent rules. Candidate manifest rules include actor
 immutable fields, and `pending -> confirmed`; calculations, integrations, and derivations
 may use Lua, but must not bypass the protected write/action boundary.
 
-**Decided 2026-09-17 (§4):** rules are Lua in the signed manifest, run by the node over
-verified facts; no custom rule vocabulary. Rules must still specify their authenticated
-inputs and enforcement point. A booking acceptance needs a
+The exact manifest/Lua split is **open**. Do not prematurely reduce the rule vocabulary to
+role/path checks or adopt a general-purpose inference engine as authorization.
+**Revised 2026-09-17 (§4):** rules are Lua in the signed manifest, run by the node over
+verified facts; no custom rule vocabulary. Rules must specify their authenticated inputs and
+enforcement point. A booking acceptance needs a
 serialized availability check and commit at an authority; CRDT convergence cannot make two
 concurrent reservations both exclusive. Readable policy should explain allow/deny decisions.
 

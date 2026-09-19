@@ -10,6 +10,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod token;
+
 const TICKET_DOMAIN: &[u8] = b"osvauld/courier/ticket/v1\0";
 const PERMIT_DOMAIN: &[u8] = b"osvauld/courier/permit/v1\0";
 const RECONNECT_DOMAIN: &[u8] = b"osvauld/courier/reconnect/v1\0";
