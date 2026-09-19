@@ -81,7 +81,33 @@ col#voronoi:[178] > [2] > frame#canvas:[208] > unknown prop cursor
 col#voronoi:[177] > [2] > frame:[207] > on_drag needs an id
 ```
 
-## 3. `on_hover` fires only when the pointer moves, and nothing can re-ask
+## 3. ~~`on_hover` fires only when the pointer moves, and nothing can re-ask~~
+
+**Resolved 2026-09-19.** Hover is now sampled at the end of every frame as well as on every pointer
+event, so the answer follows the geometry. `M.under` and the `M.pointer` cache are gone from
+`model.lua`; the lit cell and the readout both come from `M.hit` now, and this app has one hit test
+again instead of two.
+
+Two things were learned fixing it, both of which the original entry below had right for the wrong
+reason. First, the regions were never stale — `hits.hover` is rebuilt by every paint. Only the
+*diff* was event-driven, so the fresh regions sat there with nothing asking them. It was a missing
+call site, not a design limit.
+
+Second, "what am I on" turned out to be two answers, and the first fix only restored one. Comparing
+shape *ids* to decide whether to report a move keeps `e.shape` live but lets `e.sx, e.sy` freeze
+until the pointer crosses into a different cell — a plausible-looking pair of numbers that stops
+tracking. The unit test passed, because it asserted the name. What caught it was running this app:
+`sx -2.0  sy -60.0` held steady across 50 frames while the site under it moved 16pt. The whole hit
+is compared now, which costs nothing when nothing moves, since still geometry under a still pointer
+recomputes the same point.
+
+The second half of the entry still stands: **a view cannot read the pointer position.** It no longer
+bites this app, because the shape is enough, but an app that wants the raw coordinate every frame
+must still cache it from the last hover event.
+
+---
+
+*The original entry:*
 
 Documented — "It fires only when the pointer moves" — and the single biggest constraint on an
 app whose geometry moves under a still pointer, which is precisely what this app is for. The

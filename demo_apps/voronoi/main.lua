@@ -26,11 +26,10 @@ local function circle_path(cx, cy, r)
 end
 
 local function on_hover(e)
-	local phase, x, y, shape, sx, sy = e.phase, e.x, e.y, e.shape, e.sx, e.sy
+	local phase, shape, sx, sy = e.phase, e.shape, e.sx, e.sy
 	if phase == "leave" then
-		M.pointer, M.hit = nil, nil
+		M.hit = nil
 	else
-		M.pointer = { x, y }
 		M.hit = shape and { shape = shape, sx = sx, sy = sy } or nil
 	end
 end
@@ -49,12 +48,7 @@ local function on_drag(e)
 end
 
 local function on_click(e)
-	local x, y, shape = e.x, e.y, e.shape
-	local i = M.index_of(shape)
-	if not i then
-		local _, live = M.under(x, y)
-		i = live
-	end
+	local i = M.index_of(e.shape)
 	M.sel = M.sel ~= i and i or nil
 end
 
@@ -82,7 +76,7 @@ local function readout(live_name)
 		return "hover a cell"
 	end
 	local s = M.sites[M.index_of(h.shape)]
-	local line = string.format(
+	return string.format(
 		"%s   site (%.0f, %.0f)   sx %.1f  sy %.1f",
 		h.shape,
 		s.x,
@@ -90,19 +84,18 @@ local function readout(live_name)
 		h.sx,
 		h.sy
 	)
-	if live_name ~= h.shape then
-		line = line .. "   →  now " .. live_name .. ", the diagram moved under a still pointer"
-	end
-	return line
 end
 
 return function()
 	local sites = M.sites
 	local cells = V.cells(sites, C.w, C.h)
 
+	-- The frame's own hit test, which is resampled every frame — so the lit cell follows a drifting
+	-- diagram under a still pointer without a second copy of the pick math living here.
 	local hot_kind, hot_i
-	if M.pointer then
-		hot_kind, hot_i = M.under(M.pointer[1], M.pointer[2])
+	if M.hit then
+		hot_kind, hot_i = M.hit.shape:match("^(%a+):(%d+)")
+		hot_i = tonumber(hot_i)
 	end
 
 	-- Each cell is drawn in its own site's frame, so the pointer reports sx, sy as an offset from

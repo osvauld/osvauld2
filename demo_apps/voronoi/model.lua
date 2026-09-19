@@ -1,11 +1,9 @@
 local C = require("theme")
-local V = require("voronoi")
 
 local M = {
 	sites = {},
 	paused = false,
 	sel = nil,
-	pointer = nil,
 	hit = nil,
 	drag = nil,
 }
@@ -69,19 +67,6 @@ function M.drag_to(x, y)
 	local s = M.sites[d.i]
 	s.x = math.max(C.margin, math.min(C.w - C.margin, x - d.sx))
 	s.y = math.max(C.margin, math.min(C.h - C.margin, y - d.sy))
-end
-
--- The frame's hit test only speaks when the pointer moves, so a still pointer over a drifting
--- diagram would keep naming the cell it was in. This answers the same question from the same
--- geometry, every frame; it mirrors the draw order, where the site dots sit over the cells.
-function M.under(x, y)
-	for i = 1, #M.sites do
-		local dx, dy = x - M.sites[i].x, y - M.sites[i].y
-		if dx * dx + dy * dy <= C.site_hit * C.site_hit then
-			return "site", i
-		end
-	end
-	return "cell", V.nearest(M.sites, x, y)
 end
 
 function M.index_of(shape)
