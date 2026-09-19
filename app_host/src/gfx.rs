@@ -54,7 +54,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "linear_gradient",
         lua.create_function(|lua, spec: Table| {
             named_fields(&spec, "linear_gradient", &["from", "to", "stops", "extend"])?;
-            let start = point(need(&spec, "linear_gradient", "from")?, "linear_gradient.from")?;
+            let start = point(
+                need(&spec, "linear_gradient", "from")?,
+                "linear_gradient.from",
+            )?;
             let end = point(need(&spec, "linear_gradient", "to")?, "linear_gradient.to")?;
             let stop_table: Table = need(&spec, "linear_gradient", "stops")?;
             let len = positional_len(&stop_table, "linear_gradient.stops")?;
@@ -158,8 +161,12 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
     match kind.as_str() {
         "fill" => {
             named_fields(&spec, "fill", &["_gfx", "id", "path", "brush", "rule"])?;
-            let path = need_gfx(&spec, "fill", "path", "a gfx.path", |p: &LuaPath| p.0.clone())?;
-            let brush = need_gfx(&spec, "fill", "brush", "a brush", |b: &LuaBrush| b.0.clone())?;
+            let path = need_gfx(&spec, "fill", "path", "a gfx.path", |p: &LuaPath| {
+                p.0.clone()
+            })?;
+            let brush = need_gfx(&spec, "fill", "brush", "a brush", |b: &LuaBrush| {
+                b.0.clone()
+            })?;
             let rule = match spec.get::<Option<String>>("rule")?.as_deref() {
                 None | Some("nonzero") => Fill::NonZero,
                 Some("evenodd") => Fill::EvenOdd,
@@ -184,9 +191,12 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
                     "dash_offset",
                 ],
             )?;
-            let path = need_gfx(&spec, "stroke", "path", "a gfx.path", |p: &LuaPath| p.0.clone())?;
-            let brush =
-                need_gfx(&spec, "stroke", "brush", "a brush", |b: &LuaBrush| b.0.clone())?;
+            let path = need_gfx(&spec, "stroke", "path", "a gfx.path", |p: &LuaPath| {
+                p.0.clone()
+            })?;
+            let brush = need_gfx(&spec, "stroke", "brush", "a brush", |b: &LuaBrush| {
+                b.0.clone()
+            })?;
             named(&spec, Item::stroke(path, brush, stroke_style(&spec)?))
         }
         "group" => {
@@ -196,9 +206,13 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
         }
         "instance" => {
             named_fields(&spec, "instance", &["_gfx", "id", "visual", "transform"])?;
-            let frame = need_gfx(&spec, "instance", "visual", "a gfx.frame", |f: &LuaFrame| {
-                f.0.clone()
-            })?;
+            let frame = need_gfx(
+                &spec,
+                "instance",
+                "visual",
+                "a gfx.frame",
+                |f: &LuaFrame| f.0.clone(),
+            )?;
             let instance = Item::instance(transform(&spec)?, frame).map_err(Error::external)?;
             named(&spec, instance)
         }
