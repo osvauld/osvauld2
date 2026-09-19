@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use mlua::{AnyUserData, Error, Lua, Table, UserData, Value};
+use mlua::{Error, Lua, Table, UserData, Value};
 use runtime::frame::{
     Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
@@ -54,9 +54,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "linear_gradient",
         lua.create_function(|lua, spec: Table| {
             named_fields(&spec, "linear_gradient", &["from", "to", "stops", "extend"])?;
-            let start = point(spec.get("from")?, "linear_gradient.from")?;
-            let end = point(spec.get("to")?, "linear_gradient.to")?;
-            let stop_table: Table = spec.get("stops")?;
+            let start = point(need(&spec, "linear_gradient", "from")?, "linear_gradient.from")?;
+            let end = point(need(&spec, "linear_gradient", "to")?, "linear_gradient.to")?;
+            let stop_table: Table = need(&spec, "linear_gradient", "stops")?;
             let len = positional_len(&stop_table, "linear_gradient.stops")?;
             if len > MAX_GRADIENT_STOPS {
                 return Err(Error::runtime(format!(
@@ -94,8 +94,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             frame_fields(&spec)?;
             let items = items(&spec)?;
             let frame = Frame::new(
-                spec.get("width")?,
-                spec.get("height")?,
+                need(&spec, "frame", "width")?,
+                need(&spec, "frame", "height")?,
                 spec.get("baseline")?,
                 items,
             )
@@ -158,16 +158,8 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
     match kind.as_str() {
         "fill" => {
             named_fields(&spec, "fill", &["_gfx", "id", "path", "brush", "rule"])?;
-            let path = spec
-                .get::<AnyUserData>("path")?
-                .borrow::<LuaPath>()?
-                .0
-                .clone();
-            let brush = spec
-                .get::<AnyUserData>("brush")?
-                .borrow::<LuaBrush>()?
-                .0
-                .clone();
+            let path = need_gfx(&spec, "fill", "path", "a gfx.path", |p: &LuaPath| p.0.clone())?;
+            let brush = need_gfx(&spec, "fill", "brush", "a brush", |b: &LuaBrush| b.0.clone())?;
             let rule = match spec.get::<Option<String>>("rule")?.as_deref() {
                 None | Some("nonzero") => Fill::NonZero,
                 Some("evenodd") => Fill::EvenOdd,
@@ -192,16 +184,9 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
                     "dash_offset",
                 ],
             )?;
-            let path = spec
-                .get::<AnyUserData>("path")?
-                .borrow::<LuaPath>()?
-                .0
-                .clone();
-            let brush = spec
-                .get::<AnyUserData>("brush")?
-                .borrow::<LuaBrush>()?
-                .0
-                .clone();
+            let path = need_gfx(&spec, "stroke", "path", "a gfx.path", |p: &LuaPath| p.0.clone())?;
+            let brush =
+                need_gfx(&spec, "stroke", "brush", "a brush", |b: &LuaBrush| b.0.clone())?;
             named(&spec, Item::stroke(path, brush, stroke_style(&spec)?))
         }
         "group" => {
@@ -211,11 +196,9 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
         }
         "instance" => {
             named_fields(&spec, "instance", &["_gfx", "id", "visual", "transform"])?;
-            let frame = spec
-                .get::<AnyUserData>("visual")?
-                .borrow::<LuaFrame>()?
-                .0
-                .clone();
+            let frame = need_gfx(&spec, "instance", "visual", "a gfx.frame", |f: &LuaFrame| {
+                f.0.clone()
+            })?;
             let instance = Item::instance(transform(&spec)?, frame).map_err(Error::external)?;
             named(&spec, instance)
         }
@@ -261,7 +244,7 @@ fn stroke_style(spec: &Table) -> mlua::Result<StrokeStyle> {
         }
     };
     StrokeStyle::new(
-        spec.get("width")?,
+        need(spec, "stroke", "width")?,
         cap,
         join,
         spec.get::<Option<f64>>("miter_limit")?.unwrap_or(4.0),
@@ -299,10 +282,57 @@ fn item_fields(table: &Table, owner: &str, allowed: &[&str]) -> mlua::Result<()>
         match key {
             Value::Integer(i) if i > 0 && i as usize <= len => {}
             Value::String(key) if allowed.contains(&key.to_str()?.as_ref()) => {}
-            _ => return Err(Error::runtime(format!("{owner}: unknown or sparse field"))),
+            Value::String(key) => {
+                return Err(Error::runtime(format!(
+                    "{owner}: unknown field {}",
+                    key.to_str()?
+                )));
+            }
+            // A hole in the array part: `{a, nil, b}` has length 1, so `b` is unreachable and
+            // silently dropped. Saying "sparse" is the only way the author learns which it was.
+            key => {
+                return Err(Error::runtime(format!(
+                    "{owner}: sparse or non-string field {}",
+                    key.type_name()
+                )));
+            }
         }
     }
     Ok(())
+}
+
+/// A required field, named when it is missing. `spec.get` on its own reports only that it found a
+/// nil, which leaves the author diffing their call against the reference to work out which of
+/// four fields they left out — and two different mistakes produce identical text.
+fn need<T: mlua::FromLua>(spec: &Table, owner: &str, field: &str) -> mlua::Result<T> {
+    if spec.get::<Value>(field)?.is_nil() {
+        return Err(Error::runtime(format!("{owner} needs {field}")));
+    }
+    spec.get(field)
+        .map_err(|e| Error::runtime(format!("{owner}.{field}: {e}")))
+}
+
+/// The same, for a field holding a compiled handle — a `gfx.path`, `gfx.solid`, `gfx.frame`.
+/// Passing the wrong one of those is a borrow failure deep in mlua otherwise, which reads as an
+/// internal error rather than as "you passed a brush where a path goes".
+fn need_gfx<T: 'static, R>(
+    spec: &Table,
+    owner: &str,
+    field: &str,
+    what: &str,
+    take: impl Fn(&T) -> R,
+) -> mlua::Result<R> {
+    let held: Value = spec.get(field)?;
+    let Value::UserData(held) = held else {
+        return Err(Error::runtime(match held {
+            Value::Nil => format!("{owner} needs {field}, {what}"),
+            other => format!("{owner}.{field} must be {what}, got {}", other.type_name()),
+        }));
+    };
+    let held = held
+        .borrow::<T>()
+        .map_err(|_| Error::runtime(format!("{owner}.{field} must be {what}")))?;
+    Ok(take(&held))
 }
 
 fn point(table: Table, owner: &str) -> mlua::Result<Point> {

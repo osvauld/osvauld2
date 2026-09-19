@@ -464,6 +464,9 @@ Errors are for reading, not for fearing:
 
 - An unknown prop or a value of the wrong type is an error at that element — a red box in
   place, **siblings stay alive**.
+- A `gfx` call that is missing a required field names it: `frame needs width`, `fill needs
+  brush`, `stroke needs width`. Passing the wrong handle — a brush where a path goes — says so
+  too: `fill.path must be a gfx.path`.
 - A view that throws keeps the **last good frame** with an error banner naming file and line.
 - Nothing you write in a handler can take the app down for good; fix the file and it reloads.
 

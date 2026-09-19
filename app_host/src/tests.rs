@@ -244,6 +244,66 @@ fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
     }
 }
 
+/// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",
+/// which names neither the field nor the call — two different mistakes produced byte-identical
+/// text. Each message must now name what is missing, and no two may read the same.
+#[test]
+fn a_missing_gfx_field_says_which_one() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let setup = r##"
+        local p = gfx.path({ { "move", 0, 0 }, { "line", 1, 1 } })
+        local b = gfx.solid("#ffffff")
+        return REPLACE
+    "##;
+    let cases = [
+        ("gfx.frame({ height = 1 })", "frame needs width"),
+        ("gfx.frame({ width = 1 })", "frame needs height"),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ brush=b }) })",
+            "fill needs path",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=p }) })",
+            "fill needs brush",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.stroke({ path=p, brush=b }) })",
+            "stroke needs width",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.instance({}) })",
+            "instance needs visual",
+        ),
+        // A handle of the wrong kind is a borrow failure deep in mlua unless it is caught here,
+        // and "path" and "brush" are the two easiest arguments in the vocabulary to swap.
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=b, brush=b }) })",
+            "fill.path must be a gfx.path",
+        ),
+        (
+            "gfx.frame({ width=1, height=1, gfx.fill({ path=p, brush=p }) })",
+            "fill.brush must be a brush",
+        ),
+    ];
+
+    let mut seen: Vec<String> = Vec::new();
+    for (declaration, wanted) in cases {
+        let source = setup.replace("REPLACE", declaration);
+        let err = lua
+            .load(&source)
+            .eval::<Value>()
+            .expect_err(&format!("accepted {declaration}"))
+            .to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        seen.push(err);
+    }
+    for (i, a) in seen.iter().enumerate() {
+        for b in &seen[i + 1..] {
+            assert_ne!(a, b, "two different mistakes report the same thing");
+        }
+    }
+}
+
 #[test]
 fn on_frame_delivers_runtime_time_to_lua() {
     let src = LoroDoc::new();
