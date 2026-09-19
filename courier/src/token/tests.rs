@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use identity::Identity;
+
 use super::*;
 
 fn workspace(id: &str) -> Scope {

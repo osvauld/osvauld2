@@ -8,6 +8,7 @@ mod did;
 mod error;
 mod identity;
 mod keystore;
+mod signer;
 
 use cryptography::{ecies, signature};
 
@@ -17,6 +18,7 @@ pub use did::{did_from_public_key, public_key_from_did};
 pub use error::IdentityError;
 pub use identity::Identity;
 pub use keystore::{Keystore, seal, unlock};
+pub use signer::Signer;
 
 pub fn generate() -> (Identity, Mnemonic) {
     Identity::generate()

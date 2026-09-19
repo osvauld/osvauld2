@@ -110,6 +110,24 @@ sign(message)        -> [u8; 64]    // needs the secret signing key
 decrypt_sealed(data) -> Vec<u8>     // needs the secret encryption key
 ```
 
+**`Signer`** (added 2026-09-19) — acting as an identity without holding one:
+
+```rust
+trait Signer {
+    fn did(&self) -> &str;
+    fn sign(&self, message: &[u8]) -> [u8; 64];
+    fn encryption_public_key(&self) -> [u8; 32];
+    fn device_public_key(&self) -> [u8; 32];
+}
+```
+
+Every member is public material or a signature over it, never a secret. `Identity`
+implements it, and so does `&T` for any `Signer`. Callers that only need signatures — today
+`courier`, which takes `&impl Signer` throughout — depend on this instead of on `Identity`,
+so the crate holding the unlocked keys (`vault`) can implement it and never hand them out.
+`signing_public_key` and `decrypt_sealed` are deliberately absent: the DID carries the first,
+and nothing above `vault` has needed the second.
+
 **`Keystore`**: `to_bytes()`, `from_bytes(&[u8])`, `did()` (readable before unlock).
 
 The split is principled and mirrors the cryptography: operations that need a **secret
@@ -135,5 +153,6 @@ identity/src/
   did.rs        did_from_public_key / public_key_from_did   (+ did/tests.rs)
   identity.rs   Identity: derivation, accessors, sign/decrypt_sealed (+ identity/tests.rs)
   keystore.rs   Keystore + seal / unlock / to_bytes / from_bytes      (+ keystore/tests.rs)
+  signer.rs     Signer trait + impls for Identity and &T               (+ signer/tests.rs)
   tests.rs      in-memory generate -> seal -> unlock and recover flows
 ```
