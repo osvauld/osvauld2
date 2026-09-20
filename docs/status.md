@@ -254,8 +254,13 @@ Roughly in dependency order:
      Runner instead answers bounded, fresh-frame element/subtree and screen hit-stack queries with
      explicit content/screen geometry, clips, computed layout, scroll/thumb, and camera state.
      Pointer sequences and wheel modifiers route through normal eligibility for zoom/pan/drag tests;
-     optional screenshot annotations share the snapshot. This is unbuilt; see
+     optional screenshot annotations share the snapshot. See
      [`design/app-discovery-and-invocation.md` §7](design/app-discovery-and-invocation.md).
+     *Revised 2026-09-20: partly built.* The Runner-owned deferred seam (`App::take_driver`),
+     `Rects` (reachable elements with their **visible** rects — the rect the hit-test actually
+     tests), pointer/drag synthesis through the normal path, and `Frame`/`Advance` on the virtual
+     clock all landed. Still unbuilt: `InspectElement`/`InspectSubtree`, `Wheel` and modifiers,
+     query bounds, and the *ordered* hit stack with clip rejections — §7 carries the full split.
    - **ports as-is**: the wire transport (`read_msg`/`write_msg`, 4-byte length prefix;
    `Response::{ok,err}`) and the MCP shim's stdio↔UDS *shape*
    - **is replaced**: bridge becomes pure transport — a `UnixListener` thread on
@@ -273,6 +278,15 @@ Roughly in dependency order:
      element id, `ReadConsole` (LuaApp's errors become a bounded ring buffer, not
      `eprintln`); and `WriteFile` against an open tab reloads its VM keeping the doc —
      the free half of hot reload
+   - **landed 2026-09-20, the driver family**: `shell2 --offscreen WxH` runs the whole
+     shell with no window — real layout, real pixels (`capture_scene` never needed a
+     surface), and a virtual clock that moves only when a request asks. `Frame(n)` /
+     `Advance(secs)` drive time, `Rects` says where a pointer must land, and
+     `PointerMove`/`PointerPress`/`PointerRelease`/`Drag` go through the same methods a
+     window calls — pinned by a test asserting one gesture is event-for-event identical
+     across both drivers. `OSVAULD_OFFSCREEN=WxH` makes every existing `scripts/` Session
+     windowless untouched. **Windowless, not headless**: `EventLoop::build()` still needs a
+     `DISPLAY`. See [`design/six-apps.md` §7](design/six-apps.md).
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
 2. **W4 DX**: types gate (generated `.d.luau` stubs from the one binding registry +

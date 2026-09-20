@@ -91,7 +91,37 @@ cannot prove which closure is current or safe to call. Its `_nid` is source-edit
 runtime element id or authorization token. Runtime invocation must come from the current UI action
 registry or an explicit command registry.
 
-## 7. Resolved UI senses and gestures (designed 2026-09-11; unbuilt)
+## 7. Resolved UI senses and gestures (designed 2026-09-11; **partly built 2026-09-20**)
+
+> **Revision, 2026-09-20.** A subset landed, arrived at independently while building the offscreen
+> driver (`design/six-apps.md` §7) and only afterwards reconciled against this section. The
+> architecture here held up without being consulted, which is the useful part of the finding: the
+> seam built was "deferred like `Screenshot`, answered by the Runner, `DumpTree` left alone", for
+> the same reasons given above.
+>
+> **Built:** `App::take_driver` (the deferred Runner-owned request, modelled on `ScreenshotRequest`
+> down to the completion closure) · `Rects` — every reachable element with its **visible** rect ·
+> `PointerMove`/`PointerPress`/`PointerRelease`/`Drag` through the normal Runner path ·
+> `Frame(n)`/`Advance(secs)` on the virtual clock. Id-addressed `Click` is untouched and still
+> bypasses pointer eligibility, as specified.
+>
+> **Not built:** `InspectElement`/`InspectSubtree` (specified-vs-computed layout, content/screen
+> geometry, effective clips and transform, scroll viewport/offset/range/thumb, camera scale/pan) ·
+> `Wheel` and modifiers, which the zoom/pan and scroll-thumb tests still need · include masks and
+> depth/node limits — `Rects` is unbounded, fine at demo-app sizes and not at real ones · custom
+> per-query viewport dimensions · screenshot annotations.
+>
+> **Two divergences, deliberate:**
+>
+> 1. **`PointerPress`/`PointerRelease`, not `PointerDown`/`PointerUp`.** `Headless` — the driver
+>    that already exists in the code — calls them `press`/`release`, and matching real code beats
+>    matching an unbuilt design. Renaming both is cheap if this section is ever built out.
+> 2. **`HitTest` is weaker than specified, and this section is right.** The pointer ops report what
+>    is under the pointer as an unordered set with no clip rejections; the design asks for the
+>    *ordered eligible stack* and *why* things were rejected. Both of those are what a caller
+>    actually wants when a click lands on the wrong thing — an unordered set answers "am I over it"
+>    but not "what will get it". Worth building when something needs it; recorded here so the
+>    weaker shape is not mistaken for the intended one.
 
 `DumpTree` is intentionally pre-layout: it describes the current `El` vocabulary and handlers but
 has no window, Taffy result, camera, clip, or hit order. Do not overload it. Resolved inspection is

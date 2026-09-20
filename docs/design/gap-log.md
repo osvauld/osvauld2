@@ -67,6 +67,9 @@ positional signature that binds the wrong values *and keeps running*.
 because a guide that disagrees with itself is the authorability finding this plan exists to
 measure, and quietly patching it would have deleted the evidence.
 
+*Closed 2026-09-20.* Fixed now that the entry above preserves what it said, with a dated note in
+the guide recording the old wording — the same reason the entry was written first.
+
 ### 1.4 An app cannot find out where anything landed — **missing** (tooling)
 
 **Wanted:** to click my own Start button in a headless run.
@@ -168,16 +171,28 @@ deliberately rather than by whichever gets written first.
 
 ### Tally so far
 
-| verdict | count |
-|---|---|
-| missing | 2 |
-| no door | 3 |
-| wrong shape | 1 |
+*Updated 2026-09-20, after the harness work.*
 
-Too early to read, and the one number that moved was moved by *checking the repo instead of
-reasoning* — which is the same lesson `six-apps.md` §0 records. The thing to watch is whether 1.1
-and 1.2 recur in app 2; two apps wanting the same two things is the evidence §4 is waiting for,
-and a third would settle it.
+| verdict | count | closed |
+|---|---|---|
+| missing | 2 | — |
+| no door | 3 | 1.4, 1.5 |
+| wrong shape | 1 | 1.3 |
+
+Too early to read, and the numbers that moved were moved by *checking the repo instead of
+reasoning* — which is the same lesson `six-apps.md` §0 records.
+
+What the first app's log actually says, now that four of six entries are resolved: **every closed
+entry was tooling, and every open one is the language.** 1.3 was a doc line, 1.4 and 1.5 were
+drivers. What remains — 1.1, a click that cannot read the clock, and 1.2, no wake-at-T with
+repaint as an all-or-nothing switch — are both the timeline question §4 parks, and neither is
+touched by anything built this week. 1.6 (no type definitions) is open and is tooling, so the
+split is not perfect; it is also the cheapest thing left.
+
+That is a better result than it looks. A first app whose complaints were mostly about the harness
+means the Lua surface itself held up under an author who had never used it. The thing to watch is
+still whether 1.1 and 1.2 recur in app 2: two apps wanting the same two things is the evidence §4
+is waiting for, and a third would settle it.
 
 ### Not a gap
 
