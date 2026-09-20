@@ -4,17 +4,13 @@
 //! tokens and revocations can be sealed beside it later. Workspaces, publishing, admin
 //! storage, and sync are still absent.
 
-mod error;
-mod node;
-
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use kunki::{NodeError, node};
 use zeroize::Zeroizing;
-
-pub use error::NodeError;
 
 fn main() -> Result<(), NodeError> {
     let passphrase = Zeroizing::new(

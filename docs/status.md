@@ -95,9 +95,14 @@ reserved namespace so no name can address the keystore) and `with_signer`, which
 signer for a closure and yields nothing when locked. `kunki` now keeps its identity as a vault
 account instead of its own `identity.bin`, created on first boot and unlocked from
 `OSVAULD_KUNKI_PASSPHRASE`; a second account in the node directory stops the boot rather than
-guessing which is the node. Remaining in Gate 1: the admin store over `entry/` (tokens,
-lineage, revocations), revocation with cascade, and `role.assign` — node issuance of a role
-token with a rank check so an assigner cannot mint above itself. Next slices: (1) how a
+guessing which is the node. `kunki::admin` is the node's own record over those entries: an
+issue keyed by token id with an empty `holder/<did>/<id>` marker indexing it, and a `revoked/`
+set read whole into the chain check. Each issue carries a `Cause` — the node's own decision, or
+`Under(parent id)` — which is the lineage a flattened node-signed token no longer carries in
+`prf`, and so the only thing a cascade can follow. Revocation accepts ids the node never
+issued, because delegations are minted between holders. Remaining in Gate 1: revocation with
+cascade, and `role.assign` — node issuance of a role token with a rank check so an assigner
+cannot mint above itself. Next slices: (1) how a
 maintainer hands out an app role — delegation cannot change a role, so role assignment needs
 node issuance under `role.assign`; (2) a durable node admin store holding
 tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
