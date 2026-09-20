@@ -110,6 +110,8 @@ table in the guide is already the content.
 
 Added 2026-09-20 after the correction above. Two ways to drive an app exist, and neither is whole:
 
+*`open` was deleted 2026-09-20; this table is why. Kept as written.*
+
 | | `open` (`app_host/examples/open.rs`) | the bridge (`scripts/`) |
 |---|---|---|
 | window | none | **always** — `shell2` has no offscreen mode |

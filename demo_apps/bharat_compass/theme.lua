@@ -1,0 +1,17 @@
+return {
+	bg = "#f4f0e6",
+	panel = "#fffdf7",
+	ink = "#20332d",
+	muted = "#61736b",
+	line = "#d7d4c7",
+	green = "#237a57",
+	green_hi = "#2d9169",
+	green_soft = "#dff2e8",
+	blue = "#276b9e",
+	blue_soft = "#e1eff8",
+	saffron = "#d9772b",
+	saffron_soft = "#faeadb",
+	wrong = "#a54235",
+	wrong_soft = "#f8e4df",
+	white = "#ffffff",
+}

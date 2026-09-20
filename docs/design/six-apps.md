@@ -1,6 +1,7 @@
 # Six apps — proving the Lua layer is authorable (plan, 2026-09-19)
 
-Status: **§4a landed, app 1 written** (`demo_apps/pomodoro`, 2026-09-19), `gap-log.md` open with
+Status: **§7 complete** (2026-09-20) — one driver, offscreen, with time, geometry and pointer ops;
+`open.rs` is gone. Apps 2–6 are unblocked, which was the whole point. **§4a landed, app 1 written** (`demo_apps/pomodoro`, 2026-09-19), `gap-log.md` open with
 six entries. §7 was added 2026-09-20 and changes the near-term order: the harness is the blocker,
 not the apps. **§7 step 1 landed 2026-09-20** — `shell2 --offscreen WxH` runs windowless with real
 pixels and a driven virtual clock; step 2 (the pointer and time ops) is next. The six apps in §2
@@ -216,6 +217,12 @@ both. Everything time-shaped that landed last week depends on this being right.
 1. **`shell2` offscreen** — window optional, driven rather than free-running.
 2. **Bridge ops** — `Pointer`, `Drag`, `Frame(n)`, `Advance(secs)`.
 3. **Delete `open.rs`** — one commit, so there is never a window in which two drivers drift.
+   Done 2026-09-20. Two things in it were checked before deleting rather than assumed gone:
+   `Solo`, the ten-line adapter proving a `LuaApp` is already a runtime `App` with no shell
+   around it — recorded here because nothing needs it today and the fact is easy to lose — and
+   `--tree`'s text rendering with its did-anything-move diff, which **was** real coverage the
+   bridge lacked and so was ported to `client.format_tree` rather than dropped. JSON is the right
+   wire format and the wrong thing to read.
 
 *Revised 2026-09-20: step 2 split into 2a/2b/2c — see "Step 2, and the seam it needed".*
 

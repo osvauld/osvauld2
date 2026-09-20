@@ -15,6 +15,29 @@ class BridgeError(RuntimeError):
     """The shell answered with an error response."""
 
 
+def format_tree(node: Any, depth: int = 0) -> str:
+    """`dump_tree`'s JSON as one line per element: kind, #id, [handlers], "text".
+
+    Ported from the `open` example's `--tree` when that driver was deleted (design/six-apps.md
+    §7). JSON is the right wire format and the wrong thing to read, and two of these diff
+    cleanly — which is how you answer "did anything actually move" without eyeballing braces.
+    """
+    if not isinstance(node, dict):
+        return ""
+    out = ["  " * depth + node.get("kind", "?")]
+    if node.get("id"):
+        out[0] += f"#{node['id']}"
+    if node.get("handlers"):
+        out[0] += "  [" + " ".join(node["handlers"]) + "]"
+    text = node.get("text") or ""
+    if text:
+        clipped = text if len(text) <= 48 else text[:48] + "\u2026"
+        out[0] += f"  {clipped!r}"
+    for child in node.get("children", []):
+        out.append(format_tree(child, depth + 1))
+    return "\n".join(p for p in out if p)
+
+
 class Bridge:
     def __init__(self, socket_path: str, timeout: float = 30.0):
         self.socket_path = socket_path
