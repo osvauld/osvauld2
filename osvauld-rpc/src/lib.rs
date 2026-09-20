@@ -163,6 +163,18 @@ pub enum Request {
         el_id: String,
         key: String,
     },
+    /// Paint `count` frames, each moving the virtual clock on by 1/60s. Offscreen only — with a
+    /// window the clock is the OS's and frames belong to the compositor. Answers with the clock
+    /// after, so a caller asserts on time rather than on its own arithmetic.
+    Frame {
+        count: u32,
+    },
+    /// Jump the virtual clock `secs` forward, then paint once so the app can act on the new time.
+    /// This is how a wait an app is supposed to notice — a debounce, a toast that dismisses
+    /// itself, a 25-minute timer — is tested without waiting for it. Offscreen only.
+    Advance {
+        secs: f64,
+    },
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,

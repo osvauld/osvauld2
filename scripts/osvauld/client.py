@@ -110,6 +110,14 @@ class Bridge:
         """Every open runtime-data doc as {name: deep JSON} — live, pre-flush."""
         return self.request("AppDataGet", item_id=item_id)
 
+    def frame(self, count: int = 1) -> dict:
+        """Paint `count` frames offscreen, each 1/60s. Returns {"clock", "frames"}."""
+        return self.request("Frame", count=count)
+
+    def advance(self, secs: float) -> dict:
+        """Jump the virtual clock, then paint once so the app notices. Offscreen only."""
+        return self.request("Advance", secs=secs)
+
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)
 

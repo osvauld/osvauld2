@@ -34,7 +34,8 @@ use base64::Engine as _;
 use loro::{Container, LoroDoc, ValueOrContainer};
 use osvauld_rpc::{AccountSummary, ItemSummary, Request, Response, WorkspaceSummary};
 use runtime::{
-    Action, App, CapturedImage, El, ElInfo, EventLoopProxy, ScreenshotRequest, col, row, text,
+    Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
+    ScreenshotRequest, col, row, text,
 };
 use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem};
 
@@ -68,6 +69,11 @@ pub enum Msg {
     /// bridge's reply channel come home. The arm answers the client and lands the screen
     /// transition, both on the UI thread.
     AuthDone(std::sync::mpsc::Sender<osvauld_rpc::Response>, AuthOutcome),
+    /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
+    DriverDone(
+        std::sync::mpsc::Sender<osvauld_rpc::Response>,
+        Result<runtime::DriverReport, String>,
+    ),
     /// Runtime completes this only after the requested frame was painted and read back.
     ScreenshotDone(
         std::sync::mpsc::Sender<osvauld_rpc::Response>,
@@ -361,6 +367,13 @@ fn answer(vault: &Vault, req: Request) -> Response {
     }
 }
 
+/// A driver op waiting for the Runner to run it. Same deferral as `PendingScreenshot`: the reply
+/// travels with the op because the answer is not known until the Runner has finished.
+struct PendingDriver {
+    reply: std::sync::mpsc::Sender<Response>,
+    op: DriverOp,
+}
+
 struct PendingScreenshot {
     reply: std::sync::mpsc::Sender<Response>,
     item_id: String,
@@ -377,13 +390,46 @@ struct Shell {
     focused: usize,
     error: Option<String>,
     screenshot: Option<PendingScreenshot>,
+    driver: Option<PendingDriver>,
 }
+/// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
+/// logical points, which offscreen are also pixels. A flag rather than an env var (the other two
+/// knobs are env vars) so that `ps` answers "is this the windowless one?".
+fn offscreen_viewport() -> Option<(f32, f32)> {
+    let mut args = std::env::args().skip(1);
+    let size = loop {
+        match args.next() {
+            Some(a) if a == "--offscreen" => break args.next(),
+            Some(a) => match a.strip_prefix("--offscreen=") {
+                Some(rest) => break Some(rest.to_string()),
+                None => continue,
+            },
+            None => return None,
+        }
+    };
+    let size =
+        size.unwrap_or_else(|| panic!("--offscreen needs a size, e.g. --offscreen 1280x800"));
+    let (w, h) = size
+        .split_once(['x', 'X'])
+        .unwrap_or_else(|| panic!("--offscreen wants WxH, got {size:?}"));
+    let parse = |s: &str, axis| {
+        s.trim()
+            .parse::<f32>()
+            .unwrap_or_else(|e| panic!("--offscreen {axis} {s:?}: {e}"))
+    };
+    Some((parse(w, "width"), parse(h, "height")))
+}
+
 fn main() {
     let data_dir = std::env::var_os("OSVAULD_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(vault::default_dir);
+    let offscreen = offscreen_viewport();
     let vault = vault::Vault::open(data_dir).expect("failed to open the osvauld data directory");
-    runtime::run_with(|proxy| Shell::new(proxy, vault));
+    match offscreen {
+        Some(v) => runtime::run_offscreen(v, |proxy| Shell::new(proxy, vault)),
+        None => runtime::run_with(|proxy| Shell::new(proxy, vault)),
+    }
 }
 impl Shell {
     /// Drop every running app and return to a single Home tab. Every auth transition —
@@ -538,6 +584,10 @@ impl Shell {
             },
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
             Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
+            // Same: the Runner owns the clock and the frame, so these cannot be answered here.
+            Request::Frame { .. } | Request::Advance { .. } => {
+                Response::err("driver op was not deferred")
+            }
             Request::AppDataGet { item_id } => match self.apps.get(item_id.as_str()) {
                 None => Response::err("item is not open"),
                 Some(o) => Response::ok(o.app.docs_json()),
@@ -609,6 +659,7 @@ impl Shell {
             focused: 0,
             error: None,
             screenshot: None,
+            driver: None,
         };
         shell
     }
@@ -890,6 +941,30 @@ impl App for Shell {
                 }
                 None
             }
+            Msg::Rpc(req @ (Request::Frame { .. } | Request::Advance { .. }), reply) => {
+                let op = match req {
+                    Request::Frame { count } => DriverOp::Frame(count),
+                    Request::Advance { secs } => DriverOp::Advance(secs),
+                    _ => unreachable!("matched above"),
+                };
+                if self.driver.is_some() {
+                    let _ = reply.send(Response::err("a driver op is already pending"));
+                } else {
+                    self.driver = Some(PendingDriver { reply, op });
+                }
+                None
+            }
+            Msg::DriverDone(reply, result) => {
+                let response = match result {
+                    Ok(DriverReport { clock, frames }) => Response::ok(serde_json::json!({
+                        "clock": clock,
+                        "frames": frames,
+                    })),
+                    Err(e) => Response::err(e),
+                };
+                let _ = reply.send(response);
+                None
+            }
             Msg::ScreenshotDone(reply, result) => {
                 let response = match result {
                     Ok(image) => Response::ok(serde_json::json!({
@@ -962,6 +1037,14 @@ impl App for Shell {
         if let Some(next) = next {
             self.screen = next;
         }
+    }
+
+    fn take_driver(&mut self) -> Option<DriverRequest<Msg>> {
+        let pending = self.driver.take()?;
+        Some(DriverRequest {
+            op: pending.op,
+            complete: Box::new(move |result| Msg::DriverDone(pending.reply, result)),
+        })
     }
 
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Msg>> {

@@ -2,7 +2,9 @@
 
 Status: **§4a landed, app 1 written** (`demo_apps/pomodoro`, 2026-09-19), `gap-log.md` open with
 six entries. §7 was added 2026-09-20 and changes the near-term order: the harness is the blocker,
-not the apps. The six apps in §2 are still a proposal.
+not the apps. **§7 step 1 landed 2026-09-20** — `shell2 --offscreen WxH` runs windowless with real
+pixels and a driven virtual clock; step 2 (the pointer and time ops) is next. The six apps in §2
+are still a proposal.
 
 Companions: `gap-log.md` (the deliverable), `docs/lua-apps.md` (the author's contract these apps
 are written against), `animation.md`, `runtime-rebuild-plan.md` (why).
@@ -175,6 +177,8 @@ whose `id` the app had already given it.
 
 Two drivers, and the split between them is an accident rather than a design:
 
+*The `window` row is what step 1 closed; the rest still stands. Kept as it was written.*
+
 | | `open` (`app_host/examples/open.rs`) | the bridge (`scripts/`) |
 |---|---|---|
 | window | none | **always** — `shell2` has no offscreen mode |
@@ -213,9 +217,69 @@ both. Everything time-shaped that landed last week depends on this being right.
 2. **Bridge ops** — `Pointer`, `Drag`, `Frame(n)`, `Advance(secs)`.
 3. **Delete `open.rs`** — one commit, so there is never a window in which two drivers drift.
 
+*Revised 2026-09-20: step 2 split into 2a/2b/2c — see "Step 2, and the seam it needed".*
+
 Nothing leaves `open` before step 2 lands, or pointer and time coverage disappear in the gap. A
 consequence worth stating: the `--advance SECS` flag that gap-log 1.5 asks for should **not** be
 built. It is five lines into a file this section deletes.
+
+### Step 1, as built (2026-09-20)
+
+`shell2 --offscreen WxH`, `runtime::run_offscreen`, `Render::offscreen`. Smaller than expected in
+two places and bounded in one.
+
+**Offscreen keeps its pixels.** The plan assumed a windowless shell would be blind. It is not:
+`Render::capture_scene` was already documented as never acquiring a surface frame, so the only
+window-bound line in the whole constructor was `create_surface`. An offscreen `Render` is the same
+device, renderer and vello target with `present` returning false — and `lib.rs`'s screenshot path
+needed **no change at all**, because the fallback it already had for *surface loss* ("must not turn
+a requested shot into the previous frame") routes a failed present through `capture_scene`. That
+fallback was written for a different reason and turned out to be the offscreen path.
+
+**Driven came for free.** No window means no `RedrawRequested`, so `request_redraw` is a no-op and
+the loop only ever wakes for a user event. `user_event` paints one frame per delivered message and
+advances the clock 1/60s, which preserves the bridge's own stated contract ("answering also
+repaints", `bridge.rs`) rather than inventing a second one. Verified to the frame:
+120 requests = 2.000s, the pomodoro reading 25:00 → 24:58 (`scripts/smoke_offscreen.py`).
+
+**The bound: offscreen still needs a display server.** Probed, because it decides how far this
+reaches: with `DISPLAY` and `WAYLAND_DISPLAY` both unset, `EventLoop::build()` fails outright —
+*"neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set"*. So what landed is **windowless,
+not headless**. It hides the window; it does not remove the dependency on a compositor being
+reachable. `xvfb-run -a` covers CI as an ops workaround.
+
+Removing it for real means the event loop goes too — a plain loop owning the `Runner` and the
+socket, with `bridge::spawn`'s `EventLoopProxy<Msg>` generalized behind a small `Wake<M>` trait
+(impls for the proxy and for an `mpsc::Sender`). Perhaps 150 lines. **Deliberately not done yet**,
+and the reason it is safe to defer is that the two differ *only* in where `Msg` comes from: the
+offscreen `Render`, the driven frame, and every bridge op in step 2 are identical under both. It is
+a transport swap layered on this, not a rewrite of it. Do it when CI or a container needs it, which
+is a real date but not this week's.
+
+### Step 2, and the seam it needed (2026-09-20)
+
+Step 2 was written as four ops. It is not: it is **one seam and then ops on top of it**, and finding
+that out changed the order.
+
+`Pointer` cannot be answered from `Shell::update` — an `App` gets `&mut self` and no `Runner`, so
+nothing there can reach `on_cursor_moved`. Then the same wall turned up from the other side:
+putting rects in `DumpTree` looked cheap and is not, because `DumpTree` calls `app.view().info()`
+on a **fresh view with no layout at all**. Layout happens in `Runner::frame()` and the result never
+leaves the `Runner`. Two apparently unrelated asks, one cause — which is why gap-log 1.4's verdict
+of `no door` was right, and the door is specifically *layout results do not leave the Runner*.
+
+The seam mirrors `ScreenshotRequest` exactly, completion closure included, so the runtime never
+learns what an RPC is: `App::take_driver() -> Option<DriverRequest<Msg>>`, drained by the `Runner`
+in `user_event` after `update`, answered with a `DriverReport`.
+
+- **2a — the seam, `Frame(n)`, `Advance(secs)`.** Landed. `Advance` deliberately does not reuse the
+  frame tick: `tick` paints and *then* spends 1/60s, so `Advance(3)` would land on 3.0167 and any
+  equality a caller wrote would be a lie. Its paint is a look at the new instant, not a frame of
+  time passing. A 25-minute pomodoro now finishes in one request, which is gap-log 1.5 closed — by
+  the bridge, as §7 said, and not by the `--advance` flag 1.5 asked for.
+- **2b — `Rects`.** The layout readback. What makes 2c aimable.
+- **2c — `Pointer`, `Drag`.** The real hit-test path, and the only thing still keeping `open.rs`
+  alive.
 
 ### What this costs the apps
 

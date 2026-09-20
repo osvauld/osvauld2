@@ -12,8 +12,6 @@ use winit::dpi::PhysicalPosition;
 
 use crate::{App, Runner};
 
-/// One offscreen frame, at the 60Hz a window would run at.
-const FRAME: f64 = 1.0 / 60.0;
 /// How long after the frame a pointer event arrives — roughly a 120Hz mouse's report interval.
 /// Without it every event in a gesture would share a timestamp and `dx / dt` would divide by zero.
 const POINTER: f64 = 0.008;
@@ -34,8 +32,7 @@ impl<A: App> Headless<A> {
     /// Lay out, collect hit regions, and build a scene that is then dropped, then move the clock
     /// on by one frame.
     pub fn frame(&mut self) {
-        self.runner.frame();
-        self.runner.clock += FRAME;
+        self.runner.tick();
     }
 
     /// Move the clock on by hand, for a wait an app is supposed to notice — a debounce, a toast

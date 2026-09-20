@@ -132,6 +132,33 @@ Two ways to close it, and they are not equivalent:
 The second is the better end state and the first is what unblocks app 2 this week. Worth deciding
 deliberately rather than by whichever gets written first.
 
+> **Closed, 2026-09-20.** The second was taken. `shell2 --offscreen WxH` runs the bridge's driver
+> with no window, real pixels, and a virtual clock that advances 1/60s per delivered request —
+> so the `window` and `clock` rows above no longer split the two columns, and `open` has nothing
+> left that the bridge lacks except the pointer pipeline, which is step 2.
+>
+> **1.4 and 1.5 are therefore answered, but not the way they asked.** 1.4 wanted rects in
+> `--tree`; what it gets instead is that coordinates stopped being how you address anything —
+> `rpc.click(item, "toggle")` uses the id the app already declared. 1.5 wanted `--advance SECS`;
+> what it gets is that 120 requests *is* two seconds, exactly. Both entries stay in the log as
+> written: an entry describing a wall the author actually hit is still true after the wall moves,
+> and rewriting them to match the fix is how a log stops being evidence.
+>
+> One bound is new and worth its own line, because it is the kind of thing that is discovered at
+> the worst moment otherwise: **offscreen is windowless, not headless.** `EventLoop::build()`
+> fails with no `DISPLAY`/`WAYLAND_DISPLAY`, so a container or CI runner needs `xvfb-run` until
+> the event loop itself is replaced. See `six-apps.md` §7, "Step 1, as built".
+>
+> **1.5 closed for real, 2026-09-20.** `Advance(secs)` landed as a bridge op: `rpc.advance(25*60)`
+> runs a whole pomodoro session to completion in one request, asserted in
+> `scripts/smoke_offscreen.py`. The entry's own suggestion — an `--advance SECS` flag on `open` —
+> was deliberately not taken; see §7.
+>
+> **1.4 is still open, and now the reason is precise.** Rects looked like a small addition to
+> `DumpTree` and are not: `DumpTree` reads `app.view().info()`, a fresh view that has never been
+> laid out. Layout lives in `Runner::frame()` and its results never leave the `Runner` — the same
+> wall that stops `Pointer`. One cause, two symptoms. Slice 2b.
+
 ### Tally so far
 
 | verdict | count |

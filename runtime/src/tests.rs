@@ -272,3 +272,112 @@ fn a_drag_is_stamped_when_the_event_arrives_not_when_the_frame_draws() {
         );
     }
 }
+
+/// Offscreen is the same renderer with nowhere to present, so the proof is a pixel, not a lack of
+/// panic: a scene filled with a known colour has to come back as that colour. The failed `present`
+/// is asserted too, because it is the *only* observable difference and the screenshot path in
+/// `frame` depends on it to route a shot through `capture_scene`.
+///
+/// Ignored by default: the one test here that needs a GPU adapter.
+/// `cargo test -p runtime -- --ignored` runs it.
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn an_offscreen_render_reads_back_real_pixels() {
+    let green = Color::from_rgb8(0x2a, 0xbf, 0x6d);
+    let mut render = pollster::block_on(Render::offscreen(64, 48));
+    assert_eq!(render.viewport(), (64.0, 48.0));
+    assert!(
+        !render.present(Color::BLACK, &Scene::new()),
+        "nowhere to present to, so present must say so"
+    );
+
+    let mut scene = Scene::new();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        green,
+        None,
+        &vello::kurbo::Rect::new(0.0, 0.0, 64.0, 48.0),
+    );
+    let shot = render
+        .capture_scene(Color::BLACK, &scene, (64.0, 48.0), 1.0)
+        .expect("capture the scene");
+    assert_eq!((shot.width, shot.height), (64, 48));
+
+    let mut png = png::Decoder::new(std::io::Cursor::new(&shot.png))
+        .read_info()
+        .expect("png header");
+    let mut buf = vec![0; png.output_buffer_size().expect("png buffer size")];
+    let info = png.next_frame(&mut buf).expect("png data");
+    let at = |x: u32, y: u32| {
+        let i = ((y * info.width + x) * 4) as usize;
+        (buf[i], buf[i + 1], buf[i + 2])
+    };
+    assert_eq!(at(32, 24), (0x2a, 0xbf, 0x6d), "centre pixel");
+    assert_eq!(at(0, 0), (0x2a, 0xbf, 0x6d), "corner pixel");
+}
+
+/// `Frame(n)` is exactly n frames and exactly n/60 seconds. The count is asserted alongside the
+/// clock because the two can disagree: an op that paints without advancing, or advances without
+/// painting, satisfies one of them and is useless.
+#[test]
+fn a_frame_op_paints_exactly_what_was_asked_for() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    let report = r.run_driver(DriverOp::Frame(5)).expect("offscreen");
+
+    assert_eq!(report.frames, 5);
+    assert!((report.clock - 5.0 / 60.0).abs() < 1e-12, "{report:?}");
+    let stamps: Vec<f64> = r.app.seen.iter().map(|(_, t)| *t).collect();
+    assert_eq!(
+        stamps.len(),
+        5,
+        "one on_frame per painted frame: {stamps:?}"
+    );
+    // The app is handed the instant the frame is drawn at, so the first is 0 and each is 1/60 on.
+    assert!(
+        stamps[0].abs() < 1e-12 && (stamps[4] - 4.0 / 60.0).abs() < 1e-12,
+        "{stamps:?}"
+    );
+}
+
+/// `Advance` is what makes a wait testable without waiting: the whole point is that the app *acts*
+/// on the new time, so the paint is asserted, not just the clock. It lands on exactly `secs` —
+/// reusing the frame tick would overshoot by 1/60 and quietly break any equality a caller writes.
+#[test]
+fn advancing_the_clock_lets_the_app_act_on_the_new_time() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    let report = r.run_driver(DriverOp::Advance(1500.0)).expect("offscreen");
+
+    assert_eq!(report.frames, 1);
+    assert_eq!(report.clock, 1500.0, "advance by exactly what was asked");
+    assert_eq!(
+        r.app.seen,
+        vec![("frame", 1500.0)],
+        "the app never saw the jump"
+    );
+}
+
+/// Refused with a window rather than silently doing nothing. A driver op moves a clock that only
+/// exists offscreen, so answering one windowed would make every test written against it depend on
+/// the machine — the failure this is here to prevent shows up much later than the call does.
+#[test]
+fn driver_ops_are_refused_when_there_is_a_window() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, None);
+    for op in [DriverOp::Frame(3), DriverOp::Advance(1.0)] {
+        let err = r.run_driver(op).expect_err("must refuse");
+        assert!(err.contains("offscreen"), "{op:?}: {err}");
+    }
+    assert!(r.app.seen.is_empty(), "a refused op must not paint");
+}
+
+/// Nonsense is refused rather than corrupting the clock, which is the thing every other assertion
+/// in this file rests on. A backwards jump is the interesting one: it would run an app's deadline
+/// arithmetic in reverse and look like a hang rather than an error.
+#[test]
+fn an_impossible_advance_is_refused_and_leaves_the_clock_alone() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    for secs in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(r.run_driver(DriverOp::Advance(secs)).is_err(), "{secs}");
+    }
+    assert_eq!(r.run_driver(DriverOp::Frame(0)).unwrap().clock, 0.0);
+}

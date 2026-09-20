@@ -53,6 +53,7 @@ class Session:
         data_dir: str | None = None,
         socket_path: str | None = None,
         show_shell_output: bool = False,
+        offscreen: tuple[int, int] | None = None,
     ):
         self.tmp = tempfile.mkdtemp(prefix="osvauld-test-")
         self.data_dir = data_dir or os.path.join(self.tmp, "data")
@@ -60,6 +61,10 @@ class Session:
         self.shell_binary = shell_binary
         self.startup_timeout = startup_timeout
         self.show_shell_output = show_shell_output
+        # (w, h) runs the shell with no window: same layout, same pixels, but a virtual clock that
+        # only advances per request. Still needs a DISPLAY — winit will not build a loop without
+        # one — so this hides the window, it does not remove the display dependency.
+        self.offscreen = offscreen
         self.process: subprocess.Popen | None = None
         self.rpc = Bridge(self.socket_path)
 
@@ -76,8 +81,11 @@ class Session:
             "OSVAULD_DATA_DIR": self.data_dir,
             "OSVAULD_SOCKET": self.socket_path,
         }
+        argv = [str(self.shell_binary)]
+        if self.offscreen:
+            argv += ["--offscreen", "%dx%d" % self.offscreen]
         self.process = subprocess.Popen(
-            [str(self.shell_binary)], env=env,
+            argv, env=env,
             stdout=None if self.show_shell_output else subprocess.DEVNULL,
             stderr=None if self.show_shell_output else subprocess.DEVNULL,
         )
