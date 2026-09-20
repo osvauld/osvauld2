@@ -277,7 +277,14 @@ in `user_event` after `update`, answered with a `DriverReport`.
   equality a caller wrote would be a lie. Its paint is a look at the new instant, not a frame of
   time passing. A 25-minute pomodoro now finishes in one request, which is gap-log 1.5 closed — by
   the bridge, as §7 said, and not by the `--advance` flag 1.5 asked for.
-- **2b — `Rects`.** The layout readback. What makes 2c aimable.
+- **2b — `Rects`.** Landed. Read from `hits`, not from layout, and reporting the **clipped**
+  rect — `Geometry::contains` tests `visible_rect` and nothing else, so an element scrolled half
+  out of view has a layout rect whose centre misses, and a fully clipped one cannot be hit at any
+  coordinate and is simply absent. Reporting layout rects would have rebuilt gap-log 1.4 exactly:
+  plausible coordinates that quietly do nothing. `DumpTree` says what exists; this says what is
+  reachable. The test that matters clicks the centre of what it reports and asserts the handler
+  fired — the loop closed rather than described. `Headless::rects()` exposes the same readback to
+  Rust tests, which had the same blindness.
 - **2c — `Pointer`, `Drag`.** The real hit-test path, and the only thing still keeping `open.rs`
   alive.
 

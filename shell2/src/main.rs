@@ -585,7 +585,7 @@ impl Shell {
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
             Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
             // Same: the Runner owns the clock and the frame, so these cannot be answered here.
-            Request::Frame { .. } | Request::Advance { .. } => {
+            Request::Frame { .. } | Request::Advance { .. } | Request::Rects { .. } => {
                 Response::err("driver op was not deferred")
             }
             Request::AppDataGet { item_id } => match self.apps.get(item_id.as_str()) {
@@ -941,10 +941,14 @@ impl App for Shell {
                 }
                 None
             }
-            Msg::Rpc(req @ (Request::Frame { .. } | Request::Advance { .. }), reply) => {
+            Msg::Rpc(
+                req @ (Request::Frame { .. } | Request::Advance { .. } | Request::Rects { .. }),
+                reply,
+            ) => {
                 let op = match req {
                     Request::Frame { count } => DriverOp::Frame(count),
                     Request::Advance { secs } => DriverOp::Advance(secs),
+                    Request::Rects {} => DriverOp::Rects,
                     _ => unreachable!("matched above"),
                 };
                 if self.driver.is_some() {
@@ -956,9 +960,23 @@ impl App for Shell {
             }
             Msg::DriverDone(reply, result) => {
                 let response = match result {
-                    Ok(DriverReport { clock, frames }) => Response::ok(serde_json::json!({
+                    Ok(DriverReport {
+                        clock,
+                        frames,
+                        rects,
+                    }) => Response::ok(serde_json::json!({
                         "clock": clock,
                         "frames": frames,
+                        "rects": rects.map(|rs| {
+                            rs.into_iter()
+                                .map(|r| {
+                                    serde_json::json!({
+                                        "id": r.id, "x": r.x, "y": r.y, "w": r.w, "h": r.h,
+                                        "hits": r.hits,
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        }),
                     })),
                     Err(e) => Response::err(e),
                 };

@@ -158,6 +158,13 @@ deliberately rather than by whichever gets written first.
 > `DumpTree` and are not: `DumpTree` reads `app.view().info()`, a fresh view that has never been
 > laid out. Layout lives in `Runner::frame()` and its results never leave the `Runner` — the same
 > wall that stops `Pointer`. One cause, two symptoms. Slice 2b.
+>
+> **1.4 closed, 2026-09-20.** `rpc.rects()` answers with every reachable element and where to aim
+> for it. The entry asked for rects in `--tree`; what landed is better in a way the entry could
+> not have known to ask for — the rect reported is the *clipped* one the hit-test actually checks,
+> so it cannot hand back a coordinate that looks right and misses. Measured on the app that
+> produced the entry: `toggle` is at (378, 427) 65×36, and the 10pt gap the first wrong guess
+> landed in is now a number you read (443 → 453) rather than a thing you discover by missing.
 
 ### Tally so far
 

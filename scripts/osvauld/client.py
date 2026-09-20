@@ -118,6 +118,10 @@ class Bridge:
         """Jump the virtual clock, then paint once so the app notices. Offscreen only."""
         return self.request("Advance", secs=secs)
 
+    def rects(self) -> list[dict]:
+        """Where every reachable element is: [{id, x, y, w, h, hits}]. Clipped ones are absent."""
+        return self.request("Rects")["rects"]
+
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)
 

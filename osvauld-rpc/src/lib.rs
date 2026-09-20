@@ -175,6 +175,11 @@ pub enum Request {
     Advance {
         secs: f64,
     },
+    /// Where every reachable element is, in logical points — the *clipped* rect a pointer must
+    /// land in, which is what the hit-test actually checks. Fully clipped elements are absent:
+    /// they cannot be hit at any coordinate. `DumpTree` says what exists; this says what is
+    /// reachable. Offscreen only.
+    Rects {},
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,

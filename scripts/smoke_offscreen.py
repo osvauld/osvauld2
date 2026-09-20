@@ -127,6 +127,21 @@ with Session(shell_binary=shell_binary(), offscreen=VIEWPORT) as s:
     assert labels(s.rpc.dump_tree(item))[0] == "Break", "the work session never finished"
     assert s.rpc.read_data(item)["pomodoro"]["stats"]["done"] == 1.0
 
+    # ── rects: where a pointer must land ───────────────────────────────────────
+    # The entry gap-log 1.4 was written about. App 1 cost fifteen cold-start runs sweeping
+    # coordinates for this button; it is one request now. Asserted as geometry rather than
+    # "is present", because a rect that exists and is wrong is the failure that actually hurt.
+    at = {r["id"]: r for r in s.rpc.rects()}
+    toggle, reset = at["toggle"], at["reset"]
+    assert toggle["hits"] == ["click"], toggle
+    assert toggle["w"] > 0 and toggle["h"] > 0, toggle
+
+    # The two buttons sit in a row with `gap = 10`, and the first wrong guess in app 1 landed
+    # exactly in that gap — so the gap is the thing worth pinning, not the absolute positions.
+    gap = reset["x"] - (toggle["x"] + toggle["w"])
+    assert abs(gap - 10.0) < 0.5, f"buttons are {gap}pt apart, theme says 10"
+    assert abs(toggle["y"] - reset["y"]) < 0.5, "same row"
+
     assert s.rpc.read_console(item) == []
 
 print("offscreen smoke ok")

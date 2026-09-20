@@ -93,16 +93,38 @@ pub enum DriverOp {
     /// Jump the virtual clock, then paint once — the paint is what lets the app notice. Without
     /// it the time has passed and nothing has run, which is never what a caller means.
     Advance(f64),
+    /// Where every reachable element is. Paints first, because hit regions are built by painting.
+    Rects,
+}
+
+/// One element a pointer can reach, and where to aim for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElRect {
+    pub id: String,
+    /// The rect a pointer must land in, in logical points. This is the *clipped* rect — what
+    /// [`Geometry::contains`] actually tests — not the layout rect. The two differ whenever an
+    /// element is scrolled or clipped, and there the layout rect's centre misses: aiming at a
+    /// plausible-looking coordinate that quietly does nothing is the exact failure gap-log 1.4
+    /// was written about.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// What it responds to — `click`, `hover`, `drag`, `drop`, `input` — sorted, deduplicated.
+    pub hits: Vec<&'static str>,
 }
 
 /// What a finished [`DriverOp`] reports. The clock comes back so a caller can assert on time
 /// directly rather than counting requests and trusting the arithmetic.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DriverReport {
     /// The virtual clock after the op — seconds since the app started.
     pub clock: f64,
     /// Frames actually painted, which is not always what was asked for: `Frame(0)` paints none.
     pub frames: u32,
+    /// Filled only by [`DriverOp::Rects`]. `None` means "not asked", which is a different thing
+    /// from `Some(vec![])` — nothing on screen is reachable.
+    pub rects: Option<Vec<ElRect>>,
 }
 
 /// One deferred driver op. Shaped exactly like [`ScreenshotRequest`], including the completion
@@ -359,7 +381,16 @@ impl<A: App> Runner<A> {
                 "driver ops need offscreen mode; with a window the clock is the OS's".into(),
             );
         }
+        let mut rects = None;
         let frames = match op {
+            DriverOp::Rects => {
+                // `frame` and not `tick`: a readback is a look, not time passing. Painting is not
+                // optional though — `hits` is rebuilt by painting, so without it this would report
+                // where things were as of whatever happened to run last.
+                self.frame();
+                rects = Some(self.reachable());
+                1
+            }
             DriverOp::Frame(n) => {
                 for _ in 0..n {
                     self.tick();
@@ -381,7 +412,74 @@ impl<A: App> Runner<A> {
         Ok(DriverReport {
             clock: self.clock,
             frames,
+            rects,
         })
+    }
+
+    /// Every named element a pointer can reach, merged across the hit lists so one element appears
+    /// once carrying everything it responds to.
+    ///
+    /// Read from `hits` rather than from layout deliberately: `hits` *is* what input is tested
+    /// against, so this cannot drift from the truth the way a parallel walk of the element tree
+    /// would. Anything fully clipped has no visible rect and is simply absent — it cannot be hit
+    /// at any coordinate, and saying where it "is" would be an invitation to aim at it. Use
+    /// `DumpTree` for what exists; this is what is reachable.
+    fn reachable(&self) -> Vec<ElRect> {
+        let mut found: Vec<(&str, Rect, &'static str)> = Vec::new();
+        for (g, id, _, _, _) in &self.hits.click {
+            if let (Some(id), Some(r)) = (id, g.visible_rect_kurbo()) {
+                found.push((id, r, "click"));
+            }
+        }
+        for (g, id, _, _) in &self.hits.hover {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "hover"));
+            }
+        }
+        for (g, id, _, _) in &self.hits.drag {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "drag"));
+            }
+        }
+        for (g, id, _) in &self.hits.drop {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "drop"));
+            }
+        }
+        for (g, id, _) in &self.hits.input {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "input"));
+            }
+        }
+
+        let mut out: Vec<ElRect> = Vec::new();
+        for (id, rect, kind) in found {
+            // Keyed by id *and* rect: one id can be laid out more than once (a list row rebuilt
+            // per item), and merging those into one entry would report a rect nothing is at.
+            match out
+                .iter_mut()
+                .find(|e| e.id == id && (e.x, e.y) == (rect.x0 as f32, rect.y0 as f32))
+            {
+                Some(e) => {
+                    if !e.hits.contains(&kind) {
+                        e.hits.push(kind);
+                    }
+                }
+                None => out.push(ElRect {
+                    id: id.to_string(),
+                    x: rect.x0 as f32,
+                    y: rect.y0 as f32,
+                    w: rect.width() as f32,
+                    h: rect.height() as f32,
+                    hits: vec![kind],
+                }),
+            }
+        }
+        for e in &mut out {
+            e.hits.sort_unstable();
+        }
+        out.sort_by(|a, b| (&a.id, a.y as i32, a.x as i32).cmp(&(&b.id, b.y as i32, b.x as i32)));
+        out
     }
 
     fn frame(&mut self) {

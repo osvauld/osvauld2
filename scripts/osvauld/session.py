@@ -22,6 +22,23 @@ ROOT = Path(__file__).parent.parent.parent
 DEFAULT_SHELL_BINARY = ROOT / "target" / "debug" / "shell2"
 
 
+def offscreen_default() -> tuple[int, int] | None:
+    """`OSVAULD_OFFSCREEN=WxH` makes every Session in every script windowless.
+
+    An env default rather than a per-script argument on purpose: the scripts that most need it
+    (`drive.py`, `upload_app.py`, the screenshot pair) are the ones already written, and an agent
+    that must not open a window should not have to edit each of them to run one.
+    """
+    spec = os.environ.get("OSVAULD_OFFSCREEN", "").strip()
+    if not spec:
+        return None
+    try:
+        w, h = spec.lower().split("x")
+        return int(w), int(h)
+    except ValueError:
+        raise SystemExit(f"OSVAULD_OFFSCREEN wants WxH, got {spec!r}")
+
+
 def build_shell(release: bool = False) -> None:
     """Compile shell2 before spawning it.
 
@@ -64,7 +81,7 @@ class Session:
         # (w, h) runs the shell with no window: same layout, same pixels, but a virtual clock that
         # only advances per request. Still needs a DISPLAY — winit will not build a loop without
         # one — so this hides the window, it does not remove the display dependency.
-        self.offscreen = offscreen
+        self.offscreen = offscreen if offscreen is not None else offscreen_default()
         self.process: subprocess.Popen | None = None
         self.rpc = Bridge(self.socket_path)
 

@@ -381,3 +381,59 @@ fn an_impossible_advance_is_refused_and_leaves_the_clock_alone() {
     }
     assert_eq!(r.run_driver(DriverOp::Frame(0)).unwrap().clock, 0.0);
 }
+
+/// Rects come from the hit lists, so one element reports everything it responds to, once.
+#[test]
+fn rects_report_what_an_element_responds_to() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+    let rects = r
+        .run_driver(DriverOp::Rects)
+        .unwrap()
+        .rects
+        .expect("asked for rects");
+
+    assert_eq!(
+        rects.len(),
+        1,
+        "only the named element is addressable: {rects:?}"
+    );
+    assert_eq!(rects[0].id, "pad");
+    assert_eq!((rects[0].w, rects[0].h), (200.0, 200.0));
+    assert_eq!(
+        rects[0].hits,
+        vec!["click", "drag"],
+        "both handlers, merged into one entry"
+    );
+}
+
+/// The whole point, and the only assertion that can catch the failure this op exists to prevent:
+/// aiming at what it reports must actually hit. A rect that looks plausible and misses is exactly
+/// gap-log 1.4 — fifteen runs sweeping coordinates because "nothing happened" says nothing about
+/// whether you were 5pt out or 200. So the loop is closed here rather than described.
+#[test]
+fn the_centre_of_a_reported_rect_is_a_hit() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
+    let rects = h.rects();
+    let pad = &rects[0];
+
+    h.click_at(pad.x + pad.w / 2.0, pad.y + pad.h / 2.0);
+    let fired = log.borrow().clone();
+    assert!(
+        fired.iter().any(|m| m.starts_with("click ")),
+        "aiming at the reported centre missed: {fired:?}"
+    );
+}
+
+/// Not asked is not the same as nothing reachable, and a caller has to be able to tell them apart
+/// — an op that reported `[]` for both would make "my app has no buttons" indistinguishable from
+/// "I called the wrong op".
+#[test]
+fn only_the_rects_op_reports_rects() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+    assert_eq!(r.run_driver(DriverOp::Frame(1)).unwrap().rects, None);
+    assert_eq!(r.run_driver(DriverOp::Advance(1.0)).unwrap().rects, None);
+    assert!(r.run_driver(DriverOp::Rects).unwrap().rects.is_some());
+}
