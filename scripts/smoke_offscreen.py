@@ -142,6 +142,21 @@ with Session(shell_binary=shell_binary(), offscreen=VIEWPORT) as s:
     assert abs(gap - 10.0) < 0.5, f"buttons are {gap}pt apart, theme says 10"
     assert abs(toggle["y"] - reset["y"]) < 0.5, "same row"
 
+    # ── the real pointer pipeline, aimed by rects ──────────────────────────────
+    # This is the capability `open.rs` uniquely had: a hit-test, not a handler called by id.
+    # The loop is rects -> aim -> click -> observe, which is the one app 1 could not close.
+    assert labels(s.rpc.dump_tree(item))[2] == "Start", "the break timer should be idle"
+    under = s.rpc.click_at(*s.rpc.centre_of("toggle"))
+    assert [r["id"] for r in under] == ["toggle"], f"aimed at toggle, was over {under}"
+    s.rpc.frame()
+    assert labels(s.rpc.dump_tree(item))[2] == "Pause", "a coordinate click did not start it"
+
+    # And the negative, which is the half that actually hurt: a miss must report as a miss rather
+    # than as silence. 1.4 was expensive because "nothing happened" and "you were 200pt out" look
+    # identical from the outside.
+    gap_x = toggle["x"] + toggle["w"] + 5  # dead centre of the 10pt gap between the buttons
+    assert s.rpc.move_to(gap_x, toggle["y"] + toggle["h"] / 2) == []
+
     assert s.rpc.read_console(item) == []
 
 print("offscreen smoke ok")

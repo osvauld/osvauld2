@@ -95,6 +95,18 @@ pub enum DriverOp {
     Advance(f64),
     /// Where every reachable element is. Paints first, because hit regions are built by painting.
     Rects,
+    /// Move the pointer, firing hover — and drag, while a button is down.
+    PointerMove((f32, f32)),
+    PointerPress,
+    PointerRelease,
+    /// A press, `steps` moves, and a release. Not composable from the three above at the client,
+    /// because a drag only begins once the pointer has travelled past the runtime's slop and the
+    /// interpolation has to happen on this side of the wire to be timed like a real gesture.
+    Drag {
+        from: (f32, f32),
+        to: (f32, f32),
+        steps: usize,
+    },
 }
 
 /// One element a pointer can reach, and where to aim for it.
@@ -122,8 +134,14 @@ pub struct DriverReport {
     pub clock: f64,
     /// Frames actually painted, which is not always what was asked for: `Frame(0)` paints none.
     pub frames: u32,
-    /// Filled only by [`DriverOp::Rects`]. `None` means "not asked", which is a different thing
-    /// from `Some(vec![])` — nothing on screen is reachable.
+    /// What the op has to say about geometry. `None` means "not asked", which is a different
+    /// thing from `Some(vec![])`.
+    ///
+    /// [`DriverOp::Rects`] fills it with everything reachable. The pointer ops fill it with what
+    /// is **under the pointer afterwards**, which is the answer to the question a silent miss
+    /// cannot give you: an unchanged app says nothing about whether you were 5pt out or 200.
+    /// It is a report of what the pointer is over, not a claim about what a click dispatches to —
+    /// paint order and shape hits decide that, and neither is modelled here.
     pub rects: Option<Vec<ElRect>>,
 }
 
@@ -363,6 +381,9 @@ impl<M> Hits<M> {
 
 /// One offscreen frame, at the 60Hz a window would run at.
 const FRAME: f64 = 1.0 / 60.0;
+/// How long after the frame a pointer event arrives — roughly a 120Hz mouse's report interval.
+/// Without it every event in a gesture would share a timestamp and `dx / dt` would divide by zero.
+pub(crate) const POINTER: f64 = 0.008;
 
 impl<A: App> Runner<A> {
     /// One driven frame: paint, then move the virtual clock on by a frame's worth. Offscreen only
@@ -408,12 +429,77 @@ impl<A: App> Runner<A> {
                 self.frame();
                 1
             }
+            // Every pointer op paints first, for the reason `headless.rs` gives: `hits` is filled
+            // by painting, and in a window you never receive an event against a frame that has not
+            // been drawn. Time moves by POINTER rather than a frame, so the events in one gesture
+            // do not share a timestamp — `dx / dt` divides by zero when they do.
+            DriverOp::PointerMove(to) => {
+                self.pointer_move(to);
+                1
+            }
+            DriverOp::PointerPress => {
+                self.tick();
+                self.clock += POINTER;
+                self.click();
+                1
+            }
+            DriverOp::PointerRelease => {
+                self.tick();
+                self.clock += POINTER;
+                self.on_cursor_release();
+                1
+            }
+            DriverOp::Drag { from, to, steps } => {
+                let steps = steps.max(1);
+                self.pointer_move(from);
+                self.tick();
+                self.clock += POINTER;
+                self.click();
+                for i in 1..=steps {
+                    let f = i as f32 / steps as f32;
+                    self.pointer_move((from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f));
+                }
+                self.tick();
+                self.clock += POINTER;
+                self.on_cursor_release();
+                (steps + 3) as u32
+            }
         };
+        if matches!(
+            op,
+            DriverOp::PointerMove(_)
+                | DriverOp::PointerPress
+                | DriverOp::PointerRelease
+                | DriverOp::Drag { .. }
+        ) {
+            rects = Some(self.under_pointer());
+        }
         Ok(DriverReport {
             clock: self.clock,
             frames,
             rects,
         })
+    }
+
+    /// One pointer move: paint, spend a mouse report interval, then deliver it — the same order
+    /// `Headless` uses, and the same order a window produces.
+    fn pointer_move(&mut self, (x, y): (f32, f32)) {
+        self.tick();
+        self.clock += POINTER;
+        self.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64));
+    }
+
+    /// What the pointer is currently over. Offscreen the scale is 1.0, so the rect a caller was
+    /// handed by `Rects` and the coordinate it then aimed at are in the same units — which is the
+    /// property that makes "aim at the centre and check you are on it" a usable loop.
+    fn under_pointer(&self) -> Vec<ElRect> {
+        let Some((px, py)) = self.pointer else {
+            return Vec::new();
+        };
+        self.reachable()
+            .into_iter()
+            .filter(|e| px >= e.x && px <= e.x + e.w && py >= e.y && py <= e.y + e.h)
+            .collect()
     }
 
     /// Every named element a pointer can reach, merged across the hit lists so one element appears

@@ -437,3 +437,87 @@ fn only_the_rects_op_reports_rects() {
     assert_eq!(r.run_driver(DriverOp::Advance(1.0)).unwrap().rects, None);
     assert!(r.run_driver(DriverOp::Rects).unwrap().rects.is_some());
 }
+
+/// The point of routing pointer ops through the `Runner` instead of inventing a second path: a
+/// gesture driven over the bridge must be the *same* gesture `Headless` produces, event for event.
+/// Two drivers that diverge here is the failure `six-apps.md` §7 exists to prevent, and it would
+/// show up as a test that passes in Rust and fails through the socket.
+#[test]
+fn a_driven_drag_matches_the_one_headless_produces() {
+    let gesture = ((50.0, 50.0), (150.0, 130.0), 4);
+
+    let direct = {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
+        h.drag(gesture.0, gesture.1, gesture.2);
+        let out = log.borrow().clone();
+        out
+    };
+    let driven = {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+        r.run_driver(DriverOp::Drag {
+            from: gesture.0,
+            to: gesture.1,
+            steps: gesture.2,
+        })
+        .expect("offscreen");
+        let out = log.borrow().clone();
+        out
+    };
+
+    assert!(
+        !direct.is_empty(),
+        "the fixture gesture must fire something"
+    );
+    assert_eq!(driven, direct, "the two drivers disagree about one gesture");
+}
+
+/// A press that travels is a drag and only a drag — asserted through the driver, because the
+/// arming and dropping of the click happens in the pointer pipeline and an op that reimplemented
+/// it would get this wrong in a way no unit test of the op itself would catch.
+#[test]
+fn a_driven_drag_is_not_also_a_click() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+    r.run_driver(DriverOp::Drag {
+        from: (50.0, 50.0),
+        to: (150.0, 130.0),
+        steps: 4,
+    })
+    .expect("offscreen");
+
+    let fired = log.borrow().clone();
+    assert!(fired.iter().any(|m| m.starts_with("drag ")), "{fired:?}");
+    assert!(!fired.iter().any(|m| m.starts_with("click ")), "{fired:?}");
+}
+
+/// A miss has to report as a miss. This is the whole remedy for gap-log 1.4's real complaint —
+/// "an unchanged result says nothing about whether you missed by 5pt or 200" — so the empty case
+/// is the one being pinned here, not the hit.
+#[test]
+fn a_pointer_op_says_what_it_is_over_including_nothing() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+
+    let pad = r.run_driver(DriverOp::Rects).unwrap().rects.unwrap()[0].clone();
+    let on = r
+        .run_driver(DriverOp::PointerMove((
+            pad.x + pad.w / 2.0,
+            pad.y + pad.h / 2.0,
+        )))
+        .unwrap()
+        .rects
+        .expect("a pointer op reports what it is over");
+    assert_eq!(on.iter().map(|e| &e.id).collect::<Vec<_>>(), vec!["pad"]);
+
+    let off = r
+        .run_driver(DriverOp::PointerMove((pad.x + pad.w + 40.0, pad.y)))
+        .unwrap()
+        .rects
+        .unwrap();
+    assert!(
+        off.is_empty(),
+        "40pt clear of it and still reported: {off:?}"
+    );
+}

@@ -585,9 +585,13 @@ impl Shell {
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
             Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
             // Same: the Runner owns the clock and the frame, so these cannot be answered here.
-            Request::Frame { .. } | Request::Advance { .. } | Request::Rects { .. } => {
-                Response::err("driver op was not deferred")
-            }
+            Request::Frame { .. }
+            | Request::Advance { .. }
+            | Request::Rects { .. }
+            | Request::PointerMove { .. }
+            | Request::PointerPress { .. }
+            | Request::PointerRelease { .. }
+            | Request::Drag { .. } => Response::err("driver op was not deferred"),
             Request::AppDataGet { item_id } => match self.apps.get(item_id.as_str()) {
                 None => Response::err("item is not open"),
                 Some(o) => Response::ok(o.app.docs_json()),
@@ -942,13 +946,23 @@ impl App for Shell {
                 None
             }
             Msg::Rpc(
-                req @ (Request::Frame { .. } | Request::Advance { .. } | Request::Rects { .. }),
+                req @ (Request::Frame { .. }
+                | Request::Advance { .. }
+                | Request::Rects { .. }
+                | Request::PointerMove { .. }
+                | Request::PointerPress { .. }
+                | Request::PointerRelease { .. }
+                | Request::Drag { .. }),
                 reply,
             ) => {
                 let op = match req {
                     Request::Frame { count } => DriverOp::Frame(count),
                     Request::Advance { secs } => DriverOp::Advance(secs),
                     Request::Rects {} => DriverOp::Rects,
+                    Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
+                    Request::PointerPress {} => DriverOp::PointerPress,
+                    Request::PointerRelease {} => DriverOp::PointerRelease,
+                    Request::Drag { from, to, steps } => DriverOp::Drag { from, to, steps },
                     _ => unreachable!("matched above"),
                 };
                 if self.driver.is_some() {

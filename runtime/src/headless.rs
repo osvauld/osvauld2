@@ -10,11 +10,7 @@
 
 use winit::dpi::PhysicalPosition;
 
-use crate::{App, DriverOp, ElRect, Runner};
-
-/// How long after the frame a pointer event arrives — roughly a 120Hz mouse's report interval.
-/// Without it every event in a gesture would share a timestamp and `dx / dt` would divide by zero.
-const POINTER: f64 = 0.008;
+use crate::{App, DriverOp, ElRect, POINTER, Runner};
 
 pub struct Headless<A: App> {
     runner: Runner<A>,

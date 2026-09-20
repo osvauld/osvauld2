@@ -285,8 +285,19 @@ in `user_event` after `update`, answered with a `DriverReport`.
   reachable. The test that matters clicks the centre of what it reports and asserts the handler
   fired — the loop closed rather than described. `Headless::rects()` exposes the same readback to
   Rust tests, which had the same blindness.
-- **2c — `Pointer`, `Drag`.** The real hit-test path, and the only thing still keeping `open.rs`
-  alive.
+- **2c — `Pointer`, `Drag`.** Landed. `PointerMove`/`PointerPress`/`PointerRelease`/`Drag` go
+  through the same `on_cursor_moved` / `click` / `on_cursor_release` a window calls, so this is
+  not a second pointer implementation. Pinned by a test that runs one gesture both ways and
+  asserts the event logs are equal — drift between drivers is what §7 exists to prevent, and it
+  would otherwise surface as a test that passes in Rust and fails through the socket.
+
+  The pointer ops answer with **what is under the pointer afterwards**, which is the other half of
+  gap-log 1.4: the complaint was never only "I cannot find the button", it was that a miss and a
+  no-op look identical. Aiming at the 10pt gap between the pomodoro's buttons now returns `[]`,
+  asserted in the smoke.
+
+  `click_at` is composed client-side from the three orthogonal ops; `drag` is not, because its
+  interpolation has to be timed runtime-side to pass the slop like a real gesture.
 
 ### What this costs the apps
 
