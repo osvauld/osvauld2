@@ -1,10 +1,11 @@
 # Six apps — proving the Lua layer is authorable (plan, 2026-09-19)
 
-Status: **nothing built.** This is the plan for the next stretch, agreed 2026-09-19. The six
-apps in §2 are a proposal and expected to be edited before any of them starts.
+Status: **§4a landed, app 1 written** (`demo_apps/pomodoro`, 2026-09-19), `gap-log.md` open with
+six entries. §7 was added 2026-09-20 and changes the near-term order: the harness is the blocker,
+not the apps. The six apps in §2 are still a proposal.
 
-Companions: `docs/lua-apps.md` (the author's contract these apps are written against),
-`animation.md` (the engine §0 says Lua can't reach), `runtime-rebuild-plan.md` (why).
+Companions: `gap-log.md` (the deliverable), `docs/lua-apps.md` (the author's contract these apps
+are written against), `animation.md`, `runtime-rebuild-plan.md` (why).
 
 ---
 
@@ -70,8 +71,8 @@ Notes on the table:
 - **#2 is nearly free.** The kanban app is already written and already pinned by the round-trip
   tests, but it lives in `shell2/src/kanban/` and is loaded by four `include_str!` paths in
   `app_host/src/tests.rs:2394–2401`. Moving it to `demo_apps/kanban` is mechanical and has been
-  pending for a while. It earns its slot because animated reorder is the most natural consumer of
-  the bridge §0 says is missing.
+  pending for a while. It earns its slot because animated reorder is the most natural place for
+  the narrower gaps §0 ends on to bite: no easing choice, and no `on_done` to sequence with.
 - **#6 is not a seventh thing.** It is M2 itself (target ~2026-10-17), approached as an app rather
   than as a subsystem. If the six compete for time, this is the one that cannot slip.
 - Numbers 3–5 are the least certain and the most likely to be replaced by something either of us
@@ -141,10 +142,13 @@ land before the apps are written rather than after one of them has quietly come 
 
 ## 5. Sequencing
 
-1. **`os.*` shadow** (§4a) — small, unblocked, and gets worse the longer it waits.
+**Superseded 2026-09-20 by §7** — writing app 1 showed the harness costs more than the apps do.
+The original order is kept below; steps 1 and 3 are done.
+
+1. ~~**`os.*` shadow** (§4a)~~ — landed 2026-09-19.
 2. **Move kanban** to `demo_apps/kanban`, fixing the four `include_str!` paths — mechanical, and
    it puts app #2 in place.
-3. **App 1 and app 2**, with the gap log open from the first line.
+3. ~~**App 1**, with the gap log open from the first line.~~ — `demo_apps/pomodoro`, 2026-09-19.
 4. **Read the log, then decide the timeline** (§4).
 5. **App 6 in parallel from the start**, because it is M2 and M2 has a date.
 
@@ -160,3 +164,62 @@ point of the log.
 - If the agent cannot write app 1 from `docs/lua-apps.md` without a host contributor reaching in,
   that is the M2 finding, and it arrives four weeks early — which is the best possible outcome of
   this plan and the reason §1 insists on agent-written.
+
+## 7. One driver — the bridge, offscreen (2026-09-20)
+
+Writing app 1 cost more in harness friction than in Lua. Half the gap log is tooling, and the
+worst of it was mechanical: fifteen cold-start runs sweeping pixel coordinates to press a button
+whose `id` the app had already given it.
+
+### What we have
+
+Two drivers, and the split between them is an accident rather than a design:
+
+| | `open` (`app_host/examples/open.rs`) | the bridge (`scripts/`) |
+|---|---|---|
+| window | none | **always** — `shell2` has no offscreen mode |
+| address an element | pixel coordinates | **by `id`** |
+| pointer pipeline | **the real one** — hit tests, drags, hover | none: `Request::Click` calls the handler directly |
+| session | one action list, then exit | **persistent REPL** (`drive.py`) |
+| clock | virtual, exactly 1/60s a frame | real |
+| sees | element tree, console | tree, console, doc data, **real pixels** |
+| edit Lua live | no | **`write_file` + `reload_item`** |
+| needs | the cargo workspace | a socket |
+
+### The decision
+
+**The bridge becomes the only driver, and `shell2` gains an offscreen mode.** Two arguments, and
+the second is the one that settles it:
+
+- The two things `open` uniquely has are not architectural, they are **ops nobody has written**.
+  Pointer input is `on_cursor_moved` / `click` / `on_cursor_release` — the same methods `Headless`
+  calls — behind a request. Virtual time is already in the Runner: `now()` returns `self.clock`
+  when `offscreen.is_some()`, real time otherwise. Offscreen mode *is* the virtual clock.
+- `open` needs the cargo workspace. An agent authoring apps against a shipped binary has a socket
+  and no source, so **every hour spent on `open` is spent on a tool that stops existing** at the
+  moment it would matter most. The bridge is already the planned agent surface (`mcp-bridge`).
+
+### Driven, not free-running
+
+The one design decision inside this, taken up front because it shapes the build: an offscreen
+shell **paints when told**, the way `Headless::frame()` does — a `Frame` op advances the clock by
+one frame, an `Advance` op jumps it. If the offscreen shell keeps its event loop running on real
+time it is merely a window nobody can see, with none of the determinism, which is the worst of
+both. Everything time-shaped that landed last week depends on this being right.
+
+### Order
+
+1. **`shell2` offscreen** — window optional, driven rather than free-running.
+2. **Bridge ops** — `Pointer`, `Drag`, `Frame(n)`, `Advance(secs)`.
+3. **Delete `open.rs`** — one commit, so there is never a window in which two drivers drift.
+
+Nothing leaves `open` before step 2 lands, or pointer and time coverage disappear in the gap. A
+consequence worth stating: the `--advance SECS` flag that gap-log 1.5 asks for should **not** be
+built. It is five lines into a file this section deletes.
+
+### What this costs the apps
+
+Apps 2–6 wait on it. That is the trade being made deliberately: five more apps each paying app
+1's coordinate-sweep tax is more expensive than building the harness once, and app 1 is enough
+evidence that the tax is real. M2 (app 6) is the thing to watch — if step 1 looks like it will run
+past a week, app 6 starts in parallel on the existing driver regardless.

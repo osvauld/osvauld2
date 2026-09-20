@@ -12,6 +12,18 @@ Verdicts: **no door** (the runtime can do it, nothing reaches Lua) · **missing*
 
 Written from `docs/lua-apps.md` alone. Six entries; the first two shaped the whole app.
 
+> **Correction, 2026-09-20.** Entries 1.4 and 1.5 were written without checking `scripts/`, and
+> they overstate. A second driver exists — the bridge (`scripts/osvauld/client.py`,
+> `scripts/drive.py`) — and it already has most of what they ask for: `rpc.click(item_id, el_id)`
+> clicks **by element id**, plus `dump_tree`, `read_console`, `read_data`, `type_text`, `key`,
+> real `screenshot`, `write_file` + `reload_item` for a live Lua edit, and a persistent REPL
+> against one running app.
+>
+> It drives `shell2`, which always opens a window (`Session` spawns the binary; no offscreen flag
+> exists in `shell2/src/main.rs`). So both entries change verdict from **missing** to **no door**,
+> and the door is a specific one: *the good driver only exists on the windowed path, and the
+> headless path has coordinates and cold starts.* See §Tooling below.
+
 ### 1.1 A click cannot read the clock — **missing**
 
 **Wanted:** "start counting 25 minutes from now", in `on_click`.
@@ -91,16 +103,47 @@ table in the guide is already the content.
 
 ---
 
+### Tooling — one capability, two drivers, and the split between them
+
+Added 2026-09-20 after the correction above. Two ways to drive an app exist, and neither is whole:
+
+| | `open` (`app_host/examples/open.rs`) | the bridge (`scripts/`) |
+|---|---|---|
+| window | none | **always** — `shell2` has no offscreen mode |
+| address an element | pixel coordinates | **by `id`** |
+| session | one action list, then exit | **persistent REPL** (`drive.py`) |
+| clock | `--frames N`, virtual and exact | real time |
+| sees | element tree, console | tree, console, doc data, **real pixels** |
+| edit Lua live | no | **`write_file` + `reload_item`** |
+
+The interesting part is that the columns are almost complementary. The bridge has every affordance
+worth having except a headless mode; `open` is headless and has none of them. So an agent that
+must not open a window — which is the normal case for an agent — is left on the weaker driver, and
+pays for it in cold starts and guessed coordinates.
+
+Two ways to close it, and they are not equivalent:
+
+- **Port the affordances into `open`** — `--click-id`, `--advance`, a tree diff. Perhaps 60 lines,
+  no runtime change, but it makes a second driver that will drift from the first.
+- **Give `shell2` an offscreen mode** so the bridge drives it without a window. Bigger, and it
+  ends with *one* driver that has by-id addressing, screenshots, hot reload and a REPL — the same
+  path the MCP bridge gives an agent, which is the one that should be good.
+
+The second is the better end state and the first is what unblocks app 2 this week. Worth deciding
+deliberately rather than by whichever gets written first.
+
 ### Tally so far
 
 | verdict | count |
 |---|---|
-| missing | 4 |
-| no door | 1 |
+| missing | 2 |
+| no door | 3 |
 | wrong shape | 1 |
 
-Too early to read. The thing to watch is whether 1.1 and 1.2 recur in app 2 — two apps wanting
-the same two things is the evidence `six-apps.md` §4 is waiting for, and a third would settle it.
+Too early to read, and the one number that moved was moved by *checking the repo instead of
+reasoning* — which is the same lesson `six-apps.md` §0 records. The thing to watch is whether 1.1
+and 1.2 recur in app 2; two apps wanting the same two things is the evidence §4 is waiting for,
+and a third would settle it.
 
 ### Not a gap
 
