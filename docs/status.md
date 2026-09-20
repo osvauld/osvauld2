@@ -56,7 +56,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - **`lua_tree`**: full-moon/Luau parse → 22-kind schema → printer; round-trip and
   strong-spike suites (printed source runs and produces an identical element tree); the
   every-table-constructor-on-its-own-line printer rule (two rules, pinned by test)
-- **kanban** (`shell2/src/kanban/`, 6 files): the reference app — typed drags (card/col
+- **kanban** (`demo_apps/kanban/`, moved there 2026-09-20 from `shell2/src/kanban/`): the reference app — typed drags (card/col
   sharing one `on_drop`), cross-column moves through the doc, resizable columns with
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.

@@ -72,7 +72,7 @@ capability; the primitive exists and isn't exposed."
 Notes on the table:
 
 - **#2 is nearly free.** The kanban app is already written and already pinned by the round-trip
-  tests, but it lives in `shell2/src/kanban/` and is loaded by four `include_str!` paths in
+  tests, but it lived in `shell2/src/kanban/` and was loaded by four `include_str!` paths in
   `app_host/src/tests.rs:2394–2401`. Moving it to `demo_apps/kanban` is mechanical and has been
   pending for a while. It earns its slot because animated reorder is the most natural place for
   the narrower gaps §0 ends on to bite: no easing choice, and no `on_done` to sequence with.

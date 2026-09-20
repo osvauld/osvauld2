@@ -2427,18 +2427,18 @@ fn a_board_survives_a_restart_after_every_operation() {
 /// fail when the app changes. It is also the only end-to-end check that `require` resolves a
 /// subdirectory (`ui/widgets`) the way an upload stores one.
 const KANBAN: [(&str, &str); 4] = [
-    ("main.lua", include_str!("../../shell2/src/kanban/main.lua")),
+    ("main.lua", include_str!("../../demo_apps/kanban/main.lua")),
     (
         "model.lua",
-        include_str!("../../shell2/src/kanban/model.lua"),
+        include_str!("../../demo_apps/kanban/model.lua"),
     ),
     (
         "theme.lua",
-        include_str!("../../shell2/src/kanban/theme.lua"),
+        include_str!("../../demo_apps/kanban/theme.lua"),
     ),
     (
         "ui/widgets.lua",
-        include_str!("../../shell2/src/kanban/ui/widgets.lua"),
+        include_str!("../../demo_apps/kanban/ui/widgets.lua"),
     ),
 ];
 

@@ -1,4 +1,4 @@
-//! The spike's pass conditions, run against the real corpus: `shell2/src/kanban`, every line of
+//! The spike's pass conditions, run against the real corpus: `demo_apps/kanban`, every line of
 //! Lua this implementation has (docs/design/code-as-tree.md §9).
 //!
 //! `app_engine/examples` is deliberately absent — it is sthalam's DSL from the previous
@@ -10,7 +10,7 @@ use full_moon::node::Node;
 use full_moon::tokenizer::TokenType;
 
 fn corpus() -> Vec<(String, String)> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../shell2/src/kanban");
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../demo_apps/kanban");
     let mut out = Vec::new();
     collect(std::path::Path::new(dir), &mut out);
     out.sort();

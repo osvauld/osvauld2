@@ -1,8 +1,7 @@
 # Writing Lua apps — a guide
 
 How to write an app for the osvauld shell. For humans and agents alike; the reference app is
-**kanban** (in the shell's source under `shell2/src/kanban/` — six files that use everything
-in this guide), and `demo_apps/tally` is the smallest complete app.
+**kanban** (`demo_apps/kanban/` — the files that use everything in this guide), and `demo_apps/tally` is the smallest complete app.
 
 ## Shape
 

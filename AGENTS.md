@@ -66,6 +66,6 @@ cargo run   -p shell2       # the shell; OSVAULD_DATA_DIR=<dir> for a throwaway 
 | cross-crate, new patterns, docs claims | `expert-architect` |
 | `runtime/` | `expert-runtime` |
 | `app_host/`, `lua_tree/` | `expert-app-host` |
-| app `.lua` files (`shell2/src/kanban/`, `demo_apps/`) | `expert-lua-app` |
+| app `.lua` files (`demo_apps/`) | `expert-lua-app` |
 | `shell2/` | `expert-shell` |
 | `vault/`, `identity/`, `storage/`, `cryptography/` | `expert-secure-core` |
