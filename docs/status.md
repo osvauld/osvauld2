@@ -289,8 +289,12 @@ Roughly in dependency order:
      `DISPLAY`. See [`design/six-apps.md` §7](design/six-apps.md).
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
-2. **W4 DX**: types gate (generated `.d.luau` stubs from the one binding registry +
-   `luau-lsp analyze` before any swap), and per-block `.lua` edits (needs the splitter port).
+2. **W4 DX**: ~~types gate~~ **landed 2026-09-20**, with one substitution: the stubs are
+   `lua-types/osvauld.lua` for `lua-language-server`, not `.d.luau` for `luau-lsp` — that is the
+   checker actually installed here, and an unused gate is not a gate. Generated from a real
+   `sandboxed_vm` plus `Registry`, guarded by `generated_defs_are_current`, run per-app by
+   `scripts/check_lua.py`. Swapping in `luau-lsp` later is an emitter change, not a redesign.
+   Still open: per-block `.lua` edits (needs the splitter port).
    *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
 3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
    `reload`), but nothing writes the source doc after upload — the file watcher and the

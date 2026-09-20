@@ -104,6 +104,26 @@ app, and it is a small app.
 prop list and `doc`. It is also the cheapest possible authoring aid for an agent, since the prop
 table in the guide is already the content.
 
+*Closed 2026-09-20,* and it announced itself: moving kanban into `demo_apps/` put it where the
+editor indexes, and every `ui`/`doc`/`gfx`/`uuid` reference in the corpus lit up at once.
+
+Built **generated, not written** — `lua-types/osvauld.lua` comes off a real `sandboxed_vm` and
+`props.rs`'s `Registry`, because a hand-kept list would be the same invisible-registry problem
+§0 records, with an extra copy to forget. `generated_defs_are_current` fails when it drifts.
+
+Two things the entry could not have known:
+
+- **A wrong stub is worse than no stub.** The first version declared `@param spec table` on every
+  `gfx.*`, and `gfx.solid(C.accent)` takes a colour *string* — so correct code was reported as
+  broken. The registry carries names, not types; the definitions now say `...any` where the type
+  is genuinely unknown rather than inventing one.
+- **The gate has to run per app.** `require` is app-scoped at runtime; a server pointed at
+  `demo_apps/` cross-links every `widgets.lua`. That reported four arity errors in `math_mela`
+  that came from `kanban`'s unrelated `W.badge`. Checked alone, `math_mela` is clean.
+
+Corpus after: 11 warnings across 17 apps, none about undefined globals, and 6 of the 11 are in
+kanban's `main3.lua`/`test.lua` — the two files nothing requires.
+
 ---
 
 ### Tooling — one capability, two drivers, and the split between them
