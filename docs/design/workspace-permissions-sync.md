@@ -349,13 +349,25 @@ rather than a second database.
 Open: the canonical encoding a record signature covers (field order, and the form of the
 address inside it); whether a signed record is ever amended in place rather than versioned.
 
-### Decided 2026-09-21: nodes federate; a user talks only to their own node
+### Decided 2026-09-21: a user may or may not have their own node
 
-Agreed with the user, as direction rather than near-term work. The end state is that a
-published node is usually some user's own node, nodes stay synced with each other, and a user
-connects only to their own node to receive everything — never directly to a peer's. Nothing
-here is built, and Gate 1 is unaffected; this section exists so the parts being built now do
-not have to be untangled later.
+Agreed with the user, as direction rather than near-term work. **Both shapes have to work, for
+good — this is not a migration from one to the other.** A user without a node of their own
+connects their desktop directly to the node hosting each workspace they join; that is the whole
+of the first POC, one node with every user on it. A user *with* a node connects only to it, and
+it connects onward to the home nodes, so nodes stay synced with each other and the user never
+dials a peer's node. Nothing here is built, and Gate 1 is unaffected; this section exists so
+the parts being built now do not have to be untangled later.
+
+**A user's node is a hop, not a second protocol.** In the first shape the presenting DID is the
+person's account; in the second it is their node's, holding authority the person delegated. The
+chain check answers both identically, because it asks who presents and what they may do, never
+what kind of thing they are. That is a constraint on everything built from here: **no
+participant-type field in a token or a permit**, or an invitation would have to be decided
+against whether the invitee happens to run a node. The built claim/reconnect exchange is
+already symmetric in mechanism — both sides trade a permit carrying a DID and keys — and only
+its vocabulary (`desktop_did`, `desktop_start_claim`) assumes the caller is a person's machine.
+Renaming is mechanical and can wait for a second kind of caller.
 
 **Authority does not change; the topology does.** Every workspace has a *home node* — the one
 hosting it, and the only one that decides what is accepted. Bob commenting in a workspace
@@ -394,10 +406,11 @@ Three concrete consequences for storage and protocol:
 `token/<id>` is the issue record, `users/<did>/tokens/<id>` indexes it by holder and leaves
 room for `users/<did>/meta` when profiles exist, and `revoked/<id>` is what this node revoked.
 `nodes/<node-did>/` is reserved for the mirror image — tokens this node holds from another, and
-revocations that node announced — which is also exactly what a desktop needs, since a user
-holds tokens from several nodes. That the two halves are the same shape is the argument for
-moving this store out of `kunki` into a crate both it and `shell2` use, once there is a second
-caller.
+revocations that node announced. A desktop needs that half regardless of which shape it is in:
+a user with no node of their own joins several nodes directly and holds a separate set from
+each, so this is not federation-only groundwork. That the two halves are the same shape is the
+argument for moving this store out of `kunki` into a crate both it and `shell2` use, once there
+is a second caller.
 
 **A profile is not authority.** Tokens flow node → user; profile data flows user → node. They
 share a namespace, not a record, and only the second is a candidate for CRDT sync — a grant or
