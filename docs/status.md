@@ -174,9 +174,17 @@ built. Frame remains 2D; Taffy/Parley remain candidates for logical UI surfaces.
 research passes recommend first testing a narrow same-device WGPU compositor while treating Bevy
 0.19/Vello 0.9 as a measured challenger—not selecting either by prose. Rapier2D/3D is reserved for
 rigid bodies; PBD/XPBD is the candidate for cloth/deformables; custom/Lua systems remain valid where
-bounded. Immediate gates: repair/pin callback scheduling semantics, then render and ray-pick two
-depth-intersecting Y-rotated Vello/Taffy panels with a bridge screenshot and no CPU texture
-readback. Dependency and public World API decisions wait for those results.
+bounded. **2026-09-20 revision:** the immediate experiment is the
+[Lua-first 3D model viewer proof](design/3d-model-viewer.md): two depth-intersecting built-in
+objects inside a shell-hosted Lua app, camera/object controls, picking/highlighting and final
+composite bridge screenshots, with no CPU texture readback between rendering passes. GLB import
+follows separately; Blender is only an authoring tool, not a runtime dependency. The selected
+substrate is an owned WGPU pipeline using focused libraries (`gltf`, `glam`, Parry and optional
+direct Rapier) rather than Bevy or its coupled rendering crates; no ECS is selected. Pin callback
+scheduling before relying on continuous animation. The earlier projected Vello/Taffy panel gate
+remains a broader Environment target, not something this narrower proof establishes. The exact
+pass/resource architecture and public World API remain open. This is documentation only; no 3D
+implementation has landed.
 
 ### Runtime and app milestones
 
