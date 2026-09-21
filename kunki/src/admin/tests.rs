@@ -55,6 +55,24 @@ fn a_token_is_found_by_id_and_under_its_holder() {
 }
 
 #[test]
+fn a_profile_beside_the_tokens_is_not_read_as_one() {
+    let (_tmp, vault) = node_vault();
+    let admin = Admin::new(vault.clone());
+    let alice = holder();
+    admin
+        .record(&root_for(&vault, alice.did()), Cause::Node, NOW)
+        .unwrap();
+
+    // What `users/<did>/meta` will hold once profiles exist. The tokens sit one level
+    // further down precisely so this cannot be mistaken for a grant.
+    vault
+        .put_entry(&format!("users/{}/meta", alice.did()), b"display name")
+        .unwrap();
+
+    assert_eq!(admin.issued_to(alice.did()).unwrap().len(), 1);
+}
+
+#[test]
 fn the_cause_records_lineage_a_flat_token_no_longer_carries() {
     let (_tmp, vault) = node_vault();
     let admin = Admin::new(vault.clone());

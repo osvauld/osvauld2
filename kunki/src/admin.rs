@@ -1,9 +1,16 @@
 //! What the node handed out and what it took back.
 //!
-//! Sealed `vault` entries, not a CRDT: the node is the sole writer here, and a revocation
-//! that could merge away is not a revocation. Keys are plaintext by construction — a holder's
-//! DID names its index — which adds nothing, since `vault` already names an account's file
-//! after its DID.
+//! Sealed `vault` entries, not a CRDT: the node is the sole writer here, and a grant or a
+//! revocation that a peer could merge away is neither. Keys are plaintext by construction — a
+//! holder's DID names its index — which adds nothing, since `vault` already names an account's
+//! file after its DID.
+//!
+//! Everything here is **this node's own authority**: `token/<id>` is the issue and
+//! `users/<did>/tokens/<id>` indexes it by holder, leaving room for `users/<did>/meta` when
+//! profiles exist. `revoked/<id>` is what *this* node revoked, never what another node
+//! announced — merged, one node's revocation could shadow another's ids. The mirror image,
+//! tokens this node holds from another node, is reserved for `nodes/<node-did>/`, and is the
+//! same shape a desktop needs, since a user holds tokens from several nodes.
 
 use std::collections::HashSet;
 
@@ -16,7 +23,7 @@ use vault::Vault;
 use crate::NodeError;
 
 const RECORD: &str = "token/";
-const HOLDER: &str = "holder/";
+const USERS: &str = "users/";
 const REVOKED: &str = "revoked/";
 
 /// Why a token exists. Lineage, not history: the node reissues flat tokens to keep chains
@@ -69,7 +76,7 @@ impl Admin {
         // promising one that isn't there.
         self.vault
             .put_entry(&record_key(&id), &serde_json::to_vec(&issue)?)?;
-        self.vault.put_entry(&holder_key(&holder, &id), &[])?;
+        self.vault.put_entry(&tokens_key(&holder, &id), &[])?;
         Ok(id)
     }
 
@@ -84,7 +91,7 @@ impl Admin {
     /// handed out, the revoked set says what still counts.
     pub fn issued_to(&self, holder: &str) -> Result<Vec<Issue>, NodeError> {
         let mut issues = Vec::new();
-        for name in self.vault.list_entries(&holder_scan(holder))? {
+        for name in self.vault.list_entries(&tokens_scan(holder))? {
             let id = id_in(&name)?;
             // The record is written first, so an index without one is a damaged store, not a
             // race. An audit log that quietly under-reports is the worse failure.
@@ -101,9 +108,11 @@ impl Admin {
         Ok(())
     }
 
-    /// The set the chain check consumes. Read whole, because a check that asked per link
-    /// would be a decrypt per link on every request. An unreadable name fails the whole
-    /// read rather than returning a set that is quietly missing a revocation.
+    /// What *this* node revoked, which is the set its own chain check consumes — a chain
+    /// rooted elsewhere is answered by that node's set, under `nodes/`, not by this one.
+    /// Read whole, because a check that asked per link would be a decrypt per link on every
+    /// request. An unreadable name fails the whole read rather than returning a set that is
+    /// quietly missing a revocation.
     pub fn revoked(&self) -> Result<HashSet<[u8; 32]>, NodeError> {
         self.vault
             .list_entries(REVOKED)?
@@ -117,12 +126,14 @@ fn record_key(id: &[u8; 32]) -> String {
     format!("{RECORD}{}", name_of(id))
 }
 
-fn holder_scan(holder: &str) -> String {
-    format!("{HOLDER}{holder}/")
+/// `users/<did>/tokens/` — a level down from `users/<did>/`, so a profile can sit beside the
+/// tokens without the listing scan picking it up.
+fn tokens_scan(holder: &str) -> String {
+    format!("{USERS}{holder}/tokens/")
 }
 
-fn holder_key(holder: &str, id: &[u8; 32]) -> String {
-    format!("{}{}", holder_scan(holder), name_of(id))
+fn tokens_key(holder: &str, id: &[u8; 32]) -> String {
+    format!("{}{}", tokens_scan(holder), name_of(id))
 }
 
 fn revoked_key(id: &[u8; 32]) -> String {
