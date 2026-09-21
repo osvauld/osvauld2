@@ -260,14 +260,14 @@ fn emit<M>(
         transform *= scale;
         stable_transform *= scale;
     }
-    if let Some((spec, target_scale)) = &m.behaviour.press_scale
+    if let Some((easing, target_scale)) = &m.behaviour.press_scale
         && let Some(id) = &m.id
     {
         let p = store
             .get::<Spring>(id, Slot::PressScale)
             .map(|s| s.value.clamp(0.0, 1.0))
             .unwrap_or(0.0);
-        let s = 1.0 + spec.easing.apply(p) * (target_scale - 1.0);
+        let s = 1.0 + easing.apply(p) * (target_scale - 1.0);
         let c = rect.center();
         transform = transform
             * Affine::translate((c.x, c.y))

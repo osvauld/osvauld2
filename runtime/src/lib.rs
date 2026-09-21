@@ -647,7 +647,7 @@ impl<A: App> Runner<A> {
                 }
             }
 
-            if let Some((_b, _scale)) = &p.behaviour.press_scale
+            if p.behaviour.press_scale.is_some()
                 && let Some(id) = &p.id
             {
                 let pressed_id = pressed.and_then(|(_, id)| id);
@@ -658,8 +658,7 @@ impl<A: App> Runner<A> {
 
             for (b, slot) in p.behaviour.bindings() {
                 if let Some(id) = &p.id {
-                    let pressed_id = pressed.and_then(|(_, id)| id);
-                    let (fl, landed) = Self::drive(b, slot, store, dt, over, pressed_id, id);
+                    let (fl, landed) = Self::drive(b, slot, store, dt, over, id);
                     if fl {
                         any_in_flight = true;
                     }
@@ -887,7 +886,6 @@ impl<A: App> Runner<A> {
         store: &mut Store,
         dt: f32,
         over: bool,
-        pressed: Option<&Id>,
         id: &Id,
     ) -> (bool, Option<f32>) {
         let target = match b.driver {
@@ -898,7 +896,6 @@ impl<A: App> Runner<A> {
                     0.0
                 }
             }
-            Driver::Press => (pressed == Some(id)) as u8 as f32,
             Driver::Value(f) => f,
         };
         let tr = store.get_or_with(id, s, || Transition::new(target, b.duration));

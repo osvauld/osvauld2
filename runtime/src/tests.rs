@@ -521,3 +521,81 @@ fn a_pointer_op_says_what_it_is_over_including_nothing() {
         "40pt clear of it and still reported: {off:?}"
     );
 }
+
+/// A pressed element shrinks, and **stays reachable the whole way down**.
+///
+/// The two halves are one claim. `press_scale` is a paint transform (`layout.rs`), so it would be
+/// easy to scale the pixels and leave the hit region at the layout rect — and nothing would look
+/// wrong. A press is short and the pointer is already inside; you would only find it on a slow
+/// animation or a large scale, as a press that "sometimes does not take". "Describable =
+/// touchable" has to hold *during* motion, not just at rest, and this is where that is tested.
+///
+/// Measured offscreen rather than reasoned about: the numbers below came from stepping a real
+/// press frame by frame, which the virtual clock makes exact and repeatable.
+#[test]
+fn a_press_scales_the_hit_rect_with_the_paint() {
+    struct Button;
+    impl App for Button {
+        type Msg = ();
+        fn view(&self) -> El<()> {
+            crate::col().full().child(
+                crate::col()
+                    .id("btn")
+                    .w(280.0)
+                    .h(32.0)
+                    .press_scale(0.97)
+                    .on_click(()),
+            )
+        }
+        fn update(&mut self, _: ()) {}
+    }
+
+    let mut h = Headless::new(Button, (400.0, 400.0));
+    let find = |h: &mut Headless<Button>| {
+        h.rects()
+            .into_iter()
+            .find(|r| r.id == "btn")
+            .expect("the button is reachable")
+    };
+
+    let rest = find(&mut h);
+    assert_eq!((rest.w, rest.h), (280.0, 32.0));
+
+    let (cx, cy) = (rest.x + rest.w / 2.0, rest.y + rest.h / 2.0);
+    h.move_to(cx, cy);
+    h.press();
+
+    // Every frame: smaller than the last, and still under the pointer. A hit region left behind
+    // at the layout rect would keep `w` at 280 and still pass the reachability half alone.
+    let mut last = rest.w;
+    let mut widths = Vec::new();
+    for _ in 0..12 {
+        h.frame();
+        let now = find(&mut h);
+        assert!(
+            now.w <= last,
+            "the press rect grew mid-animation: {last} then {now:?}"
+        );
+        last = now.w;
+        widths.push(now.w);
+        h.move_to(cx, cy);
+        assert!(
+            h.rects().iter().any(|r| r.id == "btn"),
+            "the centre stopped hitting the button at width {}",
+            now.w
+        );
+    }
+
+    // It moved, and it landed where `press_scale(0.97)` says. A spring converges rather than
+    // arriving, so this is the settled value, not a step count.
+    assert!(
+        widths[0] < 280.0,
+        "nothing happened on the first frame: {widths:?}"
+    );
+    let settled = widths.last().copied().unwrap();
+    assert!(
+        (settled - 280.0 * 0.97).abs() < 0.05,
+        "settled at {settled}, expected {}: {widths:?}",
+        280.0 * 0.97
+    );
+}

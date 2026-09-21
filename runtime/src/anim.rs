@@ -86,6 +86,5 @@ impl Easing {
 
 pub enum Driver {
     Hover,
-    Press,
     Value(f32),
 }

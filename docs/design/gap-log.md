@@ -221,3 +221,43 @@ Recorded so the next author doesn't re-litigate them:
 - **Declarative hover and press did everything asked of them.** `hover_fill`, `tint` and
   `press_scale` needed no per-frame code, which is the half of the animation story that is
   genuinely finished.
+
+### Animation — what `Binding` offers and what Lua can reach
+
+Added 2026-09-21, measured rather than reasoned: a kanban button pressed offscreen and stepped
+frame by frame, reading the hit rect each frame. The virtual clock makes that exact and
+repeatable, which is new this week — before it, none of the numbers below were obtainable.
+
+```
+frame     w        h      hit?          280.00 x 32.00 at rest
+  0    278.587  31.839   True
+  2    273.117  31.213   True
+  4    271.789  31.062   True
+  6    271.619  31.042   True
+  9    271.600  31.040   True           271.6/280 = 0.970 exactly
+```
+
+**What the measurement settled, and the code then confirmed:**
+
+- **`press_scale` had no duration at all.** `el.rs` wrote `duration: 0.12` into a `Binding`, but
+  a press is driven by `Spring`, and `Spring::new` takes only a target — stiffness 260 and
+  damping 30 are constants in `anim.rs`. The field was stored and never read. Fixed by changing
+  the type: `press_scale` is now `Option<(Easing, f32)>`, so the ignored fields cannot be
+  written. `Driver::Press` was press_scale's only user and went with it.
+- **The hit rect tracks the paint, frame by frame.** `hit?` holds through the shrink because
+  paint and geometry share one transform. Pinned by
+  `runtime::tests::a_press_scales_the_hit_rect_with_the_paint`, which exists to keep them
+  sharing it — "describable = touchable" during motion, not only at rest.
+
+**Still open, both now precisely bounded:**
+
+1. **No easing choice.** `Easing::Linear` and `EaseInOut` are constructed nowhere; every
+   constructor hard-codes `EaseOut`. One prop away, and the dead-code warning on that enum has
+   been the standing reminder.
+2. **No general `on_done`.** Only `fade` surfaces one, as `on_faded_out`. Under a spring,
+   "done" is not arrival — a spring converges — but `anim.rs` already snaps to target below a
+   velocity and error threshold, so the event exists and is unreported.
+
+Neither is worth building until an app asks. `EaseInOut` has gone unconstructed for months
+without a complaint, and adding props because an enum has variants is how the deleted types gate
+happened.
