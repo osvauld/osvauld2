@@ -10,7 +10,7 @@
 
 use winit::dpi::PhysicalPosition;
 
-use crate::{App, Runner};
+use crate::{App, DriverOp, ElRect, POINTER, Runner};
 
 pub struct Headless<A: App> {
     runner: Runner<A>,
@@ -25,25 +25,51 @@ impl<A: App> Headless<A> {
         }
     }
 
-    /// Lay out, collect hit regions, and build a scene that is then dropped.
+    /// Lay out, collect hit regions, and build a scene that is then dropped, then move the clock
+    /// on by one frame.
     pub fn frame(&mut self) {
-        self.runner.frame();
+        self.runner.tick();
+    }
+
+    /// Move the clock on by hand, for a wait an app is supposed to notice — a debounce, a toast
+    /// that dismisses itself. Nothing is drawn: follow it with `frame` to let the app act.
+    ///
+    /// The bridge's `Advance` op paints instead of making the caller do it. The difference is
+    /// deliberate — in a Rust test the two steps are usually wanted apart, so the app can be
+    /// inspected at the instant before it reacts.
+    pub fn advance(&mut self, secs: f64) {
+        self.runner.clock += secs;
+    }
+
+    /// Where every reachable element is — the same readback the bridge's `Rects` op answers with,
+    /// and for the same reason: a coordinate guessed from the source is the one thing a layout
+    /// test cannot check, because a wrong guess and a broken layout both look like "nothing
+    /// happened". Paints first, since hit regions are built by painting.
+    pub fn rects(&mut self) -> Vec<ElRect> {
+        self.runner
+            .run_driver(DriverOp::Rects)
+            .expect("Headless is always offscreen")
+            .rects
+            .expect("the rects op reports rects")
     }
 
     /// Move the pointer, firing hover and — while a button is down — drag.
     pub fn move_to(&mut self, x: f32, y: f32) {
         self.frame();
+        self.runner.clock += POINTER;
         self.runner
             .on_cursor_moved(PhysicalPosition::new(x as f64, y as f64));
     }
 
     pub fn press(&mut self) {
         self.frame();
+        self.runner.clock += POINTER;
         self.runner.click();
     }
 
     pub fn release(&mut self) {
         self.frame();
+        self.runner.clock += POINTER;
         self.runner.on_cursor_release();
     }
 

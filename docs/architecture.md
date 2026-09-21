@@ -67,7 +67,7 @@ Rust screen: El builders (typed M) ───────────────
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
-| `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme; the kanban reference app in `src/kanban/`. |
+| `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. |
 | `lua_tree` | full-moon (Luau) parse → 22-kind semantic tree → printer; the substrate for surgical agent edits and nids. See [`design/code-as-tree.md`](design/code-as-tree.md). |
 | `vault` | headless account manager: identity + storage over redb (one file per DID), workspaces, items, sealed source/doc storage. Loro-free by design. |
 | `cryptography` `identity` `storage` | backend crates, unchanged by the rebuild. Contracts in [`identity.md`](identity.md), [`storage.md`](storage.md), [`vault.md`](vault.md). |

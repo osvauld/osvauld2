@@ -31,6 +31,11 @@ pub struct DragEvent {
     /// gesture: a drag reports what it grabbed, not whatever has slid under the pointer since,
     /// and it keeps reporting once the pointer leaves the shape — which is what grabbing means.
     pub shape: Option<(Id, (f32, f32))>,
+    /// Monotonic seconds since the app started, taken when the pointer event arrived rather than
+    /// when the frame it lands in is drawn — several moves often arrive within one frame, and
+    /// frame time would give them all the same stamp and a velocity of `dx / 0`. Same epoch as
+    /// `FrameTick::elapsed`, so a release can be measured against the frames that follow it.
+    pub t: f64,
 }
 
 #[derive(Clone, Debug)]

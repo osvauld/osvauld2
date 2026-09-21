@@ -163,6 +163,42 @@ pub enum Request {
         el_id: String,
         key: String,
     },
+    /// Paint `count` frames, each moving the virtual clock on by 1/60s. Offscreen only — with a
+    /// window the clock is the OS's and frames belong to the compositor. Answers with the clock
+    /// after, so a caller asserts on time rather than on its own arithmetic.
+    Frame {
+        count: u32,
+    },
+    /// Jump the virtual clock `secs` forward, then paint once so the app can act on the new time.
+    /// This is how a wait an app is supposed to notice — a debounce, a toast that dismisses
+    /// itself, a 25-minute timer — is tested without waiting for it. Offscreen only.
+    Advance {
+        secs: f64,
+    },
+    /// Where every reachable element is, in logical points — the *clipped* rect a pointer must
+    /// land in, which is what the hit-test actually checks. Fully clipped elements are absent:
+    /// they cannot be hit at any coordinate. `DumpTree` says what exists; this says what is
+    /// reachable. Offscreen only.
+    Rects {},
+    /// Move the pointer to a logical point, firing hover — and drag, while a button is down.
+    /// Answers with what is under the pointer afterwards, so a miss reports as a miss instead of
+    /// as silence. Use `Rects` to find the point; never guess one. Offscreen only.
+    PointerMove {
+        x: f32,
+        y: f32,
+    },
+    /// Press the left button where the pointer is. Offscreen only.
+    PointerPress {},
+    /// Release it. Offscreen only.
+    PointerRelease {},
+    /// A press, `steps` interpolated moves, and a release — the real gesture, through the real
+    /// hit-test. A short drag with few steps fires nothing because it never passes the runtime's
+    /// slop; that is the behaviour, not a limit of the driver. Offscreen only.
+    Drag {
+        from: (f32, f32),
+        to: (f32, f32),
+        steps: usize,
+    },
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,

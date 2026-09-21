@@ -61,6 +61,9 @@ pub struct DragArgs {
     pub origin: (f32, f32),
     /// The shape the press grabbed, held for the whole gesture. See [`Shape`].
     pub shape: Shape,
+    /// Monotonic seconds since the app opened, stamped when the pointer event arrived. Reaches
+    /// Lua as `e.t`, and shares an epoch with `on_frame`'s `elapsed`.
+    pub t: f64,
 }
 
 /// The trailing arguments a pointer handler carries: which named shape of the element's visual
@@ -562,6 +565,7 @@ impl<M: 'static> LuaApp<M> {
                 event.set("scale", a.scale)?;
                 event.set("origin_x", a.origin.0)?;
                 event.set("origin_y", a.origin.1)?;
+                event.set("t", a.t)?;
                 a.shape.write(&event)?;
             }
             LuaMsg::CallFrame(_, dt, elapsed) => {
@@ -778,20 +782,63 @@ function ui.state(id, init)
 end
 "#;
 
+/// Seconds since the Unix epoch. The clock for recording *when* — it can step backwards, so it
+/// is never the one to measure a duration with.
+fn wall_clock() -> mlua::Result<f64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .map_err(mlua::Error::external)
+}
+
+/// Luau ships an `os` table we never asked for, and `os.clock` in it is a real monotonic clock
+/// (`clock_gettime(CLOCK_MONOTONIC)`). An app reaching for it would bypass the runtime's clock
+/// entirely: offscreen that clock is virtual, so a gesture timed with `os.clock` measures real
+/// elapsed time instead and comes out different on every machine. Its epoch is the machine's,
+/// unrelated to `e.t` and `e.elapsed`, so the two cannot even be compared.
+///
+/// This must run before `sandbox(true)` freezes the globals — which is also what makes it hold,
+/// since a frozen `os` is one an app cannot put back.
+fn shadow_os(vm: &Lua) -> mlua::Result<()> {
+    let os: Table = vm.globals().get("os")?;
+    os.set(
+        "clock",
+        vm.create_function(|_, _: mlua::MultiValue| -> mlua::Result<f64> {
+            Err(Error::runtime(
+                "os.clock is the machine's clock, not the app's: use e.t on a pointer event, or \
+                 e.elapsed in on_frame",
+            ))
+        })?,
+    )?;
+    // Whole seconds, per Lua. Routed through our own clock so the sandbox has one wall clock
+    // rather than two that can disagree by a leap second or a mid-call NTP step.
+    os.set(
+        "time",
+        vm.create_function(|_, _: mlua::MultiValue| Ok(wall_clock()?.floor()))?,
+    )?;
+    // Bare `os.date()` formats real time in the machine's locale and zone. An explicit-timestamp
+    // form is defensible and can come back when an app actually wants one.
+    os.set(
+        "date",
+        vm.create_function(|_, _: mlua::MultiValue| -> mlua::Result<String> {
+            Err(Error::runtime(
+                "os.date reads real time and the machine's locale; format from now() instead",
+            ))
+        })?,
+    )?;
+    // `os.difftime` is arithmetic on numbers the caller supplies and reads no clock — left alone.
+    Ok(())
+}
+
 pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     let vm = Lua::new();
-    let now_fn = vm.create_function(|_, ()| {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(mlua::Error::external)?
-            .as_secs() as i64;
-        Ok(secs)
-    })?;
+    let now_fn = vm.create_function(|_, ()| wall_clock())?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;
     gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
+    shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
     let fires = Arc::new(AtomicU64::new(0));
     let f = fires.clone();

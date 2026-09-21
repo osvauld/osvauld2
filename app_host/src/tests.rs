@@ -37,11 +37,56 @@ fn vm_interrupt() {
     let res = lua.load("while true do end").exec();
     assert!(res.is_err(), "inifinite loop should have been killed")
 }
+/// Wall-clock unix seconds, with a fraction. It is for recording *when* something happened, not
+/// for measuring how long anything took — it can step under NTP. Gestures use `e.t` instead.
 #[test]
-fn now() {
+fn now_has_a_fraction() {
     let (lua, _) = sandboxed_vm().unwrap();
-    let res = lua.load("return now()").eval::<i64>();
-    assert!(res.unwrap() > 1);
+    let t = lua.load("return now()").eval::<f64>().unwrap();
+    assert!(t > 1.7e9, "not unix seconds: {t}");
+    // Whole seconds would make this exactly zero every time, which is what it used to be.
+    let mut fractional = false;
+    for _ in 0..50 {
+        let t = lua.load("return now()").eval::<f64>().unwrap();
+        fractional |= t.fract() != 0.0;
+    }
+    assert!(fractional, "now() is still whole seconds");
+}
+
+/// Luau's own `os.clock` is a real monotonic clock, and an app using it would time itself against
+/// the machine rather than the runtime — so offscreen, where the clock is virtual, it would report
+/// real elapsed time and differ on every machine. It is shadowed, and the freeze is what keeps it
+/// shadowed: an app that reassigns it must fail rather than quietly get the original back.
+#[test]
+fn the_machines_clocks_are_not_reachable_from_an_app() {
+    let (lua, _) = sandboxed_vm().unwrap();
+
+    for call in ["os.clock()", "os.date()", "os.date('%c', 0)"] {
+        let err = lua
+            .load(format!("return {call}"))
+            .exec()
+            .expect_err(&format!("{call} still reaches the machine"));
+        assert!(
+            err.to_string().contains("e.t") || err.to_string().contains("now()"),
+            "{call} errors without saying what to use instead: {err}"
+        );
+    }
+
+    // os.time stays, mapped onto our own wall clock: whole seconds, as Lua defines it.
+    let t = lua.load("return os.time()").eval::<f64>().unwrap();
+    assert!(t > 1.7e9, "os.time is not unix seconds: {t}");
+    assert_eq!(t.fract(), 0.0, "os.time should be whole seconds: {t}");
+
+    // difftime reads no clock — it is arithmetic on what you hand it.
+    let d = lua.load("return os.difftime(10, 4)").eval::<f64>().unwrap();
+    assert_eq!(d, 6.0);
+
+    assert!(
+        lua.load("os.clock = function() return 0 end")
+            .exec()
+            .is_err(),
+        "an app can put the machine's clock back"
+    );
 }
 
 #[test]
@@ -223,6 +268,7 @@ fn a_handler_reads_its_event_by_name_not_by_position() {
                 scale: 1.0,
                 origin: (100.0, 50.0),
                 shape,
+                t: 0.0,
             },
         )
     };
@@ -252,7 +298,7 @@ fn a_drag_carries_the_shape_it_grabbed() {
                 visual = gfx.frame({ width = 10, height = 10 }),
                 on_drag = function(e)
                     seen = table.concat(
-                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil" },
+                        { e.phase, e.x, e.dx, e.scale, e.origin_x, e.shape or "nil", e.sx or "nil", e.t },
                         " "
                     )
                 end,
@@ -273,10 +319,12 @@ fn a_drag_carries_the_shape_it_grabbed() {
             scale: 1.0,
             origin: (100.0, 50.0),
             shape: Shape(Some(("knob".into(), 5.0, 50.0))),
+            // Sub-second, because a gesture measured in whole seconds is not measured at all.
+            t: 0.25,
         },
     ));
     let seen: String = app.vm.globals().get("seen").unwrap();
-    assert_eq!(seen, "move 40 6 1 100 knob 5");
+    assert_eq!(seen, "move 40 6 1 100 knob 5 0.25");
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }
 
@@ -2379,18 +2427,18 @@ fn a_board_survives_a_restart_after_every_operation() {
 /// fail when the app changes. It is also the only end-to-end check that `require` resolves a
 /// subdirectory (`ui/widgets`) the way an upload stores one.
 const KANBAN: [(&str, &str); 4] = [
-    ("main.lua", include_str!("../../shell2/src/kanban/main.lua")),
+    ("main.lua", include_str!("../../demo_apps/kanban/main.lua")),
     (
         "model.lua",
-        include_str!("../../shell2/src/kanban/model.lua"),
+        include_str!("../../demo_apps/kanban/model.lua"),
     ),
     (
         "theme.lua",
-        include_str!("../../shell2/src/kanban/theme.lua"),
+        include_str!("../../demo_apps/kanban/theme.lua"),
     ),
     (
         "ui/widgets.lua",
-        include_str!("../../shell2/src/kanban/ui/widgets.lua"),
+        include_str!("../../demo_apps/kanban/ui/widgets.lua"),
     ),
 ];
 
@@ -2833,6 +2881,7 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ))
     };
@@ -3551,6 +3600,7 @@ fn dashboard_demo_links_hover_and_range_selection() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ))
     };
@@ -3663,6 +3713,7 @@ fn dashboard_view_cost() {
                 scale: 1.0,
                 origin: (0.0, 0.0),
                 shape: Shape::default(),
+                t: 0.0,
             },
         ));
         let _ = app.view();

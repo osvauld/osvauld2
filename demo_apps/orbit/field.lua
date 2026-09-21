@@ -117,35 +117,37 @@ function M.step(dt)
 	end
 	M.drifting = drifting
 
-	-- Throw speed, measured on the frame clock: on_drag has no dt of its own and several moves
-	-- can arrive between two frames.
-	local g = M.grab
-	if g and dt > 0 then
-		local s = g.s
-		g.vx = (s.cx - g.px) / dt
-		g.vy = (s.cy - g.py) / dt
-		g.px, g.py = s.cx, s.cy
-	end
 end
 
-function M.grab_at(s, sx, sy)
+function M.grab_at(s, sx, sy, t)
 	M.release()
 	if not s then
 		return
 	end
 	s.held = true
 	s.vx, s.vy = 0, 0
-	M.grab = { s = s, cx = s.cx, cy = s.cy, px = s.cx, py = s.cy, vx = 0, vy = 0, sx = sx, sy = sy }
+	M.grab =
+		{ s = s, cx = s.cx, cy = s.cy, px = s.cx, py = s.cy, pt = t, vx = 0, vy = 0, sx = sx, sy = sy }
 	M.gx, M.gy = sx, sy
 end
 
-function M.hold_to(dx, dy)
+function M.hold_to(dx, dy, t)
 	local g = M.grab
 	if not g then
 		return
 	end
 	g.s.cx, g.s.cy = g.cx + dx, g.cy + dy
 	keep_in(g.s)
+	-- Throw speed off the pointer's own clock, so this no longer needs on_frame to hold a
+	-- stopwatch. Measured over at least `C.fling_window` rather than between consecutive events:
+	-- a mouse can report twice in a millisecond, and dividing by that turns a 1px jitter into
+	-- hundreds of px/s.
+	local d = t - g.pt
+	if d >= C.fling_window then
+		g.vx = (g.s.cx - g.px) / d
+		g.vy = (g.s.cy - g.py) / d
+		g.px, g.py, g.pt = g.s.cx, g.s.cy, t
+	end
 end
 
 function M.release()

@@ -143,9 +143,9 @@ return function()
 			on_drag = function(e)
 				local phase, x, y, dx, dy, scale, origin_x, origin_y, shape, sx, sy = e.phase, e.x, e.y, e.dx, e.dy, e.scale, e.origin_x, e.origin_y, e.shape, e.sx, e.sy
 				if phase == "start" then
-					F.grab_at(shape and F.by_id[shape], sx, sy)
+					F.grab_at(shape and F.by_id[shape], sx, sy, e.t)
 				elseif phase == "move" then
-					F.hold_to(dx, dy)
+					F.hold_to(dx, dy, e.t)
 					-- The grabbed shape keeps answering in its own coordinates, pointer still on
 					-- it or not; that is the whole claim this demo is here to show.
 					F.gx, F.gy = sx, sy

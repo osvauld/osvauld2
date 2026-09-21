@@ -56,7 +56,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - **`lua_tree`**: full-moon/Luau parse → 22-kind schema → printer; round-trip and
   strong-spike suites (printed source runs and produces an identical element tree); the
   every-table-constructor-on-its-own-line printer rule (two rules, pinned by test)
-- **kanban** (`shell2/src/kanban/`, 6 files): the reference app — typed drags (card/col
+- **kanban** (`demo_apps/kanban/`, moved there 2026-09-20 from `shell2/src/kanban/`): the reference app — typed drags (card/col
   sharing one `on_drop`), cross-column moves through the doc, resizable columns with
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
@@ -254,8 +254,13 @@ Roughly in dependency order:
      Runner instead answers bounded, fresh-frame element/subtree and screen hit-stack queries with
      explicit content/screen geometry, clips, computed layout, scroll/thumb, and camera state.
      Pointer sequences and wheel modifiers route through normal eligibility for zoom/pan/drag tests;
-     optional screenshot annotations share the snapshot. This is unbuilt; see
+     optional screenshot annotations share the snapshot. See
      [`design/app-discovery-and-invocation.md` §7](design/app-discovery-and-invocation.md).
+     *Revised 2026-09-20: partly built.* The Runner-owned deferred seam (`App::take_driver`),
+     `Rects` (reachable elements with their **visible** rects — the rect the hit-test actually
+     tests), pointer/drag synthesis through the normal path, and `Frame`/`Advance` on the virtual
+     clock all landed. Still unbuilt: `InspectElement`/`InspectSubtree`, `Wheel` and modifiers,
+     query bounds, and the *ordered* hit stack with clip rejections — §7 carries the full split.
    - **ports as-is**: the wire transport (`read_msg`/`write_msg`, 4-byte length prefix;
    `Response::{ok,err}`) and the MCP shim's stdio↔UDS *shape*
    - **is replaced**: bridge becomes pure transport — a `UnixListener` thread on
@@ -273,10 +278,25 @@ Roughly in dependency order:
      element id, `ReadConsole` (LuaApp's errors become a bounded ring buffer, not
      `eprintln`); and `WriteFile` against an open tab reloads its VM keeping the doc —
      the free half of hot reload
+   - **landed 2026-09-20, the driver family**: `shell2 --offscreen WxH` runs the whole
+     shell with no window — real layout, real pixels (`capture_scene` never needed a
+     surface), and a virtual clock that moves only when a request asks. `Frame(n)` /
+     `Advance(secs)` drive time, `Rects` says where a pointer must land, and
+     `PointerMove`/`PointerPress`/`PointerRelease`/`Drag` go through the same methods a
+     window calls — pinned by a test asserting one gesture is event-for-event identical
+     across both drivers. `OSVAULD_OFFSCREEN=WxH` makes every existing `scripts/` Session
+     windowless untouched. **Windowless, not headless**: `EventLoop::build()` still needs a
+     `DISPLAY`. See [`design/six-apps.md` §7](design/six-apps.md).
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
-2. **W4 DX**: types gate (generated `.d.luau` stubs from the one binding registry +
-   `luau-lsp analyze` before any swap), and per-block `.lua` edits (needs the splitter port).
+2. **W4 DX**: types gate, and per-block `.lua` edits (needs the splitter port).
+   An editor-shaped gate was built and removed on 2026-09-21 — `lua-language-server` stubs
+   generated from the sandbox. Two reasons, and the second is the one that matters. It never
+   ran: `workspace.library` resolves relative to the folder being checked, so the per-app runner
+   loaded no definitions at all and was green because `diagnostics.globals` silenced the names.
+   And the author is an agent writing over the bridge, which opens no editor and reads no
+   `.luarc.json` — for it, the type system is the error the runtime hands back. A gate here
+   should be that, not stubs.
    *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
 3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
    `reload`), but nothing writes the source doc after upload — the file watcher and the

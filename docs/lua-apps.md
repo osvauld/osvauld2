@@ -1,8 +1,7 @@
 # Writing Lua apps — a guide
 
 How to write an app for the osvauld shell. For humans and agents alike; the reference app is
-**kanban** (in the shell's source under `shell2/src/kanban/` — six files that use everything
-in this guide), and `demo_apps/tally` is the smallest complete app.
+**kanban** (`demo_apps/kanban/` — the files that use everything in this guide), and `demo_apps/tally` is the smallest complete app.
 
 ## Shape
 
@@ -305,6 +304,13 @@ end
   pointer has since slid over, and reported even once the pointer leaves it — which is what
   holding something means. **Needs an `id`.**
 
+  `e.t` is when the pointer event arrived: monotonic seconds since the app opened, on the same
+  clock as `on_frame`'s `e.elapsed`, so a release can be measured against the frames after it.
+  Keep the last two `(e.t, e.x)` and a fling is `(x - x_prev) / (t - t_prev)` on `"end"` — no
+  `on_frame` running purely to hold a stopwatch. Use `e.t` and never `now()` for this: several
+  moves usually arrive inside one frame, so anything sampled per frame divides by zero, and
+  `now()` is wall-clock and can step backwards.
+
   A press that travels past 5pt is a drag and fires **no** click. A press that travels less is a
   click, reported where it was *released*. No hand is perfectly still, so the second is ordinary.
 
@@ -396,10 +402,18 @@ Retargeting mid-flight reverses smoothly instead of jumping: kanban's drop guide
 as the pointer moves. `on_faded_out` fires when a fade completes — the hook for removing an
 element after it fades away.
 
-Authored simulations are the deliberate exception: `on_frame(dt, elapsed)` runs Lua after each
-presented frame and schedules the next while declared. Keep transient positions and velocities in
-module locals, perform no document writes per tick, avoid allocations in inner numeric loops, and
-remove the handler when settled. Routine UI effects must use the declarative transitions above.
+Authored simulations are the deliberate exception: `on_frame(e)` runs Lua after each presented
+frame and schedules the next while declared — so **declaring it is the repaint request**, and
+removing it is how repainting stops. Read `e.dt` and `e.elapsed` by name; see §Handlers for the
+full event. Keep transient positions and velocities in module locals, perform no document writes
+per tick, avoid allocations in inner numeric loops, and remove the handler when settled. Routine
+UI effects must use the declarative transitions above.
+
+*Corrected 2026-09-20: this paragraph read `on_frame(dt, elapsed)` — the old positional form —
+while §Handlers documented the named-field event. Following it bound the wrong values silently and
+kept running, which is exactly the failure §Handlers warns about. Logged as gap-log 1.3 before
+being fixed, because a guide that contradicts itself is the authorability finding `six-apps.md`
+exists to measure, and patching it in passing would have destroyed the evidence.*
 
 ## Patterns from kanban
 
@@ -478,7 +492,12 @@ The kanban split, worth copying at any size:
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
 only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `now()` (unix
-seconds), `uuid()`. A runaway loop is killed, with the line number.
+seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
+
+`now()` is for recording *when* something happened — a created-at, a last-edited. It is not for
+measuring how long something took: it follows the system clock, so it can jump, including
+backwards. Anything timing a gesture or an animation wants the monotonic clock instead, which
+reaches Lua as `e.t` on `on_drag` and `e.elapsed` on `on_frame`.
 
 Errors are for reading, not for fearing:
 
@@ -495,31 +514,60 @@ enough that a reported line number means one obvious thing.
 
 ## Checking it without a window
 
-`open` loads a folder, builds a view, and prints the element tree with each element's id and
-handlers, then the console. It exits non-zero if anything reached the console, so it drops
-straight into a loop.
+The shell runs windowless: `shell2 --offscreen WxH` is the real shell — real layout, real pixels,
+real Lua — with nowhere to present the frame. Drive it over the bridge from Python.
 
+```python
+from osvauld.session import Session, shell_binary
+
+with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
+    s.rpc.signup("me", "passphrase")
+    ws = s.rpc.create_workspace("scratch")
+    item = s.rpc.create_item(ws["id"], "pie", "app")["id"]
+    s.rpc.upload_folder(item, "demo_apps/pie")
+    s.rpc.open_item(item)
+
+    s.rpc.dump_tree(item)              # the El tree: ids and handlers, no rects
+    s.rpc.click(item, "legend:search") # by id — calls the handler, no hit-test
+    s.rpc.rects()                      # ['pie', 'legend:search', …] and where they are
+    s.rpc.click_at(*s.rpc.centre_of("legend:search"))  # by coordinate, through the hit-test
+    s.rpc.frame(250)                   # time passing
+    s.rpc.save_screenshot(item, "out.png")
+    s.rpc.read_console(item)           # errors, newest last
 ```
-cargo run -p app_host --example open -- demo_apps/pie
-cargo run -p app_host --example open -- demo_apps/pie --hover 180,128 --tree
-cargo run -p app_host --example open -- demo_apps/voronoi --drag 300,300:380,360
-cargo run -p app_host --example open -- demo_apps/voronoi --hover 400,250 --frames 200 --tree
-```
 
-`--hover X,Y`, `--click X,Y`, `--drag X0,Y0:X1,Y1[:steps]` and `--frames N` run in the order given,
-and after each one it reports new console lines and whether the view changed. These are not
-simulated: the
-same layout, the same hit regions, the same handler call the window makes. The only thing supplied
-by hand is the pointer coordinate — which is also the limit, since scaling, event timing and
-painting all live below that line. A view that passes here can still look wrong.
+`OSVAULD_OFFSCREEN=900x700` makes *every* script in `scripts/` windowless without editing it, and
+`python3 scripts/smoke.py` runs the smokes. `print()` from a handler reaches `read_console`.
 
-Coordinates are logical points from the top-left of a 1200×800 viewport (`--size WxH` to change
-it), so they are the same units an element's rect is in. `print()` from a handler goes to stdout.
+**Never guess a coordinate.** `rects()` answers with every reachable element and the rect a pointer
+must land in — the *clipped* rect, which is what the hit-test tests, so an element scrolled half
+out of view reports where it can actually be hit rather than where its layout box is. An element
+that is fully clipped is absent, because it cannot be hit at any coordinate. `dump_tree` says what
+exists; `rects` says what is reachable. Coordinates are logical points from the top-left, the same
+units an element's rect is in.
 
-`--frames N` is time passing with the pointer left where it was — the only way to watch an
-animating app move, and the only way to see `on_hover` follow geometry that drifts under a still
-pointer. Offscreen frames run back to back, so `N` is a count of frames, not of seconds.
+The pointer ops report what is under the pointer afterwards, so a miss reports as a miss. This is
+the difference that matters: an app that did not change tells you nothing about whether you were
+5pt out or 200.
+
+`Click` by id and `click_at` by coordinate are **not** the same test. The first calls the handler
+directly; the second goes through `on_cursor_moved` / `click` / `on_cursor_release` — the same
+methods a window calls, with hit regions, shape hits, drag slop and eligibility all in play. Use
+the id form to drive an app, the coordinate form to test that it is *touchable*.
+
+Offscreen the clock is **virtual and driven**: nothing moves until a request asks. A frame is
+1/60s and a pointer event lands 8ms after the frame it is tested against, whatever the machine
+actually took — so `frame(250)` is a little over four seconds of app time, on every machine, every
+run. `advance(secs)` jumps instead, then paints once so the app notices: a 25-minute timer
+finishing is one request, not 90,000 frames.
 
 Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
 a drag and fires **no** click, and a press that travels less is a click reported at the point it
 was *released*. Since no hand is perfectly still, the second is the ordinary case.
+
+What this still cannot tell you: it needs a `DISPLAY` even though it shows nothing (windowless,
+not headless), and a view that passes here can still look wrong — check the screenshot.
+
+*Rewritten 2026-09-20. This section taught `cargo run -p app_host --example open`, a second driver
+that only worked from a source checkout and had no ids, no screenshots and no hot reload. The
+bridge now does everything it did; see `design/six-apps.md` §7 for why there is one driver.*

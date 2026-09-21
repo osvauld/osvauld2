@@ -1,4 +1,4 @@
-//! The node types. Drawn from a census of `shell2/src/kanban` rather than the Lua grammar,
+//! The node types. Drawn from a census of `demo_apps/kanban` rather than the Lua grammar,
 //! so the variants here are the constructs that code actually uses; everything else lowers
 //! to `Opaque` and round-trips as text (docs/design/code-as-tree.md §10.7).
 

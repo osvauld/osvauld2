@@ -25,6 +25,8 @@ return {
 	orbit_span = 148,
 
 	fling_damp = 1.9,
+	-- The shortest span a throw is measured over; below it the samples are mostly jitter.
+	fling_window = 0.03,
 	bounce = 0.55,
 	rest = 6,
 	max_fling = 1400,

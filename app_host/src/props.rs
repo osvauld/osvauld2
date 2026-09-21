@@ -174,6 +174,7 @@ impl<M: 'static> Registry<M> {
                         scale: e.scale,
                         origin: (e.pos.0 - e.grab.0, e.pos.1 - e.grab.1),
                         shape: Shape(e.shape.clone().map(|(id, at)| (id.to_string(), at.0, at.1))),
+                        t: e.t,
                     },
                 ))
             }))

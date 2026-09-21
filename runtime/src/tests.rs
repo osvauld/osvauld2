@@ -195,3 +195,407 @@ fn a_shape_drifting_under_a_still_pointer_still_fires_hover() {
         ["enter -", "move cell@40", "move cell@10", "move -"]
     );
 }
+
+/// Records the monotonic time of every frame and every drag event, in the order they arrived.
+struct Stamped {
+    seen: Vec<(&'static str, f64)>,
+}
+
+#[derive(Clone)]
+enum Stamp {
+    Frame(f64),
+    Drag(&'static str, f64),
+}
+
+impl App for Stamped {
+    type Msg = Stamp;
+    fn view(&self) -> El<Stamp> {
+        crate::col().full().child(
+            crate::col()
+                .id("pad")
+                .w(200.0)
+                .h(200.0)
+                .on_frame("pad", |f| Stamp::Frame(f.elapsed))
+                .on_drag("pad", |d| Stamp::Drag(d.phase.as_str(), d.t)),
+        )
+    }
+    fn update(&mut self, msg: Stamp) {
+        match msg {
+            Stamp::Frame(t) => self.seen.push(("frame", t)),
+            Stamp::Drag(phase, t) => self.seen.push((phase, t)),
+        }
+    }
+}
+
+/// A drag is stamped when the pointer event arrives, not when the frame it lands in is drawn.
+/// Frame time would hand every event processed in one frame the same number, and a fling computed
+/// from two such samples divides by zero rather than looking wrong.
+#[test]
+fn a_drag_is_stamped_when_the_event_arrives_not_when_the_frame_draws() {
+    let mut h = Headless::new(Stamped { seen: Vec::new() }, (400.0, 400.0));
+    h.drag((50.0, 50.0), (150.0, 130.0), 4);
+    let seen = &h.app().seen;
+
+    assert!(
+        seen.windows(2).all(|w| w[0].1 <= w[1].1),
+        "time went backwards: {seen:?}"
+    );
+
+    // Each drag event is stamped *after* the frame before it. If the stamp were the frame's, the
+    // two would be equal — so this is the assertion that tells the two designs apart.
+    let (mut last_frame, mut drags) = (f64::NEG_INFINITY, 0);
+    for (what, t) in seen {
+        if *what == "frame" {
+            last_frame = *t;
+        } else {
+            assert!(*t > last_frame, "{what} at {t} is not after {last_frame}");
+            drags += 1;
+        }
+    }
+    assert!(drags >= 3, "expected start, moves and an end: {seen:?}");
+
+    // Offscreen the clock is virtual, so the spacing is exact and the same on every machine —
+    // which is what makes a fling measurable here at all. `"start"` and the move it fires with it
+    // share a stamp on purpose: one event, one time.
+    let mut times: Vec<f64> = seen
+        .iter()
+        .filter(|(w, _)| *w != "frame")
+        .map(|(_, t)| *t)
+        .collect();
+    times.dedup();
+    let step = 1.0 / 60.0 + 0.008;
+    for pair in times.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(
+            (gap - step).abs() < 1e-9,
+            "events {gap}s apart, expected {step}s: {seen:?}"
+        );
+    }
+}
+
+/// Offscreen is the same renderer with nowhere to present, so the proof is a pixel, not a lack of
+/// panic: a scene filled with a known colour has to come back as that colour. The failed `present`
+/// is asserted too, because it is the *only* observable difference and the screenshot path in
+/// `frame` depends on it to route a shot through `capture_scene`.
+///
+/// Ignored by default: the one test here that needs a GPU adapter.
+/// `cargo test -p runtime -- --ignored` runs it.
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn an_offscreen_render_reads_back_real_pixels() {
+    let green = Color::from_rgb8(0x2a, 0xbf, 0x6d);
+    let mut render = pollster::block_on(Render::offscreen(64, 48));
+    assert_eq!(render.viewport(), (64.0, 48.0));
+    assert!(
+        !render.present(Color::BLACK, &Scene::new()),
+        "nowhere to present to, so present must say so"
+    );
+
+    let mut scene = Scene::new();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        green,
+        None,
+        &vello::kurbo::Rect::new(0.0, 0.0, 64.0, 48.0),
+    );
+    let shot = render
+        .capture_scene(Color::BLACK, &scene, (64.0, 48.0), 1.0)
+        .expect("capture the scene");
+    assert_eq!((shot.width, shot.height), (64, 48));
+
+    let mut png = png::Decoder::new(std::io::Cursor::new(&shot.png))
+        .read_info()
+        .expect("png header");
+    let mut buf = vec![0; png.output_buffer_size().expect("png buffer size")];
+    let info = png.next_frame(&mut buf).expect("png data");
+    let at = |x: u32, y: u32| {
+        let i = ((y * info.width + x) * 4) as usize;
+        (buf[i], buf[i + 1], buf[i + 2])
+    };
+    assert_eq!(at(32, 24), (0x2a, 0xbf, 0x6d), "centre pixel");
+    assert_eq!(at(0, 0), (0x2a, 0xbf, 0x6d), "corner pixel");
+}
+
+/// `Frame(n)` is exactly n frames and exactly n/60 seconds. The count is asserted alongside the
+/// clock because the two can disagree: an op that paints without advancing, or advances without
+/// painting, satisfies one of them and is useless.
+#[test]
+fn a_frame_op_paints_exactly_what_was_asked_for() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    let report = r.run_driver(DriverOp::Frame(5)).expect("offscreen");
+
+    assert_eq!(report.frames, 5);
+    assert!((report.clock - 5.0 / 60.0).abs() < 1e-12, "{report:?}");
+    let stamps: Vec<f64> = r.app.seen.iter().map(|(_, t)| *t).collect();
+    assert_eq!(
+        stamps.len(),
+        5,
+        "one on_frame per painted frame: {stamps:?}"
+    );
+    // The app is handed the instant the frame is drawn at, so the first is 0 and each is 1/60 on.
+    assert!(
+        stamps[0].abs() < 1e-12 && (stamps[4] - 4.0 / 60.0).abs() < 1e-12,
+        "{stamps:?}"
+    );
+}
+
+/// `Advance` is what makes a wait testable without waiting: the whole point is that the app *acts*
+/// on the new time, so the paint is asserted, not just the clock. It lands on exactly `secs` —
+/// reusing the frame tick would overshoot by 1/60 and quietly break any equality a caller writes.
+#[test]
+fn advancing_the_clock_lets_the_app_act_on_the_new_time() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    let report = r.run_driver(DriverOp::Advance(1500.0)).expect("offscreen");
+
+    assert_eq!(report.frames, 1);
+    assert_eq!(report.clock, 1500.0, "advance by exactly what was asked");
+    assert_eq!(
+        r.app.seen,
+        vec![("frame", 1500.0)],
+        "the app never saw the jump"
+    );
+}
+
+/// Refused with a window rather than silently doing nothing. A driver op moves a clock that only
+/// exists offscreen, so answering one windowed would make every test written against it depend on
+/// the machine — the failure this is here to prevent shows up much later than the call does.
+#[test]
+fn driver_ops_are_refused_when_there_is_a_window() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, None);
+    for op in [DriverOp::Frame(3), DriverOp::Advance(1.0)] {
+        let err = r.run_driver(op).expect_err("must refuse");
+        assert!(err.contains("offscreen"), "{op:?}: {err}");
+    }
+    assert!(r.app.seen.is_empty(), "a refused op must not paint");
+}
+
+/// Nonsense is refused rather than corrupting the clock, which is the thing every other assertion
+/// in this file rests on. A backwards jump is the interesting one: it would run an app's deadline
+/// arithmetic in reverse and look like a hang rather than an error.
+#[test]
+fn an_impossible_advance_is_refused_and_leaves_the_clock_alone() {
+    let mut r = Runner::new(Stamped { seen: Vec::new() }, Some((400.0, 400.0)));
+    for secs in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(r.run_driver(DriverOp::Advance(secs)).is_err(), "{secs}");
+    }
+    assert_eq!(r.run_driver(DriverOp::Frame(0)).unwrap().clock, 0.0);
+}
+
+/// Rects come from the hit lists, so one element reports everything it responds to, once.
+#[test]
+fn rects_report_what_an_element_responds_to() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+    let rects = r
+        .run_driver(DriverOp::Rects)
+        .unwrap()
+        .rects
+        .expect("asked for rects");
+
+    assert_eq!(
+        rects.len(),
+        1,
+        "only the named element is addressable: {rects:?}"
+    );
+    assert_eq!(rects[0].id, "pad");
+    assert_eq!((rects[0].w, rects[0].h), (200.0, 200.0));
+    assert_eq!(
+        rects[0].hits,
+        vec!["click", "drag"],
+        "both handlers, merged into one entry"
+    );
+}
+
+/// The whole point, and the only assertion that can catch the failure this op exists to prevent:
+/// aiming at what it reports must actually hit. A rect that looks plausible and misses is exactly
+/// gap-log 1.4 — fifteen runs sweeping coordinates because "nothing happened" says nothing about
+/// whether you were 5pt out or 200. So the loop is closed here rather than described.
+#[test]
+fn the_centre_of_a_reported_rect_is_a_hit() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
+    let rects = h.rects();
+    let pad = &rects[0];
+
+    h.click_at(pad.x + pad.w / 2.0, pad.y + pad.h / 2.0);
+    let fired = log.borrow().clone();
+    assert!(
+        fired.iter().any(|m| m.starts_with("click ")),
+        "aiming at the reported centre missed: {fired:?}"
+    );
+}
+
+/// Not asked is not the same as nothing reachable, and a caller has to be able to tell them apart
+/// — an op that reported `[]` for both would make "my app has no buttons" indistinguishable from
+/// "I called the wrong op".
+#[test]
+fn only_the_rects_op_reports_rects() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+    assert_eq!(r.run_driver(DriverOp::Frame(1)).unwrap().rects, None);
+    assert_eq!(r.run_driver(DriverOp::Advance(1.0)).unwrap().rects, None);
+    assert!(r.run_driver(DriverOp::Rects).unwrap().rects.is_some());
+}
+
+/// The point of routing pointer ops through the `Runner` instead of inventing a second path: a
+/// gesture driven over the bridge must be the *same* gesture `Headless` produces, event for event.
+/// Two drivers that diverge here is the failure `six-apps.md` §7 exists to prevent, and it would
+/// show up as a test that passes in Rust and fails through the socket.
+#[test]
+fn a_driven_drag_matches_the_one_headless_produces() {
+    let gesture = ((50.0, 50.0), (150.0, 130.0), 4);
+
+    let direct = {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
+        h.drag(gesture.0, gesture.1, gesture.2);
+        let out = log.borrow().clone();
+        out
+    };
+    let driven = {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+        r.run_driver(DriverOp::Drag {
+            from: gesture.0,
+            to: gesture.1,
+            steps: gesture.2,
+        })
+        .expect("offscreen");
+        let out = log.borrow().clone();
+        out
+    };
+
+    assert!(
+        !direct.is_empty(),
+        "the fixture gesture must fire something"
+    );
+    assert_eq!(driven, direct, "the two drivers disagree about one gesture");
+}
+
+/// A press that travels is a drag and only a drag — asserted through the driver, because the
+/// arming and dropping of the click happens in the pointer pipeline and an op that reimplemented
+/// it would get this wrong in a way no unit test of the op itself would catch.
+#[test]
+fn a_driven_drag_is_not_also_a_click() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+    r.run_driver(DriverOp::Drag {
+        from: (50.0, 50.0),
+        to: (150.0, 130.0),
+        steps: 4,
+    })
+    .expect("offscreen");
+
+    let fired = log.borrow().clone();
+    assert!(fired.iter().any(|m| m.starts_with("drag ")), "{fired:?}");
+    assert!(!fired.iter().any(|m| m.starts_with("click ")), "{fired:?}");
+}
+
+/// A miss has to report as a miss. This is the whole remedy for gap-log 1.4's real complaint —
+/// "an unchanged result says nothing about whether you missed by 5pt or 200" — so the empty case
+/// is the one being pinned here, not the hit.
+#[test]
+fn a_pointer_op_says_what_it_is_over_including_nothing() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log }, Some((400.0, 400.0)));
+
+    let pad = r.run_driver(DriverOp::Rects).unwrap().rects.unwrap()[0].clone();
+    let on = r
+        .run_driver(DriverOp::PointerMove((
+            pad.x + pad.w / 2.0,
+            pad.y + pad.h / 2.0,
+        )))
+        .unwrap()
+        .rects
+        .expect("a pointer op reports what it is over");
+    assert_eq!(on.iter().map(|e| &e.id).collect::<Vec<_>>(), vec!["pad"]);
+
+    let off = r
+        .run_driver(DriverOp::PointerMove((pad.x + pad.w + 40.0, pad.y)))
+        .unwrap()
+        .rects
+        .unwrap();
+    assert!(
+        off.is_empty(),
+        "40pt clear of it and still reported: {off:?}"
+    );
+}
+
+/// A pressed element shrinks, and **stays reachable the whole way down**.
+///
+/// The two halves are one claim. `press_scale` is a paint transform (`layout.rs`), so it would be
+/// easy to scale the pixels and leave the hit region at the layout rect — and nothing would look
+/// wrong. A press is short and the pointer is already inside; you would only find it on a slow
+/// animation or a large scale, as a press that "sometimes does not take". "Describable =
+/// touchable" has to hold *during* motion, not just at rest, and this is where that is tested.
+///
+/// Measured offscreen rather than reasoned about: the numbers below came from stepping a real
+/// press frame by frame, which the virtual clock makes exact and repeatable.
+#[test]
+fn a_press_scales_the_hit_rect_with_the_paint() {
+    struct Button;
+    impl App for Button {
+        type Msg = ();
+        fn view(&self) -> El<()> {
+            crate::col().full().child(
+                crate::col()
+                    .id("btn")
+                    .w(280.0)
+                    .h(32.0)
+                    .press_scale(0.97)
+                    .on_click(()),
+            )
+        }
+        fn update(&mut self, _: ()) {}
+    }
+
+    let mut h = Headless::new(Button, (400.0, 400.0));
+    let find = |h: &mut Headless<Button>| {
+        h.rects()
+            .into_iter()
+            .find(|r| r.id == "btn")
+            .expect("the button is reachable")
+    };
+
+    let rest = find(&mut h);
+    assert_eq!((rest.w, rest.h), (280.0, 32.0));
+
+    let (cx, cy) = (rest.x + rest.w / 2.0, rest.y + rest.h / 2.0);
+    h.move_to(cx, cy);
+    h.press();
+
+    // Every frame: smaller than the last, and still under the pointer. A hit region left behind
+    // at the layout rect would keep `w` at 280 and still pass the reachability half alone.
+    let mut last = rest.w;
+    let mut widths = Vec::new();
+    for _ in 0..12 {
+        h.frame();
+        let now = find(&mut h);
+        assert!(
+            now.w <= last,
+            "the press rect grew mid-animation: {last} then {now:?}"
+        );
+        last = now.w;
+        widths.push(now.w);
+        h.move_to(cx, cy);
+        assert!(
+            h.rects().iter().any(|r| r.id == "btn"),
+            "the centre stopped hitting the button at width {}",
+            now.w
+        );
+    }
+
+    // It moved, and it landed where `press_scale(0.97)` says. A spring converges rather than
+    // arriving, so this is the settled value, not a step count.
+    assert!(
+        widths[0] < 280.0,
+        "nothing happened on the first frame: {widths:?}"
+    );
+    let settled = widths.last().copied().unwrap();
+    assert!(
+        (settled - 280.0 * 0.97).abs() < 0.05,
+        "settled at {settled}, expected {}: {widths:?}",
+        280.0 * 0.97
+    );
+}

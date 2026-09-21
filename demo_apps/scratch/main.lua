@@ -35,7 +35,8 @@ end
 -- A relative timestamp is a pure derivation of `now()`, so it is computed per frame and never
 -- stored: a stored "2m ago" is wrong a minute later, on every peer.
 local function ago(ts)
-	local d = now() - ts
+	-- now() carries a fraction, so floor before it reaches a string or "3s" prints as "3.41s".
+	local d = math.floor(now() - ts)
 	if d < 60 then
 		return d .. "s"
 	end
