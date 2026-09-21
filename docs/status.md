@@ -102,14 +102,15 @@ authority, with `nodes/<node-did>/` reserved for the mirror image a federated pe
 needs. Each issue carries a `Cause` — the node's own decision, or
 `Under(parent id)` — which is the lineage a flattened node-signed token no longer carries in
 `prf`, and so the only thing a cascade can follow. Revocation accepts ids the node never
-issued, because delegations are minted between holders. Remaining in Gate 1: revocation with
-cascade, and `role.assign` — node issuance of a role token with a rank check so an assigner
-cannot mint above itself. Next slices: (1) how a
-maintainer hands out an app role — delegation cannot change a role, so role assignment needs
-node issuance under `role.assign`; (2) a durable node admin store holding
-tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
-QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
-workspace publish, or sync exists yet.
+issued, because delegations are minted between holders.
+
+**Priority moved to sync, 2026-09-21.** Gate 1 stops here: revocation cascade and `role.assign`
+are deferred with their reasoning intact in
+[`design/node-backlog.md`](design/node-backlog.md), which is the running note for everything
+set aside as we go. The node now remembers enough to be worth syncing, and the rest of the
+authorization surface is worth building against a working wire rather than ahead of one. Still
+absent: any transport, any workspace on the node, any sync protocol, and a desktop UI claim
+handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
