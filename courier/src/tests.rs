@@ -1,3 +1,5 @@
+use identity::Identity;
+
 use super::*;
 use serde::de::DeserializeOwned;
 

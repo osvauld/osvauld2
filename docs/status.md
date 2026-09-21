@@ -88,13 +88,29 @@ does, with the admin store on `Vault::store`. Also built: `courier::policy` — 
 capabilities as a closed Rust set, the `(scope level, role) -> capabilities` table pinned cell
 by cell, and `authorize` joining the chain check to scope coverage and capability. A role read
 one level down is a different role, so narrowing a token to app scope drops platform
-capabilities by design. Next slices: (1) `role.assign` — node issuance of a role token, with a
-rank check so an assigner cannot mint above itself; (2) the durable node admin store. Next slices: (1) how a
-maintainer hands out an app role — delegation cannot change a role, so role assignment needs
-node issuance under `role.assign`; (2) a durable node admin store holding
-tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
-QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
-workspace publish, or sync exists yet.
+capabilities by design. **Gate 1 (the node remembers), in progress:** `identity::Signer` is the outside view of an
+identity — DID, signature, the two public keys — so `courier` takes `&(impl Signer + ?Sized)`
+and never holds a private key. `vault` gained sealed `entry/` records (opaque, caller-keyed,
+reserved namespace so no name can address the keystore) and `with_signer`, which lends a
+signer for a closure and yields nothing when locked. `kunki` now keeps its identity as a vault
+account instead of its own `identity.bin`, created on first boot and unlocked from
+`OSVAULD_KUNKI_PASSPHRASE`; a second account in the node directory stops the boot rather than
+guessing which is the node. `kunki::admin` is the node's own record over those entries: an
+issue keyed by token id with an empty `users/<did>/tokens/<id>` marker indexing it, and a
+`revoked/` set read whole into the chain check — everything at top level being *this* node's
+authority, with `nodes/<node-did>/` reserved for the mirror image a federated peer or a desktop
+needs. Each issue carries a `Cause` — the node's own decision, or
+`Under(parent id)` — which is the lineage a flattened node-signed token no longer carries in
+`prf`, and so the only thing a cascade can follow. Revocation accepts ids the node never
+issued, because delegations are minted between holders.
+
+**Priority moved to sync, 2026-09-21.** Gate 1 stops here: revocation cascade and `role.assign`
+are deferred with their reasoning intact in
+[`design/node-backlog.md`](design/node-backlog.md), which is the running note for everything
+set aside as we go. The node now remembers enough to be worth syncing, and the rest of the
+authorization surface is worth building against a working wire rather than ahead of one. Still
+absent: any transport, any workspace on the node, any sync protocol, and a desktop UI claim
+handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

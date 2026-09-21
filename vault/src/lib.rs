@@ -5,6 +5,7 @@
 //! opaque sealed bytes here, Loro docs live in the caller. See `docs/vault.md`.
 
 mod account;
+mod entry;
 mod error;
 mod item;
 mod workspace;
@@ -12,7 +13,7 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use identity::{Identity, Keystore, Mnemonic};
+use identity::{Identity, Keystore, Mnemonic, Signer};
 pub use storage::Store;
 
 pub use account::AccountInfo;
@@ -325,6 +326,48 @@ impl Vault {
         };
         self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)
     }
+    /// Opaque sealed records this account keeps for itself, outside the workspace/item tree:
+    /// the node's tokens and revocations, a desktop's node relationships. Vault seals and
+    /// stores them without interpreting them, under a reserved key namespace.
+    pub fn put_entry(&self, name: &str, bytes: &[u8]) -> Result<(), VaultError> {
+        self.put_sealed(&entry::key(name)?, bytes)
+    }
+
+    pub fn get_entry(&self, name: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        self.get_sealed(&entry::key(name)?)
+    }
+
+    pub fn delete_entry(&self, name: &str) -> Result<(), VaultError> {
+        let key = entry::key(name)?;
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.delete(&key)?)
+    }
+
+    /// Names under `prefix`, sorted. A plain prefix scan, so `order` also matches `orders/1` —
+    /// end a prefix with `/` to keep namespaces apart.
+    pub fn list_entries(&self, prefix: &str) -> Result<Vec<String>, VaultError> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active
+            .store
+            .list_prefixed(&entry::scan(prefix))?
+            .iter()
+            .filter_map(|key| entry::name_of(key))
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Sign as the unlocked account without handing the identity out. The account is held for
+    /// the closure, so the closure must not call back into this vault — sign, return, then
+    /// write. `None` when locked, which is what makes this safer than lending a signer out:
+    /// nothing can sign once the account is gone.
+    pub fn with_signer<R>(&self, f: impl FnOnce(&dyn Signer) -> R) -> Option<R> {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref()?;
+        Some(f(&active.identity))
+    }
+
     fn get_sealed(&self, key: &str) -> Result<Option<Vec<u8>>, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;

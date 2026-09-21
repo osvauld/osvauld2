@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use identity::{Identity, public_key_from_did, verify};
+use identity::{Signer, public_key_from_did, verify};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -153,7 +153,11 @@ pub struct DesktopNodeRecord {
     pub permit_for_desktop: String,
 }
 
-pub fn issue_connection_ticket(node: &Identity, now: u64, name: &str) -> Result<ConnectionTicket> {
+pub fn issue_connection_ticket(
+    node: &(impl Signer + ?Sized),
+    now: u64,
+    name: &str,
+) -> Result<ConnectionTicket> {
     let node_encryption_key = enc(node.encryption_public_key());
     let device_public_key = enc(node.device_public_key());
     let node_id = device_public_key.clone();
@@ -183,7 +187,7 @@ pub fn issue_connection_ticket(node: &Identity, now: u64, name: &str) -> Result<
 
 pub fn desktop_start_claim(
     ticket: ConnectionTicket,
-    desktop: &Identity,
+    desktop: &(impl Signer + ?Sized),
     now: u64,
 ) -> Result<ClaimHello> {
     verify_ticket(&ticket)?;
@@ -207,7 +211,7 @@ pub fn desktop_start_claim(
 
 pub fn node_accept_claim(
     hello: ClaimHello,
-    node: &Identity,
+    node: &(impl Signer + ?Sized),
     admins: &mut Vec<AdminRecord>,
     now: u64,
 ) -> Result<ClaimWelcome> {
@@ -242,7 +246,7 @@ pub fn node_accept_claim(
 pub fn desktop_finish_claim(
     ticket: &ConnectionTicket,
     welcome: ClaimWelcome,
-    desktop: &Identity,
+    desktop: &(impl Signer + ?Sized),
 ) -> Result<DesktopNodeRecord> {
     verify_ticket(ticket)?;
     if welcome.node_did != ticket.node_did {
@@ -263,7 +267,7 @@ pub fn desktop_finish_claim(
 }
 
 pub fn node_issue_reconnect_challenge(
-    node: &Identity,
+    node: &(impl Signer + ?Sized),
     challenges: &mut Vec<String>,
 ) -> ReconnectChallenge {
     let challenge = ReconnectChallenge {
@@ -276,7 +280,7 @@ pub fn node_issue_reconnect_challenge(
 
 pub fn desktop_start_reconnect(
     record: &DesktopNodeRecord,
-    desktop: &Identity,
+    desktop: &(impl Signer + ?Sized),
     challenge: ReconnectChallenge,
 ) -> Result<ReconnectHello> {
     if challenge.node_did != record.node_did {
@@ -300,7 +304,7 @@ pub fn desktop_start_reconnect(
 
 pub fn node_accept_reconnect(
     hello: ReconnectHello,
-    node: &Identity,
+    node: &(impl Signer + ?Sized),
     admins: &[AdminRecord],
     challenges: &mut Vec<String>,
 ) -> Result<()> {
@@ -355,7 +359,7 @@ fn verify_ticket(ticket: &ConnectionTicket) -> Result<TicketClaim> {
 }
 
 fn issue_permit(
-    issuer: &Identity,
+    issuer: &(impl Signer + ?Sized),
     audience: &str,
     cap: &str,
     now: u64,
@@ -384,7 +388,11 @@ fn verify_permit(token: &str, issuer: &str, audience: &str, cap: &str) -> Result
         .ok_or(CourierError::BadPermit)
 }
 
-fn sign_blob<T: Serialize>(identity: &Identity, domain: &[u8], payload: &T) -> Result<String> {
+fn sign_blob<T: Serialize>(
+    identity: &(impl Signer + ?Sized),
+    domain: &[u8],
+    payload: &T,
+) -> Result<String> {
     let payload = bincode::serialize(payload).map_err(|_| CourierError::Decode)?;
     let signed = SignedBlob {
         signature: enc(identity.sign(&[domain, &payload].concat())),
