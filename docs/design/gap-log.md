@@ -100,29 +100,25 @@ flag that reaches it. An `--advance SECS` action is about five lines.
 **Had to:** ignore an "undefined global" warning on every single reference to them — ten in this
 app, and it is a small app.
 
-**What it would take:** a `.luarc.json` and a definitions file for the eight constructors, the
-prop list and `doc`. It is also the cheapest possible authoring aid for an agent, since the prop
-table in the guide is already the content.
+**What it would take:** *not* what this entry first assumed. Tried on 2026-09-20 as a
+`.luarc.json` plus a generated `lua-types/osvauld.lua`, and removed the next day.
 
-*Closed 2026-09-20,* and it announced itself: moving kanban into `demo_apps/` put it where the
-editor indexes, and every `ui`/`doc`/`gfx`/`uuid` reference in the corpus lit up at once.
+Two findings, and the second is the one that decides it:
 
-Built **generated, not written** — `lua-types/osvauld.lua` comes off a real `sandboxed_vm` and
-`props.rs`'s `Registry`, because a hand-kept list would be the same invisible-registry problem
-§0 records, with an extra copy to forget. `generated_defs_are_current` fails when it drifts.
+1. **It never ran.** `workspace.library` resolves relative to the folder being checked, and the
+   runner checks one app at a time, so it looked for `demo_apps/tally/lua-types` and loaded
+   nothing. Every green result came from `diagnostics.globals` silencing the *names*. Pointed at
+   an absolute path it does work, and does catch a real bug — but it was reporting success for a
+   whole day without ever having loaded a definition.
+2. **The author is not in an editor.** An agent writing an app over the bridge opens no editor,
+   reads no `.luarc.json`, and may not have the files in this repo at all. LuaCATS stubs are
+   something you hand to a human. For the agent, the type system *is* the error the runtime
+   hands back.
 
-Two things the entry could not have known:
-
-- **A wrong stub is worse than no stub.** The first version declared `@param spec table` on every
-  `gfx.*`, and `gfx.solid(C.accent)` takes a colour *string* — so correct code was reported as
-  broken. The registry carries names, not types; the definitions now say `...any` where the type
-  is genuinely unknown rather than inventing one.
-- **The gate has to run per app.** `require` is app-scoped at runtime; a server pointed at
-  `demo_apps/` cross-links every `widgets.lua`. That reported four arity errors in `math_mela`
-  that came from `kanban`'s unrelated `W.badge`. Checked alone, `math_mela` is clean.
-
-Corpus after: 11 warnings across 17 apps, none about undefined globals, and 6 of the 11 are in
-kanban's `main3.lua`/`test.lua` — the two files nothing requires.
+So the entry stands, and its answer is a runtime concern: when an app calls a global wrongly,
+does the message name the mistake well enough for the author to fix it without guessing? The
+worked example is `doc:open` — registered `|_this, name|`, so the dot form puts the name into
+the receiver. Unknown props are already a hard error; that is the shape to extend, not stubs.
 
 ---
 

@@ -34,13 +34,6 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
   where a pointer must land — never guess a coordinate. It still needs a `DISPLAY`: windowless,
   not headless (`design/six-apps.md` §7).
 
-- **The sandbox globals have type definitions.** `lua-types/osvauld.lua` is **generated** from a
-  real `sandboxed_vm` plus `props.rs`'s registry — never hand-edit it. Regenerate with
-  `BLESS=1 cargo test -p app_host generated_defs_are_current`; that test fails when it drifts.
-  `python3 scripts/check_lua.py` runs the types gate **one app at a time**, which is required, not
-  an optimisation: `require` is app-scoped at runtime, and a language server pointed at
-  `demo_apps/` cross-links every `widgets.lua` and invents errors.
-
 ## How we work — the process rules
 
 - **Write in slices.** One write lands at most **~100 new or changed lines of code**; tests

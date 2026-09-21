@@ -289,12 +289,14 @@ Roughly in dependency order:
      `DISPLAY`. See [`design/six-apps.md` §7](design/six-apps.md).
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
-2. **W4 DX**: ~~types gate~~ **landed 2026-09-20**, with one substitution: the stubs are
-   `lua-types/osvauld.lua` for `lua-language-server`, not `.d.luau` for `luau-lsp` — that is the
-   checker actually installed here, and an unused gate is not a gate. Generated from a real
-   `sandboxed_vm` plus `Registry`, guarded by `generated_defs_are_current`, run per-app by
-   `scripts/check_lua.py`. Swapping in `luau-lsp` later is an emitter change, not a redesign.
-   Still open: per-block `.lua` edits (needs the splitter port).
+2. **W4 DX**: types gate, and per-block `.lua` edits (needs the splitter port).
+   An editor-shaped gate was built and removed on 2026-09-21 — `lua-language-server` stubs
+   generated from the sandbox. Two reasons, and the second is the one that matters. It never
+   ran: `workspace.library` resolves relative to the folder being checked, so the per-app runner
+   loaded no definitions at all and was green because `diagnostics.globals` silenced the names.
+   And the author is an agent writing over the bridge, which opens no editor and reads no
+   `.luarc.json` — for it, the type system is the error the runtime hands back. A gate here
+   should be that, not stubs.
    *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
 3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
    `reload`), but nothing writes the source doc after upload — the file watcher and the

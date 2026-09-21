@@ -5,8 +5,6 @@
 //! loop is unchanged — dispatch just calls whatever the latest view registered under that key.
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
-#[cfg(test)]
-mod defs;
 mod gfx;
 mod modules;
 mod props;
