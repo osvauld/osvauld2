@@ -43,6 +43,27 @@ Tokens this node holds *from* another node, and revocations that node announced.
 own joins several nodes directly and holds a separate set from each. Once there is a second
 caller, the store moves out of `kunki` into a crate `shell2` shares.
 
+### Extracting the shared substrate from `shell2`/`app_host`
+
+The node is the desktop's substrate minus the UI — Loro to merge, mlua to run rules, the same
+vault underneath — so both halves eventually come out into headless crates. Already recorded in
+§10 item 4 of the permissions design and in the Luau-sandbox note there. **Decided 2026-09-21:
+not before sync works.**
+
+For sync the node needs neither. Loading a sealed snapshot into a `LoroDoc`, importing updates,
+exporting deltas, and writing the snapshot back is about fifty lines and touches no `app_host`
+code; rules only arrive once the node adjudicates merges. And with one caller, an extraction
+extracts *shell2's* shape — which is already visibly wrong for the node: shell2 opens a doc per
+tab for editing, with undo and a UI-driven lifecycle, while kunki wants many docs at once, no
+undo, no editing, and eviction. The honest shared part is those fifty lines.
+
+The Lua half is the one that must become a genuinely shared crate rather than a copy, and for a
+security reason rather than a duplication one: two Luau sandboxes that drift mean a rule that is
+safe on the desktop is a denial of service on the node. It is also not a lift — `app_host`
+depends on `runtime` (vello, parley), and its `crdt.rs` is `Rc`/`RefCell` throughout, so the
+work is splitting the sandbox and the CRDT binding away from gfx. Easier to aim once the node
+can say what it needs.
+
 ### `users/<did>/meta` profiles
 
 The namespace exists and is pinned by a test; nothing writes it. When it does: a profile is
