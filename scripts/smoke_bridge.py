@@ -82,6 +82,14 @@ end
     assert s.rpc.write_file(item["id"], "main.lua", app) == "written"
     assert s.rpc.list_files(item["id"]) == ["main.lua"]
     assert s.rpc.read_file(item["id"], "main.lua") == app
+    closed = s.rpc.read_file_versioned(item["id"], "main.lua")
+    outcome = s.rpc.edit_file(
+        item["id"],
+        "main.lua",
+        closed["revision"],
+        [{"old_text": '"count: "', "new_text": '"subtotal: "'}],
+    )
+    assert outcome["persisted"] and outcome["activation"] == "closed"
     assert s.rpc.open_item(item["id"]) == "open"
 
     def find(node, el_id):
@@ -95,17 +103,40 @@ end
         return find(tree, el_id)["text"]
 
     tree = s.rpc.dump_tree(item["id"])
-    assert find(tree, "root") and text_of(tree, "count") == "count: 0"
+    assert find(tree, "root") and text_of(tree, "count") == "subtotal: 0"
+
+    # Surgical source edit: mutate the live LoroText, persist it, and activate a staged VM.
+    versioned = s.rpc.read_file_versioned(item["id"], "main.lua")
+    edited = s.rpc.edit_file(
+        item["id"],
+        "main.lua",
+        versioned["revision"],
+        [{"old_text": '"subtotal: "', "new_text": '"total: "'}],
+    )
+    assert edited["persisted"] and edited["activation"] == "activated"
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 0"
+    try:
+        s.rpc.edit_file(
+            item["id"],
+            "main.lua",
+            versioned["revision"],
+            [{"old_text": '"total: "', "new_text": '"sum: "'}],
+        )
+        raise AssertionError("a stale source edit must refuse")
+    except BridgeError as e:
+        assert "stale" in str(e).lower(), f"unexpected error: {e}"
+
+    tree = s.rpc.dump_tree(item["id"])
     assert "on_click" in find(tree, "inc")["handlers"]
     assert "on_input" in find(tree, "note")["handlers"]
     assert s.rpc.click(item["id"], "inc") == "fired"
     assert s.rpc.click(item["id"], "inc") == "fired"
-    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "count: 2"
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 2"
     assert s.rpc.type_text(item["id"], "note", "hello bridge") == "fired"
     tree = s.rpc.dump_tree(item["id"])
     assert find(tree, "note")["text"] == "hello bridge"
     assert s.rpc.key(item["id"], "note", "enter") == "fired"
-    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "count: 12"
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 12"
 
     data = s.rpc.read_data(item["id"])
     assert data["state"]["map"]["count"] == 12
@@ -115,7 +146,7 @@ end
     console = s.rpc.read_console(item["id"], 5)
     assert console and "handler error" in console[-1] and "kaboom" in console[-1], console
     # the app survives its handler's error
-    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "count: 12"
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 12"
 
     shot = Path(s.tmp) / "screen.png"
     dimensions = s.rpc.save_screenshot(item["id"], shot)
@@ -133,4 +164,29 @@ end
     except BridgeError as e:
         assert "no element" in str(e), f"unexpected error: {e}"
 
-    print("smoke ok: transport, auth, files, app senses/actions, and screenshot")
+    # Invalid edited source is durable but does not replace the running VM; a later exact edit
+    # repairs it, and reopening proves the repaired source—not an in-memory copy—was persisted.
+    broken = s.rpc.read_file_versioned(item["id"], "main.lua")
+    outcome = s.rpc.edit_file(
+        item["id"],
+        "main.lua",
+        broken["revision"],
+        [{"old_text": "return function()", "new_text": "return function("}],
+    )
+    assert outcome["persisted"] and "failed" in outcome["activation"]
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 12"
+    broken = s.rpc.read_file_versioned(item["id"], "main.lua")
+    repaired = s.rpc.edit_file(
+        item["id"],
+        "main.lua",
+        broken["revision"],
+        [{"old_text": "return function(", "new_text": "return function()"}],
+    )
+    assert repaired["activation"] == "activated"
+
+    s.rpc.lock()
+    s.rpc.unlock(did, "correct horse")
+    assert s.rpc.open_item(item["id"]) == "open"
+    assert text_of(s.rpc.dump_tree(item["id"]), "count") == "total: 12"
+
+    print("smoke ok: transport, auth, surgical source edits, app actions, and screenshot")

@@ -29,10 +29,17 @@ use crate::{
     mnemonic::{Mnemonic, MnemonicMsg},
     space::{SpaceScreen, SpaceScreenMsg},
 };
-use app_host::{LuaApp, Resolve, Wake, write_source_file as write_source_doc_file};
+use app_host::{
+    LuaApp, Resolve, SourceEdit, Wake, edit_source_file as edit_source_doc_file,
+    read_source_file_versioned as read_source_doc_file_versioned,
+    write_source_file as write_source_doc_file,
+};
 use base64::Engine as _;
 use loro::{Container, LoroDoc, ValueOrContainer};
-use osvauld_rpc::{AccountSummary, ItemSummary, Request, Response, WorkspaceSummary};
+use osvauld_rpc::{
+    AccountSummary, EditFileResult, ItemSummary, Request, Response, SourceActivation,
+    VersionedFile, WorkspaceSummary,
+};
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
     ScreenshotRequest, col, row, text,
@@ -509,6 +516,86 @@ impl Shell {
                             .and_then(|doc| read_source_file(&doc, &path))
                             .map(Response::ok)
                             .unwrap_or_else(Response::err),
+                    }
+                }
+            },
+            Request::ReadFileVersioned { item_id, path } => {
+                match find_item(&self.vault, &item_id) {
+                    Err(e) => Response::err(e),
+                    Ok(wi) => {
+                        if let Err(e) = valid_source_path(&path) {
+                            return Response::err(e);
+                        }
+                        let file = if let Some(o) = self.apps.get(wi.id.as_str()) {
+                            o.app.read_source_file_versioned(&path)
+                        } else {
+                            source_doc(&self.vault, &wi.ws_id, &wi.id)
+                                .and_then(|doc| read_source_doc_file_versioned(&doc, &path))
+                        };
+                        file.map(|f| {
+                            Response::ok(VersionedFile {
+                                content: f.content,
+                                revision: f.revision,
+                            })
+                        })
+                        .unwrap_or_else(Response::err)
+                    }
+                }
+            }
+            Request::EditFile {
+                item_id,
+                path,
+                expected_revision,
+                edits,
+            } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => {
+                    if let Err(e) = valid_source_path(&path) {
+                        return Response::err(e);
+                    }
+                    let edit_bytes = edits.iter().fold(0usize, |total, e| {
+                        total
+                            .saturating_add(e.old_text.len())
+                            .saturating_add(e.new_text.len())
+                    });
+                    if edits.len() > 128 || edit_bytes > 1024 * 1024 {
+                        return Response::err("source edit batch is too large");
+                    }
+                    let edits: Vec<SourceEdit> = edits
+                        .into_iter()
+                        .map(|e| SourceEdit {
+                            old_text: e.old_text,
+                            new_text: e.new_text,
+                        })
+                        .collect();
+                    let edited = if let Some(o) = self.apps.get(wi.id.as_str()) {
+                        o.app.edit_source_file(&path, &expected_revision, &edits)
+                    } else {
+                        source_doc(&self.vault, &wi.ws_id, &wi.id).and_then(|doc| {
+                            edit_source_doc_file(&doc, &path, &expected_revision, &edits)
+                        })
+                    };
+                    match edited.and_then(|edited| {
+                        self.vault
+                            .put_src(&wi.ws_id, &wi.id, &edited.snapshot)
+                            .map_err(|e| e.to_string())?;
+                        Ok(edited.revision)
+                    }) {
+                        Err(e) => Response::err(e),
+                        Ok(revision) => {
+                            let activation = match self.apps.get_mut(wi.id.as_str()) {
+                                None => SourceActivation::Closed,
+                                Some(o) => match o.app.reload_if_stale() {
+                                    Some(Err(error)) => SourceActivation::Failed { error },
+                                    Some(Ok(())) | None => SourceActivation::Activated,
+                                },
+                            };
+                            Response::ok(EditFileResult {
+                                revision,
+                                persisted: true,
+                                activation,
+                            })
+                        }
                     }
                 }
             },

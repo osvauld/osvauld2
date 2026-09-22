@@ -21,8 +21,11 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 - **The Lua surface is strict.** Unknown props are errors; the doc mirror is a frame behind
   your own write; `on_drag`/`on_drop`/scroll need an `id`. The guide says all of it — read it.
 - **The bridge is live.** `$OSVAULD_SOCKET` (default `/tmp/osvauld.sock`, `0600`) answers
-  `osvauld-rpc` requests — drive the shell from `scripts/osvauld/` (see `scripts/smoke_bridge.py`).
-  The MCP shim and `.mcp.json` are gone; an MCP face would rebuild over the bridge.
+  `osvauld-rpc` requests. There is no MCP layer: agents drive the shell with the Python client in
+  `scripts/osvauld/` (see `scripts/smoke_bridge.py`). For an existing source file, use
+  `read_file_versioned` then `edit_file` with exact replacements; do not rewrite the whole file
+  with `WriteFile`. `WriteFile` remains for initial upload/file creation and explicit wholesale
+  replacement. An MCP face, if wanted later, would rebuild over the same bridge.
 - **Run `python3 scripts/smoke.py` before landing anything that touches the shell, the bridge
   or the runtime.** `cargo test` covers runtime internals (`Headless`); the smokes cover the path
   an agent drives — real socket, real pixels, a real Lua VM. There is no CI, so a smoke's failure

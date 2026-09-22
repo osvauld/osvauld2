@@ -111,6 +111,26 @@ class Bridge:
     def read_file(self, item_id: str, path: str) -> str:
         return self.request("ReadFile", item_id=item_id, path=path)
 
+    def read_file_versioned(self, item_id: str, path: str) -> dict:
+        """Read source plus the opaque revision required by edit_file."""
+        return self.request("ReadFileVersioned", item_id=item_id, path=path)
+
+    def edit_file(
+        self,
+        item_id: str,
+        path: str,
+        expected_revision: str,
+        edits: list[dict[str, str]],
+    ) -> dict:
+        """Apply exact old_text/new_text replacements to the existing LoroText."""
+        return self.request(
+            "EditFile",
+            item_id=item_id,
+            path=path,
+            expected_revision=expected_revision,
+            edits=edits,
+        )
+
     def write_file(self, item_id: str, path: str, content: str) -> str:
         return self.request("WriteFile", item_id=item_id, path=path, content=content)
 

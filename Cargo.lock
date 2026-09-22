@@ -187,6 +187,7 @@ dependencies = [
  "mlua",
  "runtime",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 
