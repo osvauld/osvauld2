@@ -108,9 +108,14 @@ issued, because delegations are minted between holders.
 are deferred with their reasoning intact in
 [`design/node-backlog.md`](design/node-backlog.md), which is the running note for everything
 set aside as we go. The node now remembers enough to be worth syncing, and the rest of the
-authorization surface is worth building against a working wire rather than ahead of one. Still
-absent: any transport, any workspace on the node, any sync protocol, and a desktop UI claim
-handler.
+authorization surface is worth building against a working wire rather than ahead of one. The
+route to first sync stays transport-free — courier's handlers are pure message transitions, so
+publish and sync extend that shape and an iroh adapter slots in at the end rather than being
+designed around. **2026-09-22:** the claim survives a restart. `Admin::admins` rebuilds
+courier's admin list from `users/<did>/relationship`, and `accept_claim`/`accept_reconnect`
+supply it and persist what courier adds — before this the list was an in-memory `Vec`, so a
+reboot handed a claimed node to whoever claimed it next. Still absent: any transport, any
+workspace on the node, any sync protocol, and a desktop UI claim handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

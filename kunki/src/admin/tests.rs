@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use courier::DesktopNodeRecord;
 use courier::token::{Scope, Token, verify_chain};
 use identity::Identity;
 use tempfile::TempDir;
@@ -52,6 +53,80 @@ fn a_token_is_found_by_id_and_under_its_holder() {
     assert_eq!(alices.len(), 1, "bob's token is not in alice's index");
     assert_eq!(alices[0], issue, "the index leads back to the whole record");
     assert_eq!(admin.issued_to("did:key:znobody").unwrap(), vec![]);
+}
+
+/// Drive a full claim against `admin`, returning what the desktop keeps.
+fn claim(admin: &Admin, vault: &Vault, desktop: &Identity) -> Result<DesktopNodeRecord, NodeError> {
+    let ticket = vault
+        .with_signer(|node| courier::issue_connection_ticket(node, NOW, "kunki"))
+        .unwrap()?;
+    let hello = courier::desktop_start_claim(ticket.clone(), desktop, NOW)?;
+    let welcome = admin.accept_claim(hello, NOW)?;
+    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop)?)
+}
+
+#[test]
+fn a_claimed_node_is_still_claimed_after_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let alice = holder();
+
+    let (vault, _) = node::open(tmp.path().to_path_buf(), "pw").unwrap();
+    claim(&Admin::new(vault.clone()), &vault, &alice).unwrap();
+    drop(vault);
+
+    // The whole point: before this, the list was an in-memory Vec, so a reboot handed the
+    // node to whoever claimed it next.
+    let (vault, _) = node::open(tmp.path().to_path_buf(), "pw").unwrap();
+    let admin = Admin::new(vault.clone());
+    assert_eq!(admin.admins().unwrap().len(), 1);
+    assert_eq!(admin.admins().unwrap()[0].did, alice.did());
+    assert!(matches!(
+        claim(&admin, &vault, &holder()),
+        Err(NodeError::Courier(courier::CourierError::AlreadyAdmined))
+    ));
+}
+
+#[test]
+fn a_reconnect_after_a_restart_is_answered_from_the_store() {
+    let tmp = TempDir::new().unwrap();
+    let alice = holder();
+
+    let (vault, _) = node::open(tmp.path().to_path_buf(), "pw").unwrap();
+    let record = claim(&Admin::new(vault.clone()), &vault, &alice).unwrap();
+    drop(vault);
+
+    let (vault, _) = node::open(tmp.path().to_path_buf(), "pw").unwrap();
+    let admin = Admin::new(vault.clone());
+    let mut challenges = Vec::new();
+    let challenge = vault
+        .with_signer(|node| courier::node_issue_reconnect_challenge(node, &mut challenges))
+        .unwrap();
+    let hello = courier::desktop_start_reconnect(&record, &alice, challenge).unwrap();
+    assert!(admin.accept_reconnect(hello, &mut challenges).is_ok());
+
+    // A stranger is refused by the same list that admitted alice.
+    let mut challenges = Vec::new();
+    let challenge = vault
+        .with_signer(|node| courier::node_issue_reconnect_challenge(node, &mut challenges))
+        .unwrap();
+    let stranger = holder();
+    let hello = courier::desktop_start_reconnect(&record, &stranger, challenge).unwrap();
+    assert!(matches!(
+        admin.accept_reconnect(hello, &mut challenges),
+        Err(NodeError::Courier(courier::CourierError::UnknownAdmin))
+    ));
+}
+
+#[test]
+fn a_relationship_is_not_read_as_a_token() {
+    let (_tmp, vault) = node_vault();
+    let admin = Admin::new(vault.clone());
+    let alice = holder();
+    claim(&admin, &vault, &alice).unwrap();
+
+    // Both live under `users/<did>/`; only one of them is a grant.
+    assert_eq!(admin.issued_to(alice.did()).unwrap(), vec![]);
+    assert_eq!(admin.admins().unwrap().len(), 1);
 }
 
 #[test]

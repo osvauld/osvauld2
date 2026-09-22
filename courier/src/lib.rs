@@ -139,13 +139,15 @@ struct ReconnectProof {
     nonce: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Both sides keep their half of the relationship across restarts, so these carry serde:
+// the node's list is what the first-admin check is decided against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminRecord {
     pub did: String,
     pub permit_for_node: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopNodeRecord {
     pub node_did: String,
     pub node_id: String,
