@@ -134,8 +134,12 @@ scope, delegable so a publisher can narrow it to a workspace for their own node,
 and is reissued on reconnect, where expiry and the revoked set are both checked on the way
 through. `kunki::admin` records it with `Cause::Node`, which gives that variant its first real
 caller. Still absent: any transport, any workspace on the node, any sync protocol, and a
-desktop UI claim handler. `ClaimHello.permit_for_node` is still a permit; finishing that and
-deleting the permit machinery is tracked in the backlog.
+desktop UI claim handler. The claimant's half went the same way: `ClaimHello.attestation` is a
+token rooted at the claimant rather than the node — `verify_chain` always took the expected
+root as a parameter, so no second verification path was needed — carrying its key material in
+`Claims.binds` under a role no capability-table entry matches, so a statement about keys can
+never be read as authority. `PermitClaim`, `issue_permit` and `verify_permit` are gone, and
+courier now has one credential mechanism rather than two, which is also the shape osvauld1 had.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

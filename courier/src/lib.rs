@@ -1,8 +1,15 @@
 //! Courier protocol: authenticated peer sessions, then workspace publish/sync messages.
 //!
 //! Transport-free throughout: node bootstrap claim and reconnect are pure message
-//! transitions, [`token`] is the node-rooted role-token chain, and [`policy`] turns a
-//! verified chain into an allow/deny. QUIC/Iroh adapters will only carry these bytes later.
+//! transitions, [`token`] is the delegation chain every credential here is made of, and
+//! [`policy`] turns a verified chain into an allow/deny. QUIC/Iroh adapters will only carry
+//! these bytes later.
+//!
+//! One credential mechanism, not two. Every grant and every attestation in this module is a
+//! [`token::Token`], so expiry, revocation by id, and the chain walk apply to all of them
+//! rather than to whichever ones remembered to implement it. Most chains root at the node,
+//! but not all: a claimant's attestation roots at the claimant, and `verify_chain` takes the
+//! expected root as a parameter for exactly that reason.
 
 use std::collections::HashSet;
 
@@ -19,7 +26,6 @@ pub mod token;
 use token::{Claims, Scope, Token};
 
 const TICKET_DOMAIN: &[u8] = b"osvauld/courier/ticket/v1\0";
-const PERMIT_DOMAIN: &[u8] = b"osvauld/courier/permit/v1\0";
 const RECONNECT_DOMAIN: &[u8] = b"osvauld/courier/reconnect/v1\0";
 
 /// The role the first claimant holds over the node.
@@ -41,10 +47,14 @@ pub enum CourierError {
     Decode,
     #[error("signature invalid")]
     BadSignature,
-    #[error("ticket did not match node identity")]
+    // Also raised when a chain roots somewhere other than the authority the caller expected,
+    // which since attestations exist is no longer always the node.
+    #[error("identity did not match the one expected")]
     NodeMismatch,
-    #[error("permit invalid")]
-    BadPermit,
+    #[error("signed material does not match what was presented")]
+    BadAttestation,
+    #[error("token is not the grant this step requires")]
+    WrongGrant,
     #[error("node already has admins")]
     AlreadyAdmined,
     #[error("unknown admin")]
@@ -139,23 +149,14 @@ struct SignedBlob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PermitClaim {
-    iss: String,
-    aud: String,
-    cap: String,
-    nonce: String,
-    iat: u64,
-    subject_encryption_key: Option<String>,
-    subject_device_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimHello {
     pub ticket: ConnectionTicket,
     pub desktop_did: String,
     pub desktop_encryption_key: String,
     pub desktop_device_key: String,
-    pub permit_for_node: String,
+    /// The claimant's signature over its own key material. The plaintext keys above are what
+    /// the node reads; this is what makes them worth reading.
+    pub attestation: Token,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +193,7 @@ struct ReconnectProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminRecord {
     pub did: String,
-    pub permit_for_node: String,
+    pub attestation: Token,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,13 +245,15 @@ pub fn desktop_start_claim(
     let desktop_encryption_key = enc(desktop.encryption_public_key());
     let desktop_device_key = enc(desktop.device_public_key());
     Ok(ClaimHello {
-        permit_for_node: issue_permit(
+        attestation: token::attest(
             desktop,
             &ticket.node_did,
-            "node.relationship",
+            token::KeyBinding {
+                encryption: desktop_encryption_key.clone(),
+                device: desktop_device_key.clone(),
+            },
             now,
-            Some(&desktop_encryption_key),
-            Some(&desktop_device_key),
+            now + CLAIM_TTL,
         )?,
         ticket,
         desktop_did: desktop.did().to_string(),
@@ -272,20 +275,26 @@ pub fn node_accept_claim(
     if ticket.iss != node.did() {
         return Err(CourierError::NodeMismatch);
     }
-    let permit = verify_permit(
-        &hello.permit_for_node,
+    // Rooted at the claimant, not at us: this is the one token in the exchange whose authority
+    // is the sender's own. `verify_chain` takes the expected root as a parameter, so it needs
+    // no separate path.
+    let attested = token::verify_chain(
+        &hello.attestation,
         &hello.desktop_did,
         node.did(),
-        "node.relationship",
+        now,
+        &HashSet::new(),
     )?;
-    if permit.subject_encryption_key.as_deref() != Some(&hello.desktop_encryption_key)
-        || permit.subject_device_key.as_deref() != Some(&hello.desktop_device_key)
+    // The keys in the clear must be the keys that were signed, or the signature is over
+    // something other than what we are about to record.
+    let binds = attested.binds.ok_or(CourierError::BadAttestation)?;
+    if binds.encryption != hello.desktop_encryption_key || binds.device != hello.desktop_device_key
     {
-        return Err(CourierError::BadPermit);
+        return Err(CourierError::BadAttestation);
     }
     admins.push(AdminRecord {
         did: hello.desktop_did.clone(),
-        permit_for_node: hello.permit_for_node,
+        attestation: hello.attestation,
     });
     Ok(ClaimWelcome {
         node_did: node.did().to_string(),
@@ -295,11 +304,7 @@ pub fn node_accept_claim(
 
 /// The node's grant to a claimant: its own root authority over itself, delegable so the
 /// holder can hand a narrowed slice to their own node when publishing.
-fn issue_claim_token(
-    node: &(impl Signer + ?Sized),
-    holder: &str,
-    now: u64,
-) -> Result<Token> {
+fn issue_claim_token(node: &(impl Signer + ?Sized), holder: &str, now: u64) -> Result<Token> {
     token::issue_root(
         node,
         holder,
@@ -320,7 +325,7 @@ fn verify_claim_token(token: &Token, node_did: &str, holder: &str, now: u64) -> 
     // the node's own root grant at node scope, and nothing narrower stands in for it.
     (claims.role == CLAIM_ROLE && claims.scope == Scope::Node)
         .then_some(claims)
-        .ok_or(CourierError::BadPermit)
+        .ok_or(CourierError::WrongGrant)
 }
 
 pub fn desktop_finish_claim(
@@ -448,37 +453,7 @@ fn verify_ticket(ticket: &ConnectionTicket) -> Result<TicketClaim> {
         && claim.node_id == ticket.node_id
         && claim.name == ticket.name
         && claim.relay == ticket.relay;
-    matches.then_some(claim).ok_or(CourierError::BadPermit)
-}
-
-fn issue_permit(
-    issuer: &(impl Signer + ?Sized),
-    audience: &str,
-    cap: &str,
-    now: u64,
-    subject_encryption_key: Option<&str>,
-    subject_device_key: Option<&str>,
-) -> Result<String> {
-    sign_blob(
-        issuer,
-        PERMIT_DOMAIN,
-        &PermitClaim {
-            iss: issuer.did().to_string(),
-            aud: audience.to_string(),
-            cap: cap.to_string(),
-            nonce: nonce(),
-            iat: now,
-            subject_encryption_key: subject_encryption_key.map(str::to_string),
-            subject_device_key: subject_device_key.map(str::to_string),
-        },
-    )
-}
-
-fn verify_permit(token: &str, issuer: &str, audience: &str, cap: &str) -> Result<PermitClaim> {
-    let claim: PermitClaim = verify_blob(token, issuer, PERMIT_DOMAIN)?;
-    (claim.iss == issuer && claim.aud == audience && claim.cap == cap)
-        .then_some(claim)
-        .ok_or(CourierError::BadPermit)
+    matches.then_some(claim).ok_or(CourierError::BadAttestation)
 }
 
 fn sign_blob<T: Serialize>(

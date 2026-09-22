@@ -27,7 +27,9 @@ fn try_claim(node_vault: &Vault, desktop: &Identity) -> Result<DesktopNodeRecord
         .unwrap()?;
     let hello = courier::desktop_start_claim(ticket.clone(), desktop, NOW)?;
     let welcome = Admin::new(node_vault.clone()).accept_claim(hello, NOW)?;
-    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop, NOW)?)
+    Ok(courier::desktop_finish_claim(
+        &ticket, welcome, desktop, NOW,
+    )?)
 }
 
 fn claim(node_vault: &Vault, desktop: &Identity) -> DesktopNodeRecord {
@@ -95,7 +97,10 @@ fn one_relationship_per_node_however_often_its_token_is_reissued() {
     let reissued = Admin::new(node_a.clone())
         .accept_reconnect(hello, &mut challenges, NOW)
         .unwrap();
-    assert_ne!(reissued, first.token, "a fresh grant, not the one presented");
+    assert_ne!(
+        reissued, first.token,
+        "a fresh grant, not the one presented"
+    );
 
     let again = courier::desktop_accept_reissue(&first, reissued, &alice, NOW).unwrap();
     peer.record_node(&again).unwrap();
@@ -146,5 +151,8 @@ fn a_locked_account_neither_reads_nor_writes_its_relationships() {
         Err(NodeError::Vault(vault::VaultError::Locked))
     ));
     assert!(matches!(peer.nodes(), Err(NodeError::Vault(_))));
-    assert!(matches!(peer.record_node(&record), Err(NodeError::Vault(_))));
+    assert!(matches!(
+        peer.record_node(&record),
+        Err(NodeError::Vault(_))
+    ));
 }

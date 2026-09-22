@@ -38,7 +38,9 @@ fn bootstrap_claim_authenticates_and_reconnects() {
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let reconnect = desktop_start_reconnect(&record, &desktop, wire(challenge)).unwrap();
-    assert!(node_accept_reconnect(wire(reconnect), &node, &admins, &mut challenges, 5, &none()).is_ok());
+    assert!(
+        node_accept_reconnect(wire(reconnect), &node, &admins, &mut challenges, 5, &none()).is_ok()
+    );
 }
 
 #[test]
@@ -49,12 +51,12 @@ fn tampered_ticket_node_id_is_rejected() {
 
     assert_eq!(
         desktop_start_claim(ticket, &desktop, 2).unwrap_err(),
-        CourierError::BadPermit
+        CourierError::BadAttestation
     );
 }
 
 #[test]
-fn relationship_permit_binds_desktop_public_material() {
+fn the_attestation_binds_the_keys_presented_beside_it() {
     let (node, desktop) = ids();
     let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
     let mut hello = desktop_start_claim(ticket, &desktop, 2).unwrap();
@@ -63,8 +65,65 @@ fn relationship_permit_binds_desktop_public_material() {
 
     assert_eq!(
         node_accept_claim(hello, &node, &mut admins, 3).unwrap_err(),
-        CourierError::BadPermit
+        CourierError::BadAttestation
     );
+}
+
+#[test]
+fn an_attestation_signed_by_someone_else_is_refused() {
+    let (node, desktop) = ids();
+    let (impostor, _) = identity::generate();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let mut hello = desktop_start_claim(ticket, &desktop, 2).unwrap();
+
+    // The keys and DID say desktop; the signature is the impostor's. Before, the attestation
+    // was a flat blob checked field-by-field; now it is a chain that must root at its subject.
+    hello.attestation = token::attest(
+        &impostor,
+        node.did(),
+        token::KeyBinding {
+            encryption: hello.desktop_encryption_key.clone(),
+            device: hello.desktop_device_key.clone(),
+        },
+        2,
+        1_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        node_accept_claim(hello, &node, &mut Vec::new(), 3).unwrap_err(),
+        CourierError::NodeMismatch,
+    );
+}
+
+#[test]
+fn an_attestation_grants_nothing_the_policy_table_reads() {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = desktop_start_claim(ticket, &desktop, 2).unwrap();
+    let claims = hello.attestation.claims().unwrap();
+
+    // It describes keys rather than granting anything, so its role must not appear in the
+    // capability table — otherwise "I am me" would read as authority over the node.
+    assert!(
+        policy::platform_capabilities(&claims.role, &claims.scope).is_empty(),
+        "role {:?} carries capabilities",
+        claims.role
+    );
+    assert!(!claims.delegable, "nothing chains off a statement of keys");
+    assert_eq!(claims.sub, desktop.did(), "the claimant is its own root");
+}
+
+#[test]
+fn a_binding_survives_the_wire() {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = wire(desktop_start_claim(ticket, &desktop, 2).unwrap());
+
+    let binds = hello.attestation.claims().unwrap().binds.expect("bound");
+    assert_eq!(binds.encryption, hello.desktop_encryption_key);
+    assert_eq!(binds.device, hello.desktop_device_key);
+    assert!(node_accept_claim(hello, &node, &mut Vec::new(), 3).is_ok());
 }
 
 #[test]
@@ -133,7 +192,15 @@ fn reconnect_replay_is_rejected() {
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
 
-    node_accept_reconnect(reconnect.clone(), &node, &admins, &mut challenges, 5, &none()).unwrap();
+    node_accept_reconnect(
+        reconnect.clone(),
+        &node,
+        &admins,
+        &mut challenges,
+        5,
+        &none(),
+    )
+    .unwrap();
     assert_eq!(
         node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &none()).unwrap_err(),
         CourierError::StaleChallenge

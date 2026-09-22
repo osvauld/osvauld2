@@ -62,7 +62,9 @@ fn claim(admin: &Admin, vault: &Vault, desktop: &Identity) -> Result<DesktopNode
         .unwrap()?;
     let hello = courier::desktop_start_claim(ticket.clone(), desktop, NOW)?;
     let welcome = admin.accept_claim(hello, NOW)?;
-    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop, NOW)?)
+    Ok(courier::desktop_finish_claim(
+        &ticket, welcome, desktop, NOW,
+    )?)
 }
 
 #[test]
