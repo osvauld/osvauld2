@@ -151,3 +151,59 @@ fn welcome_from_wrong_node_is_rejected() {
         CourierError::NodeMismatch
     );
 }
+
+#[test]
+fn a_printed_ticket_parses_back_and_still_claims() {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+
+    let text = ticket.to_text().unwrap();
+    assert!(text.starts_with("osv1."));
+    assert!(
+        text.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+        "one word a shell needs no quoting for: {text}"
+    );
+
+    let parsed = ConnectionTicket::from_text(&text).unwrap();
+    assert_eq!(parsed, ticket);
+    // Copy-paste picks up whitespace. Nothing else is forgiven — the signature does not
+    // survive a changed field anyway.
+    assert_eq!(
+        ConnectionTicket::from_text(&format!("  {text}\n")).unwrap(),
+        ticket
+    );
+
+    // Still the ticket the node signed, after the round trip through text.
+    let hello = desktop_start_claim(parsed, &desktop, 2).unwrap();
+    assert!(node_accept_claim(hello, &node, &mut Vec::new(), 3).is_ok());
+}
+
+#[test]
+fn a_ticket_from_a_version_we_do_not_know_is_refused_by_name() {
+    let (node, _) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+
+    // A newer node's ticket. Without the prefix this decoded as v1 and dropped whatever v2
+    // added, because `verify_ticket` only checks the ticket and its claim against each other.
+    let future = format!("osv2.{}", enc(serde_json::to_vec(&ticket).unwrap()));
+    assert_eq!(
+        ConnectionTicket::from_text(&future).unwrap_err(),
+        CourierError::UnknownTicketVersion
+    );
+
+    // Right prefix, but the version inside disagrees with it.
+    let mut lying = ticket.clone();
+    lying.version = 2;
+    let lying = format!("osv1.{}", enc(serde_json::to_vec(&lying).unwrap()));
+    assert_eq!(
+        ConnectionTicket::from_text(&lying).unwrap_err(),
+        CourierError::UnknownTicketVersion
+    );
+
+    // Something that is not a ticket at all says so, rather than "decode failed".
+    assert_eq!(
+        ConnectionTicket::from_text("https://example.com/not-a-ticket").unwrap_err(),
+        CourierError::UnknownTicketVersion
+    );
+}

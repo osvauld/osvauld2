@@ -114,8 +114,12 @@ publish and sync extend that shape and an iroh adapter slots in at the end rathe
 designed around. **2026-09-22:** the claim survives a restart. `Admin::admins` rebuilds
 courier's admin list from `users/<did>/relationship`, and `accept_claim`/`accept_reconnect`
 supply it and persist what courier adds — before this the list was an in-memory `Vec`, so a
-reboot handed a claimed node to whoever claimed it next. Still absent: any transport, any
-workspace on the node, any sync protocol, and a desktop UI claim handler.
+reboot handed a claimed node to whoever claimed it next. The ticket's text form moved into
+courier as `ConnectionTicket::to_text`/`from_text` — base64url of JSON behind an `osv1.` prefix,
+so a ticket from a version this build does not understand is refused by name instead of read as
+an older one — and `kunki/tests/printed_ticket.rs` runs the binary, parses what it actually
+printed, and claims with it. Still absent: any transport, any workspace on the node, any sync
+protocol, and a desktop UI claim handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

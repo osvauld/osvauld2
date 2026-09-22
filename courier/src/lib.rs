@@ -54,6 +54,8 @@ pub enum CourierError {
     OutOfScope,
     #[error("role does not carry that capability")]
     NotPermitted,
+    #[error("connection ticket is not a version this build understands")]
+    UnknownTicketVersion,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;
@@ -68,6 +70,35 @@ pub struct ConnectionTicket {
     pub name: String,
     pub relay: Option<String>,
     pub claim_token: String,
+}
+
+/// Current ticket version. The prefix carries it in the text form so a ticket from a newer
+/// node is refused by name rather than decoded into something subtly older.
+const TICKET_VERSION: u8 = 1;
+const TICKET_PREFIX: &str = "osv1.";
+
+impl ConnectionTicket {
+    /// The form a human copies: one URL-safe word, no padding, nothing to quote in a shell.
+    /// JSON inside rather than bincode — the two ends update separately, and a self-describing
+    /// body turns version skew into a parse error instead of a misread field.
+    pub fn to_text(&self) -> Result<String> {
+        let json = serde_json::to_vec(self).map_err(|_| CourierError::Decode)?;
+        Ok(format!("{TICKET_PREFIX}{}", enc(json)))
+    }
+
+    pub fn from_text(text: &str) -> Result<Self> {
+        let body = text
+            .trim()
+            .strip_prefix(TICKET_PREFIX)
+            .ok_or(CourierError::UnknownTicketVersion)?;
+        let ticket: Self = serde_json::from_slice(&dec(body)?).map_err(|_| CourierError::Decode)?;
+        // Belt and braces: the prefix said v1, so the body must agree. `verify_ticket` only
+        // checks the ticket and its signed claim against each other, never against us.
+        if ticket.version != TICKET_VERSION {
+            return Err(CourierError::UnknownTicketVersion);
+        }
+        Ok(ticket)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +195,7 @@ pub fn issue_connection_ticket(
     let device_public_key = enc(node.device_public_key());
     let node_id = device_public_key.clone();
     let claim = TicketClaim {
-        version: 1,
+        version: TICKET_VERSION,
         iss: node.did().to_string(),
         cap: "node.claim_admin.bootstrap".to_string(),
         nonce: nonce(),
@@ -176,7 +207,7 @@ pub fn issue_connection_ticket(
         relay: None,
     };
     Ok(ConnectionTicket {
-        version: 1,
+        version: TICKET_VERSION,
         node_did: node.did().to_string(),
         node_encryption_key,
         device_public_key,
