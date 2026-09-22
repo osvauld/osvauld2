@@ -16,6 +16,9 @@ pub enum VaultError {
     Locked,
     #[error("not a valid name: {0}")]
     InvalidName(String),
+    // An id from another account becomes a key here, so it is checked rather than trusted.
+    #[error("not a workspace id this account would mint: {0}")]
+    BadWorkspaceId(String),
     #[error(transparent)]
     Identity(IdentityError),
     #[error(transparent)]

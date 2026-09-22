@@ -48,6 +48,16 @@ pub(crate) fn new_id() -> String {
         })
 }
 
+/// Whether `id` is shaped like one [`new_id`] mints. Adoption checks this because an id
+/// reached across a trust boundary is about to become a key: `ws/<id>/meta` with a crafted
+/// id addresses something else under `ws/` — `ws/a/item/b/meta` is a legal key for an id of
+/// `a/item/b`. Accepting only the minted shape is the tightest rule available and the one a
+/// legitimate id always satisfies; it can be loosened later without breaking anything, which
+/// is not true in the other direction.
+pub(crate) fn is_minted_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Unix seconds now, or 0 if the clock is before the epoch (it isn't).
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()

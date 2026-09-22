@@ -1,4 +1,4 @@
-use super::{ItemKind, Vault, VaultError};
+use super::{ItemKind, Vault, VaultError, WorkspaceMeta};
 use tempfile::TempDir;
 
 fn fresh() -> (Vault, TempDir) {
@@ -360,4 +360,82 @@ fn the_vault_signs_as_its_account_without_lending_the_identity() {
 
     let key = identity::public_key_from_did(&did).unwrap();
     assert!(identity::verify(&key, b"a token payload", &signed));
+}
+
+#[test]
+fn an_adopted_workspace_keeps_the_id_and_time_it_arrived_with() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+
+    // What another account would have sent: its own minted id, its own creation time.
+    let published = WorkspaceMeta {
+        id: "0123456789abcdef0123456789abcdef".to_string(),
+        name: "notes".to_string(),
+        created: 42,
+    };
+    vault.adopt_workspace(&published).unwrap();
+
+    // Both ends name the same workspace, which is the whole point — an id minted here would
+    // leave the two accounts unable to refer to one thing.
+    assert_eq!(vault.workspaces().unwrap(), vec![published.clone()]);
+
+    // The originating account owns the header, so a republish replaces rather than adding.
+    let renamed = WorkspaceMeta {
+        name: "field notes".to_string(),
+        ..published.clone()
+    };
+    vault.adopt_workspace(&renamed).unwrap();
+    assert_eq!(vault.workspaces().unwrap(), vec![renamed]);
+}
+
+#[test]
+fn an_id_this_account_would_not_mint_is_refused_before_it_becomes_a_key() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+    let real = vault.create_workspace("mine").unwrap();
+
+    // `ws/<id>/meta` with a slashed id is a legal key addressing something else under `ws/`.
+    // This one would land inside a workspace that already exists.
+    let forged = WorkspaceMeta {
+        id: format!("{}/item/abc", real.id),
+        name: "trojan".to_string(),
+        created: 1,
+    };
+    assert!(matches!(
+        vault.adopt_workspace(&forged),
+        Err(VaultError::BadWorkspaceId(_))
+    ));
+
+    for id in ["", "../identity", "0123456789ABCDEF0123456789abcdef", "abc"] {
+        assert!(
+            matches!(
+                vault.adopt_workspace(&WorkspaceMeta {
+                    id: id.to_string(),
+                    name: "n".to_string(),
+                    created: 1,
+                }),
+                Err(VaultError::BadWorkspaceId(_))
+            ),
+            "accepted {id:?}"
+        );
+    }
+
+    // Nothing was written by any of them.
+    assert_eq!(vault.workspaces().unwrap(), vec![real]);
+}
+
+#[test]
+fn a_locked_account_adopts_nothing() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+    vault.lock();
+
+    assert!(matches!(
+        vault.adopt_workspace(&WorkspaceMeta {
+            id: "0123456789abcdef0123456789abcdef".to_string(),
+            name: "notes".to_string(),
+            created: 42,
+        }),
+        Err(VaultError::Locked)
+    ));
 }

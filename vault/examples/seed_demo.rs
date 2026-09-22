@@ -75,12 +75,12 @@ fn main() {
 /// Replace any earlier copy rather than stacking duplicates, so re-seeding is idempotent.
 fn upsert_app(vault: &mut Vault, ws: &str, name: &str, files: &[(&str, &str)]) {
     let src = app_snapshot(files);
-    if let Ok(items) = vault.items(ws) {
-        for it in items.iter().filter(|i| i.name == name) {
-            vault.put_src(ws, &it.id, &src).expect("update the source");
-            println!("updated item {name} ({})", it.id);
-            return;
-        }
+    if let Ok(items) = vault.items(ws)
+        && let Some(it) = items.iter().find(|i| i.name == name)
+    {
+        vault.put_src(ws, &it.id, &src).expect("update the source");
+        println!("updated item {name} ({})", it.id);
+        return;
     }
     let item = vault
         .create_item(ws, name, ItemKind::App)

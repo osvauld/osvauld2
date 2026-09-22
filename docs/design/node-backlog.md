@@ -92,8 +92,9 @@ is the identity; a display name is a label.
 - **`kunki::admin` keys assume a DID contains no `/`.** True for `did:key` (base58btc has no
   slash), unasserted anywhere. If it were false, holder `a` and holder `a/b` would share a
   prefix scan. Close it by validating on record or hashing the DID into the key.
-- **`vault/examples/seed_demo.rs:79` fails clippy** ("this loop never actually loops"), came in
-  from main, untouched. Unanswered whether to fix in passing.
+- ~~**`vault/examples/seed_demo.rs:79` fails clippy**~~ — fixed 2026-09-22 while adding
+  `adopt_workspace`. It is a `deny` lint, so it broke `cargo clippy -p vault --all-targets`
+  outright, which made the crate's real lints unreadable the moment we started touching it.
 - **`result_large_err`** fires 45 times across the workspace, `kunki` included. Consistent with
   the codebase to leave it; noted so it is a decision rather than an oversight.
 
