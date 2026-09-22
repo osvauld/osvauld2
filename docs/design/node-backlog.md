@@ -38,10 +38,22 @@ handing out an app role has to be node issuance — which also keeps it in the a
 
 ### The `nodes/<node-did>/` half of the store
 
-Tokens this node holds *from* another node, and revocations that node announced. Reserved in
-`kunki::admin` today. A desktop needs the identical shape, since a user with no node of their
-own joins several nodes directly and holds a separate set from each. Once there is a second
-caller, the store moves out of `kunki` into a crate `shell2` shares.
+**Partly landed 2026-09-22** as `kunki::peer`: the relationship itself lives at
+`nodes/<node-did>/relationship`, so a claimant can still name the node it claimed after a
+restart and reconnect from what it kept. Before it, `desktop_finish_claim`'s return value was
+dropped by every caller. Still missing: the tokens held from that node, and the revocations
+that node announced.
+
+**Correction to an earlier revision of this file**, which called it the identical shape to
+`admin`. It is the mirror, not the twin. `admin` is what this account *issued* — it is the
+authority, an issue is appended, and losing one loses the audit log. `peer` is what it
+*holds* — it is the subject, it verifies rather than decides, and a reissued permit replaces
+rather than accumulating. Same storage primitives, opposite direction; two modules rather
+than one generic one.
+
+It sits in `kunki` because a node needs it under federation, not only a desktop — a node
+holds permits from the nodes it federates with exactly as a desktop holds them from its
+nodes. It moves out to a crate `shell2` shares once shell2 actually calls it.
 
 ### Extracting the shared substrate from `shell2`/`app_host`
 

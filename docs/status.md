@@ -118,8 +118,14 @@ reboot handed a claimed node to whoever claimed it next. The ticket's text form 
 courier as `ConnectionTicket::to_text`/`from_text` — base64url of JSON behind an `osv1.` prefix,
 so a ticket from a version this build does not understand is refused by name instead of read as
 an older one — and `kunki/tests/printed_ticket.rs` runs the binary, parses what it actually
-printed, and claims with it. Still absent: any transport, any workspace on the node, any sync
-protocol, and a desktop UI claim handler.
+printed, and claims with it. `kunki::peer` closes the other side of that asymmetry: until now
+only the node kept its half, while `desktop_finish_claim`'s record was dropped by every caller,
+so a claimant restarting could not name the node it had claimed. It is stored at
+`nodes/<node-did>/relationship` and is enough to reconnect from. It is the mirror of `admin`
+rather than the same shape — `admin` is what this account issued and appends, `peer` is what it
+holds and replaces — and it lives in `kunki` because a node federating with another node holds
+permits exactly as a desktop does. Still absent: any transport, any workspace on the node, any
+sync protocol, and a desktop UI claim handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
