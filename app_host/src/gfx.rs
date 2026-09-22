@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
+use glam::{Quat, Vec3};
 use mlua::{Error, Lua, Table, UserData, Value};
 use runtime::frame::{
     Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
 };
+use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
 
@@ -23,6 +25,14 @@ impl UserData for LuaBrush {}
 #[derive(Clone)]
 pub(crate) struct LuaFrame(pub Arc<Frame>);
 impl UserData for LuaFrame {}
+
+#[derive(Clone)]
+pub(crate) struct LuaScene3d(pub Arc<Scene3d>);
+impl UserData for LuaScene3d {}
+
+#[derive(Clone)]
+pub(crate) struct LuaTextSurface(pub Arc<TextSurface>);
+impl UserData for LuaTextSurface {}
 
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
@@ -92,6 +102,70 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     gfx.set(
+        "text_surface",
+        lua.create_function(|lua, spec: Table| {
+            named_fields(
+                &spec,
+                "text_surface",
+                &["text", "font_size", "color", "background"],
+            )?;
+            let color = |name: &str, default: &str| -> mlua::Result<[f32; 4]> {
+                Ok(csscolorparser::parse(
+                    &spec
+                        .get::<Option<String>>(name)?
+                        .unwrap_or_else(|| default.into()),
+                )
+                .map_err(Error::external)?
+                .to_rgba8()
+                .map(|v| v as f32 / 255.0))
+            };
+            lua.create_userdata(LuaTextSurface(Arc::new(TextSurface {
+                text: need::<String>(&spec, "text_surface", "text")?.into(),
+                font_size: spec.get::<Option<f32>>("font_size")?.unwrap_or(32.0),
+                color: color("color", "#ffffff")?,
+                background: color("background", "#171923")?,
+            })))
+        })?,
+    )?;
+    gfx.set(
+        "scene3d",
+        lua.create_function(|lua, spec: Table| {
+            named_fields(&spec, "scene3d", &["camera", "objects"])?;
+            let camera_spec: Table = need(&spec, "scene3d", "camera")?;
+            named_fields(
+                &camera_spec,
+                "scene3d.camera",
+                &["eye", "target", "up", "fov_y", "near", "far"],
+            )?;
+            let camera = Camera3d {
+                eye: vec3(need(&camera_spec, "scene3d.camera", "eye")?, "camera.eye")?,
+                target: vec3(
+                    need(&camera_spec, "scene3d.camera", "target")?,
+                    "camera.target",
+                )?,
+                up: camera_spec
+                    .get::<Option<Table>>("up")?
+                    .map(|v| vec3(v, "camera.up"))
+                    .transpose()?
+                    .unwrap_or(Vec3::Y),
+                fov_y_radians: camera_spec
+                    .get::<Option<f32>>("fov_y")?
+                    .unwrap_or(45.0)
+                    .to_radians(),
+                near: camera_spec.get::<Option<f32>>("near")?.unwrap_or(0.1),
+                far: camera_spec.get::<Option<f32>>("far")?.unwrap_or(100.0),
+            };
+            let objects_spec: Table = need(&spec, "scene3d", "objects")?;
+            let len = positional_len(&objects_spec, "scene3d.objects")?;
+            let mut objects = Vec::with_capacity(len);
+            for index in 1..=len {
+                objects.push(object3d(objects_spec.get(index)?, index)?);
+            }
+            let scene = Scene3d::new(camera, objects).map_err(Error::external)?;
+            lua.create_userdata(LuaScene3d(scene))
+        })?,
+    )?;
+    gfx.set(
         "frame",
         lua.create_function(|lua, spec: Table| {
             frame_fields(&spec)?;
@@ -116,6 +190,72 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "#,
     )
     .exec()
+}
+
+fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
+    named_fields(
+        &spec,
+        &format!("scene3d object {index}"),
+        &[
+            "id", "mesh", "position", "rotation", "scale", "color", "surface",
+        ],
+    )?;
+    let mesh = match spec.get::<Option<String>>("mesh")?.as_deref() {
+        None | Some("cube") => BuiltinMesh::Cube,
+        Some(mesh) => return Err(Error::runtime(format!("unknown 3D mesh {mesh:?}"))),
+    };
+    let rotation = spec
+        .get::<Option<Table>>("rotation")?
+        .map(|v| quat(v, "object.rotation"))
+        .transpose()?
+        .unwrap_or(Quat::IDENTITY);
+    let color = csscolorparser::parse(&need::<String>(&spec, "scene3d object", "color")?)
+        .map_err(Error::external)?
+        .to_rgba8()
+        .map(|v| v as f32 / 255.0);
+    Ok(Object3d {
+        id: need::<String>(&spec, "scene3d object", "id")?.into(),
+        mesh,
+        position: spec
+            .get::<Option<Table>>("position")?
+            .map(|v| vec3(v, "object.position"))
+            .transpose()?
+            .unwrap_or(Vec3::ZERO),
+        rotation,
+        scale: spec
+            .get::<Option<Table>>("scale")?
+            .map(|v| vec3(v, "object.scale"))
+            .transpose()?
+            .unwrap_or(Vec3::ONE),
+        color,
+        surface: spec
+            .get::<Option<mlua::AnyUserData>>("surface")?
+            .map(|surface| {
+                surface
+                    .borrow::<LuaTextSurface>()
+                    .map(|surface| surface.0.clone())
+            })
+            .transpose()?,
+    })
+}
+
+fn vec3(table: Table, owner: &str) -> mlua::Result<Vec3> {
+    if positional_len(&table, owner)? != 3 {
+        return Err(Error::runtime(format!("{owner} needs x, y and z")));
+    }
+    Ok(Vec3::new(table.get(1)?, table.get(2)?, table.get(3)?))
+}
+
+fn quat(table: Table, owner: &str) -> mlua::Result<Quat> {
+    if positional_len(&table, owner)? != 4 {
+        return Err(Error::runtime(format!("{owner} needs x, y, z and w")));
+    }
+    Ok(Quat::from_xyzw(
+        table.get(1)?,
+        table.get(2)?,
+        table.get(3)?,
+        table.get(4)?,
+    ))
 }
 
 fn command(command: Table, index: usize) -> mlua::Result<PathEl> {

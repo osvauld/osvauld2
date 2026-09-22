@@ -1,8 +1,9 @@
 # Composable Environment runtime — design and handover
 
-Status: **planning baseline, 2026-09-12, revised 2026-09-20; no retained World, 3D renderer, ECS,
-physics binding, cloth, world picking, or perspective UI is built.** The current runtime is a
-working Lua-authored 2D interface/vector substrate. This document records the product direction
+Status: **planning baseline, 2026-09-12, revised 2026-09-20; the first bounded built-in-mesh 3D
+rendering slice is now built, but no retained World, ECS, physics binding, cloth, world picking,
+GLB or perspective UI is built.** The current runtime is a Lua-authored 2D interface/vector
+substrate with one experimental 3D viewport. This document records the product direction
 and experimental gates. The owned-WGPU substrate decision is recorded in §10; proposed names and
 example Lua below are illustrative, not shipped contracts.
 
@@ -33,8 +34,9 @@ picking and a later true-3D rigid-body world without redefining identity or hier
 ## 2. Verified built baseline
 
 The workspace currently resolves wgpu 29.0.4, winit 0.30.13, Vello 0.9.0, Parley 0.11.0,
-Taffy 0.12.2, Kurbo 0.13.1, Euclid 0.22.14 and Peniko 0.6.1. No ECS, Rapier dependency or 3D
-renderer is present.
+Taffy 0.12.2, Kurbo 0.13.1, Euclid 0.22.14 and Peniko 0.6.1. No ECS or Rapier dependency is
+present. **2026-09-20 implementation note:** `glam`/`bytemuck` and the first owned WGPU mesh/depth
+pass have landed; it is the deliberately narrow model-viewer proof described below, not a World.
 
 Built today:
 - `El<M>` from Rust or strict `ui.*` Lua tables; Taffy layout; Parley text/editor support;
@@ -44,11 +46,15 @@ Built today:
 - strict Lua `gfx.*` construction and `ui.frame` placement;
 - scrolling, overlays, mouse click/drag, camera pan/zoom and animation primitives;
 - experimental `on_frame(dt, elapsed)` Lua callbacks;
-- live/custom screenshots and the animated `demo_apps/frame_orbits` proof.
+- live/custom screenshots and the animated `demo_apps/frame_orbits` proof;
+- one experimental Lua `ui.scene3d` viewport with validated built-in cubes, perspective camera,
+  instanced GPU buffers, real depth, final-target capture and bounded `DumpTree` inspection.
 
 Hard current limits:
 - Frame and Geometry transforms are 2D Kurbo `Affine`; there is no projective transform;
-- rendering has no depth attachment, camera matrix, mesh or material pass;
+- the experimental 3D proof has a depth attachment, camera matrix, 4× MSAA and a lit cube pass,
+  plus transformed-cube click raycasts, but no general mesh/material resources, GLB, hover/world
+  query surface or correct foreground Vello pass;
 - transformed clip eligibility uses screen-space bounding boxes while Vello paints actual shapes;
 - drag capture retains press-time Geometry; deforming/current-geometry capture is unbuilt;
 - Frame has no text resource, image, internal clip, identity/hit item or dynamic buffer;

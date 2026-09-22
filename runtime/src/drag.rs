@@ -60,7 +60,7 @@ impl DropPhase {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mods {
     pub shift: bool,
     pub ctrl: bool,

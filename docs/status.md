@@ -182,9 +182,23 @@ follows separately; Blender is only an authoring tool, not a runtime dependency.
 substrate is an owned WGPU pipeline using focused libraries (`gltf`, `glam`, Parry and optional
 direct Rapier) rather than Bevy or its coupled rendering crates; no ECS is selected. Pin callback
 scheduling before relying on continuous animation. The earlier projected Vello/Taffy panel gate
-remains a broader Environment target, not something this narrower proof establishes. The exact
-pass/resource architecture and public World API remain open. This is documentation only; no 3D
-implementation has landed.
+remains a broader Environment target, not something this narrower proof establishes. **First 3D
+slice landed:** runtime validates immutable perspective-camera scenes containing at most 256
+stable-id built-in cubes, renders instanced geometry with a shared-device depth pass into both live
+and custom capture targets, and places one visible `ui.scene3d` leaf through ordinary Lua layout.
+`gfx.scene3d` is strict and `DumpTree` includes its bounded camera/object inspection. The live
+`demo_apps/model_viewer` proof shows two depth-intersecting cubes with face normals, simple
+directional lighting, 4× MSAA, app-driven rotation buttons, drag orbit and wheel zoom; clean-console
+1000×700 bridge captures are `model-viewer.png` and the corrected `model-viewer-msaa.png`. Wheel
+input enters normal topmost-element eligibility before scroll/zoom ancestors and is pinned by the
+headless Runner test. **Picking slice landed:** ordinary scene `on_click` now constructs the camera
+ray, intersects every transformed cube in local space, chooses the nearest visible hit independent
+of declaration order, and reports stable object ID, distance, world point and world normal as plain
+Lua event data. The demo highlights the selected cube and updates its ordinary UI label; a headless
+Runner test pins that picking enters through normal pointer eligibility. Current limits are explicit:
+one rendered viewport, no hover picking, and the resolved 3D overlay currently follows the complete
+Vello scene so foreground overlays are not yet correct. GLB, retained resource lifetime and the
+public World API remain open.
 
 ### Runtime and app milestones
 

@@ -182,6 +182,7 @@ name = "app_host"
 version = "0.1.0"
 dependencies = [
  "csscolorparser",
+ "glam",
  "loro",
  "lua_tree",
  "mlua",
@@ -1341,6 +1342,15 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
+]
+
+[[package]]
+name = "glam"
+version = "0.30.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]
@@ -3434,13 +3444,16 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "euclid",
+ "glam",
  "kurbo",
  "parley",
  "peniko",
  "png",
  "pollster 1.0.1",
+ "skrifa 0.43.2",
  "taffy",
  "thiserror 2.0.18",
  "vello",

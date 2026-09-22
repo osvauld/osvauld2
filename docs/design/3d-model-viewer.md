@@ -1,7 +1,13 @@
 # Interactive 3D models — Lua-first rendering proof
 
-Status: **agreed direction, 2026-09-20; implementation unbuilt.** Blender is an authoring
- tool, not an embedded application or runtime dependency. This plan narrows the first proof
+Status: **implementation started, 2026-09-20.** The first slice renders bounded built-in cubes
+from strict Lua scene declarations through an owned WGPU depth pass into live/custom captures;
+`DumpTree` exposes the validated camera and object data. The proof now has 4× MSAA, face normals,
+simple directional lighting, Lua-owned drag orbit/wheel zoom, and CPU ray picking of transformed
+cubes through the normal click route. It is still one viewport and its resolved 3D overlay
+composites after the complete Vello scene, so hover picking, foreground overlay composition and
+GLB remain unbuilt. Blender is an authoring tool, not an embedded application or
+runtime dependency. This plan narrows the first proof
 of the [Environment runtime](environment-runtime.md); it does not freeze a public Lua API
 or select a full game engine.
 

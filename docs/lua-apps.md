@@ -123,6 +123,22 @@ error, not an ignored extra.
 There is no text inside a frame, no arcs, and no internal clips yet; labels are `ui.text`
 siblings positioned by layout, which is what the demo charts' axes do.
 
+## 3D scenes (experimental proof)
+
+`gfx.scene3d` compiles a bounded immutable scene containing a perspective camera and up to 256
+built-in cubes. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the
+viewport size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`,
+`fov_y` in degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh = "cube"`,
+`position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and CSS `color`.
+
+This is a rendering proof, not the public Environment API. It currently supports one visible 3D
+viewport, 4× MSAA, simple directional lighting and app-driven rebuilds. The model-viewer demo uses
+`on_drag` for orbit and `on_wheel` for zoom. An `on_click` on the scene leaf ray-picks the
+nearest visible cube and reports its stable ID, world hit point, normal and distance. GLB assets,
+hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
+the validated camera,
+objects, transforms and colors so an agent can inspect the same scene declaration that renders.
+
 ## Layout
 
 Flexbox: `ui.col` stacks children vertically, `ui.row` lays them out horizontally. Children
@@ -189,7 +205,7 @@ states, padding and centering are all yours to declare.
 
 ### Constructors
 
-Eight, and no others. Anything else is `unknown tag`.
+Nine, and no others. Anything else is `unknown tag`.
 
 | constructor | children | required | notes |
 |---|---|---|---|
@@ -200,6 +216,7 @@ Eight, and no others. Anything else is `unknown tag`.
 | `ui.input({…})` | none | `value` · `id` · `on_input` | extras: `on_enter` · `on_esc` · `autofocus` |
 | `ui.text_area({…})` | none | `value` · `id` · `on_input` | same, multi-line |
 | `ui.frame({ visual = v, … })` | none | `visual` (a `gfx.frame`) | the frame's `width`/`height` are its layout claim |
+| `ui.scene3d({ scene = s, … })` | none | `scene` (a `gfx.scene3d`) | experimental; viewport size comes from layout |
 | `ui.overlay({ anchor, panel, … })` | **exactly two** | — | takes *only* `id` · `side` · `align` · `on_dismiss` — no box or paint props; style the panel child instead |
 
 `ui.state(id, init)` is not an element — it is per-viewer scratch, see [State](#state).
@@ -279,7 +296,9 @@ end
 - `on_click(e)` — `e.x, e.y` are where the click landed, from the element's top-left corner in
   its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
   whatever the camera is doing. Fired from the bridge, with no layout, they are `0, 0`. Inside a
-  `zoomable`, a press that travels past 5pt pans instead.
+  `zoomable`, a press that travels past 5pt pans instead. On a `ui.scene3d`, a visible cube hit also
+  supplies `e.object`, `e.distance`, `e.world_x/y/z` and `e.normal_x/y/z`; these fields are absent
+  when the ray hits no object.
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
   the element on `"leave"`). An element is hovered while the pointer is inside it, like
   `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
@@ -323,6 +342,10 @@ end
   like a broken drag rather than a coordinate-space mistake.
 - `on_drop(e)` — `e.phase` is `"over"` (while hovering) / `"release"`; `e.x, e.y` are normalized
   to the drop target (0–1), so `e.y < 0.5` means "above the midline". **Needs an `id`.**
+- `on_wheel(e)` — `e.dx, e.dy` are normalized logical wheel deltas (line wheels use 30 points per
+  step). The topmost eligible handler consumes the wheel before scroll/zoom ancestors. Use it for
+  app-owned cameras such as `ui.scene3d`; ordinary scrolling should continue to use `scroll_*`.
+  **Needs an `id`.**
 - `on_frame(e)` — an **experimental visual/prototyping loop**. `e.elapsed` is monotonic Runner
   time and `e.dt` is clamped to 0.1 seconds after stalls; only Runner's first frame is guaranteed
   zero. Presence keeps repainting, so omit it to stop that request. Custom screenshots currently

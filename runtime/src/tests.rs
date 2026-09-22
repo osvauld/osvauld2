@@ -1,5 +1,7 @@
 use super::*;
 use crate::frame::{Brush, Frame, Item, Path};
+use crate::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d};
+use glam::{Quat, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
 use vello::kurbo::PathEl;
@@ -90,6 +92,7 @@ impl App for Recorder {
                 .w(200.0)
                 .h(200.0)
                 .on_click_at(|at| format!("click {},{}", at.pos.0, at.pos.1))
+                .on_wheel("pad", |w| format!("wheel {},{}", w.delta.0, w.delta.1))
                 .on_drag("pad", |d| format!("drag {}", d.phase.as_str())),
         )
     }
@@ -127,6 +130,62 @@ fn a_press_that_barely_moves_is_still_a_click() {
     let fired = gesture(|h| h.drag((50.0, 50.0), (53.0, 52.0), 4));
     assert_eq!(fired, vec!["click 53,52".to_string()]);
     assert!(!fired.iter().any(|m| m.starts_with("drag")));
+}
+
+#[test]
+fn the_topmost_wheel_handler_consumes_the_event() {
+    let fired = gesture(|h| h.wheel(50.0, 50.0, 2.0, -12.0));
+    assert_eq!(fired, ["wheel 2,-12"]);
+}
+
+struct Picker {
+    scene: Arc<Scene3d>,
+    selected: Option<String>,
+}
+
+impl App for Picker {
+    type Msg = Option<String>;
+    fn view(&self) -> El<Self::Msg> {
+        crate::scene3d(self.scene.clone())
+            .id("scene")
+            .w(200.0)
+            .h(200.0)
+            .on_click_at(|at| at.object.map(|hit| hit.id.to_string()))
+    }
+    fn update(&mut self, msg: Self::Msg) {
+        self.selected = msg;
+    }
+}
+
+#[test]
+fn scene_click_picks_the_visible_object_through_normal_routing() {
+    let camera = Camera3d {
+        eye: Vec3::new(0.0, 0.0, 5.0),
+        target: Vec3::ZERO,
+        up: Vec3::Y,
+        fov_y_radians: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let object = Object3d {
+        id: "cube".into(),
+        mesh: BuiltinMesh::Cube,
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [1.0; 4],
+        surface: None,
+    };
+    let scene = Scene3d::new(camera, vec![object]).unwrap();
+    let mut headless = Headless::new(
+        Picker {
+            scene,
+            selected: None,
+        },
+        (200.0, 200.0),
+    );
+    headless.click_at(100.0, 100.0);
+    assert_eq!(headless.app().selected.as_deref(), Some("cube"));
 }
 
 /// A canvas whose one named shape slides 30pt right per frame, under a pointer that never moves.
