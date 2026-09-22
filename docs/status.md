@@ -124,8 +124,18 @@ so a claimant restarting could not name the node it had claimed. It is stored at
 `nodes/<node-did>/relationship` and is enough to reconnect from. It is the mirror of `admin`
 rather than the same shape — `admin` is what this account issued and appends, `peer` is what it
 holds and replaces — and it lives in `kunki` because a node federating with another node holds
-permits exactly as a desktop does. Still absent: any transport, any workspace on the node, any
-sync protocol, and a desktop UI claim handler.
+permits exactly as a desktop does. `vault::adopt_workspace` takes a workspace that originated
+in another account keeping its id and creation time, since publishing requires both ends to
+name one workspace; the id is validated against the shape `new_id` mints, because `ws/<id>/meta`
+with a slashed id is a legal key addressing something else under `ws/`. The claim now hands out
+a `token::Token` rather than a permit — the permit had no `exp` field and no id, so the
+credential a node issued was valid forever and could not be revoked. It is `owner` at node
+scope, delegable so a publisher can narrow it to a workspace for their own node, lives 30 days,
+and is reissued on reconnect, where expiry and the revoked set are both checked on the way
+through. `kunki::admin` records it with `Cause::Node`, which gives that variant its first real
+caller. Still absent: any transport, any workspace on the node, any sync protocol, and a
+desktop UI claim handler. `ClaimHello.permit_for_node` is still a permit; finishing that and
+deleting the permit machinery is tracked in the backlog.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

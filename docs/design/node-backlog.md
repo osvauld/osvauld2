@@ -82,6 +82,23 @@ The namespace exists and is pinned by a test; nothing writes it. When it does: a
 user-authored and node-stored, flows user → node, and is **never read as authority**. The DID
 is the identity; a display name is a label.
 
+### Finishing the permit/token unification
+
+**Started 2026-09-22.** The node's grant to a claimant is now a real `token::Token`
+(`CLAIM_ROLE` = `owner` at `Scope::Node`, delegable, `CLAIM_TTL` of 30 days, reissued on
+reconnect). Two halves remain:
+
+- **`ClaimHello.permit_for_node`** is still a `PermitClaim`. It becomes a desktop-rooted
+  token — `verify_chain` already takes the expected root as a parameter, so this needs no new
+  verification path. Its payload is really a key attestation, so `Claims` gains
+  `binds: Option<KeyBinding>`, ignored by `verify_chain` and checked by the acceptor.
+- **Then delete** `PermitClaim`, `issue_permit`, `verify_permit`, `PERMIT_DOMAIN`, and rename
+  `CourierError::BadPermit`, which no longer describes anything.
+
+Superseding also needs a decision: a reissue is recorded as a new `Issue`, so the log grows by
+one per reconnect and the replaced token stays listed as though live. Under-reporting what is
+live would be worse, so it stands until there is a reason to prune.
+
 ### Raised by the osvauld1 reading (2026-09-22)
 
 [`osvauld1-prior-art.md`](osvauld1-prior-art.md) §8 holds these with their reasoning. In

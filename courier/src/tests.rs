@@ -15,6 +15,11 @@ fn wire<T: Serialize + DeserializeOwned>(msg: T) -> T {
     bincode::deserialize(&bytes).unwrap()
 }
 
+/// Nothing revoked. Storage lives in `kunki`, so courier is always handed this set.
+fn none() -> HashSet<[u8; 32]> {
+    HashSet::new()
+}
+
 #[test]
 fn bootstrap_claim_authenticates_and_reconnects() {
     let (node, desktop) = ids();
@@ -26,14 +31,14 @@ fn bootstrap_claim_authenticates_and_reconnects() {
     assert_eq!(admins.len(), 1);
     assert_eq!(admins[0].did, desktop.did());
 
-    let record = desktop_finish_claim(&ticket, wire(welcome), &desktop).unwrap();
+    let record = desktop_finish_claim(&ticket, wire(welcome), &desktop, 4).unwrap();
     assert_eq!(record.node_did, node.did());
     assert_eq!(record.node_id, ticket.node_id);
 
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let reconnect = desktop_start_reconnect(&record, &desktop, wire(challenge)).unwrap();
-    assert!(node_accept_reconnect(wire(reconnect), &node, &admins, &mut challenges).is_ok());
+    assert!(node_accept_reconnect(wire(reconnect), &node, &admins, &mut challenges, 5, &none()).is_ok());
 }
 
 #[test]
@@ -85,14 +90,14 @@ fn reconnect_unknown_admin_is_rejected() {
     let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
     let mut admins = Vec::new();
     let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
-    let record = desktop_finish_claim(&ticket, welcome, &desktop).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
     admins.clear();
 
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
     assert_eq!(
-        node_accept_reconnect(reconnect, &node, &admins, &mut challenges).unwrap_err(),
+        node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &none()).unwrap_err(),
         CourierError::UnknownAdmin
     );
 }
@@ -104,14 +109,14 @@ fn reconnect_requires_desktop_signature() {
     let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
     let mut admins = Vec::new();
     let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
-    let record = desktop_finish_claim(&ticket, welcome, &desktop).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let mut reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
     reconnect.signature = enc([0u8; 64]);
 
     assert_eq!(
-        node_accept_reconnect(reconnect, &node, &admins, &mut challenges).unwrap_err(),
+        node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &none()).unwrap_err(),
         CourierError::BadSignature
     );
 }
@@ -123,14 +128,14 @@ fn reconnect_replay_is_rejected() {
     let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
     let mut admins = Vec::new();
     let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
-    let record = desktop_finish_claim(&ticket, welcome, &desktop).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
     let mut challenges = Vec::new();
     let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
     let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
 
-    node_accept_reconnect(reconnect.clone(), &node, &admins, &mut challenges).unwrap();
+    node_accept_reconnect(reconnect.clone(), &node, &admins, &mut challenges, 5, &none()).unwrap();
     assert_eq!(
-        node_accept_reconnect(reconnect, &node, &admins, &mut challenges).unwrap_err(),
+        node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &none()).unwrap_err(),
         CourierError::StaleChallenge
     );
 }
@@ -142,13 +147,103 @@ fn welcome_from_wrong_node_is_rejected() {
     let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
     let welcome = ClaimWelcome {
         node_did: other_node.did().to_string(),
-        permit_for_desktop: issue_permit(&other_node, desktop.did(), "node.admin", 2, None, None)
-            .unwrap(),
+        token: issue_claim_token(&other_node, desktop.did(), 2).unwrap(),
     };
 
     assert_eq!(
-        desktop_finish_claim(&ticket, welcome, &desktop).unwrap_err(),
+        desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap_err(),
         CourierError::NodeMismatch
+    );
+}
+
+/// Claim, then reconnect at `at`, returning what the node decided.
+fn claim_then_reconnect(at: u64, revoked: &HashSet<[u8; 32]>) -> Result<Token> {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
+    let mut admins = Vec::new();
+    let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
+
+    let mut challenges = Vec::new();
+    let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
+    let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
+    node_accept_reconnect(reconnect, &node, &admins, &mut challenges, at, revoked)
+}
+
+#[test]
+fn the_relationship_token_expires_where_the_permit_it_replaced_never_did() {
+    // Issued at 3, so anywhere inside the window is fine.
+    assert!(claim_then_reconnect(3 + CLAIM_TTL - 1, &none()).is_ok());
+
+    // Past it, the credential is simply no longer one. `PermitClaim` had no `exp` field, so
+    // this case could not be expressed at all before, let alone refused.
+    assert_eq!(
+        claim_then_reconnect(3 + CLAIM_TTL + 1, &none()).unwrap_err(),
+        CourierError::Expired
+    );
+}
+
+#[test]
+fn a_revoked_relationship_token_cannot_reconnect() {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
+    let mut admins = Vec::new();
+    let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
+
+    // Revocation names the grant by id — which a permit did not have, so taking one back was
+    // impossible rather than merely unimplemented.
+    let revoked = HashSet::from([record.token.id()]);
+
+    let mut challenges = Vec::new();
+    let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
+    let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
+    assert_eq!(
+        node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &revoked).unwrap_err(),
+        CourierError::Revoked
+    );
+}
+
+#[test]
+fn reconnecting_replaces_the_token_rather_than_extending_it() {
+    let (node, desktop) = ids();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
+    let mut admins = Vec::new();
+    let welcome = node_accept_claim(hello, &node, &mut admins, 3).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
+
+    let mut challenges = Vec::new();
+    let challenge = node_issue_reconnect_challenge(&node, &mut challenges);
+    let reconnect = desktop_start_reconnect(&record, &desktop, challenge).unwrap();
+    let fresh =
+        node_accept_reconnect(reconnect, &node, &admins, &mut challenges, 5, &none()).unwrap();
+
+    // A distinct grant with its own id, so revoking the old one does not reach the new one.
+    assert_ne!(fresh, record.token);
+    assert_ne!(fresh.id(), record.token.id());
+
+    let renewed = desktop_accept_reissue(&record, fresh, &desktop, 5).unwrap();
+    assert_eq!(renewed.node_did, record.node_did, "same relationship");
+    // And it outlives the one it replaced, which is the point of reissuing at all.
+    assert!(renewed.token.claims().unwrap().exp > record.token.claims().unwrap().exp);
+}
+
+#[test]
+fn a_reissue_meant_for_someone_else_is_not_kept() {
+    let (node, desktop) = ids();
+    let (stranger, _) = identity::generate();
+    let ticket = issue_connection_ticket(&node, 1, "kunki").unwrap();
+    let hello = desktop_start_claim(ticket.clone(), &desktop, 2).unwrap();
+    let welcome = node_accept_claim(hello, &node, &mut Vec::new(), 3).unwrap();
+    let record = desktop_finish_claim(&ticket, welcome, &desktop, 4).unwrap();
+
+    let for_stranger = issue_claim_token(&node, stranger.did(), 5).unwrap();
+    assert_eq!(
+        desktop_accept_reissue(&record, for_stranger, &desktop, 5).unwrap_err(),
+        CourierError::WrongHolder
     );
 }
 

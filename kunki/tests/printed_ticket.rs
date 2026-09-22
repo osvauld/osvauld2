@@ -57,7 +57,8 @@ fn the_string_kunki_prints_is_one_a_desktop_can_claim_with() {
         courier::desktop_finish_claim(
             &ConnectionTicket::from_text(&printed).unwrap(),
             welcome,
-            &desktop
+            &desktop,
+            now_secs()
         )
         .is_ok()
     );

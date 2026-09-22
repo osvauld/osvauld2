@@ -27,7 +27,7 @@ fn try_claim(node_vault: &Vault, desktop: &Identity) -> Result<DesktopNodeRecord
         .unwrap()?;
     let hello = courier::desktop_start_claim(ticket.clone(), desktop, NOW)?;
     let welcome = Admin::new(node_vault.clone()).accept_claim(hello, NOW)?;
-    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop)?)
+    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop, NOW)?)
 }
 
 fn claim(node_vault: &Vault, desktop: &Identity) -> DesktopNodeRecord {
@@ -61,13 +61,13 @@ fn a_claimant_still_knows_its_node_after_a_restart() {
     let hello = courier::desktop_start_reconnect(&kept, &alice, challenge).unwrap();
     assert!(
         Admin::new(node_vault.clone())
-            .accept_reconnect(hello, &mut challenges)
+            .accept_reconnect(hello, &mut challenges, NOW)
             .is_ok()
     );
 }
 
 #[test]
-fn one_relationship_per_node_however_its_permit_is_replaced() {
+fn one_relationship_per_node_however_often_its_token_is_reissued() {
     let (_tmp, desktop) = account();
     let peer = Peer::new(desktop);
     let (_a_tmp, node_a) = account();
@@ -79,18 +79,25 @@ fn one_relationship_per_node_however_its_permit_is_replaced() {
     peer.record_node(&claim(&node_b, &alice)).unwrap();
     assert_eq!(peer.nodes().unwrap().len(), 2, "two nodes, two records");
 
-    // A node is claimed once, so a replacement permit never arrives by claiming again.
+    // A node is claimed once, so a replacement token never arrives by claiming again.
     assert!(matches!(
         try_claim(&node_a, &alice),
         Err(NodeError::Courier(courier::CourierError::AlreadyAdmined))
     ));
 
-    // It arrives by reissue, which this stands in for. Unlike an `admin` issue, which is
-    // appended, it replaces: there is only ever one current permit per node.
-    let again = DesktopNodeRecord {
-        permit_for_desktop: "reissued".to_string(),
-        ..first.clone()
-    };
+    // It arrives by reconnecting, which reissues. Unlike an `admin` issue, which is appended,
+    // this replaces: there is only ever one current token per node.
+    let mut challenges = Vec::new();
+    let challenge = node_a
+        .with_signer(|node| courier::node_issue_reconnect_challenge(node, &mut challenges))
+        .unwrap();
+    let hello = courier::desktop_start_reconnect(&first, &alice, challenge).unwrap();
+    let reissued = Admin::new(node_a.clone())
+        .accept_reconnect(hello, &mut challenges, NOW)
+        .unwrap();
+    assert_ne!(reissued, first.token, "a fresh grant, not the one presented");
+
+    let again = courier::desktop_accept_reissue(&first, reissued, &alice, NOW).unwrap();
     peer.record_node(&again).unwrap();
 
     assert_eq!(peer.nodes().unwrap().len(), 2, "still two");

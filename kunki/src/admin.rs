@@ -136,21 +136,35 @@ impl Admin {
             self.vault
                 .put_entry(&relationship_key(&admin.did), &serde_json::to_vec(admin)?)?;
         }
+        // The node's own decision, with nothing above it — which is what `Cause::Node` is for.
+        // Recorded here and not inside courier, because courier never touches storage.
+        self.record(&welcome.token, Cause::Node, now)?;
         Ok(welcome)
     }
 
-    /// Reconnect only reads the list. Challenges stay in memory on purpose — a restart should
-    /// invalidate every nonce it handed out.
+    /// Reconnect reads the admin list and the revoked set, and hands back a fresh token.
+    /// Challenges stay in memory on purpose — a restart should invalidate every nonce it
+    /// handed out. Both sets are loaded before signing, because `with_signer` holds the
+    /// account for its closure.
     pub fn accept_reconnect(
         &self,
         hello: ReconnectHello,
         challenges: &mut Vec<String>,
-    ) -> Result<(), NodeError> {
+        now: u64,
+    ) -> Result<Token, NodeError> {
         let admins = self.admins()?;
-        self.vault
-            .with_signer(|node| courier::node_accept_reconnect(hello, node, &admins, challenges))
+        let revoked = self.revoked()?;
+        let token = self
+            .vault
+            .with_signer(|node| {
+                courier::node_accept_reconnect(hello, node, &admins, challenges, now, &revoked)
+            })
             .ok_or(NodeError::Locked)??;
-        Ok(())
+        // A reissue is an issuance, so it joins the log. That makes the log grow by one per
+        // reconnect and leaves the superseded token listed as well; superseding is in the
+        // backlog, and under-reporting what is live would be the worse of the two.
+        self.record(&token, Cause::Node, now)?;
+        Ok(token)
     }
 
     /// Unknown ids are accepted: delegations are minted between holders and the node never

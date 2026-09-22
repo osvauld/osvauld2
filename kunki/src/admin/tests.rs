@@ -62,7 +62,7 @@ fn claim(admin: &Admin, vault: &Vault, desktop: &Identity) -> Result<DesktopNode
         .unwrap()?;
     let hello = courier::desktop_start_claim(ticket.clone(), desktop, NOW)?;
     let welcome = admin.accept_claim(hello, NOW)?;
-    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop)?)
+    Ok(courier::desktop_finish_claim(&ticket, welcome, desktop, NOW)?)
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn a_reconnect_after_a_restart_is_answered_from_the_store() {
         .with_signer(|node| courier::node_issue_reconnect_challenge(node, &mut challenges))
         .unwrap();
     let hello = courier::desktop_start_reconnect(&record, &alice, challenge).unwrap();
-    assert!(admin.accept_reconnect(hello, &mut challenges).is_ok());
+    assert!(admin.accept_reconnect(hello, &mut challenges, NOW).is_ok());
 
     // A stranger is refused by the same list that admitted alice.
     let mut challenges = Vec::new();
@@ -112,9 +112,40 @@ fn a_reconnect_after_a_restart_is_answered_from_the_store() {
     let stranger = holder();
     let hello = courier::desktop_start_reconnect(&record, &stranger, challenge).unwrap();
     assert!(matches!(
-        admin.accept_reconnect(hello, &mut challenges),
+        admin.accept_reconnect(hello, &mut challenges, NOW),
         Err(NodeError::Courier(courier::CourierError::UnknownAdmin))
     ));
+}
+
+#[test]
+fn revoking_a_claimant_stops_it_reconnecting() {
+    let (_tmp, vault) = node_vault();
+    let admin = Admin::new(vault.clone());
+    let alice = holder();
+    let record = claim(&admin, &vault, &alice).unwrap();
+
+    let reconnect = |record: &DesktopNodeRecord| {
+        let mut challenges = Vec::new();
+        let challenge = vault
+            .with_signer(|node| courier::node_issue_reconnect_challenge(node, &mut challenges))
+            .unwrap();
+        let hello = courier::desktop_start_reconnect(record, &alice, challenge).unwrap();
+        admin.accept_reconnect(hello, &mut challenges, NOW)
+    };
+
+    assert!(reconnect(&record).is_ok(), "an admin in good standing");
+
+    // The node takes the grant back. Nothing about this was possible while the credential was
+    // a permit: it had no id to name and no check that would have consulted one.
+    admin.revoke(&record.token.id(), NOW).unwrap();
+    assert!(matches!(
+        reconnect(&record),
+        Err(NodeError::Courier(courier::CourierError::Revoked))
+    ));
+
+    // Still an admin by relationship — revoking a grant is not forgetting the person, and the
+    // fresh token from the successful reconnect above is a separate grant that still stands.
+    assert_eq!(admin.admins().unwrap().len(), 1);
 }
 
 #[test]
@@ -122,10 +153,14 @@ fn a_relationship_is_not_read_as_a_token() {
     let (_tmp, vault) = node_vault();
     let admin = Admin::new(vault.clone());
     let alice = holder();
-    claim(&admin, &vault, &alice).unwrap();
+    let record = claim(&admin, &vault, &alice).unwrap();
 
-    // Both live under `users/<did>/`; only one of them is a grant.
-    assert_eq!(admin.issued_to(alice.did()).unwrap(), vec![]);
+    // Both live under `users/<did>/`, and a claim now writes both: the grant it issued and
+    // the relationship that admitted them. Exactly one of them is a token.
+    let issued = admin.issued_to(alice.did()).unwrap();
+    assert_eq!(issued.len(), 1, "the relationship is not a second grant");
+    assert_eq!(issued[0].token, record.token, "the token the claimant kept");
+    assert_eq!(issued[0].cause, Cause::Node, "the node's own decision");
     assert_eq!(admin.admins().unwrap().len(), 1);
 }
 
