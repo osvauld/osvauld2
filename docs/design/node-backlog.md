@@ -82,6 +82,17 @@ The namespace exists and is pinned by a test; nothing writes it. When it does: a
 user-authored and node-stored, flows user → node, and is **never read as authority**. The DID
 is the identity; a display name is a label.
 
+### Raised by the osvauld1 reading (2026-09-22)
+
+[`osvauld1-prior-art.md`](osvauld1-prior-art.md) §8 holds these with their reasoning. In
+short: **multi-device** (the claim binds one device key and refuses a second claim, so "another
+machine belonging to an existing admin" is currently inexpressible), **the identity record**
+(`users/<did>/meta` should probably be v1's contacts row — name and devices — and the desktop
+needs the same record for people it shares no node with), **re-publish disagreement** (nothing
+defines what happens when a header the node holds contradicts one being announced), and
+**layer granularity** (v1 syncs `(page_id, layer_name)`; our `meta`/`src`/`doc/<name>` keys are
+nearly the same decomposition, worth confirming before the sync slice rather than during it).
+
 ---
 
 ## Smaller things surfaced in passing
