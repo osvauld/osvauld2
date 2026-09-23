@@ -56,7 +56,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - **`lua_tree`**: full-moon/Luau parse → 22-kind schema → printer; round-trip and
   strong-spike suites (printed source runs and produces an identical element tree); the
   every-table-constructor-on-its-own-line printer rule (two rules, pinned by test)
-- **kanban** (`shell2/src/kanban/`, 6 files): the reference app — typed drags (card/col
+- **kanban** (`demo_apps/kanban/`, moved there 2026-09-20 from `shell2/src/kanban/`): the reference app — typed drags (card/col
   sharing one `on_drop`), cross-column moves through the doc, resizable columns with
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
@@ -88,13 +88,29 @@ does, with the admin store on `Vault::store`. Also built: `courier::policy` — 
 capabilities as a closed Rust set, the `(scope level, role) -> capabilities` table pinned cell
 by cell, and `authorize` joining the chain check to scope coverage and capability. A role read
 one level down is a different role, so narrowing a token to app scope drops platform
-capabilities by design. Next slices: (1) `role.assign` — node issuance of a role token, with a
-rank check so an assigner cannot mint above itself; (2) the durable node admin store. Next slices: (1) how a
-maintainer hands out an app role — delegation cannot change a role, so role assignment needs
-node issuance under `role.assign`; (2) a durable node admin store holding
-tokens, lineage, and revocations — `admins` is an in-memory `Vec` today and is lost on restart.
-QUIC/Iroh wiring comes after. No desktop UI claim handler, durable admin store, QUIC protocol,
-workspace publish, or sync exists yet.
+capabilities by design. **Gate 1 (the node remembers), in progress:** `identity::Signer` is the outside view of an
+identity — DID, signature, the two public keys — so `courier` takes `&(impl Signer + ?Sized)`
+and never holds a private key. `vault` gained sealed `entry/` records (opaque, caller-keyed,
+reserved namespace so no name can address the keystore) and `with_signer`, which lends a
+signer for a closure and yields nothing when locked. `kunki` now keeps its identity as a vault
+account instead of its own `identity.bin`, created on first boot and unlocked from
+`OSVAULD_KUNKI_PASSPHRASE`; a second account in the node directory stops the boot rather than
+guessing which is the node. `kunki::admin` is the node's own record over those entries: an
+issue keyed by token id with an empty `users/<did>/tokens/<id>` marker indexing it, and a
+`revoked/` set read whole into the chain check — everything at top level being *this* node's
+authority, with `nodes/<node-did>/` reserved for the mirror image a federated peer or a desktop
+needs. Each issue carries a `Cause` — the node's own decision, or
+`Under(parent id)` — which is the lineage a flattened node-signed token no longer carries in
+`prf`, and so the only thing a cascade can follow. Revocation accepts ids the node never
+issued, because delegations are minted between holders.
+
+**Priority moved to sync, 2026-09-21.** Gate 1 stops here: revocation cascade and `role.assign`
+are deferred with their reasoning intact in
+[`design/node-backlog.md`](design/node-backlog.md), which is the running note for everything
+set aside as we go. The node now remembers enough to be worth syncing, and the rest of the
+authorization surface is worth building against a working wire rather than ahead of one. Still
+absent: any transport, any workspace on the node, any sync protocol, and a desktop UI claim
+handler.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
@@ -276,8 +292,13 @@ Roughly in dependency order:
      Runner instead answers bounded, fresh-frame element/subtree and screen hit-stack queries with
      explicit content/screen geometry, clips, computed layout, scroll/thumb, and camera state.
      Pointer sequences and wheel modifiers route through normal eligibility for zoom/pan/drag tests;
-     optional screenshot annotations share the snapshot. This is unbuilt; see
+     optional screenshot annotations share the snapshot. See
      [`design/app-discovery-and-invocation.md` §7](design/app-discovery-and-invocation.md).
+     *Revised 2026-09-20: partly built.* The Runner-owned deferred seam (`App::take_driver`),
+     `Rects` (reachable elements with their **visible** rects — the rect the hit-test actually
+     tests), pointer/drag synthesis through the normal path, and `Frame`/`Advance` on the virtual
+     clock all landed. Still unbuilt: `InspectElement`/`InspectSubtree`, `Wheel` and modifiers,
+     query bounds, and the *ordered* hit stack with clip rejections — §7 carries the full split.
    - **ports as-is**: the wire transport (`read_msg`/`write_msg`, 4-byte length prefix;
    `Response::{ok,err}`) and the MCP shim's stdio↔UDS *shape*
    - **is replaced**: bridge becomes pure transport — a `UnixListener` thread on
@@ -295,17 +316,45 @@ Roughly in dependency order:
      element id, `ReadConsole` (LuaApp's errors become a bounded ring buffer, not
      `eprintln`); and `WriteFile` against an open tab reloads its VM keeping the doc —
      the free half of hot reload
+   - **landed 2026-09-20, the driver family**: `shell2 --offscreen WxH` runs the whole
+     shell with no window — real layout, real pixels (`capture_scene` never needed a
+     surface), and a virtual clock that moves only when a request asks. `Frame(n)` /
+     `Advance(secs)` drive time, `Rects` says where a pointer must land, and
+     `PointerMove`/`PointerPress`/`PointerRelease`/`Drag` go through the same methods a
+     window calls — pinned by a test asserting one gesture is event-for-event identical
+     across both drivers. `OSVAULD_OFFSCREEN=WxH` makes every existing `scripts/` Session
+     windowless untouched. **Windowless, not headless**: `EventLoop::build()` still needs a
+     `DISPLAY`. See [`design/six-apps.md` §7](design/six-apps.md).
    - **needs small runtime/app_host support**: `El::to_json()` + find-by-id for dump/click;
      the console ring buffer
-2. **W4 DX**: types gate (generated `.d.luau` stubs from the one binding registry +
-   `luau-lsp analyze` before any swap), and per-block `.lua` edits (needs the splitter port).
+2. **W4 DX**: types gate, and per-block `.lua` edits (needs the splitter port).
+   An editor-shaped gate was built and removed on 2026-09-21 — `lua-language-server` stubs
+   generated from the sandbox. Two reasons, and the second is the one that matters. It never
+   ran: `workspace.library` resolves relative to the folder being checked, so the per-app runner
+   loaded no definitions at all and was green because `diagnostics.globals` silenced the names.
+   And the author is an agent writing over the bridge, which opens no editor and reads no
+   `.luarc.json` — for it, the type system is the error the runtime hands back. A gate here
+   should be that, not stubs.
    *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
-3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
-   `reload`), but nothing writes the source doc after upload — the file watcher and the
-   bridge's `WriteFile` are the missing triggers
-4. **nid channel** (`design/nid-channel.md`) — the provenance channel: a click resolves
-   back to the source construct that drew it. Designed, costed, **prerequisites landed;
-   the channel itself is unbuilt**:
+3. **Agent source editing — landed 2026-09-22:** `ReadFileVersioned` returns source plus a
+   SHA-256 content revision; `EditFile` applies bounded, revision-checked exact replacements
+   directly to the existing `LoroText`, without disk working files or whole-file normalization.
+   Missing/ambiguous matches, stale revisions and overlapping batches reject before mutation;
+   Unicode offsets, snapshots and wire round trips are pinned. Open apps persist then stage and
+   report activation separately; closed apps report that no VM is running. The Python client and
+   `smoke_bridge.py` prove live editing, stale rejection, failed-reload survival, repair and
+   persistence across reopen. Explicit persistence-failure injection remains unbuilt. See
+   [agent-source-editing.md](design/agent-source-editing.md). Semantic Loro source storage and
+   structural node operations are deferred; `lua_tree` remains isolated groundwork.
+   **Hot-reload correction:** `WriteFile` already writes source after upload and triggers the
+   existing staged reload for open apps. The earlier claim that this trigger was missing was
+   stale. Persistence is not proof of successful activation; invalid source can remain durable
+   while the old VM runs. A file watcher remains unbuilt and is not required for bridge editing.
+4. **nid channel — deferred 2026-09-22** (`design/nid-channel.md`) — the provenance channel:
+   a click resolves back to the source construct that drew it. Nice to have, not a prerequisite
+   for agent text edits. Source nids are distinct from existing runtime/UI ids, which stay.
+   Designed, costed, **prerequisites landed; the channel itself is unbuilt**.
+   The earlier implementation outline is retained below for later reconsideration:
 
    - **built**: the tree carries ids (`lua_tree` mints them, a printed `_nid` round-trips
      back as identity, not a field); `print_bare` (id-free — what apps run today) with the

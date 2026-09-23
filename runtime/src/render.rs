@@ -1,7 +1,10 @@
-//! Render — the per-window host runtime. Owns the winit window, the wgpu device/surface, the vello
-//! renderer, and the text engine; drives one frame (reset scene → active screen builds it →
-//! rasterize offscreen → blit to surface → present). Knows *how* to paint, not *what* — that's the
-//! `Screen`.
+//! Render — the per-window host runtime. Owns the wgpu device, the vello renderer, and (when there
+//! is a window) its surface; drives one frame (reset scene → active screen builds it → rasterize
+//! offscreen → blit to surface → present). Knows *how* to paint, not *what* — that's the `Screen`.
+//!
+//! The window is optional. Rasterizing was never the part that needed one — only presenting is —
+//! so an offscreen `Render` runs the same device, renderer and target, and differs in exactly one
+//! observable way: [`Render::present`] returns false because there is nowhere to present to.
 
 use std::sync::Arc;
 
@@ -20,7 +23,6 @@ const SUPERSAMPLE: u32 = 1;
 const SCENE_SAMPLES: u32 = 4;
 const MAX_CAPTURE_PIXELS: u64 = 16 * 1024 * 1024;
 
-/// Per-window GPU state, created once the event loop is `resumed` (a surface needs a live window).
 /// PNG read back from the live Vello target. Dimensions are physical pixels.
 #[derive(Clone)]
 pub struct CapturedImage {
@@ -29,9 +31,17 @@ pub struct CapturedImage {
     pub height: u32,
 }
 
-pub struct Render {
+/// A window and the surface drawn to it. One `Option` rather than two because the surface borrows
+/// its window for `'static`: neither can be present without the other.
+struct Presenter {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+}
+
+pub struct Render {
+    /// `None` offscreen. The device, renderer and target are still real there — what is missing is
+    /// only somewhere to put the finished frame.
+    presenter: Option<Presenter>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -71,6 +81,53 @@ fn create_targets(
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
     (target, view)
+}
+
+/// The adapter and device, with or without a surface to be compatible with. Shared by both
+/// constructors so the offscreen path cannot quietly drift into a different feature set than the
+/// windowed one — the whole value of offscreen mode is that it is the same renderer.
+async fn open_device(
+    instance: &wgpu::Instance,
+    compatible: Option<&wgpu::Surface<'static>>,
+) -> (wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: compatible,
+            force_fallback_adapter: false,
+        })
+        .await
+        .expect("request adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("shell2 device"),
+            // vello's optional features, only if present — NOT raw `adapter.features()`, which
+            // sweeps in experimental features that need a separate opt-in and fail to enable.
+            required_features: adapter.features()
+                & (wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE),
+            ..Default::default()
+        })
+        .await
+        .expect("request device");
+    (adapter, device, queue)
+}
+
+fn surface_config(
+    format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    width: u32,
+    height: u32,
+) -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: width.max(1),
+        height: height.max(1),
+        present_mode: wgpu::PresentMode::AutoVsync,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    }
 }
 
 struct SceneTargets {
@@ -173,25 +230,7 @@ impl Render {
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("request adapter");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("shell2 device"),
-                // vello's optional features, only if present — NOT raw `adapter.features()`, which
-                // sweeps in experimental features that need a separate opt-in and fail to enable.
-                required_features: adapter.features()
-                    & (wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE),
-                ..Default::default()
-            })
-            .await
-            .expect("request device");
+        let (adapter, device, queue) = open_device(&instance, Some(&surface)).await;
 
         let caps = surface.get_capabilities(&adapter);
         // 8-bit non-sRGB blit target so vello's already-gamma-encoded pixels pass through unaltered.
@@ -206,18 +245,52 @@ impl Render {
                 )
             })
             .expect("surface supports Rgba8Unorm or Bgra8Unorm");
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
+        let config = surface_config(format, caps.alpha_modes[0], size.width, size.height);
         surface.configure(&device, &config);
 
+        let scale = window.scale_factor();
+        eprintln!(
+            "shell2: scale_factor = {scale}, surface = {}x{}",
+            config.width, config.height
+        );
+        Self::assemble(
+            Some(Presenter { window, surface }),
+            device,
+            queue,
+            config,
+            scale,
+        )
+    }
+
+    /// The same device and renderer with nowhere to present. `width` and `height` are physical
+    /// pixels, which offscreen are also logical points because the scale is 1.0 — so the numbers a
+    /// driver passes to a pointer method are the ones an element's rect is measured in. Use
+    /// [`Self::set_scale`] to test a hidpi layout.
+    ///
+    /// Frames still rasterize, so [`Self::capture_scene`] reads back real pixels.
+    pub async fn offscreen(width: u32, height: u32) -> Self {
+        let instance = wgpu::Instance::default();
+        let (_, device, queue) = open_device(&instance, None).await;
+        // With no surface the format is chosen rather than negotiated. Rgba8Unorm is what the vello
+        // target already is, and nothing blits offscreen, so there is nothing left to disagree.
+        let config = surface_config(
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::CompositeAlphaMode::Auto,
+            width,
+            height,
+        );
+        Self::assemble(None, device, queue, config, 1.0)
+    }
+
+    /// Everything downstream of the device: the renderer, the vello target, and the blit pipeline.
+    /// Identical either way — a frame is built the same with and without a window.
+    fn assemble(
+        presenter: Option<Presenter>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        scale: f64,
+    ) -> Self {
         let renderer = Renderer::new(
             &device,
             RendererOptions {
@@ -226,7 +299,6 @@ impl Render {
             },
         )
         .expect("create vello renderer");
-
         let target_width = config.width * SUPERSAMPLE;
         let target_height = config.height * SUPERSAMPLE;
         let (target, target_view) = create_targets(target_width, target_height, &device);
@@ -237,16 +309,9 @@ impl Render {
                 .blend_state(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
                 .build();
         // Nearest is exact at 1:1 (crisp). If SUPERSAMPLE > 1, switch to Linear to downsample.
-        let blitter = wgpu::util::TextureBlitter::new(&device, format);
-        let scale = window.scale_factor();
-        eprintln!(
-            "shell2: scale_factor = {scale}, surface = {}x{}",
-            config.width, config.height
-        );
-
+        let blitter = wgpu::util::TextureBlitter::new(&device, config.format);
         Self {
-            window,
-            surface,
+            presenter,
             device,
             queue,
             config,
@@ -262,7 +327,9 @@ impl Render {
     }
 
     pub fn set_ime_allowed(&self, allowed: bool) {
-        self.window.set_ime_allowed(allowed);
+        if let Some(p) = &self.presenter {
+            p.window.set_ime_allowed(allowed);
+        }
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -271,7 +338,9 @@ impl Render {
         }
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(p) = &self.presenter {
+            p.surface.configure(&self.device, &self.config);
+        }
         let (target, target_view) = create_targets(
             size.width * SUPERSAMPLE,
             size.height * SUPERSAMPLE,
@@ -295,13 +364,19 @@ impl Render {
         self.scale
     }
 
-    /// Ask winit for the next frame — call after rendering to keep the loop alive.
+    /// Ask winit for the next frame — call after rendering to keep the loop alive. Offscreen this
+    /// is deliberately nothing: no window means no `RedrawRequested`, so frames happen when the
+    /// driver says and an animating app cannot free-run.
     pub fn request_redraw(&self) {
-        self.window.request_redraw();
+        if let Some(p) = &self.presenter {
+            p.window.request_redraw();
+        }
     }
 
     pub fn set_cursor(&self, icon: winit::window::CursorIcon) {
-        self.window.set_cursor(icon);
+        if let Some(p) = &self.presenter {
+            p.window.set_cursor(icon);
+        }
     }
 
     pub fn viewport(&self) -> (f32, f32) {
@@ -326,11 +401,20 @@ impl Render {
     ) -> bool {
         // Acquire before submitting Vello work. Some backends can stall acquiring a surface after
         // offscreen work is already queued; this was the original and reliable frame ordering.
-        let frame = match self.surface.get_current_texture() {
-            Success(f) | Suboptimal(f) => f,
-            _ => {
-                self.surface.configure(&self.device, &self.config);
+        // Scoped so the surface borrow ends before the renderer is taken mutably below.
+        let frame = {
+            // Offscreen this is the whole difference. Reported as a failed present rather than
+            // hidden, because the caller's fallback for one — capture from the scene instead of
+            // from the live target — is exactly what an offscreen screenshot needs.
+            let Some(presenter) = &self.presenter else {
                 return false;
+            };
+            match presenter.surface.get_current_texture() {
+                Success(f) | Suboptimal(f) => f,
+                _ => {
+                    presenter.surface.configure(&self.device, &self.config);
+                    return false;
+                }
             }
         };
         let view = frame
@@ -390,6 +474,12 @@ impl Render {
     /// are ordered, so a copy submitted after [`Self::present`] observes that frame even if
     /// its GPU work was still in flight.
     pub fn capture(&self) -> Result<CapturedImage, String> {
+        if self.presenter.is_none() {
+            // Nothing is ever presented into the live target offscreen, so reading it back would
+            // hand out an uninitialized texture. `capture_scene` is the offscreen path, and a
+            // false `present` already routes callers there.
+            return Err("no live frame offscreen: capture the scene instead".into());
+        }
         self.read_texture(
             &self.target,
             self.config.width * SUPERSAMPLE,

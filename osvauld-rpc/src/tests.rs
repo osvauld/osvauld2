@@ -1,7 +1,8 @@
 use std::io::Cursor;
 
 use crate::{
-    AccountSummary, ItemSummary, Request, Response, WorkspaceSummary, read_msg, write_msg,
+    AccountSummary, ItemSummary, Request, Response, SourceTextEdit, WorkspaceSummary, read_msg,
+    write_msg,
 };
 
 fn roundtrip<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(value: &T) -> T {
@@ -49,6 +50,19 @@ fn every_request_roundtrips() {
         Request::ReadFile {
             item_id: "i-9".into(),
             path: "main.lua".into(),
+        },
+        Request::ReadFileVersioned {
+            item_id: "i-9".into(),
+            path: "main.lua".into(),
+        },
+        Request::EditFile {
+            item_id: "i-9".into(),
+            path: "main.lua".into(),
+            expected_revision: "abc123".into(),
+            edits: vec![SourceTextEdit {
+                old_text: "13".into(),
+                new_text: "18".into(),
+            }],
         },
         Request::WriteFile {
             item_id: "i-9".into(),

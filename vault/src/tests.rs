@@ -272,3 +272,92 @@ fn item_blob_ops_require_an_unlocked_account() {
         Err(VaultError::Locked)
     ));
 }
+
+#[test]
+fn entries_round_trip_and_list_by_prefix() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+
+    vault.put_entry("token/a", b"one").unwrap();
+    vault.put_entry("token/b", b"two").unwrap();
+    vault.put_entry("revoked/a", b"gone").unwrap();
+
+    assert_eq!(vault.get_entry("token/a").unwrap().unwrap(), b"one");
+    assert_eq!(vault.get_entry("nothing").unwrap(), None);
+    assert_eq!(
+        vault.list_entries("token/").unwrap(),
+        vec!["token/a".to_string(), "token/b".to_string()]
+    );
+    assert_eq!(vault.list_entries("").unwrap().len(), 3);
+
+    vault.delete_entry("token/a").unwrap();
+    assert_eq!(vault.get_entry("token/a").unwrap(), None);
+    assert_eq!(vault.list_entries("token/").unwrap(), vec!["token/b"]);
+}
+
+#[test]
+fn an_entry_is_sealed_at_rest_and_cannot_address_the_keystore() {
+    let (mut vault, _tmp) = fresh();
+    let (did, _) = vault.signup("node", "pw").unwrap();
+    vault.put_entry("secret", b"plaintext-marker").unwrap();
+
+    // The reserved namespace means the raw key is elsewhere, and the bytes there are sealed.
+    // Scoped: a live Store clone holds the redb handle, and login would then find it open.
+    {
+        let store = vault.store().unwrap();
+        assert!(store.get("secret").unwrap().is_none());
+        let sealed = store.get("entry/secret").unwrap().unwrap();
+        assert_ne!(sealed, b"plaintext-marker");
+    }
+
+    // Writing through the entry API never reaches the keystore, so the account still opens.
+    vault.put_entry("identity/keystore", b"clobbered").unwrap();
+    vault.lock();
+    vault.login(&did, "pw").unwrap();
+    assert_eq!(
+        vault.get_entry("secret").unwrap().unwrap(),
+        b"plaintext-marker"
+    );
+}
+
+#[test]
+fn an_empty_entry_name_is_refused() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+    assert!(matches!(
+        vault.put_entry("", b"x"),
+        Err(VaultError::InvalidName(_))
+    ));
+}
+
+#[test]
+fn a_locked_vault_neither_signs_nor_keeps_entries() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+    vault.lock();
+
+    assert!(vault.with_signer(|s| s.did().to_string()).is_none());
+    assert!(matches!(
+        vault.put_entry("k", b"v"),
+        Err(VaultError::Locked)
+    ));
+    assert!(matches!(vault.get_entry("k"), Err(VaultError::Locked)));
+    assert!(matches!(vault.list_entries(""), Err(VaultError::Locked)));
+    assert!(matches!(vault.delete_entry("k"), Err(VaultError::Locked)));
+}
+
+#[test]
+fn the_vault_signs_as_its_account_without_lending_the_identity() {
+    let (mut vault, _tmp) = fresh();
+    let (did, _) = vault.signup("node", "pw").unwrap();
+
+    let signed = vault
+        .with_signer(|signer| {
+            assert_eq!(signer.did(), did);
+            signer.sign(b"a token payload")
+        })
+        .unwrap();
+
+    let key = identity::public_key_from_did(&did).unwrap();
+    assert!(identity::verify(&key, b"a token payload", &signed));
+}

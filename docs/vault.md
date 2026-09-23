@@ -31,7 +31,21 @@ vault.create_workspace(name) / workspaces()       // newest first
 vault.create_item(ws, name, kind) / items(ws)     // ItemKind::{Doc, Table, App, Canvas}
 vault.get_src / put_src(ws, item, snapshot)       // an .app's source doc (Loro snapshot)
 vault.get_doc / put_doc(ws, item, snapshot, name) // its state docs, name-keyed
+vault.put_entry / get_entry / delete_entry(name)     // opaque sealed records, reserved namespace
+vault.list_entries(prefix)                          // their names, sorted, prefix-scanned
+vault.with_signer(|signer| …)                     // sign as the account; None when locked
 ```
+
+**Entries** (added 2026-09-19) are records the account keeps for itself outside the
+workspace/item tree — the node's role tokens, lineage and revocations; a desktop's node
+relationships. Vault seals and stores them without interpreting them. Their keys live under
+a reserved `entry/` prefix, so no entry name can address the keystore or an item.
+
+**`with_signer`** hands the closure an `identity::Signer`, never the `Identity`: the DID, a
+signature, and the two public keys, so `courier` can mint tickets and tokens while the
+signing key stays in here. The account is held for the closure's duration, so the closure
+must not call back into the same vault, and a locked vault returns `None` — nothing can sign
+once the account is gone.
 
 The Argon2 halves (`prepare_*`/`commit_*`) are split so hashing can run off the UI thread
 and only the commit needs `&mut`. They are private today: `shell2` spawns a worker that
@@ -51,6 +65,7 @@ ws/<id>/meta                      WorkspaceMeta { id, name, created }
 ws/<ws>/item/<id>/meta            WorkspaceItem { id, ws, name, kind, created }
 ws/<ws>/item/<id>/src             an .app's source doc — a Loro snapshot, sealed
 ws/<ws>/item/<id>/doc/<name>      its state docs, name-keyed (no `/`, non-empty)
+entry/<name>                       opaque caller-keyed records, sealed, uninterpreted
 ```
 
 redb allows a single handle per file: the active account's store is held open for the

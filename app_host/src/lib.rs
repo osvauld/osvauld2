@@ -19,6 +19,7 @@ use runtime::{
     Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row,
     scene3d as scene3d_el, text, text_area, text_input,
 };
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
@@ -227,6 +228,100 @@ pub struct LuaApp<M> {
     wake: Wake,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFile {
+    pub content: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceEdit {
+    pub old_text: String,
+    pub new_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditedSource {
+    pub revision: String,
+    pub snapshot: Vec<u8>,
+}
+
+fn source_revision(content: &str) -> String {
+    format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+pub fn read_source_file_versioned(doc: &LoroDoc, path: &str) -> Result<SourceFile, String> {
+    let content = match doc.get_map("files").get(path) {
+        Some(ValueOrContainer::Container(Container::Text(text))) => text.to_string(),
+        Some(_) => return Err(format!("{path} is not a text source file")),
+        None => return Err(format!("source file not found: {path}")),
+    };
+    Ok(SourceFile {
+        revision: source_revision(&content),
+        content,
+    })
+}
+
+pub fn edit_source_file(
+    doc: &LoroDoc,
+    path: &str,
+    expected_revision: &str,
+    edits: &[SourceEdit],
+) -> Result<EditedSource, String> {
+    let file = read_source_file_versioned(doc, path)?;
+    if file.revision != expected_revision {
+        return Err(format!("stale source revision for {path}"));
+    }
+
+    let mut ranges = Vec::with_capacity(edits.len());
+    for edit in edits {
+        if edit.old_text.is_empty() {
+            return Err("old_text must not be empty".to_string());
+        }
+        let mut matches = file.content.match_indices(&edit.old_text);
+        let Some((start, _)) = matches.next() else {
+            return Err("old_text was not found".to_string());
+        };
+        if matches.next().is_some() {
+            return Err("old_text matched more than once".to_string());
+        }
+        ranges.push((start, start + edit.old_text.len(), &edit.new_text));
+    }
+    ranges.sort_by_key(|(start, _, _)| *start);
+    if ranges.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+        return Err("source edits overlap".to_string());
+    }
+
+    let files = doc.get_map("files");
+    let Some(ValueOrContainer::Container(Container::Text(text))) = files.get(path) else {
+        return Err(format!("source file changed while editing: {path}"));
+    };
+    let mut changed = false;
+    for (start, end, replacement) in ranges.into_iter().rev() {
+        if &file.content[start..end] == replacement {
+            continue;
+        }
+        let char_start = file.content[..start].chars().count();
+        let char_len = file.content[start..end].chars().count();
+        text.delete(char_start, char_len)
+            .map_err(|e| e.to_string())?;
+        text.insert(char_start, replacement)
+            .map_err(|e| e.to_string())?;
+        changed = true;
+    }
+    if changed {
+        doc.commit();
+    }
+    let content = text.to_string();
+    let snapshot = doc
+        .export(ExportMode::Snapshot)
+        .map_err(|e| e.to_string())?;
+    Ok(EditedSource {
+        revision: source_revision(&content),
+        snapshot,
+    })
+}
+
 pub fn write_source_file(doc: &LoroDoc, path: &str, content: &str) -> Result<Vec<u8>, String> {
     let files = doc.get_map("files");
     let text = match files.get(path) {
@@ -432,6 +527,19 @@ impl<M: 'static> LuaApp<M> {
             Some(ValueOrContainer::Container(Container::Text(t))) => Some(t.to_string()),
             _ => None,
         }
+    }
+
+    pub fn read_source_file_versioned(&self, path: &str) -> Result<SourceFile, String> {
+        read_source_file_versioned(&self.src.doc, path)
+    }
+
+    pub fn edit_source_file(
+        &self,
+        path: &str,
+        expected_revision: &str,
+        edits: &[SourceEdit],
+    ) -> Result<EditedSource, String> {
+        edit_source_file(&self.src.doc, path, expected_revision, edits)
     }
 
     pub fn write_source_file(&self, path: &str, content: &str) -> Result<Vec<u8>, String> {

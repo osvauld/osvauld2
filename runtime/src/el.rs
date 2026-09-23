@@ -308,7 +308,11 @@ pub(crate) struct Behaviour<M> {
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
-    pub press_scale: Option<(Binding<M>, f32)>,
+    /// Easing and target scale — *not* a `Binding`. A press is driven by `Spring`, whose timing
+    /// is its stiffness and damping (`anim.rs`), so a binding's `duration` and `on_done` would
+    /// be fields nothing reads. This used to be one, carrying `duration: 0.12` that no code
+    /// path ever looked at.
+    pub press_scale: Option<(Easing, f32)>,
 }
 impl<M> Behaviour<M> {
     /// Every store-backed transition on this node, paired with the slot it lives under.
@@ -663,15 +667,7 @@ impl<M> El<M> {
         self
     }
     pub fn press_scale(mut self, scale: f32) -> Self {
-        self.behaviour.press_scale = Some((
-            Binding {
-                driver: Driver::Press,
-                duration: 0.12,
-                easing: Easing::EaseOut,
-                on_done: None,
-            },
-            scale,
-        ));
+        self.behaviour.press_scale = Some((Easing::EaseOut, scale));
         self
     }
     pub fn hover_stroke(mut self, w: f32, c: Color) -> Self {

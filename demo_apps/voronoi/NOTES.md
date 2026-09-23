@@ -209,3 +209,4 @@ neighbour and nothing would explain why.
   the `actions` table". This app has no document at all: drifting sites and a drag in flight are
   exactly the "gesture and interaction state" the State section says should be locals. The
   structure section could say that a `model.lua` with no `doc:open` is normal.
+*2026-09-20: `--example open` was deleted; the bridge is the one driver now (`docs/lua-apps.md` §Checking it without a window). The commands below are kept as a record of what was run at the time, not as instructions.*

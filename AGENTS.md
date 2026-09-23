@@ -21,8 +21,21 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 - **The Lua surface is strict.** Unknown props are errors; the doc mirror is a frame behind
   your own write; `on_drag`/`on_drop`/scroll need an `id`. The guide says all of it — read it.
 - **The bridge is live.** `$OSVAULD_SOCKET` (default `/tmp/osvauld.sock`, `0600`) answers
-  `osvauld-rpc` requests — drive the shell from `scripts/osvauld/` (see `scripts/smoke_bridge.py`).
-  The MCP shim and `.mcp.json` are gone; an MCP face would rebuild over the bridge.
+  `osvauld-rpc` requests. There is no MCP layer: agents drive the shell with the Python client in
+  `scripts/osvauld/` (see `scripts/smoke_bridge.py`). For an existing source file, use
+  `read_file_versioned` then `edit_file` with exact replacements; do not rewrite the whole file
+  with `WriteFile`. `WriteFile` remains for initial upload/file creation and explicit wholesale
+  replacement. An MCP face, if wanted later, would rebuild over the same bridge.
+- **Run `python3 scripts/smoke.py` before landing anything that touches the shell, the bridge
+  or the runtime.** `cargo test` covers runtime internals (`Headless`); the smokes cover the path
+  an agent drives — real socket, real pixels, a real Lua VM. There is no CI, so a smoke's failure
+  mode is never being run, not failing. Add new ones to `SMOKES` in that file.
+- **Nothing needs a window.** `OSVAULD_OFFSCREEN=WxH` makes every `Session` spawn
+  `shell2 --offscreen`, including in scripts written before offscreen mode existed. Layout and
+  pixels are real; the clock is virtual and only moves when a request asks (`rpc.frame`,
+  `rpc.advance`), so time-dependent behaviour is exact rather than raced. `rpc.rects()` says
+  where a pointer must land — never guess a coordinate. It still needs a `DISPLAY`: windowless,
+  not headless (`design/six-apps.md` §7).
 
 ## How we work — the process rules
 
@@ -56,6 +69,6 @@ cargo run   -p shell2       # the shell; OSVAULD_DATA_DIR=<dir> for a throwaway 
 | cross-crate, new patterns, docs claims | `expert-architect` |
 | `runtime/` | `expert-runtime` |
 | `app_host/`, `lua_tree/` | `expert-app-host` |
-| app `.lua` files (`shell2/src/kanban/`, `demo_apps/`) | `expert-lua-app` |
+| app `.lua` files (`demo_apps/`) | `expert-lua-app` |
 | `shell2/` | `expert-shell` |
 | `vault/`, `identity/`, `storage/`, `cryptography/` | `expert-secure-core` |

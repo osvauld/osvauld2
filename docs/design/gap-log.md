@@ -67,6 +67,9 @@ positional signature that binds the wrong values *and keeps running*.
 because a guide that disagrees with itself is the authorability finding this plan exists to
 measure, and quietly patching it would have deleted the evidence.
 
+*Closed 2026-09-20.* Fixed now that the entry above preserves what it said, with a dated note in
+the guide recording the old wording — the same reason the entry was written first.
+
 ### 1.4 An app cannot find out where anything landed — **missing** (tooling)
 
 **Wanted:** to click my own Start button in a headless run.
@@ -97,15 +100,33 @@ flag that reaches it. An `--advance SECS` action is about five lines.
 **Had to:** ignore an "undefined global" warning on every single reference to them — ten in this
 app, and it is a small app.
 
-**What it would take:** a `.luarc.json` and a definitions file for the eight constructors, the
-prop list and `doc`. It is also the cheapest possible authoring aid for an agent, since the prop
-table in the guide is already the content.
+**What it would take:** *not* what this entry first assumed. Tried on 2026-09-20 as a
+`.luarc.json` plus a generated `lua-types/osvauld.lua`, and removed the next day.
+
+Two findings, and the second is the one that decides it:
+
+1. **It never ran.** `workspace.library` resolves relative to the folder being checked, and the
+   runner checks one app at a time, so it looked for `demo_apps/tally/lua-types` and loaded
+   nothing. Every green result came from `diagnostics.globals` silencing the *names*. Pointed at
+   an absolute path it does work, and does catch a real bug — but it was reporting success for a
+   whole day without ever having loaded a definition.
+2. **The author is not in an editor.** An agent writing an app over the bridge opens no editor,
+   reads no `.luarc.json`, and may not have the files in this repo at all. LuaCATS stubs are
+   something you hand to a human. For the agent, the type system *is* the error the runtime
+   hands back.
+
+So the entry stands, and its answer is a runtime concern: when an app calls a global wrongly,
+does the message name the mistake well enough for the author to fix it without guessing? The
+worked example is `doc:open` — registered `|_this, name|`, so the dot form puts the name into
+the receiver. Unknown props are already a hard error; that is the shape to extend, not stubs.
 
 ---
 
 ### Tooling — one capability, two drivers, and the split between them
 
 Added 2026-09-20 after the correction above. Two ways to drive an app exist, and neither is whole:
+
+*`open` was deleted 2026-09-20; this table is why. Kept as written.*
 
 | | `open` (`app_host/examples/open.rs`) | the bridge (`scripts/`) |
 |---|---|---|
@@ -132,18 +153,64 @@ Two ways to close it, and they are not equivalent:
 The second is the better end state and the first is what unblocks app 2 this week. Worth deciding
 deliberately rather than by whichever gets written first.
 
+> **Closed, 2026-09-20.** The second was taken. `shell2 --offscreen WxH` runs the bridge's driver
+> with no window, real pixels, and a virtual clock that advances 1/60s per delivered request —
+> so the `window` and `clock` rows above no longer split the two columns, and `open` has nothing
+> left that the bridge lacks except the pointer pipeline, which is step 2.
+>
+> **1.4 and 1.5 are therefore answered, but not the way they asked.** 1.4 wanted rects in
+> `--tree`; what it gets instead is that coordinates stopped being how you address anything —
+> `rpc.click(item, "toggle")` uses the id the app already declared. 1.5 wanted `--advance SECS`;
+> what it gets is that 120 requests *is* two seconds, exactly. Both entries stay in the log as
+> written: an entry describing a wall the author actually hit is still true after the wall moves,
+> and rewriting them to match the fix is how a log stops being evidence.
+>
+> One bound is new and worth its own line, because it is the kind of thing that is discovered at
+> the worst moment otherwise: **offscreen is windowless, not headless.** `EventLoop::build()`
+> fails with no `DISPLAY`/`WAYLAND_DISPLAY`, so a container or CI runner needs `xvfb-run` until
+> the event loop itself is replaced. See `six-apps.md` §7, "Step 1, as built".
+>
+> **1.5 closed for real, 2026-09-20.** `Advance(secs)` landed as a bridge op: `rpc.advance(25*60)`
+> runs a whole pomodoro session to completion in one request, asserted in
+> `scripts/smoke_offscreen.py`. The entry's own suggestion — an `--advance SECS` flag on `open` —
+> was deliberately not taken; see §7.
+>
+> **1.4 is still open, and now the reason is precise.** Rects looked like a small addition to
+> `DumpTree` and are not: `DumpTree` reads `app.view().info()`, a fresh view that has never been
+> laid out. Layout lives in `Runner::frame()` and its results never leave the `Runner` — the same
+> wall that stops `Pointer`. One cause, two symptoms. Slice 2b.
+>
+> **1.4 closed, 2026-09-20.** `rpc.rects()` answers with every reachable element and where to aim
+> for it. The entry asked for rects in `--tree`; what landed is better in a way the entry could
+> not have known to ask for — the rect reported is the *clipped* one the hit-test actually checks,
+> so it cannot hand back a coordinate that looks right and misses. Measured on the app that
+> produced the entry: `toggle` is at (378, 427) 65×36, and the 10pt gap the first wrong guess
+> landed in is now a number you read (443 → 453) rather than a thing you discover by missing.
+
 ### Tally so far
 
-| verdict | count |
-|---|---|
-| missing | 2 |
-| no door | 3 |
-| wrong shape | 1 |
+*Updated 2026-09-20, after the harness work.*
 
-Too early to read, and the one number that moved was moved by *checking the repo instead of
-reasoning* — which is the same lesson `six-apps.md` §0 records. The thing to watch is whether 1.1
-and 1.2 recur in app 2; two apps wanting the same two things is the evidence §4 is waiting for,
-and a third would settle it.
+| verdict | count | closed |
+|---|---|---|
+| missing | 2 | — |
+| no door | 3 | 1.4, 1.5 |
+| wrong shape | 1 | 1.3 |
+
+Too early to read, and the numbers that moved were moved by *checking the repo instead of
+reasoning* — which is the same lesson `six-apps.md` §0 records.
+
+What the first app's log actually says, now that four of six entries are resolved: **every closed
+entry was tooling, and every open one is the language.** 1.3 was a doc line, 1.4 and 1.5 were
+drivers. What remains — 1.1, a click that cannot read the clock, and 1.2, no wake-at-T with
+repaint as an all-or-nothing switch — are both the timeline question §4 parks, and neither is
+touched by anything built this week. 1.6 (no type definitions) is open and is tooling, so the
+split is not perfect; it is also the cheapest thing left.
+
+That is a better result than it looks. A first app whose complaints were mostly about the harness
+means the Lua surface itself held up under an author who had never used it. The thing to watch is
+still whether 1.1 and 1.2 recur in app 2: two apps wanting the same two things is the evidence §4
+is waiting for, and a third would settle it.
 
 ### Not a gap
 
@@ -154,3 +221,43 @@ Recorded so the next author doesn't re-litigate them:
 - **Declarative hover and press did everything asked of them.** `hover_fill`, `tint` and
   `press_scale` needed no per-frame code, which is the half of the animation story that is
   genuinely finished.
+
+### Animation — what `Binding` offers and what Lua can reach
+
+Added 2026-09-21, measured rather than reasoned: a kanban button pressed offscreen and stepped
+frame by frame, reading the hit rect each frame. The virtual clock makes that exact and
+repeatable, which is new this week — before it, none of the numbers below were obtainable.
+
+```
+frame     w        h      hit?          280.00 x 32.00 at rest
+  0    278.587  31.839   True
+  2    273.117  31.213   True
+  4    271.789  31.062   True
+  6    271.619  31.042   True
+  9    271.600  31.040   True           271.6/280 = 0.970 exactly
+```
+
+**What the measurement settled, and the code then confirmed:**
+
+- **`press_scale` had no duration at all.** `el.rs` wrote `duration: 0.12` into a `Binding`, but
+  a press is driven by `Spring`, and `Spring::new` takes only a target — stiffness 260 and
+  damping 30 are constants in `anim.rs`. The field was stored and never read. Fixed by changing
+  the type: `press_scale` is now `Option<(Easing, f32)>`, so the ignored fields cannot be
+  written. `Driver::Press` was press_scale's only user and went with it.
+- **The hit rect tracks the paint, frame by frame.** `hit?` holds through the shrink because
+  paint and geometry share one transform. Pinned by
+  `runtime::tests::a_press_scales_the_hit_rect_with_the_paint`, which exists to keep them
+  sharing it — "describable = touchable" during motion, not only at rest.
+
+**Still open, both now precisely bounded:**
+
+1. **No easing choice.** `Easing::Linear` and `EaseInOut` are constructed nowhere; every
+   constructor hard-codes `EaseOut`. One prop away, and the dead-code warning on that enum has
+   been the standing reminder.
+2. **No general `on_done`.** Only `fade` surfaces one, as `on_faded_out`. Under a spring,
+   "done" is not arrival — a spring converges — but `anim.rs` already snaps to target below a
+   velocity and error threshold, so the event exists and is unreported.
+
+Neither is worth building until an app asks. `EaseInOut` has gone unconstructed for months
+without a complaint, and adding props because an enum has variants is how the deleted types gate
+happened.

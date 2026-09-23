@@ -15,6 +15,29 @@ class BridgeError(RuntimeError):
     """The shell answered with an error response."""
 
 
+def format_tree(node: Any, depth: int = 0) -> str:
+    """`dump_tree`'s JSON as one line per element: kind, #id, [handlers], "text".
+
+    Ported from the `open` example's `--tree` when that driver was deleted (design/six-apps.md
+    §7). JSON is the right wire format and the wrong thing to read, and two of these diff
+    cleanly — which is how you answer "did anything actually move" without eyeballing braces.
+    """
+    if not isinstance(node, dict):
+        return ""
+    out = ["  " * depth + node.get("kind", "?")]
+    if node.get("id"):
+        out[0] += f"#{node['id']}"
+    if node.get("handlers"):
+        out[0] += "  [" + " ".join(node["handlers"]) + "]"
+    text = node.get("text") or ""
+    if text:
+        clipped = text if len(text) <= 48 else text[:48] + "\u2026"
+        out[0] += f"  {clipped!r}"
+    for child in node.get("children", []):
+        out.append(format_tree(child, depth + 1))
+    return "\n".join(p for p in out if p)
+
+
 class Bridge:
     def __init__(self, socket_path: str, timeout: float = 30.0):
         self.socket_path = socket_path
@@ -88,6 +111,26 @@ class Bridge:
     def read_file(self, item_id: str, path: str) -> str:
         return self.request("ReadFile", item_id=item_id, path=path)
 
+    def read_file_versioned(self, item_id: str, path: str) -> dict:
+        """Read source plus the opaque revision required by edit_file."""
+        return self.request("ReadFileVersioned", item_id=item_id, path=path)
+
+    def edit_file(
+        self,
+        item_id: str,
+        path: str,
+        expected_revision: str,
+        edits: list[dict[str, str]],
+    ) -> dict:
+        """Apply exact old_text/new_text replacements to the existing LoroText."""
+        return self.request(
+            "EditFile",
+            item_id=item_id,
+            path=path,
+            expected_revision=expected_revision,
+            edits=edits,
+        )
+
     def write_file(self, item_id: str, path: str, content: str) -> str:
         return self.request("WriteFile", item_id=item_id, path=path, content=content)
 
@@ -109,6 +152,50 @@ class Bridge:
     def read_data(self, item_id: str) -> dict:
         """Every open runtime-data doc as {name: deep JSON} — live, pre-flush."""
         return self.request("AppDataGet", item_id=item_id)
+
+    def frame(self, count: int = 1) -> dict:
+        """Paint `count` frames offscreen, each 1/60s. Returns {"clock", "frames"}."""
+        return self.request("Frame", count=count)
+
+    def advance(self, secs: float) -> dict:
+        """Jump the virtual clock, then paint once so the app notices. Offscreen only."""
+        return self.request("Advance", secs=secs)
+
+    def rects(self) -> list[dict]:
+        """Where every reachable element is: [{id, x, y, w, h, hits}]. Clipped ones are absent."""
+        return self.request("Rects")["rects"]
+
+    def move_to(self, x: float, y: float) -> list[dict]:
+        """Move the pointer; returns what is under it afterwards (empty list = a miss)."""
+        return self.request("PointerMove", x=x, y=y)["rects"]
+
+    def press(self) -> list[dict]:
+        return self.request("PointerPress")["rects"]
+
+    def release(self) -> list[dict]:
+        return self.request("PointerRelease")["rects"]
+
+    def click_at(self, x: float, y: float) -> list[dict]:
+        """Move, press, release — a click at a point, through the real hit-test.
+
+        Composed here rather than as one op because the three are orthogonal and the round trip
+        is a local socket. `drag` is not composable this way: its interpolation has to happen
+        runtime-side to be timed like a real gesture.
+        """
+        under = self.move_to(x, y)
+        self.press()
+        self.release()
+        return under
+
+    def centre_of(self, el_id: str) -> tuple[float, float]:
+        """The aim point for an element, from `rects`. Raises if it is not reachable."""
+        for r in self.rects():
+            if r["id"] == el_id:
+                return r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
+        raise BridgeError(f"{el_id!r} is not reachable; it may exist but be clipped")
+
+    def drag(self, frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> list[dict]:
+        return self.request("Drag", **{"from": list(frm), "to": list(to), "steps": steps})["rects"]
 
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)

@@ -4,7 +4,9 @@
 > and exact/terminal-subtree scope matching are built. Authorization, indexes, sync, and the
 > node are unbuilt. 2026-09-17: token, authorship, and rule decisions recorded in §4;
 > 2026-09-19: signatures are record fields and kunki stores through vault, and the
-> platform capability table plus its authorization boundary are built in `courier::policy`.**
+> platform capability table plus its authorization boundary are built in `courier::policy`.
+> 2026-09-21: federation recorded as direction — a workspace's home node stays its only
+> authority, so the built token model carries over unchanged.**
 > Records the direction agreed with the user, the lessons from the old implementation,
 > and the decisions still required. Namespace examples are illustrative, not a grammar,
 > wire format, or storage migration contract. Recommendations are explicitly labelled.
@@ -346,6 +348,79 @@ rather than a second database.
 
 Open: the canonical encoding a record signature covers (field order, and the form of the
 address inside it); whether a signed record is ever amended in place rather than versioned.
+
+### Decided 2026-09-21: a user may or may not have their own node
+
+Agreed with the user, as direction rather than near-term work. **Both shapes have to work, for
+good — this is not a migration from one to the other.** A user without a node of their own
+connects their desktop directly to the node hosting each workspace they join; that is the whole
+of the first POC, one node with every user on it. A user *with* a node connects only to it, and
+it connects onward to the home nodes, so nodes stay synced with each other and the user never
+dials a peer's node. Nothing here is built, and Gate 1 is unaffected; this section exists so
+the parts being built now do not have to be untangled later.
+
+**A user's node is a hop, not a second protocol.** In the first shape the presenting DID is the
+person's account; in the second it is their node's, holding authority the person delegated. The
+chain check answers both identically, because it asks who presents and what they may do, never
+what kind of thing they are. That is a constraint on everything built from here: **no
+participant-type field in a token or a permit**, or an invitation would have to be decided
+against whether the invitee happens to run a node. The built claim/reconnect exchange is
+already symmetric in mechanism — both sides trade a permit carrying a DID and keys — and only
+its vocabulary (`desktop_did`, `desktop_start_claim`) assumes the caller is a person's machine.
+Renaming is mechanical and can wait for a second kind of caller.
+
+**Authority does not change; the topology does.** Every workspace has a *home node* — the one
+hosting it, and the only one that decides what is accepted. Bob commenting in a workspace
+Alice hosts needs the record signed by Bob's DID and a membership token for that workspace,
+and that token was issued by **Alice's** node when she invited him, not by Bob's. So
+`sub == node_did` in the chain check stays exactly right: Bob's node never holds authority
+over Alice's workspace, it is Bob's relay and cache. The federated case reuses the built model
+rather than weakening it.
+
+**A node acts for its user by delegation.** Bob's node fetches and pushes on his behalf by
+holding a token Bob delegated to the node's DID — `sub` still Alice's node, `aud` Bob's node,
+gated by `delegable`, narrowed in scope and short-lived. This is the case `token::delegate`
+was for, so no new mechanism is needed. The cost is stated plainly: compromise of Bob's node
+key is compromise of whatever Bob delegated to it, and scope and expiry are the only limits.
+
+**Rules run exactly once, on the home node.** A relaying node never adjudicates — it would be
+deciding with a manifest it did not validate. It caches what the home node accepted. That
+keeps "Rust proves, Lua decides" a single-authority statement, which is what makes it
+analyzable at all. Corollary for the transport gate: build one protocol both ends speak, not
+a server half and a client half, because a node is a client of other nodes.
+
+Three concrete consequences for storage and protocol:
+
+- **Addressing becomes node-qualified below the token.** Tokens are already unambiguous —
+  `sub` names the node — but a store caching two other nodes' workspaces needs
+  `nodes/<node-did>/ws/<id>/…` or their ids collide.
+- **A revoked set belongs to one issuing authority, never to a node globally.** What this node
+  revoked and what another node told it are different sets; merged, one node's revocation could
+  shadow another's ids. Hence the reserved split in `kunki::admin` below.
+- **Replication adds a trust edge and removes any pretence of erasure.** "The node is trusted"
+  (§5) is a statement about *your* node; a peer's node caching your workspace is mild — the peer
+  can read it anyway — but eviction stops future delivery and nothing more, now structurally
+  rather than only for desktops.
+
+**Storage layout, built 2026-09-21 in `kunki::admin`.** Top level is this node's own authority:
+`token/<id>` is the issue record, `users/<did>/tokens/<id>` indexes it by holder and leaves
+room for `users/<did>/meta` when profiles exist, and `revoked/<id>` is what this node revoked.
+`nodes/<node-did>/` is reserved for the mirror image — tokens this node holds from another, and
+revocations that node announced. A desktop needs that half regardless of which shape it is in:
+a user with no node of their own joins several nodes directly and holds a separate set from
+each, so this is not federation-only groundwork. That the two halves are the same shape is the
+argument for moving this store out of `kunki` into a crate both it and `shell2` use, once there
+is a second caller.
+
+**A profile is not authority.** Tokens flow node → user; profile data flows user → node. They
+share a namespace, not a record, and only the second is a candidate for CRDT sync — a grant or
+a revocation that a peer could merge away is neither. A user-authored display name is a label
+the node stores and never reads as identity; the DID is the identity.
+
+Open: whether a relaying node needs its own membership token from the home node in addition to
+the delegated user token; how a node learns another node's transport address (`did:key` is
+self-authenticating for keys, so this is an address book, not a resolver); whether a home node
+can migrate.
 
 ## 5. Trust, consent, and updates
 

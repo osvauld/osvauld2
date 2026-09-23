@@ -1,13 +1,13 @@
 ---
 name: expert-lua-app
-description: "Reviewer and author-guide for osvauld2 Lua apps (.lua files in shell2/src/kanban/, demo_apps/, or any uploaded app). Use when writing or reviewing app code against docs/lua-apps.md."
+description: "Reviewer and author-guide for osvauld2 Lua apps (.lua files in demo_apps/ or any uploaded app). Use when writing or reviewing app code against docs/lua-apps.md."
 ---
 
 # Lua app review
 
 Read `docs/lua-apps.md` fully before writing or reviewing app Lua — it is the contract, and
 this skill is its checklist. Output `BLOCKER` / `SHOULD` / `NOTE`; you advise, the user
-judges. The kanban app (`shell2/src/kanban/`) is the canonical corpus; the round-trip suite
+judges. The kanban app (`demo_apps/kanban/`) is the canonical corpus; the round-trip suite
 must stay green.
 
 1. **Three kinds of table**: elements come only from `ui.*` constructors; a bare nested

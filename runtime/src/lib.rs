@@ -81,6 +81,78 @@ pub struct ScreenshotRequest<M> {
     pub complete: Box<dyn FnOnce(Result<CapturedImage, String>) -> M>,
 }
 
+/// Something only the `Runner` can do, because only the `Runner` owns the clock and decides when a
+/// frame happens. An app cannot do these for itself at any price — which is the whole reason this
+/// seam exists rather than a method on the app.
+///
+/// Offscreen only. With a window the clock is the OS's and the compositor schedules frames, so
+/// both of these would be lies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DriverOp {
+    /// Paint exactly this many frames, each moving the virtual clock on by 1/60s.
+    Frame(u32),
+    /// Jump the virtual clock, then paint once — the paint is what lets the app notice. Without
+    /// it the time has passed and nothing has run, which is never what a caller means.
+    Advance(f64),
+    /// Where every reachable element is. Paints first, because hit regions are built by painting.
+    Rects,
+    /// Move the pointer, firing hover — and drag, while a button is down.
+    PointerMove((f32, f32)),
+    PointerPress,
+    PointerRelease,
+    /// A press, `steps` moves, and a release. Not composable from the three above at the client,
+    /// because a drag only begins once the pointer has travelled past the runtime's slop and the
+    /// interpolation has to happen on this side of the wire to be timed like a real gesture.
+    Drag {
+        from: (f32, f32),
+        to: (f32, f32),
+        steps: usize,
+    },
+}
+
+/// One element a pointer can reach, and where to aim for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElRect {
+    pub id: String,
+    /// The rect a pointer must land in, in logical points. This is the *clipped* rect — what
+    /// [`Geometry::contains`] actually tests — not the layout rect. The two differ whenever an
+    /// element is scrolled or clipped, and there the layout rect's centre misses: aiming at a
+    /// plausible-looking coordinate that quietly does nothing is the exact failure gap-log 1.4
+    /// was written about.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// What it responds to — `click`, `hover`, `drag`, `drop`, `input` — sorted, deduplicated.
+    pub hits: Vec<&'static str>,
+}
+
+/// What a finished [`DriverOp`] reports. The clock comes back so a caller can assert on time
+/// directly rather than counting requests and trusting the arithmetic.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DriverReport {
+    /// The virtual clock after the op — seconds since the app started.
+    pub clock: f64,
+    /// Frames actually painted, which is not always what was asked for: `Frame(0)` paints none.
+    pub frames: u32,
+    /// What the op has to say about geometry. `None` means "not asked", which is a different
+    /// thing from `Some(vec![])`.
+    ///
+    /// [`DriverOp::Rects`] fills it with everything reachable. The pointer ops fill it with what
+    /// is **under the pointer afterwards**, which is the answer to the question a silent miss
+    /// cannot give you: an unchanged app says nothing about whether you were 5pt out or 200.
+    /// It is a report of what the pointer is over, not a claim about what a click dispatches to —
+    /// paint order and shape hits decide that, and neither is modelled here.
+    pub rects: Option<Vec<ElRect>>,
+}
+
+/// One deferred driver op. Shaped exactly like [`ScreenshotRequest`], including the completion
+/// mapping, so the runtime never needs to know what an RPC is.
+pub struct DriverRequest<M> {
+    pub op: DriverOp,
+    pub complete: Box<dyn FnOnce(Result<DriverReport, String>) -> M>,
+}
+
 pub trait App {
     type Msg: Clone + Send + 'static;
 
@@ -104,6 +176,12 @@ pub trait App {
     /// Take a pending screenshot request, if any. The default keeps non-automation apps unaware
     /// of capture; implementations must remove the request when returning it.
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Self::Msg>> {
+        None
+    }
+
+    /// Take a pending driver op, if any. Same contract as [`Self::take_screenshot`] — the default
+    /// keeps non-automation apps unaware of it, and an implementation must remove what it returns.
+    fn take_driver(&mut self) -> Option<DriverRequest<Self::Msg>> {
         None
     }
 }
@@ -331,7 +409,195 @@ impl<M> Hits<M> {
     }
 }
 
+/// One offscreen frame, at the 60Hz a window would run at.
+const FRAME: f64 = 1.0 / 60.0;
+/// How long after the frame a pointer event arrives — roughly a 120Hz mouse's report interval.
+/// Without it every event in a gesture would share a timestamp and `dx / dt` would divide by zero.
+pub(crate) const POINTER: f64 = 0.008;
+
 impl<A: App> Runner<A> {
+    /// One driven frame: paint, then move the virtual clock on by a frame's worth. Offscreen only
+    /// — windowed, the clock is the OS's and the compositor decides when a frame happens.
+    fn tick(&mut self) {
+        self.frame();
+        self.clock += FRAME;
+    }
+
+    /// Run a driver op and say what it did. Refused with a window, because there the clock is the
+    /// OS's: moving it is not something this can offer, and pretending otherwise would make every
+    /// test written against it machine-dependent in a way that only shows up much later.
+    fn run_driver(&mut self, op: DriverOp) -> Result<DriverReport, String> {
+        if self.offscreen.is_none() {
+            return Err(
+                "driver ops need offscreen mode; with a window the clock is the OS's".into(),
+            );
+        }
+        let mut rects = None;
+        let frames = match op {
+            DriverOp::Rects => {
+                // `frame` and not `tick`: a readback is a look, not time passing. Painting is not
+                // optional though — `hits` is rebuilt by painting, so without it this would report
+                // where things were as of whatever happened to run last.
+                self.frame();
+                rects = Some(self.reachable());
+                1
+            }
+            DriverOp::Frame(n) => {
+                for _ in 0..n {
+                    self.tick();
+                }
+                n
+            }
+            DriverOp::Advance(secs) => {
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err(format!("advance wants non-negative seconds, got {secs}"));
+                }
+                // Not `tick`: that paints and *then* spends a frame's worth of time, so the clock
+                // would land on `secs + 1/60` and "advance by exactly 3" would be a lie. Here the
+                // paint is a look at the new instant, not a frame of time passing.
+                self.clock += secs;
+                self.frame();
+                1
+            }
+            // Every pointer op paints first, for the reason `headless.rs` gives: `hits` is filled
+            // by painting, and in a window you never receive an event against a frame that has not
+            // been drawn. Time moves by POINTER rather than a frame, so the events in one gesture
+            // do not share a timestamp — `dx / dt` divides by zero when they do.
+            DriverOp::PointerMove(to) => {
+                self.pointer_move(to);
+                1
+            }
+            DriverOp::PointerPress => {
+                self.tick();
+                self.clock += POINTER;
+                self.click();
+                1
+            }
+            DriverOp::PointerRelease => {
+                self.tick();
+                self.clock += POINTER;
+                self.on_cursor_release();
+                1
+            }
+            DriverOp::Drag { from, to, steps } => {
+                let steps = steps.max(1);
+                self.pointer_move(from);
+                self.tick();
+                self.clock += POINTER;
+                self.click();
+                for i in 1..=steps {
+                    let f = i as f32 / steps as f32;
+                    self.pointer_move((from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f));
+                }
+                self.tick();
+                self.clock += POINTER;
+                self.on_cursor_release();
+                (steps + 3) as u32
+            }
+        };
+        if matches!(
+            op,
+            DriverOp::PointerMove(_)
+                | DriverOp::PointerPress
+                | DriverOp::PointerRelease
+                | DriverOp::Drag { .. }
+        ) {
+            rects = Some(self.under_pointer());
+        }
+        Ok(DriverReport {
+            clock: self.clock,
+            frames,
+            rects,
+        })
+    }
+
+    /// One pointer move: paint, spend a mouse report interval, then deliver it — the same order
+    /// `Headless` uses, and the same order a window produces.
+    fn pointer_move(&mut self, (x, y): (f32, f32)) {
+        self.tick();
+        self.clock += POINTER;
+        self.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64));
+    }
+
+    /// What the pointer is currently over. Offscreen the scale is 1.0, so the rect a caller was
+    /// handed by `Rects` and the coordinate it then aimed at are in the same units — which is the
+    /// property that makes "aim at the centre and check you are on it" a usable loop.
+    fn under_pointer(&self) -> Vec<ElRect> {
+        let Some((px, py)) = self.pointer else {
+            return Vec::new();
+        };
+        self.reachable()
+            .into_iter()
+            .filter(|e| px >= e.x && px <= e.x + e.w && py >= e.y && py <= e.y + e.h)
+            .collect()
+    }
+
+    /// Every named element a pointer can reach, merged across the hit lists so one element appears
+    /// once carrying everything it responds to.
+    ///
+    /// Read from `hits` rather than from layout deliberately: `hits` *is* what input is tested
+    /// against, so this cannot drift from the truth the way a parallel walk of the element tree
+    /// would. Anything fully clipped has no visible rect and is simply absent — it cannot be hit
+    /// at any coordinate, and saying where it "is" would be an invitation to aim at it. Use
+    /// `DumpTree` for what exists; this is what is reachable.
+    fn reachable(&self) -> Vec<ElRect> {
+        let mut found: Vec<(&str, Rect, &'static str)> = Vec::new();
+        for (g, id, _, _, _) in &self.hits.click {
+            if let (Some(id), Some(r)) = (id, g.visible_rect_kurbo()) {
+                found.push((id, r, "click"));
+            }
+        }
+        for (g, id, _, _) in &self.hits.hover {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "hover"));
+            }
+        }
+        for (g, id, _, _) in &self.hits.drag {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "drag"));
+            }
+        }
+        for (g, id, _) in &self.hits.drop {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "drop"));
+            }
+        }
+        for (g, id, _) in &self.hits.input {
+            if let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "input"));
+            }
+        }
+
+        let mut out: Vec<ElRect> = Vec::new();
+        for (id, rect, kind) in found {
+            // Keyed by id *and* rect: one id can be laid out more than once (a list row rebuilt
+            // per item), and merging those into one entry would report a rect nothing is at.
+            match out
+                .iter_mut()
+                .find(|e| e.id == id && (e.x, e.y) == (rect.x0 as f32, rect.y0 as f32))
+            {
+                Some(e) => {
+                    if !e.hits.contains(&kind) {
+                        e.hits.push(kind);
+                    }
+                }
+                None => out.push(ElRect {
+                    id: id.to_string(),
+                    x: rect.x0 as f32,
+                    y: rect.y0 as f32,
+                    w: rect.width() as f32,
+                    h: rect.height() as f32,
+                    hits: vec![kind],
+                }),
+            }
+        }
+        for e in &mut out {
+            e.hits.sort_unstable();
+        }
+        out.sort_by(|a, b| (&a.id, a.y as i32, a.x as i32).cmp(&(&b.id, b.y as i32, b.x as i32)));
+        out
+    }
+
     fn frame(&mut self) {
         // Windowed, the surface says how big and how sharp. Offscreen, we say, at 1.0 — which
         // makes physical and logical points the same number for anything driving it by hand.
@@ -429,7 +695,7 @@ impl<A: App> Runner<A> {
                 }
             }
 
-            if let Some((_b, _scale)) = &p.behaviour.press_scale
+            if p.behaviour.press_scale.is_some()
                 && let Some(id) = &p.id
             {
                 let pressed_id = pressed.and_then(|(_, id)| id);
@@ -440,8 +706,7 @@ impl<A: App> Runner<A> {
 
             for (b, slot) in p.behaviour.bindings() {
                 if let Some(id) = &p.id {
-                    let pressed_id = pressed.and_then(|(_, id)| id);
-                    let (fl, landed) = Self::drive(b, slot, store, dt, over, pressed_id, id);
+                    let (fl, landed) = Self::drive(b, slot, store, dt, over, id);
                     if fl {
                         any_in_flight = true;
                     }
@@ -687,7 +952,6 @@ impl<A: App> Runner<A> {
         store: &mut Store,
         dt: f32,
         over: bool,
-        pressed: Option<&Id>,
         id: &Id,
     ) -> (bool, Option<f32>) {
         let target = match b.driver {
@@ -698,7 +962,6 @@ impl<A: App> Runner<A> {
                     0.0
                 }
             }
-            Driver::Press => (pressed == Some(id)) as u8 as f32,
             Driver::Value(f) => f,
         };
         let tr = store.get_or_with(id, s, || Transition::new(target, b.duration));
@@ -1429,12 +1692,19 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         if self.render.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("osvauld");
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let render = pollster::block_on(Render::new(window));
-        render.request_redraw(); // paint the first frame; after that we only repaint on demand
-        render.set_ime_allowed(true);
-        self.render = Some(render);
+        self.render = Some(match self.offscreen {
+            // No window, so no `RedrawRequested` will ever arrive and no first frame is asked for
+            // here: offscreen every frame is one the driver asked for. See `user_event`.
+            Some((w, h)) => pollster::block_on(Render::offscreen(w as u32, h as u32)),
+            None => {
+                let attrs = Window::default_attributes().with_title("osvauld");
+                let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+                let render = pollster::block_on(Render::new(window));
+                render.request_redraw(); // paint the first frame; after that only on demand
+                render.set_ime_allowed(true);
+                render
+            }
+        });
         self.app.ready();
     }
 
@@ -1517,7 +1787,29 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
     }
     fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
         self.app.update(msg);
-        self.redraw();
+        // A driver op is answered here rather than by the app, because only this side owns the
+        // clock and the frame. Draining after `update` is what lets the request that asked for it
+        // be the message just delivered.
+        let drove = match self.app.take_driver() {
+            None => false,
+            Some(req) => {
+                let report = self.run_driver(req.op);
+                self.app.update((req.complete)(report));
+                true
+            }
+        };
+        // Windowed, `redraw` asks the compositor and the frame comes back as an event. Offscreen
+        // there is nobody to ask, so the frame happens here instead — one delivered message, one
+        // frame, which keeps the bridge's "answering also repaints" contract intact. It is also
+        // the only thing that advances the virtual clock, so an app animates per request rather
+        // than per second: deterministic, and never free-running.
+        //
+        // A driver op painted its own frames and is not owed another, or `Frame(n)` would be n+1.
+        match self.offscreen {
+            None => self.redraw(),
+            Some(_) if !drove => self.tick(),
+            Some(_) => {}
+        }
     }
 }
 
@@ -1527,6 +1819,30 @@ pub fn run<A: App + 'static>(app: A) {
 }
 
 pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> A) {
+    run_loop(None, build);
+}
+
+/// The same loop with no window: real layout, real pixels through `capture_scene`, and a virtual
+/// clock that only a delivered message advances. `viewport` is in logical points, which offscreen
+/// are also physical pixels because the scale is 1.0.
+///
+/// Driven, not free-running: with no window there are no window events, so the loop wakes only for
+/// a user event and paints exactly one frame for each.
+///
+/// **Still needs a display server**, though it shows nothing — winit refuses to build an event loop
+/// when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set. Running with no display at all means
+/// replacing the event loop, not just the window; see `docs/design/six-apps.md` §7.
+pub fn run_offscreen<A: App + 'static>(
+    viewport: (f32, f32),
+    build: impl FnOnce(EventLoopProxy<A::Msg>) -> A,
+) {
+    run_loop(Some(viewport), build);
+}
+
+fn run_loop<A: App + 'static>(
+    offscreen: Option<(f32, f32)>,
+    build: impl FnOnce(EventLoopProxy<A::Msg>) -> A,
+) {
     env_logger::init();
 
     let event_loop = EventLoop::<A::Msg>::with_user_event()
@@ -1534,7 +1850,7 @@ pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> 
         .expect("event loop");
     let app = build(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut runner = Runner::new(app, None);
+    let mut runner = Runner::new(app, offscreen);
     event_loop.run_app(&mut runner).expect("run app");
 }
 

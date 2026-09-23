@@ -188,6 +188,7 @@ dependencies = [
  "mlua",
  "runtime",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 
@@ -1943,7 +1944,11 @@ dependencies = [
  "base64",
  "courier",
  "identity",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "vault",
  "zeroize",
 ]
 

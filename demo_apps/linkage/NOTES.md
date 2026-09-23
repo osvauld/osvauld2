@@ -209,3 +209,4 @@ so I spent a while looking for it before concluding it wasn't there.
   supplies the display name". The file that was already here reads `app "Linkage" { }`, so I left
   it alone — but nothing in the docs would have let me write that from scratch, and the empty
   braces suggest there is more that could go in them.
+*2026-09-20: `--example open` was deleted; the bridge is the one driver now (`docs/lua-apps.md` §Checking it without a window). The commands below are kept as a record of what was run at the time, not as instructions.*

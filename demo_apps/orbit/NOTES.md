@@ -103,6 +103,8 @@ close it:
 
 ```
 cargo run -p app_host --example open -- demo_apps/orbit --hover 400,300 --press 400,300 --move 480,240 --release
+# ^ never worked: open parsed only --size/--hover/--click/--drag/--frames/--tree.
+#   The bridge does it: rpc.move_to(400,300); rpc.press(); rpc.move_to(480,240); rpc.release()
 ```
 
 ...printing the `shape, sx, sy` the runtime actually delivered at each step before rebuilding the
@@ -394,3 +396,4 @@ field names checkable.
 - **The console-is-the-test contract is good.** Non-zero exit when anything lands on the console
   is exactly right for an iterate-until-clean loop, and the element tree with ids and handlers
   caught more than one thing. The gap is only #3: it tests the idle frame.
+*2026-09-20: `--example open` was deleted; the bridge is the one driver now (`docs/lua-apps.md` §Checking it without a window). The commands below are kept as a record of what was run at the time, not as instructions.*
