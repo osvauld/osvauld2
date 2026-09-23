@@ -219,9 +219,31 @@ built. Frame remains 2D; Taffy/Parley remain candidates for logical UI surfaces.
 research passes recommend first testing a narrow same-device WGPU compositor while treating Bevy
 0.19/Vello 0.9 as a measured challenger—not selecting either by prose. Rapier2D/3D is reserved for
 rigid bodies; PBD/XPBD is the candidate for cloth/deformables; custom/Lua systems remain valid where
-bounded. Immediate gates: repair/pin callback scheduling semantics, then render and ray-pick two
-depth-intersecting Y-rotated Vello/Taffy panels with a bridge screenshot and no CPU texture
-readback. Dependency and public World API decisions wait for those results.
+bounded. **2026-09-20 revision:** the immediate experiment is the
+[Lua-first 3D model viewer proof](design/3d-model-viewer.md): two depth-intersecting built-in
+objects inside a shell-hosted Lua app, camera/object controls, picking/highlighting and final
+composite bridge screenshots, with no CPU texture readback between rendering passes. GLB import
+follows separately; Blender is only an authoring tool, not a runtime dependency. The selected
+substrate is an owned WGPU pipeline using focused libraries (`gltf`, `glam`, Parry and optional
+direct Rapier) rather than Bevy or its coupled rendering crates; no ECS is selected. Pin callback
+scheduling before relying on continuous animation. The earlier projected Vello/Taffy panel gate
+remains a broader Environment target, not something this narrower proof establishes. **First 3D
+slice landed:** runtime validates immutable perspective-camera scenes containing at most 256
+stable-id built-in cubes, renders instanced geometry with a shared-device depth pass into both live
+and custom capture targets, and places one visible `ui.scene3d` leaf through ordinary Lua layout.
+`gfx.scene3d` is strict and `DumpTree` includes its bounded camera/object inspection. The live
+`demo_apps/model_viewer` proof shows two depth-intersecting cubes with face normals, simple
+directional lighting, 4× MSAA, app-driven rotation buttons, drag orbit and wheel zoom; clean-console
+1000×700 bridge captures are `model-viewer.png` and the corrected `model-viewer-msaa.png`. Wheel
+input enters normal topmost-element eligibility before scroll/zoom ancestors and is pinned by the
+headless Runner test. **Picking slice landed:** ordinary scene `on_click` now constructs the camera
+ray, intersects every transformed cube in local space, chooses the nearest visible hit independent
+of declaration order, and reports stable object ID, distance, world point and world normal as plain
+Lua event data. The demo highlights the selected cube and updates its ordinary UI label; a headless
+Runner test pins that picking enters through normal pointer eligibility. Current limits are explicit:
+one rendered viewport, no hover picking, and the resolved 3D overlay currently follows the complete
+Vello scene so foreground overlays are not yet correct. GLB, retained resource lifetime and the
+public World API remain open.
 
 ### Runtime and app milestones
 

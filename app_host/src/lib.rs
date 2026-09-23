@@ -16,8 +16,8 @@ use loro::{
 use mlua::{AnyUserData, Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{
-    Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row, text,
-    text_area, text_input,
+    Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row,
+    scene3d as scene3d_el, text, text_area, text_input,
 };
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -79,6 +79,25 @@ impl From<Option<runtime::frame::FrameHit>> for Shape {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectHit {
+    pub id: String,
+    pub distance: f32,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+impl From<runtime::scene3d::SceneHit> for ObjectHit {
+    fn from(hit: runtime::scene3d::SceneHit) -> Self {
+        Self {
+            id: hit.id.to_string(),
+            distance: hit.distance,
+            point: hit.world_position.to_array(),
+            normal: hit.world_normal.to_array(),
+        }
+    }
+}
+
 impl Shape {
     /// Absent on an element that draws no frame, or when the pointer is on none of its named
     /// shapes — so the three keys are simply missing rather than present and nil.
@@ -95,10 +114,11 @@ impl Shape {
 #[derive(Clone, Debug)]
 pub enum LuaMsg {
     Call(Key),
-    CallAt(Key, f32, f32, Shape),
+    CallAt(Key, f32, f32, Shape, Option<ObjectHit>),
     CallStr(Key, String),
     CallPhase(Key, &'static str, f32, f32, Shape),
     CallDrag(Key, DragArgs),
+    CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
 }
 
@@ -653,10 +673,20 @@ impl<M: 'static> LuaApp<M> {
     fn event(&self, msg: LuaMsg) -> mlua::Result<Table> {
         let event = self.vm.create_table()?;
         match msg {
-            LuaMsg::CallAt(_, x, y, shape) => {
+            LuaMsg::CallAt(_, x, y, shape, object) => {
                 event.set("x", x)?;
                 event.set("y", y)?;
                 shape.write(&event)?;
+                if let Some(hit) = object {
+                    event.set("object", hit.id)?;
+                    event.set("distance", hit.distance)?;
+                    event.set("world_x", hit.point[0])?;
+                    event.set("world_y", hit.point[1])?;
+                    event.set("world_z", hit.point[2])?;
+                    event.set("normal_x", hit.normal[0])?;
+                    event.set("normal_y", hit.normal[1])?;
+                    event.set("normal_z", hit.normal[2])?;
+                }
             }
             LuaMsg::CallPhase(_, phase, x, y, shape) => {
                 event.set("phase", phase)?;
@@ -676,6 +706,10 @@ impl<M: 'static> LuaApp<M> {
                 event.set("t", a.t)?;
                 a.shape.write(&event)?;
             }
+            LuaMsg::CallWheel(_, dx, dy) => {
+                event.set("dx", dx)?;
+                event.set("dy", dy)?;
+            }
             LuaMsg::CallFrame(_, dt, elapsed) => {
                 event.set("dt", dt)?;
                 event.set("elapsed", elapsed)?;
@@ -693,9 +727,10 @@ impl<M: 'static> LuaApp<M> {
         // A message can outlive the view that registered its key (a click spans press to
         // release), so a key with no handler now means the element is gone — drop it.
         let key = match &msg {
-            LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _, _) | LuaMsg::CallStr(k, _) => k,
+            LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _, _, _) | LuaMsg::CallStr(k, _) => k,
             LuaMsg::CallPhase(k, _, _, _, _)
             | LuaMsg::CallDrag(k, _)
+            | LuaMsg::CallWheel(k, _, _)
             | LuaMsg::CallFrame(k, _, _) => k,
         };
         let Some(h) = handlers.get(key) else {
@@ -876,6 +911,7 @@ ui = {
     input = tagger("input"),
     text_area = tagger("text_area"),
     frame = tagger("frame"),
+    scene3d = tagger("scene3d"),
     overlay = tagger("overlay"),
 }
 
@@ -1219,6 +1255,17 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 .clone();
             frame_el(visual)
         }
+        "scene3d" => {
+            if max_index(&node) > 0 {
+                return Err(mlua::Error::runtime("scene3d takes no children"));
+            }
+            let scene = node
+                .get::<AnyUserData>("scene")?
+                .borrow::<gfx::LuaScene3d>()?
+                .0
+                .clone();
+            scene3d_el(scene)
+        }
         "input" | "text_area" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime(format!(
@@ -1260,7 +1307,11 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     if id.is_none() && (node.contains_key("scroll_x")? || node.contains_key("scroll_y")?) {
         return Err(mlua::Error::runtime(format!("{tag}: scroll needs an id")));
     }
-    let consumed: &[&str] = if tag == "frame" { &["visual"] } else { &[] };
+    let consumed: &[&str] = match tag {
+        "frame" => &["visual"],
+        "scene3d" => &["scene"],
+        _ => &[],
+    };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;
     Ok(el)
 }

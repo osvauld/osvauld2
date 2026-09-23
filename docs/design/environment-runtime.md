@@ -1,10 +1,11 @@
 # Composable Environment runtime — design and handover
 
-Status: **planning baseline, 2026-09-12; no retained World, 3D renderer, ECS, physics binding,
-cloth, world picking, or perspective UI is built.** The current runtime is a working Lua-authored
-2D interface/vector substrate. This document records the revised product direction and the spikes
-required before selecting the 3D host. Proposed names and example Lua below are illustrative, not
-shipped contracts.
+Status: **planning baseline, 2026-09-12, revised 2026-09-20; the first bounded built-in-mesh 3D
+rendering slice is now built, but no retained World, ECS, physics binding, cloth, world picking,
+GLB or perspective UI is built.** The current runtime is a Lua-authored 2D interface/vector
+substrate with one experimental 3D viewport. This document records the product direction
+and experimental gates. The owned-WGPU substrate decision is recorded in §10; proposed names and
+example Lua below are illustrative, not shipped contracts.
 
 Companions:
 - [Architecture](../architecture.md) — current live crate boundaries and invariants.
@@ -33,8 +34,9 @@ picking and a later true-3D rigid-body world without redefining identity or hier
 ## 2. Verified built baseline
 
 The workspace currently resolves wgpu 29.0.4, winit 0.30.13, Vello 0.9.0, Parley 0.11.0,
-Taffy 0.12.2, Kurbo 0.13.1, Euclid 0.22.14 and Peniko 0.6.1. No ECS, Rapier dependency or 3D
-renderer is present.
+Taffy 0.12.2, Kurbo 0.13.1, Euclid 0.22.14 and Peniko 0.6.1. No ECS or Rapier dependency is
+present. **2026-09-20 implementation note:** `glam`/`bytemuck` and the first owned WGPU mesh/depth
+pass have landed; it is the deliberately narrow model-viewer proof described below, not a World.
 
 Built today:
 - `El<M>` from Rust or strict `ui.*` Lua tables; Taffy layout; Parley text/editor support;
@@ -44,11 +46,15 @@ Built today:
 - strict Lua `gfx.*` construction and `ui.frame` placement;
 - scrolling, overlays, mouse click/drag, camera pan/zoom and animation primitives;
 - experimental `on_frame(dt, elapsed)` Lua callbacks;
-- live/custom screenshots and the animated `demo_apps/frame_orbits` proof.
+- live/custom screenshots and the animated `demo_apps/frame_orbits` proof;
+- one experimental Lua `ui.scene3d` viewport with validated built-in cubes, perspective camera,
+  instanced GPU buffers, real depth, final-target capture and bounded `DumpTree` inspection.
 
 Hard current limits:
 - Frame and Geometry transforms are 2D Kurbo `Affine`; there is no projective transform;
-- rendering has no depth attachment, camera matrix, mesh or material pass;
+- the experimental 3D proof has a depth attachment, camera matrix, 4× MSAA and a lit cube pass,
+  plus transformed-cube click raycasts, but no general mesh/material resources, GLB, hover/world
+  query surface or correct foreground Vello pass;
 - transformed clip eligibility uses screen-space bounding boxes while Vello paints actual shapes;
 - drag capture retains press-time Geometry; deforming/current-geometry capture is unbuilt;
 - Frame has no text resource, image, internal clip, identity/hit item or dynamic buffer;
@@ -248,7 +254,7 @@ Advantages: same device/window/event loop, preserves current Lua and UI architec
 falsifiable seam. Cost: we own mesh/depth pipelines, cameras, surface caching, picking and resource
 budgets.
 
-### Bevy 0.19 — credible challenger, not selected
+### Bevy 0.19 — not the runtime substrate
 
 Verified upstream facts at review time: Bevy 0.19.1 uses WGPU 29.0.3 and winit 0.30, supports
 perspective cameras, render-to-texture, custom meshes and render resources. `bevy_vello` 0.14
@@ -256,9 +262,12 @@ supports Bevy 0.19 with Vello 0.9. Bevy's built-in UI transforms remain 2D, its 
 attachment, and built-in text uses a glyph atlas. Bevy does not automatically solve perspective
 Osvauld UI, deformable text, Lua authorship, reload or UV-to-nested-hit routing.
 
-Prefer Bevy as host only if a challenger spike preserves `App::view/update`, on-demand waiting,
-screenshots and one device with a small adapter, and imminent needs include several engine-scale
-features such as glTF, skeletal animation, shadowed PBR, large-scene culling or post-processing.
+The original recommendation was to run a Bevy host challenger before selecting a renderer.
+**Revised 2026-09-20:** Osvauld will retain its existing application, device and composition
+pipelines and use focused libraries beneath an owned WGPU renderer; Bevy and its tightly coupled
+render/PBR/glTF crates are references and feature benchmarks, not runtime dependencies. See
+[the model viewer plan](3d-model-viewer.md) for the selected substrate. Reconsideration requires a
+dated decision revision, not an implementation spike assumed by default.
 
 ### Fyrox / three-d — not preferred
 
@@ -275,6 +284,14 @@ Primary references used in the 2026-09-12 review:
 - Rapier scene queries: https://rapier.rs/docs/user_guides/rust/scene_queries
 
 ## 11. Falsifiable prototype gates
+
+**2026-09-20 revision:** the immediate rendering experiment is now the
+[Lua-first model viewer proof](3d-model-viewer.md): built-in mesh geometry, depth, camera
+control and picking inside a real shell-hosted Lua app, followed separately by GLB import.
+The original gates below are retained as broader Environment acceptance targets. Passing
+that narrower proof does not satisfy Gate 1's projected text/nested controls. The owned-WGPU
+substrate decision supersedes the Bevy challenger. Gate 0 still applies before continuous
+animation is used as evidence.
 
 These are experiments, not production APIs or performance promises.
 
@@ -298,12 +315,13 @@ ray-triangle → barycentric UV → logical surface input. Pass only if sampled 
 logical point and text is acceptable at an agreed minimum angle/distance with at most a 2048²
 surface. Failure triggers the glyph/mesh rendering investigation, not silent quality reduction.
 
-### Gate 3 — Bevy challenger
+### Gate 3 — Bevy challenger (superseded 2026-09-20)
 
-Reproduce Gate 1 with Bevy 0.19/Vello 0.9. Preserve current app `view/update`, `ControlFlow::Wait`,
-screenshot and hit routing. Require one device/window, no duplicate incompatible WGPU/winit stack,
-a small auditable adapter and measured cost near the native spike. If it passes and engine-scale
-features are near-term, reconsider the host; otherwise retain native WGPU.
+The original gate would reproduce Gate 1 with Bevy 0.19/Vello 0.9 while preserving current app
+`view/update`, `ControlFlow::Wait`, screenshots, hit routing and one device/window. It is no longer
+on the implementation path: the selected substrate is the owned WGPU pipeline plus focused
+libraries. Bevy remains a comparison implementation; reopening this gate requires revising the
+recorded decision first.
 
 ### Gate 4 — retained world lifecycle
 
@@ -340,7 +358,7 @@ action.
 ## 13. Open decisions
 
 Do not silently settle these during implementation:
-- native WGPU compositor versus Bevy host after both Gate 1 and Gate 3 measurements;
+- exact owned-WGPU pass/resource architecture; the Bevy-host alternative was closed 2026-09-20;
 - 3D math representation/library and typed coordinate-space wrappers;
 - ECS/storage library versus focused packed stores;
 - surface texture cache keys, adaptive resolution and memory budget;
@@ -359,10 +377,11 @@ A new agent should:
 1. read `AGENTS.md`, architecture, status, conventions and this document;
 2. inspect the current Render target/device ownership and screenshot path;
 3. reproduce the `on_frame` audit before relying on it;
-4. write a Gate 1 spike plan in ≤100-line implementation slices and get user approval;
+4. write the revised Lua-first model viewer proof plan in ≤100-line implementation slices
+   and get user approval (see the 2026-09-20 revision in §11);
 5. load `expert-runtime` for runtime changes and `expert-architect` for the cross-cutting seam;
 6. keep Frame 2D and preserve the current app/Lua pipeline during the spike;
-7. compare Gate 1 evidence with Gate 3 before proposing dependencies or crate boundaries;
+7. keep renderer dependencies focused and recheck compatibility before each capability tier;
 8. update status honestly after each landed slice and keep rejected alternatives as dated notes.
 
 Do not begin with a public ECS API, graph widget, complete physics binding or Frame perspective

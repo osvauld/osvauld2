@@ -142,6 +142,39 @@ fn lua_builds_a_nested_gradient_frame_element() {
     assert_eq!(info.id.as_deref(), Some("picture"));
 }
 
+#[test]
+fn lua_builds_a_bounded_3d_scene_leaf() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(
+            r##"
+            local label = gfx.text_surface({ text = "hello surface", font_size = 30,
+                color = "#ffffff", background = "#242839" })
+            local scene = gfx.scene3d({
+                camera = { eye = { 3, 2, 4 }, target = { 0, 0, 0 } },
+                objects = {
+                    { id = "left", mesh = "cube", position = { -0.4, 0, 0 }, color = "#ff405f",
+                        surface = label },
+                    { id = "right", mesh = "cube", position = { 0.4, 0, 0 }, color = "#4f7cff" },
+                },
+            })
+            return ui.scene3d({ id = "viewer", scene = scene, w = 640, h = 480 })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    let info = walk(node, &mut ctx).unwrap().info();
+
+    assert_eq!(info.kind, "scene3d");
+    assert_eq!(info.id.as_deref(), Some("viewer"));
+    assert_eq!(
+        info.scene3d.unwrap().objects[0].surface_text.as_deref(),
+        Some("hello surface")
+    );
+}
+
 /// Naming shapes is how an app says which parts of a drawing are touchable. The name reaches the
 /// compiled resource; an empty one is a typo, not a shape called "".
 #[test]
@@ -600,8 +633,51 @@ fn a_click_reaches_its_element_across_rebuilds() {
         12.5,
         4.0,
         Shape::default(),
+        None,
     ));
     assert_eq!(hits(&app), vec!["b@0,0", "a@12.5,4"]);
+}
+
+#[test]
+fn a_scene_pick_reaches_lua_as_named_world_data() {
+    let src = LoroDoc::new();
+    let main = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    main.insert(
+        0,
+        r##"picked = {}
+        local scene = gfx.scene3d({
+            camera = { eye = { 0, 0, 5 }, target = { 0, 0, 0 } },
+            objects = { { id = "cube", color = "#ffffff" } },
+        })
+        return function()
+            return ui.scene3d({ id = "view", scene = scene, w = 200, h = 200,
+                on_click = function(e) picked = e end })
+        end"##,
+    )
+    .unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view();
+    app.update(LuaMsg::CallAt(
+        Key::new("view", "on_click"),
+        100.0,
+        100.0,
+        Shape::default(),
+        Some(ObjectHit {
+            id: "cube".into(),
+            distance: 4.5,
+            point: [0.0, 0.0, 0.5],
+            normal: [0.0, 0.0, 1.0],
+        }),
+    ));
+    let picked: Table = app.vm.globals().get("picked").unwrap();
+    assert_eq!(picked.get::<String>("object").unwrap(), "cube");
+    assert_eq!(picked.get::<f32>("distance").unwrap(), 4.5);
+    assert_eq!(picked.get::<f32>("world_z").unwrap(), 0.5);
+    assert_eq!(picked.get::<f32>("normal_z").unwrap(), 1.0);
 }
 
 #[test]
@@ -2870,6 +2946,7 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
             x,
             y,
             Shape::default(),
+            None,
         ))
     };
     let drag = |app: &mut LuaApp<LuaMsg>, id: &str, phase: &'static str, dx: f32, dy: f32| {
@@ -3127,6 +3204,7 @@ fn tally_loads_views_and_clicks() {
             0.0,
             0.0,
             Shape::default(),
+            None,
         ));
         let _ = app.view();
     }
@@ -3817,6 +3895,7 @@ fn pie_demo_reads_the_shape_the_runtime_names() {
             0.0,
             0.0,
             Shape(Some((shape.to_string(), 0.0, 0.0))),
+            None,
         ));
     };
     click(&mut app, "slice:search");

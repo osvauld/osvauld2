@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 runtime = { path = "../runtime" }
 csscolorparser = "0.8.3"
+glam = "0.30"
 uuid = { version = "1.24.0", features = ["v4"] }
 
 # Tests only, and the direction matters: `lua_tree` must not know what a host is. This is the

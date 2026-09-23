@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use vello::kurbo::Affine;
+use crate::scene3d::{Scene3d, SceneRenderer};
+use vello::kurbo::{Affine, Rect};
 use vello::peniko::Color;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 use winit::window::Window;
@@ -19,6 +20,7 @@ use wgpu::CurrentSurfaceTexture::*;
 /// downsamples). Left at 1 = native res: 2× linear-downsampled blurred edges more than it smoothed.
 /// Kept as a tunable knob; real fix is vello's analytic (Area) AA once it's past alpha.
 const SUPERSAMPLE: u32 = 1;
+const SCENE_SAMPLES: u32 = 4;
 const MAX_CAPTURE_PIXELS: u64 = 16 * 1024 * 1024;
 
 /// PNG read back from the live Vello target. Dimensions are physical pixels.
@@ -47,6 +49,9 @@ pub struct Render {
     scale: f64,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
+    scene_targets: SceneTargets,
+    scene_renderer: SceneRenderer,
+    scene_blitter: wgpu::util::TextureBlitter,
     blitter: wgpu::util::TextureBlitter,
 }
 
@@ -69,7 +74,8 @@ fn create_targets(
         dimension: wgpu::TextureDimension::D2,
         usage: wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: wgpu::TextureFormat::Rgba8Unorm,
         view_formats: &[],
     });
@@ -122,6 +128,99 @@ fn surface_config(
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     }
+}
+
+struct SceneTargets {
+    color: wgpu::TextureView,
+    resolve: wgpu::TextureView,
+    depth: wgpu::TextureView,
+}
+
+fn create_scene_targets(width: u32, height: u32, device: &wgpu::Device) -> SceneTargets {
+    let texture = |label, format, samples, usage| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: samples,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let attachment = wgpu::TextureUsages::RENDER_ATTACHMENT;
+    SceneTargets {
+        color: texture(
+            "3d msaa color",
+            wgpu::TextureFormat::Rgba8Unorm,
+            SCENE_SAMPLES,
+            attachment,
+        )
+        .create_view(&Default::default()),
+        resolve: texture(
+            "3d resolved color",
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            attachment | wgpu::TextureUsages::TEXTURE_BINDING,
+        )
+        .create_view(&Default::default()),
+        depth: texture(
+            "3d msaa depth",
+            wgpu::TextureFormat::Depth32Float,
+            SCENE_SAMPLES,
+            attachment,
+        )
+        .create_view(&Default::default()),
+    }
+}
+
+fn render_vello(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    scene: &Scene,
+    target: &wgpu::TextureView,
+    clear: Color,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    renderer
+        .render_to_texture(
+            device,
+            queue,
+            scene,
+            target,
+            &RenderParams {
+                base_color: clear,
+                width,
+                height,
+                // Area AA (analytic) has conflation jaggies at vello's alpha; MSAA16 is clean.
+                antialiasing_method: AaConfig::Msaa16,
+            },
+        )
+        .map_err(|e| format!("vello render: {e}"))
+}
+
+pub(crate) struct SceneView3d {
+    pub scene: Arc<Scene3d>,
+    pub rect: Rect,
+}
+
+fn physical_viewport(rect: Rect, scale: f32, width: u32, height: u32) -> [u32; 4] {
+    let x0 = (rect.x0 * scale as f64).floor().clamp(0.0, width as f64) as u32;
+    let y0 = (rect.y0 * scale as f64).floor().clamp(0.0, height as f64) as u32;
+    let x1 = (rect.x1 * scale as f64)
+        .ceil()
+        .clamp(x0 as f64, width as f64) as u32;
+    let y1 = (rect.y1 * scale as f64)
+        .ceil()
+        .clamp(y0 as f64, height as f64) as u32;
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 impl Render {
@@ -200,11 +299,15 @@ impl Render {
             },
         )
         .expect("create vello renderer");
-        let (target, target_view) = create_targets(
-            config.width * SUPERSAMPLE,
-            config.height * SUPERSAMPLE,
-            &device,
-        );
+        let target_width = config.width * SUPERSAMPLE;
+        let target_height = config.height * SUPERSAMPLE;
+        let (target, target_view) = create_targets(target_width, target_height, &device);
+        let scene_targets = create_scene_targets(target_width, target_height, &device);
+        let scene_renderer = SceneRenderer::new(&device);
+        let scene_blitter =
+            wgpu::util::TextureBlitterBuilder::new(&device, wgpu::TextureFormat::Rgba8Unorm)
+                .blend_state(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING)
+                .build();
         // Nearest is exact at 1:1 (crisp). If SUPERSAMPLE > 1, switch to Linear to downsample.
         let blitter = wgpu::util::TextureBlitter::new(&device, config.format);
         Self {
@@ -216,6 +319,9 @@ impl Render {
             scale,
             target,
             target_view,
+            scene_targets,
+            scene_renderer,
+            scene_blitter,
             blitter,
         }
     }
@@ -242,6 +348,11 @@ impl Render {
         );
         self.target = target;
         self.target_view = target_view;
+        self.scene_targets = create_scene_targets(
+            size.width * SUPERSAMPLE,
+            size.height * SUPERSAMPLE,
+            &self.device,
+        );
     }
 
     pub fn set_scale(&mut self, scale: f64) {
@@ -282,7 +393,12 @@ impl Render {
     /// Draw one frame: clear to `clear`, let `build` populate the scene (it gets the scene, text
     /// engine, the logical→physical transform, the logical viewport, and the elapsed clock), then
     /// rasterize offscreen and present. Knows *how* to paint, not *what* — that's `build`.
-    pub fn present(&mut self, clear: Color, scene: &Scene) -> bool {
+    pub(crate) fn present(
+        &mut self,
+        clear: Color,
+        scene: &Scene,
+        scene3d: Option<&SceneView3d>,
+    ) -> bool {
         // Acquire before submitting Vello work. Some backends can stall acquiring a surface after
         // offscreen work is already queued; this was the original and reliable frame ordering.
         // Scoped so the surface borrow ends before the renderer is taken mutably below.
@@ -305,21 +421,33 @@ impl Render {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.renderer
-            .render_to_texture(
+        render_vello(
+            &mut self.renderer,
+            &self.device,
+            &self.queue,
+            scene,
+            &self.target_view,
+            clear,
+            self.config.width * SUPERSAMPLE,
+            self.config.height * SUPERSAMPLE,
+        )
+        .expect("vello render");
+        if let Some(view) = scene3d {
+            self.scene_renderer.render(
                 &self.device,
                 &self.queue,
-                scene,
-                &self.target_view,
-                &RenderParams {
-                    base_color: clear,
-                    width: self.config.width * SUPERSAMPLE,
-                    height: self.config.height * SUPERSAMPLE,
-                    // Area AA (analytic) has conflation jaggies at vello's alpha; MSAA16 is clean.
-                    antialiasing_method: AaConfig::Msaa16,
-                },
-            )
-            .expect("vello render");
+                &self.scene_targets.color,
+                &self.scene_targets.resolve,
+                &self.scene_targets.depth,
+                &view.scene,
+                physical_viewport(
+                    view.rect,
+                    (self.scale * SUPERSAMPLE as f64) as f32,
+                    self.config.width * SUPERSAMPLE,
+                    self.config.height * SUPERSAMPLE,
+                ),
+            );
+        }
 
         // Blit the compute-rendered target onto the (non-storage) surface texture, then present.
         let mut encoder = self
@@ -327,6 +455,14 @@ impl Render {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("blit to surface"),
             });
+        if scene3d.is_some() {
+            self.scene_blitter.copy(
+                &self.device,
+                &mut encoder,
+                &self.scene_targets.resolve,
+                &self.target_view,
+            );
+        }
         self.blitter
             .copy(&self.device, &mut encoder, &self.target_view, &view);
         self.queue.submit([encoder.finish()]);
@@ -353,12 +489,13 @@ impl Render {
 
     /// Render an already-built scene to a temporary target. This reuses the live renderer and
     /// device but never acquires or presents a surface frame.
-    pub fn capture_scene(
+    pub(crate) fn capture_scene(
         &mut self,
         clear: Color,
         scene: &Scene,
         viewport: (f32, f32),
         scale: f32,
+        scene3d: Option<&SceneView3d>,
     ) -> Result<CapturedImage, String> {
         let dimension = |logical: f32| -> Result<u32, String> {
             let px = (logical * scale).round();
@@ -373,20 +510,36 @@ impl Render {
             return Err("screenshot exceeds the 16 megapixel limit".into());
         }
         let (target, view) = create_targets(width, height, &self.device);
-        self.renderer
-            .render_to_texture(
+        let scene_targets = create_scene_targets(width, height, &self.device);
+        render_vello(
+            &mut self.renderer,
+            &self.device,
+            &self.queue,
+            scene,
+            &view,
+            clear,
+            width,
+            height,
+        )?;
+        if let Some(scene_view) = scene3d {
+            self.scene_renderer.render(
                 &self.device,
                 &self.queue,
-                scene,
-                &view,
-                &RenderParams {
-                    base_color: clear,
-                    width,
-                    height,
-                    antialiasing_method: AaConfig::Msaa16,
-                },
-            )
-            .map_err(|e| format!("vello render: {e}"))?;
+                &scene_targets.color,
+                &scene_targets.resolve,
+                &scene_targets.depth,
+                &scene_view.scene,
+                physical_viewport(scene_view.rect, scale, width, height),
+            );
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("3d capture composite"),
+                });
+            self.scene_blitter
+                .copy(&self.device, &mut encoder, &scene_targets.resolve, &view);
+            self.queue.submit([encoder.finish()]);
+        }
         self.read_texture(&target, width, height)
     }
 

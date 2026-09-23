@@ -9,6 +9,7 @@
 //! window you never receive an event against a frame that hasn't been drawn.
 
 use winit::dpi::PhysicalPosition;
+use winit::event::MouseScrollDelta;
 
 use crate::{App, DriverOp, ElRect, POINTER, Runner};
 
@@ -59,6 +60,15 @@ impl<A: App> Headless<A> {
         self.runner.clock += POINTER;
         self.runner
             .on_cursor_moved(PhysicalPosition::new(x as f64, y as f64));
+    }
+
+    /// Deliver a logical-pixel wheel delta through the same eligibility path as a window event.
+    pub fn wheel(&mut self, x: f32, y: f32, dx: f32, dy: f32) {
+        self.move_to(x, y);
+        self.runner
+            .on_wheel_moved(MouseScrollDelta::PixelDelta(PhysicalPosition::new(
+                dx as f64, dy as f64,
+            )));
     }
 
     pub fn press(&mut self) {

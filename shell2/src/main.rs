@@ -304,6 +304,34 @@ fn screenshot_spec(
     Ok((viewport, scale))
 }
 
+fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value {
+    let objects = scene
+        .objects
+        .iter()
+        .map(|object| {
+            serde_json::json!({
+                "id": object.id,
+                "mesh": match object.mesh { runtime::scene3d::BuiltinMesh::Cube => "cube" },
+                "position": object.position,
+                "rotation": object.rotation,
+                "scale": object.scale,
+                "color": object.color,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "camera": {
+            "eye": scene.eye,
+            "target": scene.target,
+            "up": scene.up,
+            "fov_y_radians": scene.fov_y_radians,
+            "near": scene.near,
+            "far": scene.far,
+        },
+        "objects": objects,
+    })
+}
+
 fn info_json(i: &ElInfo) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     o.insert("kind".into(), i.kind.into());
@@ -312,6 +340,9 @@ fn info_json(i: &ElInfo) -> serde_json::Value {
     }
     if let Some(t) = &i.text {
         o.insert("text".into(), serde_json::Value::String(t.clone()));
+    }
+    if let Some(scene) = &i.scene3d {
+        o.insert("scene3d".into(), scene3d_json(scene));
     }
     if !i.handlers.is_empty() {
         o.insert(

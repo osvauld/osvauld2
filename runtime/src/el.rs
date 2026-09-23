@@ -140,6 +140,7 @@ pub(crate) struct Appearance {
     pub look: Look,
     pub text: Option<TextSpec>,
     pub frame: Option<Arc<Frame>>,
+    pub scene3d: Option<Arc<crate::scene3d::Scene3d>>,
     pub custom: Option<CustomFn>,
     pub repaint: bool,
 }
@@ -257,12 +258,19 @@ pub struct FrameTick {
     pub elapsed: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WheelEvent {
+    pub delta: (f32, f32),
+    pub mods: crate::drag::Mods,
+}
+
 /// Where a pointer event landed: the element-local point, and the named shape under it when the
 /// element draws a Frame. A bridge-fired event has neither, so `At::default()` is the honest zero.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct At {
     pub pos: (f32, f32),
     pub shape: Option<FrameHit>,
+    pub object: Option<crate::scene3d::SceneHit>,
 }
 
 /// What a click delivers: a message built in advance, or one built from where the click landed.
@@ -285,6 +293,7 @@ impl<M> Click<M> {
 pub(crate) struct Behaviour<M> {
     pub on_click: Option<Click<M>>,
     pub on_frame: Option<(Id, Box<dyn Fn(FrameTick) -> M>)>,
+    pub on_wheel: Option<(Id, Box<dyn Fn(WheelEvent) -> M>)>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
@@ -323,6 +332,7 @@ impl<M> Default for Behaviour<M> {
         Self {
             on_click: None,
             on_frame: None,
+            on_wheel: None,
             input: None,
             scroll: None,
             on_drag: None,
@@ -427,6 +437,13 @@ pub fn text_area<M>(
 pub fn frame<M>(visual: Arc<Frame>) -> El<M> {
     let mut e = El::new(Style::default());
     e.appearance.frame = Some(visual);
+    e
+}
+
+/// An experimental retained 3D scene leaf. Its viewport size comes from ordinary layout.
+pub fn scene3d<M>(scene: Arc<crate::scene3d::Scene3d>) -> El<M> {
+    let mut e = El::new(Style::default());
+    e.appearance.scene3d = Some(scene);
     e
 }
 
@@ -805,6 +822,11 @@ impl<M> El<M> {
         self
     }
 
+    pub fn on_wheel(mut self, id: impl Into<Id>, map: impl Fn(WheelEvent) -> M + 'static) -> Self {
+        self.behaviour.on_wheel = Some((id.into(), Box::new(map)));
+        self
+    }
+
     pub fn on_drag(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
         self.behaviour.on_drag = Some((id.into(), Box::new(map)));
         self
@@ -922,6 +944,9 @@ impl<M> El<M> {
         if self.behaviour.on_frame.is_some() {
             handlers.push("on_frame");
         }
+        if self.behaviour.on_wheel.is_some() {
+            handlers.push("on_wheel");
+        }
         if self.behaviour.on_drag.is_some() {
             handlers.push("on_drag");
         }
@@ -933,6 +958,8 @@ impl<M> El<M> {
         }
         let kind = if self.appearance.frame.is_some() {
             "frame"
+        } else if self.appearance.scene3d.is_some() {
+            "scene3d"
         } else if self.appearance.custom.is_some() {
             "custom"
         } else if self.appearance.text.is_some() {
@@ -954,6 +981,11 @@ impl<M> El<M> {
             kind,
             id: self.id.as_deref().map(str::to_string),
             text: self.appearance.text.as_ref().map(|t| t.text.clone()),
+            scene3d: self
+                .appearance
+                .scene3d
+                .as_ref()
+                .map(|scene| scene.inspect()),
             handlers,
             children,
         }
@@ -1069,6 +1101,7 @@ pub struct ElInfo {
     pub kind: &'static str,
     pub id: Option<String>,
     pub text: Option<String>,
+    pub scene3d: Option<crate::scene3d::SceneInspection>,
     pub handlers: Vec<&'static str>,
     pub children: Vec<ElInfo>,
 }

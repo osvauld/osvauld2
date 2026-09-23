@@ -17,6 +17,7 @@ mod id;
 mod layout;
 mod paint;
 mod render;
+pub mod scene3d;
 mod scroll;
 mod state;
 mod text;
@@ -52,8 +53,8 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide, col,
-    custom, frame, rich, row, text, text_area, text_input,
+    Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide,
+    WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
 };
 pub use headless::Headless;
 pub use hover::{HoverEvent, HoverPhase};
@@ -262,7 +263,7 @@ struct Runner<A: App> {
     /// `start`. Stamped once per event so everything one event fires shares it.
     event_at: f64,
     hits: Hits<A::Msg>,
-    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, Option<Shapes>)>,
+    pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, PickContent)>,
     hovered: Hovered,
 }
 
@@ -313,15 +314,41 @@ fn shape_at(shapes: &Option<Shapes>, local: NodePoint) -> Option<crate::frame::F
     shapes.as_ref().and_then(|s| s.at(local))
 }
 
+#[derive(Clone)]
+struct ScenePick {
+    scene: Arc<crate::scene3d::Scene3d>,
+    origin: (f64, f64),
+    size: (f32, f32),
+}
+
+impl ScenePick {
+    fn at(&self, local: NodePoint) -> Option<crate::scene3d::SceneHit> {
+        self.scene.raycast(
+            self.size,
+            (
+                (local.x - self.origin.0) as f32,
+                (local.y - self.origin.1) as f32,
+            ),
+        )
+    }
+}
+
+#[derive(Clone, Default)]
+struct PickContent {
+    shapes: Option<Shapes>,
+    scene: Option<ScenePick>,
+}
+
 struct Hits<M> {
     /// The last field is the element's nearest zoomable ancestor.
-    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, Option<Shapes>)>,
+    click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, PickContent)>,
     input: Vec<(Geometry, Id, Insets)>,
     input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
     context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
     drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
     drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
     hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
+    wheel: Vec<(Geometry, Id, Box<dyn Fn(WheelEvent) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -339,6 +366,7 @@ impl<M> Default for Hits<M> {
             drag: Vec::new(),
             drop: Vec::new(),
             hover: Vec::new(),
+            wheel: Vec::new(),
             scroll: Vec::new(),
             enter: Vec::new(),
             esc: Vec::new(),
@@ -358,6 +386,7 @@ impl<M> Hits<M> {
             drag,
             drop,
             hover,
+            wheel,
             scroll,
             enter,
             esc,
@@ -371,6 +400,7 @@ impl<M> Hits<M> {
         drag.clear();
         drop.clear();
         hover.clear();
+        wheel.clear();
         scroll.clear();
         enter.clear();
         esc.clear();
@@ -616,6 +646,7 @@ impl<A: App> Runner<A> {
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         hits.clear();
         let mut clips = Vec::new();
+        let mut scene3d = None;
         for p in placed.iter_mut() {
             match p.kind {
                 PlacedKind::PushClip { rect, transform } => {
@@ -633,6 +664,23 @@ impl<A: App> Runner<A> {
             }
             let geometry = Geometry::resolve(p.rect, p.transform, clips.iter().copied());
             let visible = geometry.visible_rect_kurbo();
+            if scene3d.is_none()
+                && let (Some(scene), Some(visible)) = (&p.appearance.scene3d, visible)
+            {
+                let content = Rect::new(
+                    p.rect.x0 + p.pad.x0,
+                    p.rect.y0 + p.pad.y0,
+                    p.rect.x1 - p.pad.x1,
+                    p.rect.y1 - p.pad.y1,
+                );
+                let rect = p.transform.transform_rect_bbox(content).intersect(visible);
+                if rect.width() > 0.0 && rect.height() > 0.0 {
+                    scene3d = Some(render::SceneView3d {
+                        scene: scene.clone(),
+                        rect,
+                    });
+                }
+            }
             let over =
                 pointer.is_some_and(|(px, py)| geometry.contains(Point::new(px as f64, py as f64)));
             if p.appearance.repaint {
@@ -682,16 +730,22 @@ impl<A: App> Runner<A> {
                 frame: frame.clone(),
                 origin: (p.pad.x0, p.pad.y0),
             });
+            let pick = PickContent {
+                shapes: shapes.clone(),
+                scene: p.appearance.scene3d.as_ref().map(|scene| ScenePick {
+                    scene: scene.clone(),
+                    origin: (p.pad.x0, p.pad.y0),
+                    size: (
+                        (p.rect.width() - p.pad.x0 - p.pad.x1) as f32,
+                        (p.rect.height() - p.pad.y0 - p.pad.y1) as f32,
+                    ),
+                }),
+            };
             if let Some(click) = p.behaviour.on_click.take()
                 && geometry.visible_rect.is_some()
             {
-                hits.click.push((
-                    geometry,
-                    p.id.clone(),
-                    click,
-                    p.zoom_parent.clone(),
-                    shapes.clone(),
-                ));
+                hits.click
+                    .push((geometry, p.id.clone(), click, p.zoom_parent.clone(), pick));
             }
             if let Some((id, handler)) = p.behaviour.on_drag.take()
                 && visible.is_some()
@@ -708,6 +762,11 @@ impl<A: App> Runner<A> {
                 && visible.is_some()
             {
                 hits.hover.push((geometry, id, handler, shapes));
+            }
+            if let Some((id, handler)) = p.behaviour.on_wheel.take()
+                && visible.is_some()
+            {
+                hits.wheel.push((geometry, id, handler));
             }
             if let Some(h) = p.behaviour.on_right_click.take()
                 && let Some(hit_rect) = visible
@@ -846,18 +905,25 @@ impl<A: App> Runner<A> {
                 &self.scene,
                 viewport,
                 capture_scale,
+                scene3d.as_ref(),
             );
             self.hits.clear();
             Some(result)
         } else {
             let render = self.render.as_mut().unwrap();
-            let presented = render.present(clear, &self.scene);
+            let presented = render.present(clear, &self.scene, scene3d.as_ref());
             screenshot.as_ref().map(|_| {
                 if presented {
                     render.capture()
                 } else {
                     // Surface loss must not turn a requested shot into the previous frame.
-                    render.capture_scene(clear, &self.scene, viewport, capture_scale)
+                    render.capture_scene(
+                        clear,
+                        &self.scene,
+                        viewport,
+                        capture_scale,
+                        scene3d.as_ref(),
+                    )
                 }
             })
         };
@@ -994,8 +1060,8 @@ impl<A: App> Runner<A> {
             .iter()
             .rev()
             .find(|(geometry, _, _, _, _)| geometry.contains(p));
-        if let Some((geometry, id, click, _, shapes)) = clicked {
-            self.pressed = Some((*geometry, id.clone(), click.clone(), shapes.clone()));
+        if let Some((geometry, id, click, _, pick)) = clicked {
+            self.pressed = Some((*geometry, id.clone(), click.clone(), pick.clone()));
         }
         // A click inside a camera may still pan it. A button floating over the canvas is not
         // inside, and dragging off that button must not move the canvas.
@@ -1299,7 +1365,7 @@ impl<A: App> Runner<A> {
                 Capture::Pending { .. } => {}
             }
         }
-        if let Some((geometry, _, click, shapes)) = self.pressed.take()
+        if let Some((geometry, _, click, pick)) = self.pressed.take()
             && let Some((px, py)) = self.pointer
         {
             let point = Point::new(px as f64, py as f64);
@@ -1307,7 +1373,8 @@ impl<A: App> Runner<A> {
                 let local = geometry.node_point(ScreenPoint::new(point.x, point.y));
                 self.app.update(click.fire(At {
                     pos: (local.x as f32, local.y as f32),
-                    shape: shape_at(&shapes, local),
+                    shape: shape_at(&pick.shapes, local),
+                    object: pick.scene.as_ref().and_then(|scene| scene.at(local)),
                 }));
             }
         }
@@ -1473,6 +1540,23 @@ impl<A: App> Runner<A> {
                 ((pos.x / scale) as f32, (pos.y / scale) as f32)
             }
         };
+        if let Some(msg) = self
+            .hits
+            .wheel
+            .iter()
+            .rev()
+            .find(|(geometry, _, _)| geometry.contains(p))
+            .map(|(_, _, handler)| {
+                handler(WheelEvent {
+                    delta: (dx, dy),
+                    mods: self.mods(),
+                })
+            })
+        {
+            self.app.update(msg);
+            self.redraw();
+            return;
+        }
         let (dh, dv) = if shift { (-dy, 0.0) } else { (-dx, -dy) };
         let (mut rem_h, mut rem_v) = (dh, dv);
         if ctrl_zoom {

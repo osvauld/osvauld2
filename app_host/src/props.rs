@@ -151,6 +151,7 @@ impl<M: 'static> Registry<M> {
                     at.pos.0,
                     at.pos.1,
                     at.shape.clone().into(),
+                    at.object.map(Into::into),
                 ))
             }))
         }),
@@ -159,6 +160,13 @@ impl<M: 'static> Registry<M> {
             let to_msg = cx.to_msg.clone();
             Ok(el.on_frame(key.id.to_string(), move |event| {
                 to_msg(LuaMsg::CallFrame(key.clone(), event.dt, event.elapsed))
+            }))
+        }),
+        ("on_wheel", |el, v, cx| {
+            let key = cx.register("on_wheel", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_wheel(key.id.to_string(), move |event| {
+                to_msg(LuaMsg::CallWheel(key.clone(), event.delta.0, event.delta.1))
             }))
         }),
         ("on_drag", |el, v, cx| {
