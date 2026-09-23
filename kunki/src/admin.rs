@@ -5,10 +5,11 @@
 //! holder's DID names its index — which adds nothing, since `vault` already names an account's
 //! file after its DID.
 //!
-//! Everything here is **this node's own authority**: `token/<id>` is the issue and
-//! `users/<did>/tokens/<id>` indexes it by holder, leaving room for `users/<did>/meta` when
-//! profiles exist. `revoked/<id>` is what *this* node revoked, never what another node
-//! announced — merged, one node's revocation could shadow another's ids. The mirror image,
+//! Everything here is **this node's own authority**: `token/<id>` is the issue,
+//! `users/<did>/tokens/<id>` indexes it by holder, `users/<did>/relationship` is the claim that
+//! made them known at all, and `users/<did>/meta` is left for profiles. `revoked/<id>` is what
+//! *this* node revoked, never what another node announced — merged, one node's revocation
+//! could shadow another's ids. The mirror image,
 //! tokens this node holds from another node, is reserved for `nodes/<node-did>/`, and is the
 //! same shape a desktop needs, since a user holds tokens from several nodes.
 
@@ -17,6 +18,7 @@ use std::collections::HashSet;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::token::Token;
+use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
 use serde::{Deserialize, Serialize};
 use vault::Vault;
 
@@ -25,6 +27,7 @@ use crate::NodeError;
 const RECORD: &str = "token/";
 const USERS: &str = "users/";
 const REVOKED: &str = "revoked/";
+const RELATIONSHIP: &str = "/relationship";
 
 /// Why a token exists. Lineage, not history: the node reissues flat tokens to keep chains
 /// short, and a flat token no longer carries its issuer in `prf` — without this, revoking
@@ -100,6 +103,70 @@ impl Admin {
         Ok(issues)
     }
 
+    /// Every desktop that has claimed this node. courier decides the first-admin question
+    /// against this list, so a node that could not rebuild it would let the next caller claim
+    /// an already-claimed node.
+    pub fn admins(&self) -> Result<Vec<AdminRecord>, NodeError> {
+        let mut admins = Vec::new();
+        for name in self.vault.list_entries(USERS)? {
+            if !name.ends_with(RELATIONSHIP) {
+                continue;
+            }
+            let bytes = self
+                .vault
+                .get_entry(&name)?
+                .ok_or_else(|| NodeError::Damaged(name.clone()))?;
+            admins.push(serde_json::from_slice(&bytes)?);
+        }
+        Ok(admins)
+    }
+
+    /// Claim handling with the list on disk. courier decides; this supplies what it decides
+    /// against and keeps what it added. Loaded before signing and written after, because
+    /// `with_signer` holds the account for its closure.
+    pub fn accept_claim(&self, hello: ClaimHello, now: u64) -> Result<ClaimWelcome, NodeError> {
+        let mut admins = self.admins()?;
+        let welcome = self
+            .vault
+            .with_signer(|node| courier::node_accept_claim(hello, node, &mut admins, now))
+            .ok_or(NodeError::Locked)??;
+        // The whole list, not the tail: courier only appends today, and this does not have to
+        // know that to stay correct.
+        for admin in &admins {
+            self.vault
+                .put_entry(&relationship_key(&admin.did), &serde_json::to_vec(admin)?)?;
+        }
+        // The node's own decision, with nothing above it — which is what `Cause::Node` is for.
+        // Recorded here and not inside courier, because courier never touches storage.
+        self.record(&welcome.token, Cause::Node, now)?;
+        Ok(welcome)
+    }
+
+    /// Reconnect reads the admin list and the revoked set, and hands back a fresh token.
+    /// Challenges stay in memory on purpose — a restart should invalidate every nonce it
+    /// handed out. Both sets are loaded before signing, because `with_signer` holds the
+    /// account for its closure.
+    pub fn accept_reconnect(
+        &self,
+        hello: ReconnectHello,
+        challenges: &mut Vec<String>,
+        now: u64,
+    ) -> Result<Token, NodeError> {
+        let admins = self.admins()?;
+        let revoked = self.revoked()?;
+        let token = self
+            .vault
+            .with_signer(|node| {
+                courier::node_accept_reconnect(hello, node, &admins, challenges, now, &revoked)
+            })
+            .ok_or(NodeError::Locked)??;
+        // A reissue is an issuance, so it joins the log. That makes the log grow by one per
+        // reconnect and leaves the superseded token listed as well; superseding is in the
+        // backlog, and under-reporting what is live would be the worse of the two.
+        self.record(&token, Cause::Node, now)?;
+        Ok(token)
+    }
+
     /// Unknown ids are accepted: delegations are minted between holders and the node never
     /// sees one until it is presented, so revocation cannot require a record.
     pub fn revoke(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
@@ -134,6 +201,11 @@ fn tokens_scan(holder: &str) -> String {
 
 fn tokens_key(holder: &str, id: &[u8; 32]) -> String {
     format!("{}{}", tokens_scan(holder), name_of(id))
+}
+
+/// `users/<did>/relationship` — one per claimant, found by scanning `users/` for the suffix.
+fn relationship_key(did: &str) -> String {
+    format!("{USERS}{did}{RELATIONSHIP}")
 }
 
 fn revoked_key(id: &[u8; 32]) -> String {

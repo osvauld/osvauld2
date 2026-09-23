@@ -1,18 +1,30 @@
 //! Kunki node bootstrap: open the node's account and print a connection ticket.
 //!
-//! The node keeps its identity in a `vault` account, the same store shell2 uses, so
-//! tokens and revocations can be sealed beside it later. Workspaces, publishing, admin
-//! storage, and sync are still absent.
+//! The node keeps its identity in a `vault` account, the same store shell2 uses, and its
+//! grants beside it. The ticket's text form belongs to `courier`, not here — a format only
+//! the node could write would be one nothing else could read. Workspaces, publishing, and
+//! sync are still absent.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use kunki::{NodeError, node};
 use zeroize::Zeroizing;
 
-fn main() -> Result<(), NodeError> {
+// Not `main() -> Result`: that prints the Debug form, so every message these errors carry
+// for the person running the node was replaced by its variant name.
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("kunki: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), NodeError> {
     let passphrase = Zeroizing::new(
         std::env::var("OSVAULD_KUNKI_PASSPHRASE").map_err(|_| NodeError::NoPassphrase)?,
     );
@@ -28,7 +40,7 @@ fn main() -> Result<(), NodeError> {
     let ticket = vault
         .with_signer(|signer| courier::issue_connection_ticket(signer, now_secs(), "kunki"))
         .ok_or(NodeError::Locked)??;
-    println!("{}", encode(serde_json::to_vec(&ticket)?));
+    println!("{}", ticket.to_text()?);
     Ok(())
 }
 
@@ -43,8 +55,4 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
         .as_secs()
-}
-
-fn encode(bytes: impl AsRef<[u8]>) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
 }

@@ -38,10 +38,22 @@ handing out an app role has to be node issuance — which also keeps it in the a
 
 ### The `nodes/<node-did>/` half of the store
 
-Tokens this node holds *from* another node, and revocations that node announced. Reserved in
-`kunki::admin` today. A desktop needs the identical shape, since a user with no node of their
-own joins several nodes directly and holds a separate set from each. Once there is a second
-caller, the store moves out of `kunki` into a crate `shell2` shares.
+**Partly landed 2026-09-22** as `kunki::peer`: the relationship itself lives at
+`nodes/<node-did>/relationship`, so a claimant can still name the node it claimed after a
+restart and reconnect from what it kept. Before it, `desktop_finish_claim`'s return value was
+dropped by every caller. Still missing: the tokens held from that node, and the revocations
+that node announced.
+
+**Correction to an earlier revision of this file**, which called it the identical shape to
+`admin`. It is the mirror, not the twin. `admin` is what this account *issued* — it is the
+authority, an issue is appended, and losing one loses the audit log. `peer` is what it
+*holds* — it is the subject, it verifies rather than decides, and a reissued permit replaces
+rather than accumulating. Same storage primitives, opposite direction; two modules rather
+than one generic one.
+
+It sits in `kunki` because a node needs it under federation, not only a desktop — a node
+holds permits from the nodes it federates with exactly as a desktop holds them from its
+nodes. It moves out to a crate `shell2` shares once shell2 actually calls it.
 
 ### Extracting the shared substrate from `shell2`/`app_host`
 
@@ -70,6 +82,29 @@ The namespace exists and is pinned by a test; nothing writes it. When it does: a
 user-authored and node-stored, flows user → node, and is **never read as authority**. The DID
 is the identity; a display name is a label.
 
+### ~~The permit/token unification~~ — done 2026-09-22
+
+Courier now has one credential mechanism. The node's grant is a `Token` (`CLAIM_ROLE` = `owner`
+at `Scope::Node`, delegable, `CLAIM_TTL` of 30 days, reissued on reconnect); the claimant's
+`permit_for_node` is a `Token` too, rooted at the claimant, with its key material in
+`Claims.binds` and a role (`relationship`) that no policy-table entry matches. `PermitClaim`,
+`issue_permit`, `verify_permit` and `PERMIT_DOMAIN` are deleted.
+
+One decision left open by it: a reissue is recorded as a new `Issue`, so the log grows by one
+per reconnect and the replaced token stays listed as though live. Under-reporting what is live
+would be worse, so it stands until there is a reason to prune.
+
+### Raised by the osvauld1 reading (2026-09-22)
+
+[`osvauld1-prior-art.md`](osvauld1-prior-art.md) §8 holds these with their reasoning. In
+short: **multi-device** (the claim binds one device key and refuses a second claim, so "another
+machine belonging to an existing admin" is currently inexpressible), **the identity record**
+(`users/<did>/meta` should probably be v1's contacts row — name and devices — and the desktop
+needs the same record for people it shares no node with), **re-publish disagreement** (nothing
+defines what happens when a header the node holds contradicts one being announced), and
+**layer granularity** (v1 syncs `(page_id, layer_name)`; our `meta`/`src`/`doc/<name>` keys are
+nearly the same decomposition, worth confirming before the sync slice rather than during it).
+
 ---
 
 ## Smaller things surfaced in passing
@@ -80,8 +115,9 @@ is the identity; a display name is a label.
 - **`kunki::admin` keys assume a DID contains no `/`.** True for `did:key` (base58btc has no
   slash), unasserted anywhere. If it were false, holder `a` and holder `a/b` would share a
   prefix scan. Close it by validating on record or hashing the DID into the key.
-- **`vault/examples/seed_demo.rs:79` fails clippy** ("this loop never actually loops"), came in
-  from main, untouched. Unanswered whether to fix in passing.
+- ~~**`vault/examples/seed_demo.rs:79` fails clippy**~~ — fixed 2026-09-22 while adding
+  `adopt_workspace`. It is a `deny` lint, so it broke `cargo clippy -p vault --all-targets`
+  outright, which made the crate's real lints unreadable the moment we started touching it.
 - **`result_large_err`** fires 45 times across the workspace, `kunki` included. Consistent with
   the codebase to leave it; noted so it is a decision rather than an oversight.
 

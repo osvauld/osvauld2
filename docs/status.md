@@ -108,9 +108,38 @@ issued, because delegations are minted between holders.
 are deferred with their reasoning intact in
 [`design/node-backlog.md`](design/node-backlog.md), which is the running note for everything
 set aside as we go. The node now remembers enough to be worth syncing, and the rest of the
-authorization surface is worth building against a working wire rather than ahead of one. Still
-absent: any transport, any workspace on the node, any sync protocol, and a desktop UI claim
-handler.
+authorization surface is worth building against a working wire rather than ahead of one. The
+route to first sync stays transport-free — courier's handlers are pure message transitions, so
+publish and sync extend that shape and an iroh adapter slots in at the end rather than being
+designed around. **2026-09-22:** the claim survives a restart. `Admin::admins` rebuilds
+courier's admin list from `users/<did>/relationship`, and `accept_claim`/`accept_reconnect`
+supply it and persist what courier adds — before this the list was an in-memory `Vec`, so a
+reboot handed a claimed node to whoever claimed it next. The ticket's text form moved into
+courier as `ConnectionTicket::to_text`/`from_text` — base64url of JSON behind an `osv1.` prefix,
+so a ticket from a version this build does not understand is refused by name instead of read as
+an older one — and `kunki/tests/printed_ticket.rs` runs the binary, parses what it actually
+printed, and claims with it. `kunki::peer` closes the other side of that asymmetry: until now
+only the node kept its half, while `desktop_finish_claim`'s record was dropped by every caller,
+so a claimant restarting could not name the node it had claimed. It is stored at
+`nodes/<node-did>/relationship` and is enough to reconnect from. It is the mirror of `admin`
+rather than the same shape — `admin` is what this account issued and appends, `peer` is what it
+holds and replaces — and it lives in `kunki` because a node federating with another node holds
+permits exactly as a desktop does. `vault::adopt_workspace` takes a workspace that originated
+in another account keeping its id and creation time, since publishing requires both ends to
+name one workspace; the id is validated against the shape `new_id` mints, because `ws/<id>/meta`
+with a slashed id is a legal key addressing something else under `ws/`. The claim now hands out
+a `token::Token` rather than a permit — the permit had no `exp` field and no id, so the
+credential a node issued was valid forever and could not be revoked. It is `owner` at node
+scope, delegable so a publisher can narrow it to a workspace for their own node, lives 30 days,
+and is reissued on reconnect, where expiry and the revoked set are both checked on the way
+through. `kunki::admin` records it with `Cause::Node`, which gives that variant its first real
+caller. Still absent: any transport, any workspace on the node, any sync protocol, and a
+desktop UI claim handler. The claimant's half went the same way: `ClaimHello.attestation` is a
+token rooted at the claimant rather than the node — `verify_chain` always took the expected
+root as a parameter, so no second verification path was needed — carrying its key material in
+`Claims.binds` under a role no capability-table entry matches, so a statement about keys can
+never be read as authority. `PermitClaim`, `issue_permit` and `verify_permit` are gone, and
+courier now has one credential mechanism rather than two, which is also the shape osvauld1 had.
 
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice

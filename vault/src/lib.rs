@@ -228,6 +228,28 @@ impl Vault {
         Ok(meta)
     }
 
+    /// Adopt a workspace that originated in another account, keeping the id and creation time
+    /// it already has. [`create_workspace`](Self::create_workspace) is for a workspace this
+    /// account originates and mints an id for; this is for one published to it, where both
+    /// ends must name the same workspace or nothing either says about it refers to the same
+    /// thing. Replaces any header already stored under that id — the originating account owns
+    /// the header, and a republish is how it changes.
+    ///
+    /// Errs with [`VaultError::BadWorkspaceId`] for an id this account would not have minted,
+    /// because the id becomes a key; see `workspace::is_minted_id`. Errs with
+    /// [`VaultError::Locked`] when no account is unlocked.
+    pub fn adopt_workspace(&self, meta: &WorkspaceMeta) -> Result<(), VaultError> {
+        if !workspace::is_minted_id(&meta.id) {
+            return Err(VaultError::BadWorkspaceId(meta.id.clone()));
+        }
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let plaintext = serde_json::to_vec(meta)?;
+        let sealed = active.seal(&plaintext)?;
+        active.store.put(&workspace::meta_key(&meta.id), &sealed)?;
+        Ok(())
+    }
+
     /// Every workspace in the active account, newest first (ties broken by id for a stable
     /// order). Found by prefix-scanning the store for `ws/<id>/meta` keys and unsealing each.
     /// Empty when there are none; errs with [`VaultError::Locked`] when no account is unlocked.

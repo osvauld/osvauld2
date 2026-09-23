@@ -60,6 +60,15 @@ pub struct Token {
     sig: Vec<u8>,
 }
 
+/// Public key material a token is *about*, as distinct from anything it permits. It sits
+/// inside the signed payload because a binding carried beside a signature proves nothing,
+/// and [`verify_chain`] ignores it: only the acceptor knows what it should equal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyBinding {
+    pub encryption: String,
+    pub device: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claims {
     pub iss: String,
@@ -72,7 +81,15 @@ pub struct Claims {
     pub iat: u64,
     pub exp: u64,
     pub prf: Option<Token>,
+    /// Set only by [`attest`]; `None` on every token that grants rather than describes.
+    pub binds: Option<KeyBinding>,
 }
+
+/// The role an attestation carries. Deliberately absent from
+/// [`platform_capabilities`](crate::policy::platform_capabilities), so a token that only
+/// describes key material cannot be read as authority by any table lookup. When a holder's
+/// node is genuinely allowed to act for them, that is a delegation with a real role, not this.
+const ATTEST_ROLE: &str = "relationship";
 
 impl Token {
     /// Hash of the signed payload, not the signature: revocation names the grant, whatever
@@ -108,6 +125,36 @@ pub fn issue_root(
             iat: now,
             exp,
             prf: None,
+            binds: None,
+        },
+    )
+}
+
+/// A root token whose point is the key material it carries, not a capability. The issuer is
+/// its own subject, so it verifies against itself as the root; `aud` is who it is shown to.
+///
+/// Not delegable: nothing should chain off a statement about keys.
+pub fn attest(
+    holder: &(impl Signer + ?Sized),
+    aud: &str,
+    binds: KeyBinding,
+    now: u64,
+    exp: u64,
+) -> Result<Token> {
+    sign(
+        holder,
+        Claims {
+            iss: holder.did().to_string(),
+            aud: aud.to_string(),
+            sub: holder.did().to_string(),
+            role: ATTEST_ROLE.to_string(),
+            scope: Scope::Node,
+            delegable: false,
+            nonce: nonce(),
+            iat: now,
+            exp,
+            prf: None,
+            binds: Some(binds),
         },
     )
 }
@@ -137,15 +184,20 @@ pub fn delegate(
             iat: now,
             exp,
             prf: Some(parent.clone()),
+            binds: None,
         },
     )
 }
 
-/// Walks leaf to root: every link signed by its issuer, rooted at this node, current, and
+/// Walks leaf to root: every link signed by its issuer, rooted at `root_did`, current, and
 /// never wider than its parent. Returns the leaf's claims, whose `prf` the walk consumed.
+///
+/// `root_did` is whichever authority the caller expects this chain to trace back to, not the
+/// sovereign node by definition — a claimant's own attestation roots at the claimant, and
+/// under federation a token from another node roots at that node.
 pub fn verify_chain(
     leaf: &Token,
-    node_did: &str,
+    root_did: &str,
     holder: &str,
     now: u64,
     revoked: &HashSet<[u8; 32]>,
@@ -172,7 +224,7 @@ pub fn verify_chain(
         if !verify(&issuer, &[TOKEN_DOMAIN, &token.payload].concat(), &sig) {
             return Err(CourierError::BadSignature);
         }
-        if claims.sub != node_did {
+        if claims.sub != root_did {
             return Err(CourierError::NodeMismatch);
         }
         if now >= claims.exp {
