@@ -509,8 +509,11 @@ Errors are for reading, not for fearing:
 - A view that throws keeps the **last good frame** with an error banner naming file and line.
 - Nothing you write in a handler can take the app down for good; fix the file and it reloads.
 
-The fastest authoring loop is: upload, look at the banner, fix, upload again. Keep files small
-enough that a reported line number means one obvious thing.
+The fastest agent authoring loop is: upload once, then use the Python bridge client's
+`read_file_versioned` and `edit_file` methods for exact edits to existing source. Inspect the
+rendered tree and console after activation, then repair against the new revision if needed.
+`WriteFile` is for initial upload, file creation or an explicit wholesale replacement—not the
+normal edit loop. Keep files small enough that a reported line number means one obvious thing.
 
 ## Checking it without a window
 
@@ -526,6 +529,12 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     item = s.rpc.create_item(ws["id"], "pie", "app")["id"]
     s.rpc.upload_folder(item, "demo_apps/pie")
     s.rpc.open_item(item)
+
+    source = s.rpc.read_file_versioned(item, "main.lua")
+    result = s.rpc.edit_file(item, "main.lua", source["revision"], [
+        {"old_text": '"Where visits come from"', "new_text": '"Traffic sources"'},
+    ])
+    assert result["persisted"] and result["activation"] == "activated"
 
     s.rpc.dump_tree(item)              # the El tree: ids and handlers, no rects
     s.rpc.click(item, "legend:search") # by id — calls the handler, no hit-test

@@ -1,9 +1,12 @@
 # Code as a tree
 
-**Status:** parser chosen and measured (§8½), schema drafted from a census (§10), **spike built and
-passing** (§9.1, the `lua_tree` crate). §11 revises what actually belongs in the tree; §12 is why
-the tree survives that revision. Remaining unbuilt: the Loro representation, the operations, and
-`_nid` carried onto `El`.
+**Status: deferred, 2026-09-22.** The parser/printer spike remains built and passing in
+`lua_tree`; semantic Loro storage, structural operations and `_nid` carried onto `El` remain
+unbuilt and are deferred. The agreed near-term approach is
+[revision-checked editing directly in LoroText](agent-source-editing.md). Source text remains
+authoritative; that path does not normalize and rewrite the file, so §12's printer-induced
+wide-diff objection does not apply. The historical design and reasoning below are preserved,
+not the current implementation plan.
 **Related:** `interactive-document.md` §3 (data and behaviour), `merge-referee.md`,
 `view-and-interaction.md`. Memory: *code-as-CRDT* moves out of "future directions" and becomes
 the substrate this describes.
