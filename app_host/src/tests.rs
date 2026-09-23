@@ -7,6 +7,7 @@ mod reload;
 mod require;
 mod round_trip;
 mod scratch;
+mod source_edit;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {

@@ -1,6 +1,9 @@
 # The nid channel: how a node id reaches a click
 
-**Status:** proposal, 2026-09-06. Nothing here is built.
+**Status: deferred, 2026-09-22.** Proposed 2026-09-06; printer prerequisites were built (§3),
+but the provenance channel remains unbuilt. [Agent source editing](agent-source-editing.md)
+will use revision-checked LoroText replacements without source nids. Click-to-source is a later
+feature; the proposal below is preserved for reconsideration, not required by the editing path.
 **Context:** `code-as-tree.md` §4 (the original claim), §13 (why it failed).
 **Decides:** how provenance gets from the tree to `Placed` now that it cannot ride in the source.
 

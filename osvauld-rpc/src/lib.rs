@@ -40,6 +40,33 @@ pub struct ItemSummary {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedFile {
+    pub content: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceTextEdit {
+    pub old_text: String,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceActivation {
+    Activated,
+    Closed,
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditFileResult {
+    pub revision: String,
+    pub persisted: bool,
+    pub activation: SourceActivation,
+}
+
 /// A passphrase on the wire. Serialises as a plain string (the protocol's shape) but never
 /// prints: `Debug` is redacted, so request logs and test failures cannot leak credentials.
 #[derive(Clone, Serialize, Deserialize)]
@@ -128,6 +155,18 @@ pub enum Request {
     ReadFile {
         item_id: String,
         path: String,
+    },
+    /// Read source plus an opaque per-file content revision for [`Request::EditFile`].
+    ReadFileVersioned {
+        item_id: String,
+        path: String,
+    },
+    /// Apply exact, non-overlapping replacements if the file still has `expected_revision`.
+    EditFile {
+        item_id: String,
+        path: String,
+        expected_revision: String,
+        edits: Vec<SourceTextEdit>,
     },
     /// Write one source file. If the item's tab is open, its VM reloads — the doc survives.
     WriteFile {

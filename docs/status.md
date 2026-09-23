@@ -314,12 +314,25 @@ Roughly in dependency order:
    `.luarc.json` — for it, the type system is the error the runtime hands back. A gate here
    should be that, not stubs.
    *Screenshot landed 2026-09-10; error-card polish is listed under Built; see bridge item 1.*
-3. **Hot-reload triggers**: the engine half exists (`Source` version watch + staged
-   `reload`), but nothing writes the source doc after upload — the file watcher and the
-   bridge's `WriteFile` are the missing triggers
-4. **nid channel** (`design/nid-channel.md`) — the provenance channel: a click resolves
-   back to the source construct that drew it. Designed, costed, **prerequisites landed;
-   the channel itself is unbuilt**:
+3. **Agent source editing — landed 2026-09-22:** `ReadFileVersioned` returns source plus a
+   SHA-256 content revision; `EditFile` applies bounded, revision-checked exact replacements
+   directly to the existing `LoroText`, without disk working files or whole-file normalization.
+   Missing/ambiguous matches, stale revisions and overlapping batches reject before mutation;
+   Unicode offsets, snapshots and wire round trips are pinned. Open apps persist then stage and
+   report activation separately; closed apps report that no VM is running. The Python client and
+   `smoke_bridge.py` prove live editing, stale rejection, failed-reload survival, repair and
+   persistence across reopen. Explicit persistence-failure injection remains unbuilt. See
+   [agent-source-editing.md](design/agent-source-editing.md). Semantic Loro source storage and
+   structural node operations are deferred; `lua_tree` remains isolated groundwork.
+   **Hot-reload correction:** `WriteFile` already writes source after upload and triggers the
+   existing staged reload for open apps. The earlier claim that this trigger was missing was
+   stale. Persistence is not proof of successful activation; invalid source can remain durable
+   while the old VM runs. A file watcher remains unbuilt and is not required for bridge editing.
+4. **nid channel — deferred 2026-09-22** (`design/nid-channel.md`) — the provenance channel:
+   a click resolves back to the source construct that drew it. Nice to have, not a prerequisite
+   for agent text edits. Source nids are distinct from existing runtime/UI ids, which stay.
+   Designed, costed, **prerequisites landed; the channel itself is unbuilt**.
+   The earlier implementation outline is retained below for later reconsideration:
 
    - **built**: the tree carries ids (`lua_tree` mints them, a printed `_nid` round-trips
      back as identity, not a field); `print_bare` (id-free — what apps run today) with the
