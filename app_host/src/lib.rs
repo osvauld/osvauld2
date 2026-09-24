@@ -120,6 +120,7 @@ pub enum LuaMsg {
     CallDrag(Key, DragArgs),
     CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
+    CallKey(Key, runtime::KeyInput),
 }
 
 /// A second element with the same id and handler would silently take the first one's events.
@@ -714,6 +715,19 @@ impl<M: 'static> LuaApp<M> {
                 event.set("dt", dt)?;
                 event.set("elapsed", elapsed)?;
             }
+            LuaMsg::CallKey(_, input) => {
+                event.set("cancelled", input.cancelled)?;
+                if !input.cancelled {
+                    if let Some(code) = input.code { event.set("code", code)?; }
+                    if !input.key.is_empty() { event.set("key", input.key)?; }
+                    event.set("down", input.down)?;
+                    event.set("repeated", input.repeat)?;
+                    event.set("shift", input.mods.shift)?;
+                    event.set("ctrl", input.mods.ctrl)?;
+                    event.set("alt", input.mods.alt)?;
+                    event.set("super", input.mods.super_)?;
+                }
+            }
             LuaMsg::Call(_) | LuaMsg::CallStr(_, _) => {}
         }
         Ok(event)
@@ -731,7 +745,8 @@ impl<M: 'static> LuaApp<M> {
             LuaMsg::CallPhase(k, _, _, _, _)
             | LuaMsg::CallDrag(k, _)
             | LuaMsg::CallWheel(k, _, _)
-            | LuaMsg::CallFrame(k, _, _) => k,
+            | LuaMsg::CallFrame(k, _, _)
+            | LuaMsg::CallKey(k, _) => k,
         };
         let Some(h) = handlers.get(key) else {
             return;

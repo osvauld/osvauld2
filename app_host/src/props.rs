@@ -169,6 +169,13 @@ impl<M: 'static> Registry<M> {
                 to_msg(LuaMsg::CallWheel(key.clone(), event.delta.0, event.delta.1))
             }))
         }),
+        ("on_key", |el, v, cx| {
+            let key = cx.register("on_key", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_key(key.id.to_string(), move |event| {
+                to_msg(LuaMsg::CallKey(key.clone(), event))
+            }))
+        }),
         ("on_drag", |el, v, cx| {
             let key = cx.register("on_drag", v)?;
             let to_msg = cx.to_msg.clone();

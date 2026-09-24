@@ -230,6 +230,19 @@ pub enum Request {
     PointerPress {},
     /// Release it. Offscreen only.
     PointerRelease {},
+    /// One bounded physical/logical key transition through the normal offscreen keyboard path.
+    /// Separate from `Key`, which invokes Enter/Esc on a named text input.
+    Keyboard {
+        code: Option<String>,
+        key: String,
+        down: bool,
+        repeat: bool,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        #[serde(rename = "super")]
+        super_: bool,
+    },
     /// A press, `steps` interpolated moves, and a release — the real gesture, through the real
     /// hit-test. A short drag with few steps fires nothing because it never passes the runtime's
     /// slop; that is the behaviour, not a limit of the driver. Offscreen only.

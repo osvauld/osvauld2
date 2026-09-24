@@ -42,7 +42,7 @@ use osvauld_rpc::{
 };
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
-    ScreenshotRequest, col, row, text,
+    KeyInput, Mods, ScreenshotRequest, col, row, text,
 };
 use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem};
 
@@ -1070,6 +1070,7 @@ impl App for Shell {
                 | Request::PointerMove { .. }
                 | Request::PointerPress { .. }
                 | Request::PointerRelease { .. }
+                | Request::Keyboard { .. }
                 | Request::Drag { .. }),
                 reply,
             ) => {
@@ -1080,6 +1081,11 @@ impl App for Shell {
                     Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
                     Request::PointerPress {} => DriverOp::PointerPress,
                     Request::PointerRelease {} => DriverOp::PointerRelease,
+                    Request::Keyboard { code, key, down, repeat,
+                        shift, ctrl, alt, super_ } => DriverOp::Keyboard(KeyInput {
+                        code, key, down, repeat, cancelled: false,
+                        mods: Mods { shift, ctrl, alt, super_ },
+                    }),
                     Request::Drag { from, to, steps } => DriverOp::Drag { from, to, steps },
                     _ => unreachable!("matched above"),
                 };

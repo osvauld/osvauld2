@@ -161,6 +161,13 @@ class Bridge:
         """Jump the virtual clock, then paint once so the app notices. Offscreen only."""
         return self.request("Advance", secs=secs)
 
+    def keyboard(self, code: str | None, key: str, down: bool, *, repeat: bool = False,
+                 shift: bool = False, ctrl: bool = False, alt: bool = False,
+                 super_: bool = False) -> dict:
+        """Offscreen key down/up through live keyboard eligibility, not Click-by-id."""
+        return self.request("Keyboard", code=code, key=key, down=down, repeat=repeat,
+                            shift=shift, ctrl=ctrl, alt=alt, **{"super": super_})
+
     def rects(self) -> list[dict]:
         """Where every reachable element is: [{id, x, y, w, h, hits}]. Clipped ones are absent."""
         return self.request("Rects")["rects"]
