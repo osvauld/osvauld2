@@ -89,6 +89,10 @@ fn every_request_roundtrips() {
             el_id: "field".into(),
             key: "enter".into(),
         },
+        Request::Keyboard {
+            code: Some("KeyW".into()), key: "z".into(), down: true,
+            repeat: false, shift: false, ctrl: false, alt: false, super_: false,
+        },
         Request::ReadConsole {
             item_id: "i-9".into(),
             last: 50,

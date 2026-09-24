@@ -48,13 +48,13 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 pub use winit::event_loop::{EventLoopClosed, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey::*};
+use winit::keyboard::{Key, ModifiersState, NamedKey::*, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, At, El, ElInfo, FrameTick, Placement, PlacementAlign, PlacementSide,
-    WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
+    Action, Anchor, At, El, ElInfo, FrameTick, KeyInput, Placement, PlacementAlign,
+    PlacementSide, WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
 };
 pub use headless::Headless;
 pub use hover::{HoverEvent, HoverPhase};
@@ -87,7 +87,7 @@ pub struct ScreenshotRequest<M> {
 ///
 /// Offscreen only. With a window the clock is the OS's and the compositor schedules frames, so
 /// both of these would be lies.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DriverOp {
     /// Paint exactly this many frames, each moving the virtual clock on by 1/60s.
     Frame(u32),
@@ -100,6 +100,8 @@ pub enum DriverOp {
     PointerMove((f32, f32)),
     PointerPress,
     PointerRelease,
+    /// A bounded synthetic key event, through the same game-key eligibility as window input.
+    Keyboard(KeyInput),
     /// A press, `steps` moves, and a release. Not composable from the three above at the client,
     /// because a drag only begins once the pointer has travelled past the runtime's slop and the
     /// interpolation has to happen on this side of the wire to be timed like a real gesture.
@@ -263,6 +265,8 @@ struct Runner<A: App> {
     /// `start`. Stamped once per event so everything one event fires shares it.
     event_at: f64,
     hits: Hits<A::Msg>,
+    held_keys: HashSet<String>,
+    held_owner: Option<Id>,
     pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, PickContent)>,
     hovered: Hovered,
 }
@@ -349,6 +353,7 @@ struct Hits<M> {
     drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
     hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
     wheel: Vec<(Geometry, Id, Box<dyn Fn(WheelEvent) -> M>)>,
+    key: Vec<(Id, Box<dyn Fn(KeyInput) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -367,6 +372,7 @@ impl<M> Default for Hits<M> {
             drop: Vec::new(),
             hover: Vec::new(),
             wheel: Vec::new(),
+            key: Vec::new(),
             scroll: Vec::new(),
             enter: Vec::new(),
             esc: Vec::new(),
@@ -387,6 +393,7 @@ impl<M> Hits<M> {
             drop,
             hover,
             wheel,
+            key,
             scroll,
             enter,
             esc,
@@ -401,6 +408,7 @@ impl<M> Hits<M> {
         drop.clear();
         hover.clear();
         wheel.clear();
+        key.clear();
         scroll.clear();
         enter.clear();
         esc.clear();
@@ -432,6 +440,8 @@ impl<A: App> Runner<A> {
                 "driver ops need offscreen mode; with a window the clock is the OS's".into(),
             );
         }
+        let pointer_op = matches!(&op, DriverOp::PointerMove(_)
+            | DriverOp::PointerPress | DriverOp::PointerRelease | DriverOp::Drag { .. });
         let mut rects = None;
         let frames = match op {
             DriverOp::Rects => {
@@ -479,6 +489,22 @@ impl<A: App> Runner<A> {
                 self.on_cursor_release();
                 1
             }
+            DriverOp::Keyboard(event) => {
+                let code = event.code.as_deref();
+                if event.cancelled || code.is_some_and(|c| c.len() > 48
+                    || !c.bytes().all(|b| b.is_ascii_alphanumeric()))
+                    || event.key.len() > 128
+                    || (code.is_none() && event.key.is_empty())
+                    || matches!(code, Some("F5" | "F12"))
+                    || matches!(event.key.as_str(), "F5" | "F12")
+                {
+                    return Err("invalid or reserved keyboard event".into());
+                }
+                self.tick();
+                self.clock += POINTER;
+                self.on_game_key(event);
+                1
+            }
             DriverOp::Drag { from, to, steps } => {
                 let steps = steps.max(1);
                 self.pointer_move(from);
@@ -495,13 +521,7 @@ impl<A: App> Runner<A> {
                 (steps + 3) as u32
             }
         };
-        if matches!(
-            op,
-            DriverOp::PointerMove(_)
-                | DriverOp::PointerPress
-                | DriverOp::PointerRelease
-                | DriverOp::Drag { .. }
-        ) {
+        if pointer_op {
             rects = Some(self.under_pointer());
         }
         Ok(DriverReport {
@@ -644,6 +664,7 @@ impl<A: App> Runner<A> {
         let mut any_in_flight = false;
         let mut placed = layout::solve(app.view(), text, viewport, store);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
+        let previous_key = hits.key.pop();
         hits.clear();
         let mut clips = Vec::new();
         let mut scene3d = None;
@@ -768,6 +789,11 @@ impl<A: App> Runner<A> {
             {
                 hits.wheel.push((geometry, id, handler));
             }
+            if let Some((id, handler)) = p.behaviour.on_key.take()
+                && visible.is_some()
+            {
+                hits.key.push((id, handler));
+            }
             if let Some(h) = p.behaviour.on_right_click.take()
                 && let Some(hit_rect) = visible
             {
@@ -875,6 +901,18 @@ impl<A: App> Runner<A> {
         }
         store.sweep();
         focused.clear_if_gone(store);
+        if !self.held_keys.is_empty()
+            && (focused.get().is_some()
+                || hits.key.last().map(|(id, _)| id) != self.held_owner.as_ref())
+        {
+            self.held_keys.clear();
+            if let Some((id, handler)) = previous_key
+                && Some(&id) == self.held_owner.as_ref()
+            {
+                done_msgs.push(handler(cancel_key_input()));
+            }
+            self.held_owner = None;
+        }
         let dragging = self
             .drag
             .as_ref()
@@ -1053,6 +1091,9 @@ impl<A: App> Runner<A> {
             None => {
                 self.focused.blur();
             }
+        }
+        if self.focused.get().is_some() {
+            self.cancel_keys();
         }
         let clicked = self
             .hits
@@ -1619,6 +1660,43 @@ impl<A: App> Runner<A> {
         self.redraw();
     }
 
+    fn cancel_keys(&mut self) {
+        if self.held_keys.is_empty() {
+            return;
+        }
+        self.held_keys.clear();
+        if let Some((id, handler)) = self.hits.key.last()
+            && Some(id) == self.held_owner.as_ref()
+        {
+            self.app.update(handler(cancel_key_input()));
+            self.redraw();
+        }
+        self.held_owner = None;
+    }
+
+    fn on_game_key(&mut self, event: KeyInput) {
+        if self.focused.get().is_some() {
+            return;
+        }
+        let identity = event.code.as_ref().unwrap_or(&event.key).clone();
+        if event.down && self.held_keys.len() >= 64 && !self.held_keys.contains(&identity) {
+            self.cancel_keys();
+            return;
+        }
+        let Some((id, handler)) = self.hits.key.last() else { return };
+        if event.down {
+            self.held_keys.insert(identity.clone());
+            self.held_owner = Some(id.clone());
+        } else {
+            self.held_keys.remove(&identity);
+            if self.held_keys.is_empty() {
+                self.held_owner = None;
+            }
+        }
+        self.app.update(handler(event));
+        self.redraw();
+    }
+
     fn handle_input(&mut self, event: KeyEvent) {
         let pressed = event.state == ElementState::Pressed;
         let (mut enter_pressed, mut esc_pressed, mut f12_pressed, mut f5_pressed) =
@@ -1661,11 +1739,19 @@ impl<A: App> Runner<A> {
                 return;
             }
             if f5_pressed {
+                self.cancel_keys();
                 self.app.reload();
                 self.redraw();
+                return;
             }
         }
-        if event.state != ElementState::Pressed {
+        if f12_pressed || f5_pressed {
+            return;
+        }
+        if let Some(key) = describe_key(&event, self.modifiers) {
+            self.on_game_key(key);
+        }
+        if !pressed {
             return;
         }
 
@@ -1685,6 +1771,48 @@ impl<A: App> Runner<A> {
             self.notify_app_text();
         }
     }
+}
+
+fn cancel_key_input() -> KeyInput {
+    KeyInput {
+        code: None, key: String::new(), down: false, repeat: false, cancelled: true,
+        mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }
+}
+
+fn describe_key(event: &KeyEvent, mods: ModifiersState) -> Option<KeyInput> {
+    describe_key_parts(&event.physical_key, &event.logical_key,
+        event.state == ElementState::Pressed, event.repeat, mods)
+}
+
+fn describe_key_parts(physical: &PhysicalKey, logical: &Key, down: bool,
+    repeat: bool, mods: ModifiersState) -> Option<KeyInput> {
+    let code = match physical {
+        PhysicalKey::Code(code) => Some(format!("{code:?}")),
+        PhysicalKey::Unidentified(_) => None,
+    };
+    let key = match logical {
+        Key::Character(s) if s.len() <= 128 => s.to_string(),
+        Key::Named(name) => format!("{name:?}"),
+        Key::Dead(_) => "Dead".into(),
+        _ => String::new(),
+    };
+    if code.is_none() && key.is_empty() {
+        return None;
+    }
+    Some(KeyInput {
+        code,
+        key,
+        down,
+        repeat,
+        cancelled: false,
+        mods: Mods {
+            shift: mods.shift_key(),
+            ctrl: mods.control_key(),
+            alt: mods.alt_key(),
+            super_: mods.super_key(),
+        },
+    })
 }
 
 impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
@@ -1756,6 +1884,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_input(event);
             }
+            WindowEvent::Focused(false) => self.cancel_keys(),
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
@@ -1862,6 +1991,8 @@ impl<A: App> Runner<A> {
             offscreen,
             pointer: None,
             hits: Hits::default(),
+            held_keys: HashSet::new(),
+            held_owner: None,
             focused: Focus::new(),
             text: TextEngine::new(),
             modifiers: ModifiersState::empty(),

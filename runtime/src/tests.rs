@@ -255,6 +255,131 @@ fn a_shape_drifting_under_a_still_pointer_still_fires_hover() {
     );
 }
 
+struct Keyed {
+    child: bool,
+    received: Vec<(&'static str, KeyInput)>,
+}
+
+impl App for Keyed {
+    type Msg = (&'static str, KeyInput);
+    fn view(&self) -> El<Self::Msg> {
+        let root = crate::col().full().on_key("root", |event| ("root", event));
+        if self.child {
+            root.child(crate::col().w(100.0).h(100.0)
+                .on_key("child", |event| ("child", event)))
+        } else {
+            root
+        }
+    }
+    fn update(&mut self, msg: Self::Msg) {
+        self.received.push(msg);
+    }
+}
+
+#[test]
+fn key_description_keeps_physical_and_layout_meanings_separate() {
+    let key = describe_key_parts(&PhysicalKey::Code(winit::keyboard::KeyCode::KeyW),
+        &Key::Character("z".into()), true, false,
+        ModifiersState::SHIFT | ModifiersState::CONTROL).unwrap();
+    assert_eq!(key.code.as_deref(), Some("KeyW"));
+    assert_eq!(key.key, "z");
+    assert!(key.down && key.mods.shift && key.mods.ctrl);
+    assert!(!key.mods.alt && !key.mods.super_);
+    let other = describe_key_parts(&PhysicalKey::Code(winit::keyboard::KeyCode::F1),
+        &Key::Named(winit::keyboard::NamedKey::F1), false, true,
+        ModifiersState::empty()).unwrap();
+    assert_eq!(other.code.as_deref(), Some("F1"));
+    assert_eq!(other.key, "F1");
+    assert!(!other.down && other.repeat);
+}
+
+#[test]
+fn key_input_routes_to_the_topmost_visible_handler_and_drops_vanished_handlers() {
+    let mut r = Runner::new(Keyed { child: true, received: Vec::new() }, Some((400.0, 400.0)));
+    r.frame();
+    let event = |code: &str, key: &str, down, repeat| KeyInput {
+        code: Some(code.into()), key: key.into(), down, repeat, cancelled: false,
+        mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+    };
+    r.on_game_key(event("KeyW", "w", true, false));
+    r.on_game_key(event("KeyW", "w", true, true));
+    r.on_game_key(event("KeyW", "w", false, false));
+    r.on_game_key(event("F1", "F1", true, false));
+    assert_eq!(r.app.received, vec![
+        ("child", event("KeyW", "w", true, false)),
+        ("child", event("KeyW", "w", true, true)),
+        ("child", event("KeyW", "w", false, false)),
+        ("child", event("F1", "F1", true, false)),
+    ]);
+    r.app.child = false;
+    r.frame();
+    r.on_game_key(event("ArrowLeft", "ArrowLeft", true, false));
+    assert_eq!(r.app.received.last().unwrap(),
+        &("root", event("ArrowLeft", "ArrowLeft", true, false)));
+    r.focused.set("input".into());
+    let delivered = r.app.received.len();
+    r.on_game_key(event("KeyW", "w", true, false));
+    assert_eq!(r.app.received.len(), delivered, "focused text owns the key");
+}
+
+#[test]
+fn keyboard_driver_uses_live_key_eligibility_and_rejects_shortcuts() {
+    let mut r = Runner::new(Keyed { child: true, received: Vec::new() }, Some((400.0, 400.0)));
+    let event = KeyInput {
+        code: Some("KeyW".into()), key: "z".into(), down: true,
+        repeat: false, cancelled: false,
+        mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+    };
+    let report = r.run_driver(DriverOp::Keyboard(event.clone())).unwrap();
+    assert_eq!(report.frames, 1);
+    assert_eq!(r.app.received, vec![("child", event.clone())]);
+    r.focused.set("text".into());
+    r.on_game_key(KeyInput { down: false, ..event.clone() });
+    assert_eq!(r.app.received.len(), 1, "focused text owns the key");
+    r.focused.blur();
+    let reserved = KeyInput { code: Some("F12".into()), key: "F12".into(), ..event };
+    assert!(r.run_driver(DriverOp::Keyboard(reserved)).is_err());
+    assert_eq!(r.app.received.len(), 1);
+}
+
+#[test]
+fn held_keys_cancel_on_blur_and_owner_change() {
+    let mut r = Runner::new(Keyed { child: true, received: Vec::new() }, Some((400.0, 400.0)));
+    let down = KeyInput {
+        code: Some("KeyQ".into()), key: "q".into(), down: true,
+        repeat: false, cancelled: false,
+        mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+    };
+    r.frame();
+    r.on_game_key(down.clone());
+    r.cancel_keys(); // WindowEvent::Focused(false) takes this same path.
+    assert_eq!(r.app.received.last().unwrap().0, "child");
+    assert!(r.app.received.last().unwrap().1.cancelled);
+    assert!(r.held_keys.is_empty());
+    r.on_game_key(down.clone());
+    r.app.child = false; // Next view no longer contains the old keyboard owner.
+    r.frame();
+    assert_eq!(r.app.received.last().unwrap().0, "child");
+    assert!(r.app.received.last().unwrap().1.cancelled);
+    assert!(r.held_keys.is_empty());
+    r.on_game_key(down);
+    assert_eq!(r.app.received.last().unwrap().0, "root");
+    r.focused.set("input".into());
+    r.cancel_keys(); // Focusing an editor cancels the held game input.
+    assert!(r.app.received.last().unwrap().1.cancelled);
+    r.focused.blur();
+    for i in 0..65 {
+        let next = KeyInput {
+            code: Some(format!("key-{i}")), key: "x".into(), down: true,
+            repeat: false, cancelled: false,
+            mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+        };
+        r.on_game_key(next);
+    }
+    assert!(r.held_keys.is_empty(), "too many distinct held keys cancel the input");
+    assert!(r.app.received.last().unwrap().1.cancelled);
+}
+
 /// Records the monotonic time of every frame and every drag event, in the order they arrived.
 struct Stamped {
     seen: Vec<(&'static str, f64)>,
@@ -423,7 +548,7 @@ fn advancing_the_clock_lets_the_app_act_on_the_new_time() {
 fn driver_ops_are_refused_when_there_is_a_window() {
     let mut r = Runner::new(Stamped { seen: Vec::new() }, None);
     for op in [DriverOp::Frame(3), DriverOp::Advance(1.0)] {
-        let err = r.run_driver(op).expect_err("must refuse");
+        let err = r.run_driver(op.clone()).expect_err("must refuse");
         assert!(err.contains("offscreen"), "{op:?}: {err}");
     }
     assert!(r.app.seen.is_empty(), "a refused op must not paint");

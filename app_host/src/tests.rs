@@ -483,6 +483,49 @@ fn on_frame_requires_a_stable_element_id() {
 }
 
 #[test]
+fn on_key_delivers_named_event_and_cancellation_to_lua() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, r#"return function()
+        return ui.col({ id="game", on_key=function(e) _key = e end })
+    end"#).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    assert_eq!(app.view().info().handlers, vec!["on_key"]);
+    let event = runtime::KeyInput {
+        code: Some("KeyW".into()), key: "z".into(), down: true,
+        repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: true, ctrl: false, alt: false, super_: false },
+    };
+    app.update(LuaMsg::CallKey(Key::new("game", "on_key"), event));
+    let got: Table = app.vm.globals().get("_key").unwrap();
+    assert_eq!(got.get::<String>("code").unwrap(), "KeyW");
+    assert_eq!(got.get::<String>("key").unwrap(), "z");
+    assert!(got.get::<bool>("down").unwrap());
+    assert!(got.get::<bool>("shift").unwrap());
+    assert!(!got.get::<bool>("repeated").unwrap());
+    assert!(!got.get::<bool>("cancelled").unwrap());
+    app.update(LuaMsg::CallKey(Key::new("game", "on_key"), runtime::KeyInput {
+        code: None, key: String::new(), down: false, repeat: false, cancelled: true,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    let got: Table = app.vm.globals().get("_key").unwrap();
+    assert!(got.get::<bool>("cancelled").unwrap());
+    assert!(got.get::<Option<String>>("code").unwrap().is_none());
+}
+
+#[test]
+fn on_key_needs_a_stable_id() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua.load("return ui.col({ on_key=function() end })").eval().unwrap();
+    let mut handlers = Handlers::new();
+    let mut cx = Ctx::new(&mut handlers, identity());
+    let err = walk(node, &mut cx).err().unwrap();
+    assert!(err.to_string().contains("on_key needs an id"));
+}
+
+#[test]
 fn gfx_path_rejects_unknown_sparse_and_badly_sequenced_commands() {
     let (lua, _) = sandboxed_vm().unwrap();
     for source in [

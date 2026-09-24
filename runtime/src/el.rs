@@ -264,6 +264,19 @@ pub struct WheelEvent {
     pub mods: crate::drag::Mods,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyInput {
+    /// Winit physical code name (e.g. `KeyW`), absent for unidentified hardware.
+    pub code: Option<String>,
+    /// Layout-dependent character or named key; empty for unknown/dead keys.
+    pub key: String,
+    pub down: bool,
+    pub repeat: bool,
+    /// Clears all held keys when this surface loses keyboard ownership.
+    pub cancelled: bool,
+    pub mods: crate::drag::Mods,
+}
+
 /// Where a pointer event landed: the element-local point, and the named shape under it when the
 /// element draws a Frame. A bridge-fired event has neither, so `At::default()` is the honest zero.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -294,6 +307,7 @@ pub(crate) struct Behaviour<M> {
     pub on_click: Option<Click<M>>,
     pub on_frame: Option<(Id, Box<dyn Fn(FrameTick) -> M>)>,
     pub on_wheel: Option<(Id, Box<dyn Fn(WheelEvent) -> M>)>,
+    pub on_key: Option<(Id, Box<dyn Fn(KeyInput) -> M>)>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
@@ -333,6 +347,7 @@ impl<M> Default for Behaviour<M> {
             on_click: None,
             on_frame: None,
             on_wheel: None,
+            on_key: None,
             input: None,
             scroll: None,
             on_drag: None,
@@ -827,6 +842,11 @@ impl<M> El<M> {
         self
     }
 
+    pub fn on_key(mut self, id: impl Into<Id>, map: impl Fn(KeyInput) -> M + 'static) -> Self {
+        self.behaviour.on_key = Some((id.into(), Box::new(map)));
+        self
+    }
+
     pub fn on_drag(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
         self.behaviour.on_drag = Some((id.into(), Box::new(map)));
         self
@@ -946,6 +966,9 @@ impl<M> El<M> {
         }
         if self.behaviour.on_wheel.is_some() {
             handlers.push("on_wheel");
+        }
+        if self.behaviour.on_key.is_some() {
+            handlers.push("on_key");
         }
         if self.behaviour.on_drag.is_some() {
             handlers.push("on_drag");

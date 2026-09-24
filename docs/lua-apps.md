@@ -345,6 +345,14 @@ end
   step). The topmost eligible handler consumes the wheel before scroll/zoom ancestors. Use it for
   app-owned cameras such as `ui.scene3d`; ordinary scrolling should continue to use `scroll_*`.
   **Needs an `id`.**
+- `on_key(e)` — general keyboard input on the last visible element with this handler. `e.code`
+  is the physical key name (`"KeyW"`, `"ArrowLeft"`), independent of keyboard layout;
+  `e.key` is the layout-dependent character or named key. Either may be absent if unknown.
+  `e.down` and `e.repeated` are bools; `e.shift`, `e.ctrl`, `e.alt`, `e.super` are modifier bools.
+  Ignore repeat for held movement. `e.cancelled == true` has no key identity: clear **all** held
+  keys on blur, text focus or surface change. Otherwise it is false. Text fields take priority;
+  shell F5/F12 shortcuts do not reach the app. Typed text and IME are not game-key events.
+  **Needs an `id`.**
 - `on_frame(e)` — an **experimental visual/prototyping loop**. `e.elapsed` is monotonic Runner
   time and `e.dt` is clamped to 0.1 seconds after stalls; only Runner's first frame is guaranteed
   zero. Presence keeps repainting, so omit it to stop that request. Custom screenshots currently
@@ -563,6 +571,9 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.click(item, "legend:search") # by id — calls the handler, no hit-test
     s.rpc.rects()                      # ['pie', 'legend:search', …] and where they are
     s.rpc.click_at(*s.rpc.centre_of("legend:search"))  # by coordinate, through the hit-test
+    s.rpc.keyboard("KeyW", "w", True)  # physical code, logical key, down
+    s.rpc.frame(3)                     # hold across three driven frames
+    s.rpc.keyboard("KeyW", "w", False) # release (distinct from input's Key-by-id)
     s.rpc.frame(250)                   # time passing
     s.rpc.save_screenshot(item, "out.png")
     s.rpc.read_console(item)           # errors, newest last
