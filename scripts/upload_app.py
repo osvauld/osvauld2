@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from osvauld.session import Session, build_shell, shell_binary
 
-DEFAULT_APP = Path(__file__).parent.parent / "shell2/src/kanban"
+DEFAULT_APP = Path(__file__).parent.parent / "demo_apps/kanban"
 
 
 def main() -> None:

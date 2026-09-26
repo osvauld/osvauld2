@@ -76,7 +76,8 @@ Rust screen: El builders (typed M) ───────────────
 | `kunki` | the sovereign-node binary. Today it opens its identity as a `vault` account — created on first boot, unlocked from `OSVAULD_KUNKI_PASSPHRASE` after — and prints a `courier` bootstrap connection ticket signed through `Vault::with_signer`, so the node's key never reaches the binary. `admin` keeps what the node granted and revoked in sealed vault entries — issues keyed by token id, a `users/<did>/tokens/` index, a revoked set that is this node's alone, and a `Cause` linking an issue to the authority that caused it. It also holds the claim itself at `users/<did>/relationship`, so courier's first-admin check is decided against a list that survives a reboot. Publish, sync, subscribe, and push are built (`kunki::bridge`'s `Request` verbs; `kunki::push::LiveRegistry` is a real per-desktop `Pusher`, not a placeholder) — desktop-to-node reconciliation and node-to-subscriber delivery both work, over the local UDS bridge. A remote transport (iroh, replacing the socket itself) remains unbuilt. |
 | `osvauld-rpc` | UDS wire vocabulary for shell2 automation — auth, workspaces/items, source files (including revision-checked `EditFile`), app senses (`DumpTree`/`ReadConsole`/`AppDataGet`) and actions (`Click`/`Type`/`Key`). Wired by `shell2/src/bridge.rs` (status item 1). The sthalam-era `osvauld-mcp` shim (and `.mcp.json`) was removed 2026-09-10, unused — an MCP face, if ever wanted, is a thin rebuild over the bridge. |
 
-**Reference-only — not workspace members, port lessons never code:**
+**Reference-only — removed from the tree 2026-09-26, kept at the `reference-crates` git tag;
+port lessons, never code:**
 
 `app_engine` (the old egui Lua engine: style vocab, sandbox shape, Loro binding patterns),
 `sthalam` (the abandoned shell: screen flow, bridge wiring), `doc_editor`/`block_doc`

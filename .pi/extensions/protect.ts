@@ -49,8 +49,8 @@ function blockRef(p: string) {
   return {
     block: true,
     reason:
-      `${rel(p)} is in a reference-only crate. Port its lessons, never its code — see ` +
-      `docs/architecture.md ("Crates") and docs/status.md. If a port is genuinely wanted, ` +
+      `${rel(p)} is a removed reference-only crate (read it at the \`reference-crates\` tag). ` +
+      `Port its lessons, never its code — see docs/architecture.md ("Crates"). If a port is genuinely wanted, ` +
       `it lands in a live crate with the user's explicit nod.`,
   };
 }
