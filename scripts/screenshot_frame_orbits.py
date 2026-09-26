@@ -14,7 +14,7 @@ APP = ROOT / "demo_apps" / "frame_orbits"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "frame-orbits.png")
+    parser.add_argument("--output", type=Path, default=ROOT / "shots" / "frame-orbits.png")
     parser.add_argument("--size", nargs=2, type=float, default=(1000, 700), metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--delay", type=float, default=0.75, help="seconds between motion proofs")

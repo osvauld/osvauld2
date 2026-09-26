@@ -22,5 +22,8 @@ __pycache__/
 /*.tar.bz2
 /*.tar.gz
 
-# paste artifacts
-/upload.png
+# screenshots and paste artifacts — local only
+/shots/
+
+# dev vault stores (real encrypted accounts) — never committed
+osvauld-drive-data/

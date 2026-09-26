@@ -15,9 +15,10 @@ headers. Check, in order:
 1. **Boundary direction.** Does the change put the wrong concern in the wrong crate?
    Runtime must not know about Lua (`El<M>` is generic; messages stay plain data — the VM
    never leaks into the runtime). Vault stays Loro-free. Shell owns screens + wiring only.
-2. **Live vs reference.** Any edit that reaches a non-workspace crate (`app_engine`,
-   `sthalam`, `doc_editor`, `block_doc`, `code_editor`, `code_highlight`, `text_edit`,
-   `rich_text`, `pdf_paint`, `table_*`) is a BLOCKER — lessons are ported, code is not.
+2. **Live vs reference.** Recreating a removed reference crate (`app_engine`, `sthalam`,
+   `doc_editor`, `block_doc`, `code_editor`, `code_highlight`, `text_edit`, `rich_text`,
+   `pdf_paint`, `table_*` — kept at the `reference-crates` tag) or copying its code in is a
+   BLOCKER — lessons are ported, code is not.
 3. **The invariants list** (architecture.md): messages plain data; paint order == reverse
    hit order; one node vocabulary / two front-ends; CRDT is document truth, ephemeral state
    never enters it; retained ids namespaced per item; reload stages a whole second VM.

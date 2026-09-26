@@ -7,7 +7,7 @@ from pathlib import Path
 from osvauld.session import Session
 
 ROOT = Path(__file__).resolve().parent.parent
-KANBAN = ROOT / "shell2" / "src" / "kanban"
+KANBAN = ROOT / "demo_apps" / "kanban"
 
 
 def main() -> None:
@@ -15,8 +15,8 @@ def main() -> None:
     ap.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "kanban-screenshot.png",
-        help="PNG destination (default: ./kanban-screenshot.png)",
+        default=ROOT / "shots" / "kanban-screenshot.png",
+        help="PNG destination (default: ./shots/kanban-screenshot.png)",
     )
     ap.add_argument(
         "--size",

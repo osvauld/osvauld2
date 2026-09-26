@@ -11,10 +11,11 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 
 ## Traps — these have all been fallen into once
 
-- **Reference-only crates are not workspace members.** `app_engine`, `sthalam`, `doc_editor`,
+- **The reference-only crates are gone from the tree.** `app_engine`, `sthalam`, `doc_editor`,
   `block_doc`, `code_editor`, `code_highlight`, `text_edit`, `rich_text`, `pdf_paint`,
-  `table_core`, `table_query`, `table_import` — port lessons, never code; never extend. The
-  extension blocks writes into them.
+  `table_core`, `table_query`, `table_import` were removed 2026-09-26; read them at the
+  `reference-crates` tag (`git show reference-crates:table_core/src/lib.rs`). Port lessons,
+  never code; the extension still blocks recreating those paths.
 - **The docs keep their history.** Design docs carry dated revision notes and disproved
   sections on purpose (`code-as-tree.md` §4 vs §13). Status lines at the top of each design
   doc say what's real. When code and doc disagree, code wins and the doc gets fixed.

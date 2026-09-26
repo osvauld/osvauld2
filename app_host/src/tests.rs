@@ -3216,6 +3216,45 @@ fn node_graph_demo_edits_a_graph_end_to_end() {
     assert!(app.error.is_none(), "demo failed: {:?}", app.error);
 }
 
+/// Every slide renders cleanly: a bad prop only shows as a red box on the slide that has it,
+/// so the test steps through the whole deck and reads the console after each.
+#[test]
+fn slides_demo_renders_every_slide_without_errors() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in ["main.lua", "theme.lua", "content.lua"] {
+        let body = std::fs::read_to_string(format!("../demo_apps/slides/{name}"))
+            .unwrap_or_else(|_| panic!("slides/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    assert!(app.error.is_none(), "deck failed to open: {:?}", app.error);
+
+    let mut seen = Vec::new();
+    for _ in 0..11 {
+        let info = app.view().info();
+        let slide = info
+            .children
+            .iter()
+            .find_map(|c| c.id.clone().filter(|id| id.starts_with("slide:")))
+            .expect("slide body carries its id");
+        seen.push(slide);
+        assert!(app.error.is_none(), "view failed: {:?}", app.error);
+        assert!(app.console(100).is_empty(), "{:?}: {:?}", seen.last(), app.console(100));
+        app.update(LuaMsg::CallAt(Key::new("next", "on_click"), 0.0, 0.0, Shape::default(), None));
+    }
+    let _ = app.view();
+    assert_eq!(seen.first().map(String::as_str), Some("slide:title"));
+    assert_eq!(seen.last().map(String::as_str), Some("slide:demo"));
+    seen.dedup();
+    assert_eq!(seen.len(), 11, "next must visit every slide once: {seen:?}");
+}
+
 // ── the tally demo app, from disk ─────────────────────────────────────────────
 
 /// The app a fresh demo seeds (`demo_apps/tally/`), loaded the way the shell loads every app:

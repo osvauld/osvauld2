@@ -608,5 +608,16 @@ Roughly in dependency order:
 
 ## Working-tree notes
 
-`demo_apps/` (tally, scratch), `app_host/src/tests/scratch.rs`, and `vault/examples/`
-are untracked — they should be committed with the next slice.
+**2026-09-26 cleanup:** the twelve reference-only crates (`app_engine`, `sthalam`,
+`doc_editor`, `block_doc`, `code_editor`, `code_highlight`, `text_edit`, `rich_text`,
+`pdf_paint`, `table_*`) left the tree; they are readable at the `reference-crates` tag, which
+M2's `table_core` port reads from. Committed dev vault stores (`osvauld-drive-data/`), sample
+`.xlsx` sheets and root screenshots were removed; screenshots now go to the git-ignored
+`shots/`.
+
+**2026-09-26 talk deck:** `demo_apps/slides` is a Lua slide deck that embeds whole demo apps
+(an app's `main.lua` returns its view, so the deck calls it). `require` resolves from the app
+root, so `scripts/deck_upload.py` mounts each demo under `demos/<name>/` with its requires
+rewritten, and uploads every demo standalone too; `scripts/demo_wave.py` drives the embedded
+arm through its own buttons. Keyboard zoom (Ctrl +/-/0) is Lua-side `scale` + `offset` around
+the last hover point. The shell's app grid now scrolls. `README.md` added.
