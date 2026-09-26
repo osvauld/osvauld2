@@ -20,7 +20,11 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod invite;
 pub mod policy;
+pub mod publish;
+pub mod subscribe;
+pub mod sync;
 pub mod token;
 
 use token::{Claims, Scope, Token};
@@ -83,6 +87,13 @@ pub enum CourierError {
     NotPermitted,
     #[error("connection ticket is not a version this build understands")]
     UnknownTicketVersion,
+    // Temporary: `role.assign` (not yet built) is where a real rank check belongs, so until
+    // it exists an invite may only grant a role this build already knows carries no platform
+    // capability — never one it would have to rank against the inviter's own.
+    #[error("invite cannot grant a role that itself carries platform capability")]
+    RoleNotInvitable,
+    #[error("invite ticket already redeemed")]
+    InviteAlreadyRedeemed,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

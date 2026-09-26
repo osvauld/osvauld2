@@ -16,6 +16,9 @@
 //! resolves the owning workspace. `kind` is the lower-case item tag (`doc`, `app`, …).
 
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +148,39 @@ pub enum Request {
     /// Open (or focus) the item's tab — a running app is what the senses below address.
     OpenItem {
         item_id: String,
+    },
+
+    // ── node (kunki) ────────────────────────────────────────────────────────────
+    /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told
+    /// apart by their text prefix the same way the shell's own paste box does. Answers with
+    /// the joined node's did.
+    ClaimNode {
+        ticket: String,
+    },
+    /// Mint an invite (role `member`, `Scope::Node`) from the already-claimed node. Answers
+    /// with the invite's ticket text, ready to hand to another desktop's `ClaimNode`.
+    Invite,
+    /// Announce every local workspace and its item headers to the claimed node. Answers with
+    /// how many workspaces were sent.
+    PublishAll,
+    /// Push this item's current source snapshot to the claimed node — a one-shot `Sync` on
+    /// the src layer, not the continuous kind: nothing keeps src live-synced yet, only an
+    /// already-open item's *doc* layers (the periodic tick's own scope). Answers "pushed"
+    /// once the node has it — what a joiner's `JoinItem` needs something to have done first.
+    PushSrc {
+        item_id: String,
+    },
+    /// Adopt a workspace/item another desktop already published, under its exact ids (from
+    /// that desktop's own `CreateWorkspace`/`CreateItem` replies), and pull the item's current
+    /// source from the claimed node — the two things `OpenItem` needs that sync alone does
+    /// not provide, since sync only maintains a doc that is already open. Stands in for a
+    /// node-side "what do you hold" discovery query, which does not exist yet.
+    JoinItem {
+        ws_id: String,
+        ws_name: String,
+        item_id: String,
+        item_name: String,
+        item_kind: String,
     },
 
     // ── files (an .app's source doc) ────────────────────────────────────────────
@@ -300,6 +336,41 @@ pub fn read_msg<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Bind a Unix socket at `path`, hardened to `0600`: staged under a private name beside it,
+/// permissions locked, then atomically renamed into place, so the socket never exists at the
+/// well-known path with loose permissions. Shared by every bridge in the workspace — kunki's
+/// socket carries claim tokens, shell2's carries passphrases, equally sensitive.
+///
+/// Refuses to clobber a live listener, a regular file, or a FIFO. A corpse left by a killed
+/// run at the same path is not checked for — the rename below replaces it unconditionally,
+/// which is correct once the liveness probe above has already ruled out a live listener.
+pub fn bind_uds(path: &Path) -> io::Result<UnixListener> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if !meta.file_type().is_socket() {
+            return Err(io::Error::other(format!(
+                "{path:?} exists and is not a socket"
+            )));
+        }
+        if UnixStream::connect(path).is_ok() {
+            return Err(io::Error::other(format!(
+                "{path:?} is live, refusing a second listener"
+            )));
+        }
+    }
+    let staging = path.with_extension(format!("new-{}", std::process::id()));
+    let listener = UnixListener::bind(&staging)?;
+    let placed = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)).is_ok()
+        && std::fs::rename(&staging, path).is_ok();
+    if !placed {
+        drop(listener);
+        let _ = std::fs::remove_file(&staging);
+        return Err(io::Error::other(format!(
+            "cannot place a 0600 socket at {path:?}"
+        )));
+    }
+    Ok(listener)
 }
 
 #[cfg(test)]

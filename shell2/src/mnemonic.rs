@@ -1,10 +1,7 @@
 use runtime::{El, col, row, text};
+use vault::Vault;
 
-use crate::{
-    Msg, Screen,
-    signup::{SignupForm, SignupMsg},
-    theme,
-};
+use crate::{Msg, Screen, space::SpaceScreen, theme};
 
 pub struct Mnemonic {
     pub words: String,
@@ -76,13 +73,17 @@ impl Mnemonic {
             .child(continue_button)
     }
 
-    pub fn update(&mut self, msg: MnemonicMsg) -> Option<Screen> {
+    pub fn update(&mut self, msg: MnemonicMsg, vault: &Vault) -> Option<Screen> {
         match msg {
             MnemonicMsg::ToggleSaved => {
                 self.accepted = !self.accepted;
                 None
             }
-            MnemonicMsg::Continue => Some(Screen::Signup(SignupForm::default())),
+            // The account this phrase belongs to is already unlocked — `vault.signup` (unlike
+            // the RPC path's separate prepare/commit) leaves it ready to use, same as
+            // `finish_auth`'s own post-signup transition. Sending this back to `Signup` was
+            // the bug: recovery phrase accepted, then asked to sign up again.
+            MnemonicMsg::Continue => Some(Screen::Spaces(SpaceScreen::new(vault))),
         }
     }
 }

@@ -10,6 +10,7 @@ mod bridge;
 mod item;
 mod login;
 mod mnemonic;
+mod node;
 mod signup;
 mod space;
 #[cfg(test)]
@@ -21,6 +22,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use crate::{
@@ -35,6 +37,11 @@ use app_host::{
     write_source_file as write_source_doc_file,
 };
 use base64::Engine as _;
+use courier::invite::InviteTicket;
+use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
+use courier::token::{Scope, Token};
+use courier::{ConnectionTicket, DesktopNodeRecord};
+use kunki::push::Push;
 use loro::{Container, LoroDoc, ValueOrContainer};
 use osvauld_rpc::{
     AccountSummary, EditFileResult, ItemSummary, Request, Response, SourceActivation,
@@ -44,7 +51,7 @@ use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
     ScreenshotRequest, col, row, text,
 };
-use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem};
+use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem, WorkspaceMeta};
 
 use crate::signup::{SignupForm, SignupMsg};
 
@@ -86,6 +93,37 @@ pub enum Msg {
         std::sync::mpsc::Sender<osvauld_rpc::Response>,
         Result<CapturedImage, String>,
     ),
+    /// Self-rescheduling: syncs every open doc against the claimed node, then arms its own
+    /// next tick regardless of what that sync finds — a node that never answers should not
+    /// stop later ticks from trying. A no-op with nothing to sync if no node is claimed.
+    /// Reads `Shell.node`, not `SpaceScreen`'s own copy: that one is dropped the moment the
+    /// screen navigates away from Spaces, and sync has to keep running regardless of screen.
+    SyncTick,
+    /// One item's sync round trip finished — `(item id, doc name, ack or error)`. The import
+    /// happens here, on the UI thread, because the doc it targets is not `Send`.
+    SyncDone(Arc<str>, String, Result<SyncAck, String>),
+    /// A node RPC (`ClaimNode`/`Invite`/`PublishAll`) finished on its worker thread — same
+    /// shape as `AuthDone`, and for the same reason: these do socket I/O, so `answer_mut`'s
+    /// inline-on-the-UI-thread family is the wrong place for them.
+    NodeRpcDone(
+        std::sync::mpsc::Sender<osvauld_rpc::Response>,
+        NodeRpcOutcome,
+    ),
+    /// One `Push` arrived on the standing `Listen` connection ([`spawn_push_listener`]) —
+    /// the primary delivery path now; `SyncTick` is the backstop.
+    PushReceived(Push),
+}
+
+/// What a node RPC's worker thread hands back. `Claimed` is its own variant rather than
+/// folded into a generic `Result<Value, String>` because only it needs `Shell.node` updated —
+/// `Invited`/`Published` are pure pass-through replies.
+#[derive(Clone)]
+enum NodeRpcOutcome {
+    Claimed(Result<DesktopNodeRecord, String>),
+    Invited(Result<String, String>),
+    Published(Result<usize, String>),
+    Joined(Result<(), String>),
+    Pushed(Result<(), String>),
 }
 
 type AuthJob<T> = Arc<Mutex<Option<Result<T, String>>>>;
@@ -132,6 +170,38 @@ fn resolver(vault: &Vault, ws_id: &str, item_id: &str) -> Resolve {
     Rc::new(move |name| v.get_doc(&ws, &it, name).map_err(|e| e.to_string()))
 }
 
+/// [`resolver`], plus one more thing to check first: if the local vault has nothing yet *and*
+/// a node is claimed, pull whatever the node already has before answering `None` — otherwise
+/// a doc that looks empty only because nobody has synced it to *this* desktop yet gets treated
+/// as never-written, and the app's own first-run seeding logic re-creates default content that
+/// someone else already put there (union-merged on the next sync into visible duplicates).
+/// A doc genuinely never written by anyone still resolves to `None`, same as `resolver` alone.
+fn resolver_with_node(
+    vault: &Vault,
+    ws_id: &str,
+    item_id: &str,
+    desktop_did: String,
+    token: Token,
+) -> Resolve {
+    let local = resolver(vault, ws_id, item_id);
+    let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
+    Rc::new(move |name| {
+        if let Some(bytes) = local(name)? {
+            return Ok(Some(bytes));
+        }
+        let socket = kunki::bridge::socket_path();
+        Ok(node::pull_doc(
+            &socket,
+            &v,
+            &desktop_did,
+            token.clone(),
+            &ws,
+            &it,
+            name,
+        ))
+    })
+}
+
 /// A change from outside the window has to ask for a frame; a click already has one.
 ///
 /// The proxy is the only part of the runtime that is `Send`, which is what makes this the seam:
@@ -142,6 +212,135 @@ fn waker(proxy: &EventLoopProxy<Msg>) -> Wake {
     Arc::new(move || {
         let _ = proxy.send_event(Msg::DocChanged);
     })
+}
+
+/// A reconciliation backstop now that push ([`spawn_push_listener`]) is the primary delivery
+/// path, not the poll itself — seconds-scale, the way `kunki::push`'s own doc comment already
+/// says a missed push should be caught, not the tight loop this was before push existed.
+const SYNC_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Arms one `SyncTick`, off-thread so a sleeping timer never blocks the UI thread it wakes.
+/// Called from `App::ready` for the first tick, and again by `Msg::SyncTick` itself for every
+/// tick after — the loop has no other driver.
+fn arm_sync_tick(proxy: &EventLoopProxy<Msg>) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(SYNC_INTERVAL);
+        let _ = proxy.send_event(Msg::SyncTick);
+    });
+}
+
+/// Temporary diagnostic: wall-clock milliseconds, comparable across threads (unlike
+/// `Instant`, which is only meaningful within the thread that created it) — this is what lets
+/// a "thread started" print and a "proxy.send_event" print on different threads be subtracted
+/// against each other after the fact.
+fn debug_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
+/// How long to wait before a dropped `Listen` connection tries again. Short and fixed rather
+/// than backing off: a node that is down for longer than that is no worse off getting a few
+/// wasted connection attempts than it is leaving a desktop silently unlistened forever.
+const LISTEN_RETRY: Duration = Duration::from_secs(2);
+
+/// Starts (or restarts) the connection pushes arrive on — one per claimed relationship, held
+/// for as long as the process runs. Reconnects on its own after any drop; the caller does not
+/// need to notice a disconnect and call this again.
+fn spawn_push_listener(proxy: &EventLoopProxy<Msg>, desktop_did: String, token: Token) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        loop {
+            let socket = kunki::bridge::socket_path();
+            match node::listen(&socket, &desktop_did, token.clone()) {
+                Ok(mut conn) => loop {
+                    match node::next_push(&mut conn) {
+                        Ok(push) => {
+                            let _ = proxy.send_event(Msg::PushReceived(push));
+                        }
+                        Err(e) => {
+                            eprintln!("kunki listen: connection lost: {e}");
+                            break;
+                        }
+                    }
+                },
+                Err(e) => eprintln!("kunki listen: could not connect: {e}"),
+            }
+            std::thread::sleep(LISTEN_RETRY);
+        }
+    });
+}
+
+/// Builds a `SyncHello` against one open doc and, if that succeeds, sends it off-thread —
+/// the one piece `SyncTick` and an immediate post-flush push (a local edit reaching the node
+/// without waiting for the next tick) both need, so it exists once rather than twice.
+fn sync_doc(
+    proxy: &EventLoopProxy<Msg>,
+    desktop_did: &str,
+    token: Token,
+    ws_id: &str,
+    item_id: &Arc<str>,
+    name: &str,
+    app: &LuaApp<Msg>,
+) {
+    let hello = app.with_doc(name, |doc| {
+        desktop_start_sync(
+            desktop_did,
+            token,
+            ws_id,
+            item_id,
+            SyncLayer::Doc(name.to_string()),
+            doc,
+            None,
+        )
+    });
+    match hello {
+        Some(Ok(hello)) => {
+            let proxy = proxy.clone();
+            let id = item_id.clone();
+            let doc_name = name.to_string();
+            std::thread::spawn(move || {
+                let socket = kunki::bridge::socket_path();
+                let result = node::sync(&socket, hello);
+                let _ = proxy.send_event(Msg::SyncDone(id, doc_name, result));
+            });
+        }
+        Some(Err(e)) => eprintln!("sync: could not build hello for {item_id}/{name}: {e}"),
+        None => {} // doc closed between the caller finding it and this call
+    }
+}
+
+/// Subscribes to one doc's layer the first time it's seen for this item, so a future push
+/// delivers its changes — best-effort, off-thread, same as every other node call here. A
+/// no-op if this (item, name) pair is already subscribed.
+fn subscribe_if_new(
+    subscribed: &mut HashMap<Arc<str>, std::collections::HashSet<String>>,
+    desktop_did: &str,
+    token: Token,
+    ws_id: &str,
+    item_id: &Arc<str>,
+    name: &str,
+) {
+    let first_sighting = subscribed
+        .entry(item_id.clone())
+        .or_default()
+        .insert(name.to_string());
+    if !first_sighting {
+        return;
+    }
+    let socket = kunki::bridge::socket_path();
+    let did = desktop_did.to_string();
+    let ws_id = ws_id.to_string();
+    let id = item_id.clone();
+    let layer = SyncLayer::Doc(name.to_string());
+    let log_name = name.to_string();
+    std::thread::spawn(move || {
+        if let Err(e) = node::subscribe(&socket, &did, token, &ws_id, &id, layer) {
+            eprintln!("subscribe: {id}/{log_name}: {e}");
+        }
+    });
 }
 
 fn persist(
@@ -398,6 +597,14 @@ struct Shell {
     error: Option<String>,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
+    /// Mirrors whatever `SpaceScreen` last claimed — kept here too because `SyncTick` has to
+    /// read it regardless of which screen is currently showing, and `SpaceScreen` itself is
+    /// dropped the moment the user navigates away from Spaces.
+    node: Option<DesktopNodeRecord>,
+    /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
+    /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
+    /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
+    subscribed: HashMap<Arc<str>, std::collections::HashSet<String>>,
 }
 /// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
 /// logical points, which offscreen are also pixels. A flag rather than an env var (the other two
@@ -741,6 +948,7 @@ impl Shell {
             Screen::Login(LoginScreen::new(&vault))
         };
         let tabs = vec![Tab::Home];
+        let node = node::load_relationship(&vault).ok().flatten();
         let shell = Shell {
             vault,
             proxy,
@@ -751,7 +959,14 @@ impl Shell {
             error: None,
             screenshot: None,
             driver: None,
+            node: node.clone(),
+            subscribed: HashMap::new(),
         };
+        if let Some(record) = node {
+            if let Some(desktop_did) = shell.vault.with_signer(|d| d.did().to_string()) {
+                spawn_push_listener(&shell.proxy, desktop_did, record.token);
+            }
+        }
         shell
     }
     fn open_tab(&mut self, wi: WorkspaceItem) -> Result<(), String> {
@@ -768,9 +983,18 @@ impl Shell {
         let id: Arc<str> = wi.id.as_str().into();
         let to_msg_id = id.clone();
 
+        let node_credentials = self.node.as_ref().and_then(|record| {
+            self.vault
+                .with_signer(|d| d.did().to_string())
+                .map(|did| (did, record.token.clone()))
+        });
+        let resolve = match node_credentials {
+            Some((did, token)) => resolver_with_node(&self.vault, &wi.ws_id, &wi.id, did, token),
+            None => resolver(&self.vault, &wi.ws_id, &wi.id),
+        };
         let app = LuaApp::open(
             doc,
-            resolver(&self.vault, &wi.ws_id, &wi.id),
+            resolve,
             waker(&self.proxy),
             Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
         )
@@ -861,6 +1085,7 @@ impl App for Shell {
         // Publishing the socket before `run_app` begins polling loses rapid startup events on
         // some winit backends. Runner calls this only after the renderer and event loop are live.
         bridge::spawn(self.proxy.clone());
+        arm_sync_tick(&self.proxy);
     }
 
     fn view(&self) -> El<Msg> {
@@ -903,6 +1128,14 @@ impl App for Shell {
         page.child(content)
     }
     fn update(&mut self, msg: Msg) {
+        // `Shell.node` mirrors `SpaceScreen`'s own copy — see the field's doc comment. A borrow,
+        // not a move, so the match below still owns `msg` and dispatches it to the screen too.
+        if let Msg::Space(SpaceScreenMsg::ClaimResult(Ok(record))) = &msg {
+            self.node = Some(record.clone());
+            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+                spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
+            }
+        }
         let next = match msg {
             Msg::Items(ItemsScreenMsg::Open(wi)) => {
                 self.error = self.open_tab(wi).err();
@@ -927,7 +1160,33 @@ impl App for Shell {
                     .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
                 if let Some(pos) = found {
                     self.tabs.remove(pos);
-                    self.apps.remove(&id); // tear down: VM and doc handle both dropped
+                    let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
+                    if let (Some(record), Some(names), Some(o)) = (
+                        self.node.clone(),
+                        self.subscribed.remove(&id),
+                        closed.as_ref(),
+                    ) {
+                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+                            let socket = kunki::bridge::socket_path();
+                            let (did, ws_id, item_id) =
+                                (desktop_did, o.ws_id.clone(), id.to_string());
+                            std::thread::spawn(move || {
+                                for name in names {
+                                    let layer = SyncLayer::Doc(name.clone());
+                                    if let Err(e) = node::unsubscribe(
+                                        &socket,
+                                        &did,
+                                        record.token.clone(),
+                                        &ws_id,
+                                        &item_id,
+                                        layer,
+                                    ) {
+                                        eprintln!("unsubscribe: {item_id}/{name}: {e}");
+                                    }
+                                }
+                            });
+                        }
+                    }
                     // Everything after `pos` shifts down one, so a focus at or past it must
                     // follow. Closing the focused tab therefore lands on its left neighbour —
                     // always valid, since Home holds index 0 and can never be the one removed.
@@ -994,6 +1253,204 @@ impl App for Shell {
                     _ => Screen::Signup(SignupForm::default()),
                 };
                 let _ = tx.send(Response::ok("locked"));
+                None
+            }
+            // Node RPCs: socket I/O to kunki, so a worker thread and the same
+            // AuthDone-shaped completion path Signup/Unlock already use — not `answer_mut`,
+            // whose whole point is that its family never leaves the UI thread.
+            Msg::Rpc(Request::ClaimNode { ticket }, tx) => {
+                let vault = self.vault.clone();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
+                    let socket = kunki::bridge::socket_path();
+                    let now = node::now_secs();
+                    let claimed = if let Ok(t) = ConnectionTicket::from_text(&ticket) {
+                        node::claim(&socket, &vault, &t, now)
+                    } else if let Ok(t) = InviteTicket::from_text(&ticket) {
+                        node::claim_invite(&socket, &vault, t, now)
+                    } else {
+                        Err("not a recognized node ticket or invite".to_string())
+                    };
+                    let result = claimed.and_then(|record| {
+                        node::save_relationship(&vault, &record)?;
+                        Ok(record)
+                    });
+                    eprintln!("DBG timing: ClaimNode send_event {}", debug_now_ms());
+                    let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Claimed(result)));
+                });
+                None
+            }
+            Msg::Rpc(Request::Invite, tx) => {
+                match self.node.clone() {
+                    Some(record) => {
+                        let vault = self.vault.clone();
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            eprintln!("DBG timing: Invite thread start {}", debug_now_ms());
+                            let socket = kunki::bridge::socket_path();
+                            let result =
+                                node::invite(&socket, &vault, record.token, "member", Scope::Node)
+                                    .and_then(|t| t.to_text().map_err(|e| e.to_string()));
+                            eprintln!("DBG timing: Invite send_event {}", debug_now_ms());
+                            let _ = proxy
+                                .send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Invited(result)));
+                        });
+                    }
+                    None => {
+                        let _ = tx.send(Response::err("no node claimed"));
+                    }
+                }
+                None
+            }
+            Msg::Rpc(Request::PushSrc { item_id }, tx) => {
+                match (self.node.clone(), find_item(&self.vault, &item_id)) {
+                    (Some(record), Ok(wi)) => {
+                        let vault = self.vault.clone();
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            eprintln!("DBG timing: PushSrc thread start {}", debug_now_ms());
+                            let socket = kunki::bridge::socket_path();
+                            let result =
+                                node::push_src(&socket, &vault, record.token, &wi.ws_id, &wi.id);
+                            eprintln!("DBG timing: PushSrc send_event {}", debug_now_ms());
+                            let _ = proxy
+                                .send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
+                        });
+                    }
+                    (None, _) => {
+                        let _ = tx.send(Response::err("no node claimed"));
+                    }
+                    (_, Err(e)) => {
+                        let _ = tx.send(Response::err(e));
+                    }
+                }
+                None
+            }
+            Msg::Rpc(Request::PublishAll, tx) => {
+                match (self.node.clone(), self.vault.workspaces()) {
+                    (Some(record), Ok(spaces)) => {
+                        let vault = self.vault.clone();
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            eprintln!("DBG timing: PublishAll thread start {}", debug_now_ms());
+                            let socket = kunki::bridge::socket_path();
+                            let mut published = 0usize;
+                            let mut failed = None;
+                            for meta in &spaces {
+                                let r =
+                                    space::publish_one(&socket, &vault, record.token.clone(), meta);
+                                if let Err(e) = r {
+                                    failed = Some(e);
+                                    break;
+                                }
+                                published += 1;
+                            }
+                            let result = match failed {
+                                Some(e) => Err(e),
+                                None => Ok(published),
+                            };
+                            eprintln!("DBG timing: PublishAll send_event {}", debug_now_ms());
+                            let _ = proxy.send_event(Msg::NodeRpcDone(
+                                tx,
+                                NodeRpcOutcome::Published(result),
+                            ));
+                        });
+                    }
+                    (None, _) => {
+                        let _ = tx.send(Response::err("no node claimed"));
+                    }
+                    (_, Err(e)) => {
+                        let _ = tx.send(Response::err(e.to_string()));
+                    }
+                }
+                None
+            }
+            Msg::Rpc(
+                Request::JoinItem {
+                    ws_id,
+                    ws_name,
+                    item_id,
+                    item_name,
+                    item_kind,
+                },
+                tx,
+            ) => {
+                match (self.node.clone(), kind_from_str(&item_kind)) {
+                    (Some(record), Ok(kind)) => {
+                        let vault = self.vault.clone();
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            eprintln!("DBG timing: JoinItem thread start {}", debug_now_ms());
+                            let socket = kunki::bridge::socket_path();
+                            let now = node::now_secs();
+                            let ws = WorkspaceMeta {
+                                id: ws_id.clone(),
+                                name: ws_name,
+                                created: now,
+                            };
+                            let item = WorkspaceItem {
+                                id: item_id,
+                                ws_id,
+                                name: item_name,
+                                kind,
+                                created: now,
+                            };
+                            let result = node::join_item(&socket, &vault, record.token, ws, item);
+                            eprintln!("DBG timing: JoinItem send_event {}", debug_now_ms());
+                            let _ = proxy
+                                .send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Joined(result)));
+                        });
+                    }
+                    (None, _) => {
+                        let _ = tx.send(Response::err("no node claimed"));
+                    }
+                    (_, Err(e)) => {
+                        let _ = tx.send(Response::err(e));
+                    }
+                }
+                None
+            }
+            Msg::NodeRpcDone(tx, outcome) => {
+                let kind = match &outcome {
+                    NodeRpcOutcome::Claimed(_) => "Claimed",
+                    NodeRpcOutcome::Invited(_) => "Invited",
+                    NodeRpcOutcome::Published(_) => "Published",
+                    NodeRpcOutcome::Joined(_) => "Joined",
+                    NodeRpcOutcome::Pushed(_) => "Pushed",
+                };
+                eprintln!(
+                    "DBG timing: NodeRpcDone({kind}) received {}",
+                    debug_now_ms()
+                );
+                let resp = match outcome {
+                    NodeRpcOutcome::Claimed(Ok(record)) => {
+                        let did = record.node_did.clone();
+                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+                            spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
+                        }
+                        self.node = Some(record);
+                        Response::ok(did)
+                    }
+                    NodeRpcOutcome::Claimed(Err(e)) => Response::err(e),
+                    NodeRpcOutcome::Invited(Ok(text)) => Response::ok(text),
+                    NodeRpcOutcome::Invited(Err(e)) => Response::err(e),
+                    NodeRpcOutcome::Published(Ok(n)) => Response::ok(n),
+                    NodeRpcOutcome::Published(Err(e)) => Response::err(e),
+                    NodeRpcOutcome::Joined(Ok(())) => {
+                        // Same rule `CreateWorkspace`/`CreateItem` already follow: a write
+                        // that lands off-thread must not leave a showing Spaces screen
+                        // holding its construction-time (possibly empty) snapshot — this is
+                        // exactly how a joinee with no workspace of their own got stuck on
+                        // "press ⏎ to create" even after `join_item` had already adopted one.
+                        refresh_after_workspace(&mut self.screen, &self.vault);
+                        Response::ok("joined")
+                    }
+                    NodeRpcOutcome::Joined(Err(e)) => Response::err(e),
+                    NodeRpcOutcome::Pushed(Ok(())) => Response::ok("pushed"),
+                    NodeRpcOutcome::Pushed(Err(e)) => Response::err(e),
+                };
+                let _ = tx.send(resp);
                 None
             }
             Msg::Rpc(
@@ -1103,6 +1560,17 @@ impl App for Shell {
                 // belongs to the previous one, and the flush below must not see it.
                 if next.is_some() {
                     self.reset_tabs();
+                    // The account just unlocked, possibly for the first time this process —
+                    // `Shell::new`'s own load ran while it was still locked and found nothing.
+                    // Refresh from the now-unlocked vault so a persisted relationship actually
+                    // starts its listener, instead of sitting unused until the next claim.
+                    self.node = node::load_relationship(&self.vault).ok().flatten();
+                    if let (Some(record), Some(desktop_did)) = (
+                        self.node.clone(),
+                        self.vault.with_signer(|d| d.did().to_string()),
+                    ) {
+                        spawn_push_listener(&self.proxy, desktop_did, record.token);
+                    }
                 }
                 next
             }
@@ -1115,9 +1583,78 @@ impl App for Shell {
             // the flush below then act on the imported change like any other.
             Msg::DocChanged => None,
 
+            Msg::SyncTick => {
+                // Re-armed unconditionally: a node that is slow or unreachable this tick must
+                // not stop the next one from trying.
+                arm_sync_tick(&self.proxy);
+                if let Some(record) = self.node.clone() {
+                    let desktop_did = self.vault.with_signer(|d| d.did().to_string());
+                    if let Some(desktop_did) = desktop_did {
+                        for (item_id, o) in self.apps.iter() {
+                            for name in o.app.open_doc_names() {
+                                // Normally already subscribed by the post-flush pass, which
+                                // runs after every message — this is only a backstop for a
+                                // sighting that pass somehow missed.
+                                subscribe_if_new(
+                                    &mut self.subscribed,
+                                    &desktop_did,
+                                    record.token.clone(),
+                                    &o.ws_id,
+                                    item_id,
+                                    &name,
+                                );
+
+                                sync_doc(
+                                    &self.proxy,
+                                    &desktop_did,
+                                    record.token.clone(),
+                                    &o.ws_id,
+                                    item_id,
+                                    &name,
+                                    &o.app,
+                                );
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Msg::SyncDone(item_id, name, result) => {
+                match result {
+                    Ok(ack) => {
+                        if let Some(o) = self.apps.get(&item_id) {
+                            o.app.with_doc(&name, |doc| {
+                                if let Err(e) = doc.import(&ack.update) {
+                                    eprintln!("sync: import failed for {item_id}/{name}: {e}");
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => eprintln!("sync: {item_id}/{name} failed: {e}"),
+                }
+                None
+            }
+            Msg::PushReceived(push) => {
+                if let SyncLayer::Doc(name) = &push.layer {
+                    if let Some(o) = self.apps.get(push.item_id.as_str()) {
+                        if o.ws_id == push.ws_id {
+                            o.app.with_doc(name, |doc| {
+                                if let Err(e) = doc.import(&push.snapshot) {
+                                    eprintln!(
+                                        "push: import failed for {}/{name}: {e}",
+                                        push.item_id
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                None
+            }
+
             msg => match (&mut self.screen, msg) {
                 (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
-                (Screen::Mnemonic(f), Msg::Mnemonic(m)) => f.update(m),
+                (Screen::Mnemonic(f), Msg::Mnemonic(m)) => f.update(m, &self.vault),
                 (Screen::Login(f), Msg::Login(m)) => f.update(m, &mut self.vault, &self.proxy),
                 (Screen::Spaces(s), Msg::Space(m)) => s.update(m, &mut self.vault, &self.proxy),
                 (Screen::Items(i), Msg::Items(m)) => i.update(m, &mut self.vault, &self.proxy),
@@ -1141,12 +1678,52 @@ impl App for Shell {
         // Persist after every message, not only Lua ones: MCP and peer writes reach the docs
         // without ever passing through `LuaApp::update`, so this is the single place that sees
         // all three writers. `flush` is a no-op for any doc whose version hasn't moved.
+        //
+        // Whatever it found dirty is also synced immediately, not left for `SyncTick`'s next
+        // backstop pass — the same per-doc `sync_doc` that tick uses, just triggered by the
+        // write that just happened, so a local edit reaches the node without a 20s wait.
         let vault = self.vault.clone();
+        let claimed = self.node.clone();
+        let desktop_did = claimed
+            .as_ref()
+            .and_then(|_| self.vault.with_signer(|d| d.did().to_string()));
         let mut failed = None;
         for (item_id, o) in self.apps.iter_mut() {
             let ws = o.ws_id.clone();
-            if let Err(e) = o.app.flush(persist(&vault, &ws, item_id)) {
+            let mut dirtied = Vec::new();
+            let mut put = persist(&vault, &ws, item_id);
+            let result = o.app.flush(|name, bytes| {
+                dirtied.push(name.to_string());
+                put(name, bytes)
+            });
+            if let Err(e) = result {
                 failed = Some(format!("save failed: {e}"));
+            }
+            if let (Some(record), Some(did)) = (&claimed, &desktop_did) {
+                // Subscribing here, not only in `SyncTick`, is what makes a freshly opened
+                // doc start receiving pushes right away instead of waiting up to
+                // `SYNC_INTERVAL` for the backstop tick to notice it.
+                for name in o.app.open_doc_names() {
+                    subscribe_if_new(
+                        &mut self.subscribed,
+                        did,
+                        record.token.clone(),
+                        &ws,
+                        item_id,
+                        &name,
+                    );
+                }
+                for name in &dirtied {
+                    sync_doc(
+                        &self.proxy,
+                        did,
+                        record.token.clone(),
+                        &ws,
+                        item_id,
+                        name,
+                        &o.app,
+                    );
+                }
             }
         }
         if failed.is_some() {

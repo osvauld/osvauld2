@@ -1,15 +1,18 @@
-//! Kunki node bootstrap: open the node's account and print a connection ticket.
+//! Kunki node bootstrap: open the node's account, print a connection ticket, then serve.
 //!
 //! The node keeps its identity in a `vault` account, the same store shell2 uses, and its
 //! grants beside it. The ticket's text form belongs to `courier`, not here — a format only
-//! the node could write would be one nothing else could read. Workspaces, publishing, and
-//! sync are still absent.
+//! the node could write would be one nothing else could read. The ticket is printed on
+//! every boot (harmless once an admin exists — the bootstrap claim it carries is then
+//! refused), then the process blocks in `bridge::serve_forever`: publishing and sync land as
+//! more `Request` variants there, not as more of this boot sequence.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kunki::{NodeError, node};
+use kunki::push::LiveRegistry;
+use kunki::{NodeError, bridge, node};
 use zeroize::Zeroizing;
 
 // Not `main() -> Result`: that prints the Debug form, so every message these errors carry
@@ -41,6 +44,8 @@ fn run() -> Result<(), NodeError> {
         .with_signer(|signer| courier::issue_connection_ticket(signer, now_secs(), "kunki"))
         .ok_or(NodeError::Locked)??;
     println!("{}", ticket.to_text()?);
+
+    bridge::serve_forever(vault, LiveRegistry::new())?;
     Ok(())
 }
 
