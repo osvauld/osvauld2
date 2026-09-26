@@ -32,6 +32,18 @@ impl ItemKind {
             ItemKind::Canvas => "canvas",
         }
     }
+
+    /// The inverse of [`as_str`](Self::as_str), for a kind arriving from outside the account
+    /// (published, over the wire) rather than chosen locally through [`Vault::create_item`].
+    pub fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "doc" => Some(ItemKind::Doc),
+            "table" => Some(ItemKind::Table),
+            "app" => Some(ItemKind::App),
+            "canvas" => Some(ItemKind::Canvas),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

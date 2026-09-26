@@ -602,6 +602,19 @@ impl<M: 'static> LuaApp<M> {
         )
     }
 
+    /// Every currently open doc's name — what a host-side sync loop needs before it can reach
+    /// any of them, since `Cores` itself stays private.
+    pub fn open_doc_names(&self) -> Vec<String> {
+        self.cores.borrow().keys().cloned().collect()
+    }
+
+    /// Reach one open doc's live `LoroDoc` by name, for a host-side concern (sync) that has to
+    /// read or `import` it directly rather than through the Lua mirror. `None` if nothing has
+    /// opened that name — the same "not open" a Lua `doc:open` would otherwise report.
+    pub fn with_doc<R>(&self, name: &str, f: impl FnOnce(&LoroDoc) -> R) -> Option<R> {
+        self.cores.borrow().get(name).map(|core| f(&core.doc))
+    }
+
     pub fn view(&self) -> El<M> {
         //reset budget
         self.fires.store(0, Ordering::Relaxed);

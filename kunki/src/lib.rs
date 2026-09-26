@@ -6,8 +6,10 @@
 //! so its own key, its tokens, and its revocations are sealed by the same passphrase.
 
 pub mod admin;
+pub mod bridge;
 mod error;
 pub mod node;
 pub mod peer;
+pub mod push;
 
 pub use error::NodeError;

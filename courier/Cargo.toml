@@ -8,6 +8,7 @@ license.workspace = true
 base64 = "0.22"
 bincode = "1"
 identity = { path = "../identity" }
+loro = "1.13.9"
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

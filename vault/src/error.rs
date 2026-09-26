@@ -19,6 +19,8 @@ pub enum VaultError {
     // An id from another account becomes a key here, so it is checked rather than trusted.
     #[error("not a workspace id this account would mint: {0}")]
     BadWorkspaceId(String),
+    #[error("not an item id this account would mint: {0}")]
+    BadItemId(String),
     #[error(transparent)]
     Identity(IdentityError),
     #[error(transparent)]

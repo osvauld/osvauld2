@@ -17,17 +17,33 @@ use std::collections::HashSet;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelcome};
+use courier::publish::{PublishAck, PublishHello};
+use courier::subscribe::SubscribeHello;
+use courier::sync::{SyncAck, SyncHello, SyncLayer};
 use courier::token::Token;
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
 use serde::{Deserialize, Serialize};
-use vault::Vault;
+use vault::{ItemKind, Vault, WorkspaceItem, WorkspaceMeta};
 
-use crate::NodeError;
+use crate::push::{Push, Pusher};
+use crate::{NodeError, node};
 
 const RECORD: &str = "token/";
 const USERS: &str = "users/";
 const REVOKED: &str = "revoked/";
 const RELATIONSHIP: &str = "/relationship";
+/// One entry per redeemed invite nonce, empty-valued like `revoked/<id>` — its presence is the
+/// whole fact. Its own namespace, not under `token/`, because a spent nonce is not a token: an
+/// invite ticket dies unredeemed as often as not, and this only ever holds the ones that were.
+const INVITES: &str = "invites/";
+/// `subscriptions/<ws_id>/<item_id-b64>/<layer-b64>/<did>`, empty-valued like `revoked/<id>` —
+/// presence is the whole fact. `item_id` and the layer are base64'd before becoming key
+/// segments: unlike `ws_id` (already shape-checked by `node_accept_subscription`'s membership
+/// check before this is reached) and `did` (a DID carries no `/`, same trust `relationship_key`
+/// already places in one), neither is validated the way a minted id is — a crafted `item_id`
+/// containing `/` must not be able to forge a different subscription's key.
+const SUBSCRIPTIONS: &str = "subscriptions/";
 
 /// Why a token exists. Lineage, not history: the node reissues flat tokens to keep chains
 /// short, and a flat token no longer carries its issuer in `prf` — without this, revoking
@@ -142,6 +158,229 @@ impl Admin {
         Ok(welcome)
     }
 
+    /// Verify a publish and adopt what it announced. `known_items` is read before the check,
+    /// so the ack reports what the node held *before* this call, and nothing is written until
+    /// the token is proven.
+    pub fn accept_publish(&self, hello: PublishHello, now: u64) -> Result<PublishAck, NodeError> {
+        let node_did = node::did(&self.vault)?;
+        let known_items = self
+            .vault
+            .items(&hello.workspace.id)?
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        let ack = courier::publish::node_accept_publish(
+            &hello,
+            &node_did,
+            known_items,
+            now,
+            &self.revoked()?,
+        )?;
+
+        let ws_id = hello.workspace.id.clone();
+        self.vault.adopt_workspace(&WorkspaceMeta {
+            id: hello.workspace.id,
+            name: hello.workspace.name,
+            created: hello.workspace.created,
+        })?;
+        for item in hello.items {
+            let kind = ItemKind::parse(&item.kind).ok_or(NodeError::BadItemKind(item.kind))?;
+            self.vault.adopt_item(&WorkspaceItem {
+                id: item.id,
+                ws_id: ws_id.clone(),
+                name: item.name,
+                kind,
+                created: item.created,
+            })?;
+        }
+        Ok(ack)
+    }
+
+    /// Verify a sync push and merge it into the node's stored snapshot for that item's layer.
+    /// The current snapshot is read before the check, same reasoning as `accept_publish`'s
+    /// `known_items`: `node_accept_sync` needs it to compute the merge either way, and reading
+    /// it first means a rejected push never touches storage. `None` the first time this layer
+    /// is synced — courier treats that as an empty document, not an error.
+    ///
+    /// Fans the new snapshot out to every other subscriber on this layer once it's stored.
+    /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
+    /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
+    /// same way `accept_publish` doesn't own how a publish reached it over the wire.
+    pub fn accept_sync(
+        &self,
+        hello: SyncHello,
+        now: u64,
+        pusher: &impl Pusher,
+    ) -> Result<SyncAck, NodeError> {
+        let node_did = node::did(&self.vault)?;
+        let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
+        let (ack, snapshot) = courier::sync::node_accept_sync(
+            &hello,
+            &node_did,
+            current.as_deref(),
+            now,
+            &self.revoked()?,
+        )?;
+        self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
+        self.fan_out(&hello, &snapshot, pusher)?;
+        Ok(ack)
+    }
+
+    /// Full snapshot, not a diff against each subscriber's own progress: no subscription tracks
+    /// a version vector (see `SUBSCRIPTIONS`'s doc comment), and building one now would reopen
+    /// the exact hazard `sync.rs`'s module doc already names — a vector advanced on send rather
+    /// than confirmed delivery. Loro's `import` merges a full snapshot the same as a diff, so a
+    /// subscriber who already has all of it simply merges a no-op.
+    fn fan_out(
+        &self,
+        hello: &SyncHello,
+        snapshot: &[u8],
+        pusher: &impl Pusher,
+    ) -> Result<(), NodeError> {
+        let update = Push {
+            ws_id: hello.ws_id.clone(),
+            item_id: hello.item_id.clone(),
+            layer: hello.layer.clone(),
+            snapshot: snapshot.to_vec(),
+        };
+        for subscriber in self.subscribers_for(&hello.ws_id, &hello.item_id, &hello.layer)? {
+            if subscriber != hello.desktop_did {
+                pusher.push(&subscriber, &update);
+            }
+        }
+        Ok(())
+    }
+
+    fn load_layer(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+    ) -> Result<Option<Vec<u8>>, NodeError> {
+        Ok(match layer {
+            SyncLayer::Src => self.vault.get_src(ws_id, item_id)?,
+            SyncLayer::Doc(name) => self.vault.get_doc(ws_id, item_id, name)?,
+        })
+    }
+
+    fn store_layer(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+        snapshot: &[u8],
+    ) -> Result<(), NodeError> {
+        match layer {
+            SyncLayer::Src => self.vault.put_src(ws_id, item_id, snapshot)?,
+            SyncLayer::Doc(name) => self.vault.put_doc(ws_id, item_id, snapshot, name)?,
+        }
+        Ok(())
+    }
+
+    /// Record that `hello`'s holder wants future pushes for this layer. Authorization first,
+    /// same shape as every other accept method here — nothing is written until the request is
+    /// proven.
+    pub fn subscribe(&self, hello: &SubscribeHello, now: u64) -> Result<(), NodeError> {
+        let node_did = node::did(&self.vault)?;
+        courier::subscribe::node_accept_subscription(hello, &node_did, now, &self.revoked()?)?;
+        self.vault.put_entry(&subscription_key(hello), &[])?;
+        Ok(())
+    }
+
+    /// Drop a subscription. Same authorization as `subscribe` — a holder unsubscribes with the
+    /// same grant that would let them subscribe, nothing further to prove to remove themselves.
+    pub fn unsubscribe(&self, hello: &SubscribeHello, now: u64) -> Result<(), NodeError> {
+        let node_did = node::did(&self.vault)?;
+        courier::subscribe::node_accept_subscription(hello, &node_did, now, &self.revoked()?)?;
+        self.vault.delete_entry(&subscription_key(hello))?;
+        Ok(())
+    }
+
+    /// Prove a `Listen` connection before the bridge holds it open. Node-wide, not per-item —
+    /// see `courier::subscribe::node_accept_listen`'s own doc for why.
+    pub fn authorize_listen(
+        &self,
+        desktop_did: &str,
+        token: &Token,
+        now: u64,
+    ) -> Result<(), NodeError> {
+        let node_did = node::did(&self.vault)?;
+        courier::subscribe::node_accept_listen(
+            token,
+            &node_did,
+            desktop_did,
+            now,
+            &self.revoked()?,
+        )?;
+        Ok(())
+    }
+
+    /// Every desktop DID subscribed to this item's layer — what a future push fans out to.
+    pub fn subscribers_for(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+    ) -> Result<Vec<String>, NodeError> {
+        Ok(self
+            .vault
+            .list_entries(&subscription_prefix(ws_id, item_id, layer))?
+            .iter()
+            .filter_map(|name| name.rsplit('/').next())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Mint an invite. `revoked` is read for the same reason `accept_publish` reads it: the
+    /// inviter's own token must still be good, not merely well-formed, at the moment it is spent
+    /// asking for someone else's.
+    pub fn issue_invite(
+        &self,
+        request: &InviteRequest,
+        name: &str,
+        now: u64,
+    ) -> Result<InviteTicket, NodeError> {
+        let revoked = self.revoked()?;
+        let ticket = self
+            .vault
+            .with_signer(|node| {
+                courier::invite::issue_invite_ticket(node, request, name, now, &revoked)
+            })
+            .ok_or(NodeError::Locked)??;
+        Ok(ticket)
+    }
+
+    /// Every nonce this node has already redeemed an invite for. Read whole, same reasoning as
+    /// `revoked()`: a per-nonce check would be a decrypt per nonce on every redemption attempt.
+    pub fn redeemed_invites(&self) -> Result<HashSet<String>, NodeError> {
+        Ok(self
+            .vault
+            .list_entries(INVITES)?
+            .iter()
+            .map(|name| name.rsplit('/').next().unwrap_or_default().to_string())
+            .collect())
+    }
+
+    /// Invite redemption with the spent-nonce set on disk instead of courier's in-memory
+    /// `revoked`/`redeemed` inputs. Loaded before signing, because `with_signer` holds the
+    /// account for its closure. The nonce is marked spent *before* the new token is recorded: a
+    /// crash between the two leaves the invite unredeemable rather than redeemable twice.
+    pub fn accept_invite(
+        &self,
+        hello: InviteClaimHello,
+        now: u64,
+    ) -> Result<InviteWelcome, NodeError> {
+        let redeemed = self.redeemed_invites()?;
+        let welcome = self
+            .vault
+            .with_signer(|node| courier::invite::node_accept_invite(hello, node, now, &redeemed))
+            .ok_or(NodeError::Locked)??;
+        self.vault
+            .put_entry(&invite_key(&welcome.redeemed_nonce), &[])?;
+        self.record(&welcome.token, Cause::Node, now)?;
+        Ok(welcome)
+    }
+
     /// Reconnect reads the admin list and the revoked set, and hands back a fresh token.
     /// Challenges stay in memory on purpose — a restart should invalidate every nonce it
     /// handed out. Both sets are loaded before signing, because `with_signer` holds the
@@ -212,8 +451,37 @@ fn revoked_key(id: &[u8; 32]) -> String {
     format!("{REVOKED}{}", name_of(id))
 }
 
+/// The nonce is already URL-safe (courier's `nonce()` base64url-encodes it), so it is used
+/// directly as the key's last segment rather than re-encoded.
+fn invite_key(nonce: &str) -> String {
+    format!("{INVITES}{nonce}")
+}
+
 fn name_of(id: &[u8; 32]) -> String {
     URL_SAFE_NO_PAD.encode(id)
+}
+
+fn subscription_key(hello: &SubscribeHello) -> String {
+    format!(
+        "{}{}",
+        subscription_prefix(&hello.ws_id, &hello.item_id, &hello.layer),
+        hello.desktop_did
+    )
+}
+
+fn subscription_prefix(ws_id: &str, item_id: &str, layer: &SyncLayer) -> String {
+    let item = URL_SAFE_NO_PAD.encode(item_id);
+    let layer = URL_SAFE_NO_PAD.encode(layer_tag(layer));
+    format!("{SUBSCRIPTIONS}{ws_id}/{item}/{layer}/")
+}
+
+/// `Src` and `Doc(name)` as distinct strings before either is encoded — so `Doc("src")` and
+/// `Src` itself can never collide regardless of what `name` contains.
+fn layer_tag(layer: &SyncLayer) -> String {
+    match layer {
+        SyncLayer::Src => "src".to_string(),
+        SyncLayer::Doc(name) => format!("doc:{name}"),
+    }
 }
 
 /// The id is always the last segment, whichever index the name came from.

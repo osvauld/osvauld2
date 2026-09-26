@@ -76,14 +76,15 @@ fn well_formed(scope: &Scope) -> bool {
     }
 }
 
-/// The platform half of a decision, in one place: the chain verifies, the role's scope covers
-/// what is being acted on, and the role carries the capability. Manifest rules run after this,
-/// over facts it has already proven.
-pub fn authorize(
+/// The chain verifies and the role's scope covers what is being acted on — the platform half
+/// of a decision minus the capability lookup, for callers gated by workspace membership alone
+/// rather than a specific platform action. Sync is the first of these: every role in a
+/// workspace may read and write its content, and no manifest/rule layer exists yet to say
+/// otherwise, so there is nothing for the capability table to check.
+pub fn membership(
     leaf: &Token,
     node_did: &str,
     holder: &str,
-    capability: Capability,
     target: &Scope,
     now: u64,
     revoked: &HashSet<[u8; 32]>,
@@ -95,6 +96,21 @@ pub fn authorize(
     if !claims.scope.contains(target) {
         return Err(CourierError::OutOfScope);
     }
+    Ok(claims)
+}
+
+/// [`membership`] plus the capability lookup. Manifest rules run after this, over facts it
+/// has already proven.
+pub fn authorize(
+    leaf: &Token,
+    node_did: &str,
+    holder: &str,
+    capability: Capability,
+    target: &Scope,
+    now: u64,
+    revoked: &HashSet<[u8; 32]>,
+) -> Result<Claims> {
+    let claims = membership(leaf, node_did, holder, target, now, revoked)?;
     if !platform_capabilities(&claims.role, &claims.scope).contains(&capability) {
         return Err(CourierError::NotPermitted);
     }

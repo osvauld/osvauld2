@@ -13,10 +13,14 @@ pub enum NodeError {
     // is not an id. Reading past it would under-report the audit log or the revoked set.
     #[error("admin record {0} is damaged")]
     Damaged(String),
+    #[error("not an item kind this build understands: {0}")]
+    BadItemKind(String),
     #[error(transparent)]
     Vault(#[from] vault::VaultError),
     #[error(transparent)]
     Courier(#[from] courier::CourierError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }

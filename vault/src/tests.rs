@@ -1,4 +1,4 @@
-use super::{ItemKind, Vault, VaultError, WorkspaceMeta};
+use super::{ItemKind, Vault, VaultError, WorkspaceItem, WorkspaceMeta};
 use tempfile::TempDir;
 
 fn fresh() -> (Vault, TempDir) {
@@ -258,18 +258,53 @@ fn src_survives_reopen_and_relogin() {
 #[test]
 fn item_blob_ops_require_an_unlocked_account() {
     let (vault, _tmp) = fresh();
-    assert!(matches!(vault.get_src("w", "i"), Err(VaultError::Locked)));
+    // Minted-shaped, not "w"/"i": the id-shape check now runs unlocked (same order
+    // `adopt_workspace`/`adopt_item` already use), so a locked-account assertion needs an id
+    // that shape check would pass too, or it proves the wrong thing.
+    let (ws, item) = ("a".repeat(32), "b".repeat(32));
+    assert!(matches!(vault.get_src(&ws, &item), Err(VaultError::Locked)));
     assert!(matches!(
-        vault.put_src("w", "i", SRC),
+        vault.put_src(&ws, &item, SRC),
         Err(VaultError::Locked)
     ));
     assert!(matches!(
-        vault.get_doc("w", "i", "test"),
+        vault.get_doc(&ws, &item, "test"),
         Err(VaultError::Locked)
     ));
     assert!(matches!(
-        vault.put_doc("w", "i", STATE, "test"),
+        vault.put_doc(&ws, &item, STATE, "test"),
         Err(VaultError::Locked)
+    ));
+}
+
+#[test]
+fn item_blob_ops_refuse_an_id_this_account_would_not_have_minted() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let (ws_id, item_id) = app_item(&vault);
+
+    // `item_id` containing `/` must not be able to alias a different item's key — the class
+    // `adopt_item` already guards against, now guarded here too.
+    let crafted = format!("{item_id}/doc");
+    assert!(matches!(
+        vault.get_src(&ws_id, &crafted),
+        Err(VaultError::BadItemId(_))
+    ));
+    assert!(matches!(
+        vault.put_src(&ws_id, &crafted, SRC),
+        Err(VaultError::BadItemId(_))
+    ));
+    assert!(matches!(
+        vault.get_doc(&ws_id, &crafted, "test"),
+        Err(VaultError::BadItemId(_))
+    ));
+    assert!(matches!(
+        vault.put_doc(&ws_id, &crafted, STATE, "test"),
+        Err(VaultError::BadItemId(_))
+    ));
+    assert!(matches!(
+        vault.get_src(&crafted, &item_id),
+        Err(VaultError::BadItemId(_))
     ));
 }
 
@@ -389,6 +424,51 @@ fn an_adopted_workspace_keeps_the_id_and_time_it_arrived_with() {
 }
 
 #[test]
+fn an_adopted_item_keeps_the_id_it_arrived_with() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+
+    let published = WorkspaceItem {
+        id: "0123456789abcdef0123456789abcdef".to_string(),
+        ws_id: "fedcba9876543210fedcba9876543210".to_string(),
+        name: "board".to_string(),
+        kind: ItemKind::App,
+        created: 7,
+    };
+    vault.adopt_item(&published).unwrap();
+    assert_eq!(vault.items(&published.ws_id).unwrap(), vec![published]);
+}
+
+#[test]
+fn an_id_or_ws_id_this_account_would_not_mint_is_refused_for_an_item_too() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("node", "pw").unwrap();
+    let minted = "0123456789abcdef0123456789abcdef";
+
+    let bad_id = WorkspaceItem {
+        id: format!("{minted}/../escape"),
+        ws_id: minted.to_string(),
+        name: "n".to_string(),
+        kind: ItemKind::Doc,
+        created: 1,
+    };
+    assert!(matches!(
+        vault.adopt_item(&bad_id),
+        Err(VaultError::BadItemId(_))
+    ));
+
+    let bad_ws = WorkspaceItem {
+        ws_id: format!("{minted}/item/forged"),
+        ..bad_id
+    };
+    assert!(matches!(
+        vault.adopt_item(&bad_ws),
+        Err(VaultError::BadItemId(_))
+    ));
+    assert!(vault.items(minted).unwrap().is_empty());
+}
+
+#[test]
 fn an_id_this_account_would_not_mint_is_refused_before_it_becomes_a_key() {
     let (mut vault, _tmp) = fresh();
     vault.signup("node", "pw").unwrap();
@@ -435,6 +515,16 @@ fn a_locked_account_adopts_nothing() {
             id: "0123456789abcdef0123456789abcdef".to_string(),
             name: "notes".to_string(),
             created: 42,
+        }),
+        Err(VaultError::Locked)
+    ));
+    assert!(matches!(
+        vault.adopt_item(&WorkspaceItem {
+            id: "0123456789abcdef0123456789abcdef".to_string(),
+            ws_id: "fedcba9876543210fedcba9876543210".to_string(),
+            name: "board".to_string(),
+            kind: ItemKind::App,
+            created: 7,
         }),
         Err(VaultError::Locked)
     ));

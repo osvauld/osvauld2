@@ -11,7 +11,7 @@ use app_host::{LuaApp, LuaMsg, Resolve, Wake};
 use loro::{LoroDoc, LoroText, LoroValue, ValueOrContainer};
 use std::rc::Rc;
 use tempfile::TempDir;
-use vault::{ItemKind, Vault};
+use vault::{ItemKind, Vault, WorkspaceMeta};
 
 /// No window to repaint — the poke itself is covered in `app_host`.
 fn noop_wake() -> Wake {
@@ -343,4 +343,34 @@ fn a_bridge_write_rebuilds_only_the_screen_that_shows_it() {
         matches!(screen, Screen::Items(_)),
         "an unrelated write must not rebuild this screen"
     );
+}
+
+#[test]
+fn refresh_shows_a_workspace_adopted_while_the_empty_state_was_showing() {
+    // A joinee's exact starting state: zero workspaces of their own, so `SpaceScreen::view()`
+    // is showing its empty "press ⏎ to create" branch — the same branch that never went away
+    // once `JoinItem` adopted a workspace behind it without a matching refresh call.
+    let tmp = TempDir::new().unwrap();
+    let mut vault = Vault::open(tmp.path().to_path_buf()).unwrap();
+    vault.signup("bob", "pw").unwrap();
+    let mut screen = Screen::Spaces(SpaceScreen::new(&vault));
+    match &screen {
+        Screen::Spaces(s) => assert!(s.spaces().is_empty()),
+        _ => unreachable!(),
+    }
+
+    // `adopt_workspace`, not `create_workspace` — the exact write `join_item` makes.
+    vault
+        .adopt_workspace(&WorkspaceMeta {
+            id: "a".repeat(32),
+            name: "joined".to_string(),
+            created: 1,
+        })
+        .unwrap();
+    refresh_after_workspace(&mut screen, &vault);
+
+    match &screen {
+        Screen::Spaces(s) => assert_eq!(s.spaces().len(), 1, "the adopted workspace must show"),
+        _ => panic!("refresh must keep the Spaces screen"),
+    }
 }

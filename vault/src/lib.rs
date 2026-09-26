@@ -293,6 +293,28 @@ impl Vault {
         Ok(item)
     }
 
+    /// Adopt an item that originated in another account, keeping its id, workspace and creation
+    /// time — the item-level counterpart of [`adopt_workspace`](Self::adopt_workspace), and for
+    /// the same reason: a published item and the desktop's own record of it must name the same
+    /// thing. Replaces any header already stored under that id.
+    ///
+    /// Errs with [`VaultError::BadItemId`] for an id, or a `ws_id`, this account would not have
+    /// minted — both become part of the key. Errs with [`VaultError::Locked`] when no account
+    /// is unlocked.
+    pub fn adopt_item(&self, item: &WorkspaceItem) -> Result<(), VaultError> {
+        if !workspace::is_minted_id(&item.id) || !workspace::is_minted_id(&item.ws_id) {
+            return Err(VaultError::BadItemId(item.id.clone()));
+        }
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let plaintext = serde_json::to_vec(item)?;
+        let sealed = active.seal(&plaintext)?;
+        active
+            .store
+            .put(&item::meta_key(&item.ws_id, &item.id), &sealed)?;
+        Ok(())
+    }
+
     /// All items in `ws_id`, newest first. Found by prefix scan; each meta is unsealed.
     pub fn items(&self, ws_id: &str) -> Result<Vec<WorkspaceItem>, VaultError> {
         let guard = self.active.lock().unwrap();
@@ -314,28 +336,42 @@ impl Vault {
         });
         Ok(out)
     }
-    //Retrieve lua src code
-
+    /// `ws_id`/`item_id` come from a caller synced or published from elsewhere — never minted
+    /// here — and both become part of the key, so they're checked the same way
+    /// [`adopt_item`](Self::adopt_item) already checks them, not trusted the way a purely
+    /// local read would be. Without this, `item_id = "X/doc"` with `SyncLayer::Src` and
+    /// `item_id = "X"` with `SyncLayer::Doc("src")` land at the same key: an id this account
+    /// never minted, used to alias a different item's layer.
     pub fn get_src(&self, ws_id: &str, item_id: &str) -> Result<Option<Vec<u8>>, VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
         self.get_sealed(&item::src_key(ws_id, item_id))
     }
 
-    //update lua src code
+    /// Same check as [`get_src`](Self::get_src), for the same reason.
     pub fn put_src(&self, ws_id: &str, item_id: &str, snapshot: &[u8]) -> Result<(), VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
         self.put_sealed(&item::src_key(ws_id, item_id), snapshot)
     }
 
-    //get state document
+    /// Same check as [`get_src`](Self::get_src), for the same reason.
     pub fn get_doc(
         &self,
         ws_id: &str,
         item_id: &str,
         name: &str,
     ) -> Result<Option<Vec<u8>>, VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
         self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
 
-    //update state persistance
+    /// Same check as [`get_src`](Self::get_src), for the same reason, plus the `name` check
+    /// this already had.
     pub fn put_doc(
         &self,
         ws_id: &str,
@@ -343,6 +379,9 @@ impl Vault {
         snapshot: &[u8],
         name: &str,
     ) -> Result<(), VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
         if name.is_empty() || name.contains('/') {
             return Err(VaultError::InvalidName(name.to_string()));
         };

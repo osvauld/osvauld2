@@ -141,6 +141,205 @@ root as a parameter, so no second verification path was needed — carrying its 
 never be read as authority. `PermitClaim`, `issue_permit` and `verify_permit` are gone, and
 courier now has one credential mechanism rather than two, which is also the shape osvauld1 had.
 
+**2026-09-23: publish lands.** `courier::publish` is the wire shape for a desktop announcing a
+workspace (and a flat item list) to a node it has already claimed: `PublishHello` carries the
+desktop's own DID alongside its existing node-scope claim/reconnect token — un-narrowed, on
+purpose. First cut narrowed the token to `Scope::Workspace(id)` before checking it, which is
+wrong: `WorkspaceCreate` is a platform capability `courier::policy` only ever grants at
+`Scope::Node` for `owner`/`admin`, so a token already narrowed to workspace scope can never carry
+it, no matter whose it is. `node_accept_publish` calls `policy::authorize` straight against the
+held node-scope token with `Capability::WorkspaceCreate` and target `Scope::Workspace(hello.workspace.id)`
+— one call proves the chain, the un-narrowed scope's coverage, the capability, and (since
+`verify_chain` checks `holder == leaf.aud`) that the caller is who `desktop_did` claims. A
+regression test (`a_token_already_narrowed_to_the_workspace_cannot_create_it`) pins the mistake
+so it cannot come back. `known_items` in the `PublishAck` is read before the check runs, so the
+ack reflects what the node held *before* this call. `vault::adopt_item` joins the pre-existing
+`adopt_workspace` as the item-level counterpart, validating `id` and `ws_id` against the same
+`is_minted_id` shape both share. `kunki::admin::Admin::accept_publish` wires the two together:
+verify first, write second, and an item `kind` string this build cannot parse (`ItemKind::parse`)
+fails closed before that item is adopted — earlier items in the same call stay adopted, which
+matches every other non-transactional write in this module and self-heals on republish.
+`kunki::bridge` is new: the node's own UDS bridge (`$OSVAULD_KUNKI_SOCKET`, default
+`/tmp/osvauld-kunki.sock`), same one-connection-one-request-one-reply shape as shell2's, kept
+single-threaded so `vault`'s single-handle rule needs no second mechanism. `Request::Ping` is
+the liveness probe; `Request::Publish(PublishHello)` is the only real verb so far, dispatching to
+`Admin::accept_publish`. Time is the real wall clock (`now_secs`) rather than virtual — nothing
+dispatched yet carries a TTL worth fast-forwarding past in a test — noted in-code as the seam a
+`Frame`/`Advance` pair replaces once claim/reconnect grow bridge verbs of their own. Tests drive
+`handle` over a real `UnixStream::pair()` against one shared vault clone, so the wire framing and
+`#[serde(tag = "op")]` dispatch are exercised, not only `accept_publish` in isolation. Still
+absent: a claim/reconnect bridge verb (tests still claim in-process), sync of the workspace's
+actual content (publish is headers-only by design), and the invite/role-assign path that lets a
+second user reach what got published. A fresh review against `expert-secure-core` found no
+blockers and traced authorization, holder, and revocation checks against the actual code paths
+rather than the tests alone; it closed two gaps, both now landed: `revoking_a_claimant_stops_it_publishing`
+proves a revoked claim is refused end-to-end (previously only exercised with a synthetic set at
+the courier layer), and `adopt_item`'s locked-vault guard is now asserted alongside
+`adopt_workspace`'s.
+
+**2026-09-23: invite lands.** `courier::invite` is a second, deliberately separate ticket type
+alongside bootstrap's `ConnectionTicket` rather than a field added to it — bootstrap's fields
+(fixed capability, no role/scope) would be dead weight on an invite and vice versa, so this
+duplicates the shape rather than overloading it, matching the "duplicate now, unify later"
+stance already recorded in [`design/node-backlog.md`](design/node-backlog.md). Its own signed-blob
+domain and its own text prefix (`osvi1.`, versus bootstrap's `osv1.`) keep the two kinds
+unambiguous on sight. `issue_invite_ticket` checks the inviter's held token for
+`Capability::MemberInvite` over the requested scope exactly as `node_accept_publish` checks
+`WorkspaceCreate`, then adds one restriction with no precedent to lean on: `role.assign`'s rank
+check (an assigner cannot mint above its own role) is designed but not built, so rather than
+guess at an ordering, an invite may only name a role that itself carries zero platform
+capability. New error: `RoleNotInvitable`. Redemption (`desktop_start_invite_claim`/
+`node_accept_invite`) mints the same token shape bootstrap does, but its replay guard cannot be
+reconnect's in-memory challenge set — an invite ticket has to still be good after a node restart
+between minting and redemption — so `redeemed` is caller-supplied read-only input exactly like
+`revoked` elsewhere, and the newly spent nonce comes back as `InviteWelcome::redeemed_nonce` for
+the caller to persist. `kunki::admin` supplies that persistence: `Admin::issue_invite`/
+`accept_invite` wire the courier calls to a new `invites/<nonce>` store namespace (empty-valued,
+same shape as `revoked/<id>`), writing the spent nonce before recording the new token so a crash
+between the two leaves the invite merely unusable rather than redeemable twice. `kunki::bridge`
+gained `Request::Invite`/`Request::ClaimInvite`. A fresh review against `expert-secure-core`
+found the capability-free-role check as first written was **not** the safe restriction it was
+believed to be: it tested `platform_capabilities(role, scope)` only at the literal requested
+scope, but `token::delegate` lets any holder narrow scope client-side while keeping `role`
+unchanged, and `"maintainer"` is empty at `Scope::Node` while fully powered at
+`Scope::Workspace(_)` — so an invite for `"maintainer"` at node scope passed the guard, and the
+redeemer could then self-delegate that token down into any workspace and recover full
+`MemberInvite`/`RoleAssign`/`AppInstall` power there, the exact escalation the guard existed to
+block. Fixed: `role_could_gain_capability` also checks workspace scope whenever the request is
+at node scope — the only lookahead needed, since a workspace can only narrow further into
+app/resource scope, which the table never populates — and `verify_invite_ticket` gained the same
+`claim.iss == ticket.node_did` belt-and-braces check bootstrap's `verify_ticket` already had. Two
+regression tests pin the fixed escalation (one at the courier layer, one through
+`kunki::admin`), and a new locked-vault test covers `issue_invite`/`accept_invite` alongside the
+existing claim/publish ones. 17 new tests across the two crates, including one that drops and
+reopens the node mid-test to prove the spent nonce survives a restart — the same proof
+`a_claimed_node_is_still_claimed_after_a_restart` already established for the admin list. Still
+absent: any UI or transport carrying an invite ticket to a second desktop (today's tests hand the
+ticket to the redeemer directly, same as every other courier flow so far), and `role.assign`
+itself, which is what would let this restriction be lifted.
+
+**2026-09-24: sync, subscribe, and push land.** `courier::sync` is a desktop pushing local
+Loro changes for one item's layer to its home node and learning back what it doesn't have, in
+one round trip: `desktop_start_sync` commits pending edits and exports only what changed since
+a caller-supplied version vector (`None` the first time a layer syncs, which pushes full
+history); `node_accept_sync` authorizes by workspace membership alone — no platform capability,
+same reasoning `policy::membership` already gives sync's module doc: every role in a workspace
+may read and write its content — merges into the node's current snapshot (`None` the first
+time), and diffs back only what the desktop's own `vv` doesn't cover. Merge only, never
+replace: the node's copy is authoritative by construction, so unlike osvauld1
+(`design/osvauld1-prior-art.md` §8) there is no destructive "divergence" fallback to reach for.
+`kunki::admin::accept_sync` wires this to `vault::get_src`/`put_src`/`get_doc`/`put_doc` keyed
+by `SyncLayer::Src`/`Doc(name)`; `kunki::bridge` gained `Request::Sync`.
+
+`courier::subscribe` is a desktop declaring interest in an item's layer — explicit by design (a
+Subscribe/Unsubscribe verb, never implied by sync history), same membership-only authorization
+as sync, courier stores nothing. `kunki::admin::subscribe`/`unsubscribe`/`subscribers_for`
+persist it under `subscriptions/<ws_id>/<item_id-b64>/<layer-b64>/<did>`; `item_id` and the
+layer tag are base64'd before becoming key segments so a crafted `item_id` containing `/`
+cannot alias a different subscription's key (pinned by test — see the review paragraph below).
+`kunki::bridge` gained `Request::Subscribe`/`Request::Unsubscribe`.
+
+`kunki::push::Pusher` is the delivery trait (`push(subscriber_did, &Push)`, fire-and-forget, no
+retry — a lost push is caught by the subscriber's own next sync, the same correction path a
+missed message already had, not a new one). `Admin::accept_sync` now fans the new snapshot out
+to every other subscriber on that layer once it's stored — a full snapshot, not a delta,
+because no per-subscriber version vector is tracked, so there is nothing to advance on send
+rather than confirmed delivery, the exact osvauld1 hazard `sync.rs`'s own module doc already
+names. Threaded through `bridge::dispatch`/`handle`/`serve_forever` down to `main.rs`, which
+runs `NoopPusher` — no real transport exists yet, so fan-out computes and costs a
+`subscribers_for` lookup per sync but delivers nowhere; swapping in an iroh-backed `Pusher` is
+the whole remaining migration. `two_desktops_converge_through_a_push_neither_one_pulled_for`
+(`kunki/src/admin/tests.rs`) is the two-desktop-one-node proof this was built for: alice claims
+the node, bob joins by invite and subscribes, alice syncs an edit, and bob's doc converges
+having never called sync himself — `MockPusher` stands in for the transport, the same role
+osvauld1's own `MockConnection` played for its `Coordinator<C: Connection>`.
+
+A fresh review against `expert-secure-core` (via `pi -p`) found two gaps. Fixed:
+`vault::get_src`/`put_src`/`get_doc`/`put_doc` now check `workspace::is_minted_id` on both
+`ws_id` and `item_id` before building a key, the same check `adopt_item` already applies —
+without it, `item_id = "X/doc"` at `SyncLayer::Src` and `item_id = "X"` at `SyncLayer::Doc("src")`
+aliased the same key, an id from a remote sync used to reach a different item's content.
+Still open, not yet fixed or formally deferred: `node_accept_sync` always exports a full
+snapshot even for an empty-push pull, and `kunki::bridge::serve_forever` is a single-threaded
+accept loop, so a flood of sync requests that are cheap to send but expensive for the node to
+answer, against a large layer, could stall all other bridge traffic; this fits the stated
+threat model (ordinary workspace membership, no elevated privilege needed).
+
+**2026-09-24: real push replaces the placeholder, a shell2 UI exists, and two real bugs
+surfaced by using it are fixed.** Supersedes this same date's earlier claim that "swapping in
+an iroh-backed `Pusher` is the whole remaining migration" — that undersold it.
+`kunki::push::LiveRegistry` is the real `Pusher`: one bounded channel per currently-connected
+desktop (`try_send`, so a full or abandoned receiver can never block the accept loop that calls
+it), registered by a new `Request::Listen{desktop_did, token}` verb that — unlike every other
+request — doesn't get one reply and close. `kunki::bridge::serve`'s accept loop hands a `Listen`
+to its own thread, authorizes it (`courier::subscribe::node_accept_listen`, the same
+`policy::membership` check as everything else, at `Scope::Node` since one connection carries
+every workspace's subscriptions), then relays whatever `fan_out` registers against that did
+until the connection drops. Every other request stays on the existing sequential path.
+`kunki/src/main.rs` boots with `LiveRegistry::new()`, not `NoopPusher`.
+
+On the desktop side, `shell2::node` gained the client half (`subscribe`/`unsubscribe`/
+`listen`/`next_push`), and `shell2/src/main.rs` gained `spawn_push_listener`, which holds one
+`Listen` connection open per claimed relationship — started at boot if a relationship was
+already persisted, on a successful claim, and refreshed on every unlock. `Msg::PushReceived`
+imports straight into the matching open doc. `SyncTick`'s own poll is now a 20s reconciliation
+backstop, not the delivery path: subscribing happens the first time a doc is seen open, in the
+same post-flush pass that already runs after every message (not the slow tick, so a freshly
+opened doc doesn't wait on the backstop to start receiving pushes), and a local edit reaches
+the node immediately too — the same post-flush dirty-check that already drove persistence now
+also drives `sync_doc`, a small helper `SyncTick` and the immediate path both call so the two
+don't drift apart.
+
+shell2 also gained real UI for all of this: `SpaceScreen` has "join a node" (accepts either a
+boot ticket or an invite, told apart by their text prefix), "invite" (mints one and prints it —
+no clipboard support anywhere in this codebase, the same reason kunki's own boot ticket is
+already meant to be copy-pasted from a terminal), and "publish" widgets. New `osvauld-rpc`
+verbs (`ClaimNode`/`Invite`/`PublishAll`/`JoinItem`/`PushSrc`) expose the same actions to
+automation, since shell chrome isn't reachable through the existing Click/Type/Key senses —
+those are scoped to a running app's own element tree, not the shell around it.
+`scripts/demo_sync.py` drives two desktops and one node through the whole thing — signup,
+claim, invite, publish, join, a note typed on each side to prove the other receives it — with
+no manual clicking, in `scripts/osvauld/client.py`'s existing style. Fixed along the way: a
+pre-existing, unrelated bug where `Mnemonic`'s "Continue" sent a fresh account back to
+`Screen::Signup` instead of into the app.
+
+Two real bugs surfaced by actually running that demo, both fixed:
+- `JoinItem` only ever pulled the *source* layer (`courier::publish`'s "headers only, content
+  follows over sync" holds, but nothing pulled the *doc* layer either) — so a joining desktop's
+  app saw a genuinely empty doc and re-ran its own first-run seeding logic, and the CRDT union
+  of both desktops' independent seeds showed up as literal duplicate content. Fixed with
+  `resolver_with_node` (`shell2/src/main.rs`), wrapping the existing `resolver`: if nothing's
+  stored locally and a node is claimed, `node::pull_doc` (`shell2/src/node.rs`) tries the node
+  first — checked against the doc's own `oplog_vv().is_empty()` after import, not the byte
+  length of what came back over the wire, since an empty diff is not reliably zero bytes in
+  Loro's own encoding.
+- A joining desktop with zero workspaces of its own got stuck on `SpaceScreen`'s empty
+  "press ⏎ to create" branch even after `JoinItem` had already adopted one — the same class of
+  bug `refresh_after_workspace`'s own doc comment already names for `CreateWorkspace`/
+  `CreateItem`, just never wired up for this verb. One missing call, now added.
+
+Also investigated: a demo run that appeared to hang for 10–30s per step, wildly variable
+between runs. Root-caused with wall-clock instrumentation (still in the source as
+`DBG timing:` prints, `shell2/src/main.rs`) — not fixed, because there was nothing in this
+codebase to fix: every actual network/local-processing measurement was 0–15ms, matching
+headless exactly; the entire delay was in getting winit's event loop to process an
+already-delivered `send_event`. Traced to the window manager (a tabbed/stacked layout) giving
+Wayland frame callbacks only to the currently-visible tab of a stack — a backgrounded shell2
+window's event loop stalls waiting on a callback the compositor is not sending it, which is the
+compositor behaving correctly (it does not drive invisible surfaces), not a bug in `runtime` or
+anything built here. Confirmed directly: the same run drops to milliseconds once both windows
+are actually visible. Documented as a caveat in `scripts/demo_sync.py`'s own docstring rather
+than "fixed."
+
+Still open, carried over from the review above, unchanged by any of this: the caller-identity
+gap (`desktop_did` is request-supplied, not proven by a signature — a delegated token's
+embedded parent can be replayed to impersonate its own issuer) now also applies to `Listen`;
+async worker completions (`Msg::NodeRpcDone`, `Msg::SyncDone`, `Msg::PushReceived`) are not
+scoped to an account generation, so a stale reply from before a lock/unlock or account switch
+could still write into the wrong account; `join_item` retried after local edits can still
+overwrite them (always starts from an empty doc); the bridge still has no per-connection
+frame-size cap or write deadline.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax

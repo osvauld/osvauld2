@@ -226,6 +226,39 @@ class Bridge:
         Path(path).write_bytes(base64.b64decode(result["png_base64"], validate=True))
         return {k: result[k] for k in ("width_px", "height_px")}
 
+    # ── node (kunki) ──────────────────────────────────────────────────────────
+    def claim_node(self, ticket: str) -> str:
+        """Join a kunki node — a boot ticket or an invite, told apart by prefix. Returns the
+        joined node's did."""
+        return self.request("ClaimNode", ticket=ticket)
+
+    def invite(self) -> str:
+        """Mint an invite (role member, node-wide) from the already-claimed node. Returns the
+        ticket text, ready to hand to another desktop's claim_node."""
+        return self.request("Invite")
+
+    def publish_all(self) -> int:
+        """Announce every local workspace to the claimed node. Returns how many were sent."""
+        return self.request("PublishAll")
+
+    def push_src(self, item_id: str) -> str:
+        """Push this item's current source snapshot to the claimed node — a one-shot sync on
+        the src layer; nothing keeps it continuously synced yet."""
+        return self.request("PushSrc", item_id=item_id)
+
+    def join_item(self, ws: dict, item: dict) -> str:
+        """Adopt a workspace/item another desktop already published — pass its own
+        create_workspace/create_item replies straight through — and pull the item's current
+        source. Stands in for node-side discovery, which doesn't exist yet."""
+        return self.request(
+            "JoinItem",
+            ws_id=ws["id"],
+            ws_name=ws["name"],
+            item_id=item["id"],
+            item_name=item["name"],
+            item_kind=item["kind"],
+        )
+
     def upload_folder(self, item_id: str, root) -> list:
         """Mirror the shell's GUI upload: walk `root`, keep *.lua/*.osv (skipping dotfiles),
         one WriteFile per file. Root main.lua is required — the same contract as the picker."""

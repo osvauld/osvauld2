@@ -13,9 +13,8 @@
 //! carry passphrases, so the socket is as sensitive as they are.
 
 use std::io;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -40,51 +39,16 @@ fn socket_path() -> PathBuf {
 }
 
 /// Bind and serve forever. Transport-only failures are printed, not fatal: the shell must
-/// still run without a bridge.
+/// still run without a bridge. Binding itself — staged, locked to 0600, atomically renamed
+/// into place — is `osvauld_rpc::bind_uds`, shared with kunki's bridge.
 pub fn spawn(proxy: EventLoopProxy<Msg>) {
     let path = socket_path();
-    if let Some(listener) = bind(&path) {
-        std::thread::spawn(move || serve(listener, proxy));
-    }
-}
-
-/// Bind, refusing to clobber anything that is not ours to clobber: a live bridge, a
-/// regular file, a FIFO — none of them are removed.
-fn bind(path: &Path) -> Option<UnixListener> {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if !meta.file_type().is_socket() {
-            eprintln!("bridge: {path:?} exists and is not a socket; not serving");
-            return None;
+    match osvauld_rpc::bind_uds(&path) {
+        Ok(listener) => {
+            std::thread::spawn(move || serve(listener, proxy));
         }
-        if UnixStream::connect(path).is_ok() {
-            eprintln!("bridge: {path:?} is live, not starting a second one");
-            return None;
-        }
+        Err(e) => eprintln!("bridge: {e}; not serving"),
     }
-    try_bind(path)
-}
-
-fn try_bind(path: &Path) -> Option<UnixListener> {
-    // Bind under a private staging name, lock to 0600, then atomically rename onto the
-    // target: the socket never exists at the well-known path with loose permissions, and
-    // the rename replaces any corpse left by a killed run in the same step.
-    let staging = path.with_extension(format!("new-{}", std::process::id()));
-    let listener = match UnixListener::bind(&staging) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("bridge: cannot bind beside {path:?}: {e}");
-            return None;
-        }
-    };
-    let placed = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600)).is_ok()
-        && std::fs::rename(&staging, path).is_ok();
-    if !placed {
-        drop(listener);
-        let _ = std::fs::remove_file(&staging);
-        eprintln!("bridge: cannot place a 0600 socket at {path:?}; not serving");
-        return None;
-    }
-    Some(listener)
 }
 
 fn serve(listener: UnixListener, proxy: EventLoopProxy<Msg>) {
