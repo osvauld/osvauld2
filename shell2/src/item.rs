@@ -103,7 +103,9 @@ impl ItemsScreen {
                         ),
                 );
             }
-            grid
+            // A growing scroller takes the page's remaining height; without it a long app list
+            // runs off the bottom of the window.
+            col().id("items").grow().scroll_y().child(grid)
         };
 
         let mut page = col().full().pad(40.0).gap(24.0).child(header);
