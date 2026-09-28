@@ -32,6 +32,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         pos,
         drawing: drawing.clone(),
         clip: None,
+        controller: None,
     }
 }
 
@@ -152,14 +153,14 @@ fn a_bad_description_leaves_the_last_good_world() {
 fn a_clip_plays_on_the_world_clock_from_when_it_appears() {
     let (d, clip) = (drawing(), slide());
     let mut world = World2d::default();
-    world.tick(10.0);
+    world.tick(10.0, 0.0);
     world.reconcile(vec![playing("hero", &d, &clip)]).unwrap();
     assert_eq!(
         at(&world, 4.0).as_deref(),
         Some("hero"),
         "starts at its first key"
     );
-    world.tick(10.5);
+    world.tick(10.5, 0.0);
     world.reconcile(vec![playing("hero", &d, &clip)]).unwrap();
     assert_eq!(
         at(&world, 4.0),
@@ -176,12 +177,12 @@ fn a_new_clip_handle_restarts_and_no_clip_returns_to_rest() {
     world
         .reconcile(vec![playing("hero", &d, &slide())])
         .unwrap();
-    world.tick(0.5);
+    world.tick(0.5, 0.0);
     world
         .reconcile(vec![playing("hero", &d, &slide())])
         .unwrap();
     assert_eq!(at(&world, 4.0).as_deref(), Some("hero"), "restarted at 0.5");
-    world.tick(2.0);
+    world.tick(2.0, 0.0);
     world.reconcile(vec![spec("hero", (0.0, 0.0), &d)]).unwrap();
     assert_eq!(at(&world, 4.0).as_deref(), Some("hero"), "back at rest");
 }
@@ -212,4 +213,131 @@ fn a_clip_naming_a_part_its_drawing_lacks_is_refused() {
         Some("hero"),
         "last good world kept"
     );
+}
+
+fn wasd(speed: f64, moving: Option<Arc<Clip>>) -> Controller {
+    let axis = |neg: &str, pos: &str| {
+        Some(Axis {
+            neg: neg.into(),
+            pos: pos.into(),
+        })
+    };
+    Controller {
+        speed,
+        axis_x: axis("KeyA", "KeyD"),
+        axis_y: axis("KeyW", "KeyS"),
+        moving,
+    }
+}
+
+fn controlled(d: &Arc<Drawing>, controller: Controller) -> EntitySpec {
+    EntitySpec {
+        controller: Some(controller),
+        ..spec("hero", (0.0, 0.0), d)
+    }
+}
+
+fn now_playing(world: &World2d) -> (Arc<Clip>, f64) {
+    let a = world.ecs.get::<Animator>(world.by_id["hero"]).unwrap();
+    (a.clip.clone(), a.started)
+}
+
+#[test]
+fn a_controller_moves_along_held_axes_and_a_diagonal_is_no_faster() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world
+        .reconcile(vec![controlled(&d, wasd(100.0, None))])
+        .unwrap();
+    assert!(world.needs_ticks());
+    world.tick(0.0, 0.5);
+    assert_eq!(world.transform("hero").unwrap().x, 0.0, "no key held");
+
+    world.key("KeyD", true);
+    world.tick(0.5, 0.5);
+    assert_eq!(world.transform("hero").unwrap().x, 50.0);
+    world.key("KeyA", true);
+    world.tick(1.0, 0.5);
+    assert_eq!(
+        world.transform("hero").unwrap().x,
+        50.0,
+        "opposite keys cancel"
+    );
+
+    world.key("KeyA", false);
+    world.key("KeyS", true);
+    world.tick(1.5, 0.5);
+    let t = world.transform("hero").unwrap();
+    let step = ((t.x - 50.0).powi(2) + t.y.powi(2)).sqrt();
+    assert!((step - 50.0).abs() < 1e-9, "diagonal stepped {step}");
+
+    world.release_all();
+    world.tick(2.0, 0.5);
+    assert_eq!(
+        world.transform("hero").unwrap(),
+        t,
+        "focus lost, nothing held"
+    );
+}
+
+#[test]
+fn the_moving_clip_plays_only_while_moving_and_survives_reconcile() {
+    let (d, walk, idle) = (drawing(), slide(), slide());
+    let describe = |world: &mut World2d| {
+        let hero = EntitySpec {
+            clip: Some(idle.clone()),
+            ..controlled(&d, wasd(10.0, Some(walk.clone())))
+        };
+        world.reconcile(vec![hero]).unwrap();
+    };
+    let mut world = World2d::default();
+    describe(&mut world);
+    assert!(Arc::ptr_eq(&now_playing(&world).0, &idle));
+
+    world.key("KeyD", true);
+    world.tick(1.0, 0.1);
+    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk));
+    describe(&mut world);
+    world.tick(2.0, 0.1);
+    let (clip, started) = now_playing(&world);
+    assert!(
+        Arc::ptr_eq(&clip, &walk),
+        "a reconcile does not stop the walk"
+    );
+    assert_eq!(started, 1.0, "nor restart it");
+
+    world.key("KeyD", false);
+    world.tick(3.0, 0.1);
+    let (clip, started) = now_playing(&world);
+    assert!(Arc::ptr_eq(&clip, &idle));
+    assert_eq!(started, 3.0);
+}
+
+#[test]
+fn a_bad_controller_is_refused() {
+    use crate::clip::{Easing, Key, Prop, Track};
+    let key = Key {
+        time: 0.0,
+        value: 1.0,
+        easing: Easing::Linear,
+    };
+    let track = Track {
+        part: "wing".into(),
+        prop: Prop::Rot,
+        keys: vec![key],
+    };
+    let flap = Arc::new(Clip::new(1.0, true, vec![track]).unwrap());
+    let d = drawing();
+    let mut world = World2d::default();
+    for speed in [f64::NAN, -1.0] {
+        assert!(matches!(
+            world.reconcile(vec![controlled(&d, wasd(speed, None))]),
+            Err(WorldError::Speed(_))
+        ));
+    }
+    assert!(matches!(
+        world.reconcile(vec![controlled(&d, wasd(1.0, Some(flap)))]),
+        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
+    ));
+    assert!(!world.needs_ticks(), "nothing was accepted");
 }

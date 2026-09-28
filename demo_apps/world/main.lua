@@ -2,7 +2,16 @@ local C = require("theme")
 local hero = gfx.drawing(require("hero"))
 local chest = gfx.drawing(require("chest"))
 local clips = require("clips")
-local idle, open, close = gfx.clip(clips.idle), gfx.clip(clips.open), gfx.clip(clips.close)
+local idle, walk = gfx.clip(clips.idle), gfx.clip(clips.walk)
+local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
+
+-- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
+local wasd = {
+	speed = 160,
+	axis_x = { neg = "KeyA", pos = "KeyD" },
+	axis_y = { neg = "KeyW", pos = "KeyS" },
+	moving = walk,
+}
 
 local friend = false -- whether the second hero is described; the world spawns/despawns to match
 local hot = nil -- the entity under the pointer
@@ -20,7 +29,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "click the chest", color = C.muted, font_size = 13, no_wrap = true }),
+		ui.text({ "WASD walks the hero · click the chest", color = C.muted, font_size = 13, no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is.
 		ui.world({
 			id = "room", width = C.width, height = C.height, fill = C.floor, radius = 10,
@@ -29,7 +38,7 @@ return function()
 			on_click = function(e)
 				if e.shape == "chest" then lid = lid == open and close or open end
 			end,
-			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle },
+			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd },
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),

@@ -179,7 +179,7 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle) — nothing else. `false` drops out, like a child element. List order is draw order.
+  handle) and optionally `clip` (a `gfx.clip` handle) and `controller` — nothing else. `false` drops out, like a child element. List order is draw order.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
   is; re-sending a different `pos` does not move it.
 - An id the description no longer lists is despawned. A new `drawing` handle replaces the look;
@@ -188,7 +188,7 @@ ui.world({
   `stroke`) and pointer handlers apply to the element.
 - The world outlives hot reload and survives a hidden tab. It is dropped when a successful frame
   no longer draws its id. A bad description is an error and keeps the last good world.
-- Input and collision are the next slices of [2d-world.md](design/2d-world.md).
+- Collision and discrete actions are the next slice of [2d-world.md](design/2d-world.md).
 
 ### Clips
 
@@ -220,7 +220,33 @@ ui.world({ id = "room", width = 720, height = 400,
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
 
-`demo_apps/world` is the reference: an idle hero and a chest whose lid opens on click.
+### Controllers
+
+A controller moves its entity from held keys, in Rust — Lua describes it once and runs nothing
+per key or per frame.
+
+```lua
+local wasd = {
+	speed = 160,                               -- units a second; required
+	axis_x = { neg = "KeyA", pos = "KeyD" },   -- at least one axis
+	axis_y = { neg = "KeyW", pos = "KeyS" },
+	moving = walk,                             -- optional gfx.clip played while it moves
+}
+{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd }
+```
+
+- Key names are physical codes, the same as `on_key`'s `e.code`. A misspelt code (`"W"` for
+  `"KeyW"`) is not caught — it simply never matches.
+- Both keys of an axis held cancel; a diagonal is no faster than a straight line. Movement uses the
+  runtime's frame `dt`, capped at 0.1s after a stall, so `rpc.frame(n)` is the exact way to drive
+  it offscreen — `rpc.advance` moves by at most one capped step.
+- While moving, `moving` plays in place of the entity's `clip`; when it stops, `clip` restarts.
+- A world with a controller takes keyboard input itself (it attaches `on_key`, and releases every
+  key on blur), so `on_key` on a `ui.world` is an error. A world without one leaves keys alone.
+- There are no walls yet: nothing stops an entity leaving the world's box.
+
+`demo_apps/world` is the reference: a hero who idles and walks with WASD, and a chest whose lid
+opens on click.
 
 ## 3D scenes (experimental proof)
 

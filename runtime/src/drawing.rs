@@ -131,6 +131,10 @@ impl Drawing {
         })
     }
 
+    pub fn has_part(&self, id: &str) -> bool {
+        self.parts.iter().any(|p| &*p.id == id)
+    }
+
     /// Parts with shapes become named groups, so a hit on the Frame reports the part id.
     pub fn pose(&self, overrides: &HashMap<&str, Pose>) -> Result<Frame, DrawingError> {
         if let Some(name) = overrides

@@ -552,9 +552,68 @@ fn a_world_with_a_clip_ticks_in_rust_and_poses_on_its_clock() {
         frame.hit(runtime::vello::kurbo::Point::new(x, 20.0)).map(|h| h.id.to_string())
     };
     assert_eq!(hit(&app, 16.0).as_deref(), Some("hero"));
-    app.update(LuaMsg::TickWorld("room".into(), 0.5));
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.5));
     assert_eq!(hit(&app, 16.0), None, "the body slid away");
     assert_eq!(hit(&app, 66.0).as_deref(), Some("hero"));
+}
+
+#[test]
+fn a_controlled_world_takes_keys_and_moves_in_rust() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, \
+               controller = {{ speed = 100, axis_x = {{ neg = 'KeyA', pos = 'KeyD' }} }} }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let info = app.view().info();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(info.handlers, vec!["on_frame", "on_key"]);
+
+    let key = |code: Option<&str>, down, cancelled| {
+        LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+            code: code.map(Into::into), key: String::new(), down, repeat: false, cancelled,
+            mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+        })
+    };
+    let x = |app: &LuaApp<LuaMsg>| app.worlds.borrow()["room"].transform("hero").unwrap().x;
+    app.update(key(Some("KeyD"), true, false));
+    app.update(LuaMsg::TickWorld("room".into(), 0.25, 0.25));
+    assert_eq!(x(&app), 25.0);
+    app.update(key(None, false, true));
+    app.update(LuaMsg::TickWorld("room".into(), 0.25, 0.5));
+    assert_eq!(x(&app), 25.0, "a cancel releases every held key");
+}
+
+#[test]
+fn a_controller_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |controller: &str| {
+        format!("{HERO} {SLIDE} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, controller = {controller} }} }})")
+    };
+    let x = "axis_x = { neg = 'KeyA', pos = 'KeyD' }";
+    let cases = [
+        ("'wasd'".to_string(), "controller must be a table, got string"),
+        (format!("{{ speed = 1, {x}, jump = 'Space' }}"), "controller: unknown field jump"),
+        (format!("{{ {x} }}"), "controller needs speed"),
+        ("{ speed = 1 }".to_string(), "controller needs axis_x or axis_y"),
+        ("{ speed = 1, axis_y = { neg = 'KeyW', up = 'KeyS' } }".to_string(), "axis_y: unknown field up"),
+        ("{ speed = 1, axis_y = { neg = 'KeyW' } }".to_string(), "axis_y needs pos"),
+        (format!("{{ speed = -5, {x} }}"), "controller speed must be a finite number"),
+        (format!("{{ speed = 1, {x}, moving = hero }}"), "moving must be a gfx.clip"),
+    ];
+    for (controller, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(&controller)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    let keyed = format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, on_key = function() end }})");
+    let err = walk_world(&lua, &worlds, &keyed).unwrap_err();
+    assert!(err.to_string().contains("a world runs its own keys"), "{err}");
 }
 
 #[test]

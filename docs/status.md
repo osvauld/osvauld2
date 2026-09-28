@@ -437,8 +437,16 @@ clip playing attaches the runtime's `on_frame` and routes it as `LuaMsg::TickWor
 clock in Rust without calling Lua; `on_frame` on a world is therefore an error. Lua has strict
 `gfx.clip{length, loop, tracks}`. `demo_apps/world` idles the hero and opens the chest lid on
 click; `smoke_world.py` clicks and uses `rpc.advance` to check the lid open and closed. Not built:
-clip events, speed, transitions, layers; a finished once-clip keeps the world ticking. Controller
-and physics are unbuilt; entities are never moved, and there is no world-level `DumpTree` yet.
+clip events, speed, transitions, layers; a finished once-clip keeps the world ticking. **Slice 4
+landed:** an entity's `controller = { speed, axis_x = {neg, pos}, axis_y, moving }` (strict) becomes
+a `Controller` component; the world holds key state, attaching the runtime's `on_key` only when a
+controller exists and routing it as `LuaMsg::KeyWorld` (a cancel releases all), so `on_key` on a
+world is an error. `tick(elapsed, dt)` moves along held axes at `speed × dt` (diagonals
+normalised) and plays `moving` while moving, the entity's own clip when still; a reconcile does not
+restart a walk. Clips are checked by part name via `Drawing::has_part`. The demo hero walks with
+WASD; `smoke_world.py` holds D through `rpc.keyboard` and checks the hero moved and stopped. Not
+built: walls/physics (entities can leave the box), discrete actions, facing, key-code validation,
+and a world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds
 

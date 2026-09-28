@@ -163,7 +163,9 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
 2. **`ui.world` + reconcile.** Entities spawn, update and despawn by id in `bevy_ecs`.
 3. **Animator.** Clips play in Rust; the hero idles and walks in place. *(Landed with an idle and
    the chest's open/close on click; the walk cycle waits for the controller.)*
-4. **Controller.** WASD moves the hero; Lua switches `play`.
+4. **Controller.** WASD moves the hero; Lua switches `play`. *(Revised 2026-09-28: Lua never sees
+   held keys or velocity, so the controller carries `moving = clip`, played in Rust while it moves
+   — still vocabulary, not content. Landed that way.)*
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 
 Networking, clock sync across peers, tilemaps, `gfx.image` and AI players are out of scope.

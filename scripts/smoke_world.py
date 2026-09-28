@@ -68,8 +68,20 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
     assert entity_at(200, 210) == "hero", "reload reset the world"
 
+    # WASD through the real keyboard path: held D moves the hero right at 160/s in Rust. The body
+    # starts under (200, 210); half a second of frames carries it ~80 right, and releasing stops it.
+    s.rpc.keyboard("KeyD", "d", True)
+    s.rpc.frame(30)
+    s.rpc.keyboard("KeyD", "d", False)
+    s.rpc.frame(2)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+    assert entity_at(200, 210) == "—", "the hero walked away"
+    assert entity_at(285, 210) == "hero", "the hero walked ~80 right"
+    s.rpc.frame(30)
+    assert entity_at(285, 210) == "hero", "released, the hero stopped"
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD")

@@ -342,7 +342,7 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    named_fields(&spec, &owner, &["id", "pos", "drawing", "clip"])?;
+    named_fields(&spec, &owner, &["id", "pos", "drawing", "clip", "controller"])?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
     Ok(world::EntitySpec {
         id: need(&spec, &owner, "id")?,
@@ -354,7 +354,41 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Value::Nil => None,
             _ => Some(need_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?),
         },
+        controller: match spec.get::<Value>("controller")? {
+            Value::Nil => None,
+            Value::Table(c) => Some(controller(&c, &format!("{owner}.controller"))?),
+            other => {
+                return Err(Error::runtime(format!(
+                    "{owner}.controller must be a table, got {}",
+                    other.type_name()
+                )));
+            }
+        },
     })
+}
+
+/// Key codes are physical names (`"KeyW"`, `"ArrowLeft"`), the same as `on_key`'s `e.code`.
+fn controller(spec: &Table, owner: &str) -> mlua::Result<world::Controller> {
+    named_fields(spec, owner, &["speed", "axis_x", "axis_y", "moving"])?;
+    let axis = |field: &str| -> mlua::Result<Option<world::Axis>> {
+        let Some(axis) = spec.get::<Option<Table>>(field)? else {
+            return Ok(None);
+        };
+        let owner = format!("{owner}.{field}");
+        named_fields(&axis, &owner, &["neg", "pos"])?;
+        let (neg, pos) = (need(&axis, &owner, "neg")?, need(&axis, &owner, "pos")?);
+        Ok(Some(world::Axis { neg, pos }))
+    };
+    let (axis_x, axis_y) = (axis("axis_x")?, axis("axis_y")?);
+    if axis_x.is_none() && axis_y.is_none() {
+        return Err(Error::runtime(format!("{owner} needs axis_x or axis_y")));
+    }
+    let moving = match spec.get::<Value>("moving")? {
+        Value::Nil => None,
+        _ => Some(need_gfx(spec, owner, "moving", "a gfx.clip", |c: &LuaClip| c.0.clone())?),
+    };
+    let speed = need(spec, owner, "speed")?;
+    Ok(world::Controller { speed, axis_x, axis_y, moving })
 }
 
 /// `tracks = { part = { prop = { {time, value, easing?}, ... } } }`. Parts are sorted so a bad
