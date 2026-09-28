@@ -383,6 +383,84 @@ fn gfx_stroke_rejects_bad_enums_and_dash_tables() {
     }
 }
 
+const HERO: &str = r##"
+    local hero = gfx.drawing({
+        size = { 32, 48 },
+        parts = {
+            { id = "leg", parent = "body", pivot = { 12, 34 },
+              shapes = { { path = { {"move",10,34}, {"line",14,34}, {"line",14,46}, {"close"} },
+                           fill = "#3b2f5c" } } },
+            { id = "body", pivot = { 16, 30 },
+              shapes = { { path = { {"move",8,16}, {"line",24,16}, {"line",24,36}, {"close"} },
+                           fill = "#f84aa7", stroke = { 1.5, "#1b1b3a" } } } },
+            { id = "hip", parent = "body", pivot = { 16, 34 } },
+        },
+    })
+"##;
+
+#[test]
+fn a_posed_drawing_is_an_ordinary_frame_named_by_part() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let node: Table = lua
+        .load(format!(
+            "{HERO} return ui.frame({{ id = 'hero', visual = hero:pose({{ body = {{ rot = 10 }}, leg = {{ y = -2 }} }}) }})"
+        ))
+        .eval()
+        .unwrap();
+    let visual = node.get::<mlua::AnyUserData>("visual").unwrap();
+    let frame = visual.borrow::<gfx::LuaFrame>().unwrap();
+    let ids: Vec<_> = frame
+        .0
+        .items()
+        .iter()
+        .map(|i| i.id().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["leg", "body"]); // list order is draw order; the shapeless hip is skipped
+
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    assert_eq!(walk(node, &mut ctx).unwrap().info().kind, "frame");
+}
+
+#[test]
+fn a_drawing_module_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let part = |extra: &str| {
+        format!(
+            "return gfx.drawing({{ size = {{ 10, 10 }}, parts = {{ {{ id = 'a', {extra} }} }} }})"
+        )
+    };
+    let cases = [
+        (
+            "return gfx.drawing({ size = { 10, 10 }, parts = {}, clips = {} })".into(),
+            "drawing: unknown field clips",
+        ),
+        (part("shapes = {}"), "drawing part 1 needs pivot"),
+        (part("pivot = { 0, 0 }, parent = 'ghost'"), "unknown parent"),
+        (
+            part("pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} } } }"),
+            "shape 1 needs fill or stroke",
+        ),
+        (part("pivot = { 0, 0 }, use = 'sword'"), "unknown field use"),
+        (
+            format!("{HERO} return hero:pose({{ arm = {{ rot = 1 }} }})"),
+            "unknown part \"arm\"",
+        ),
+        (
+            format!("{HERO} return hero:pose({{ body = {{ spin = 1 }} }})"),
+            "pose: unknown field spin",
+        ),
+    ];
+    for (source, wanted) in cases {
+        let err = lua
+            .load(&source)
+            .eval::<Value>()
+            .expect_err(&source)
+            .to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
 /// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",
 /// which names neither the field nor the call — two different mistakes produced byte-identical
 /// text. Each message must now name what is missing, and no two may read the same.

@@ -409,6 +409,20 @@ both planets and the moon parametrically (`x=rx*cos(t)`, `y=ry*sin(t)`); before/
 painted path. The earlier next step—scaffolding a force graph and Frame-local hits—is superseded pending the
 Environment rendering/lifetime gates below.
 
+### 2D world — drawings, animation, a Rust-run game world
+
+**Design draft 2026-09-28:** [2d-world.md](design/2d-world.md) — Lua describes, Rust runs; drawings
+and clips are pure-data Lua modules; `ui.world` over `bevy_ecs` + `rapier2d` (proposed, not yet
+added); the chest demo is the milestone. **Slice 1 landed:** runtime `drawing::Drawing` validates a
+part tree (unique ids, known parents, no cycles, 256-part cap) whose list order is draw order and
+whose `parent` is the hierarchy; `pose(overrides)` rotates/moves/scales parts about drawing-absolute
+pivots, carries children with their parent, and compiles to an ordinary Frame of part-named groups,
+so hits report the part id. Lua has strict `gfx.drawing(module)` over a pure-data module (paths as
+command lists, solid fill, `{width, color}` round-joined stroke) and `drawing:pose({...})`; `clips`
+and `use` are rejected until their slices. `demo_apps/hero` shows one drawing in four poses with
+part hover; `scripts/smoke_hero.py` (in `SMOKES`) pins reachability and part hits. Clips, the
+Animator, `ui.world`, controller and physics are unbuilt.
+
 ### Environment — composable 3D interfaces and worlds
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the

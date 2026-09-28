@@ -1,10 +1,12 @@
 //! Lua declarations for immutable runtime Frame resources. This module validates and compiles
 //! aggregate values; it never renders or retains VM callbacks.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{Quat, Vec3};
-use mlua::{Error, Lua, Table, UserData, Value};
+use mlua::{Error, Lua, Table, UserData, UserDataMethods, Value};
+use runtime::drawing::{Drawing, PartSpec, Pose};
 use runtime::frame::{
     Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
@@ -27,6 +29,34 @@ pub(crate) struct LuaFrame(pub Arc<Frame>);
 impl UserData for LuaFrame {}
 
 #[derive(Clone)]
+pub(crate) struct LuaDrawing(pub Arc<Drawing>);
+impl UserData for LuaDrawing {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("pose", |lua, this, overrides: Option<Table>| {
+            let mut poses = Vec::new();
+            let overrides = overrides.unwrap_or(lua.create_table()?);
+            for pair in overrides.pairs::<String, Table>() {
+                let (part, spec) = pair?;
+                named_fields(&spec, "pose", &["x", "y", "rot", "scale"])?;
+                let rest = Pose::default();
+                poses.push((
+                    part,
+                    Pose {
+                        x: spec.get::<Option<f64>>("x")?.unwrap_or(rest.x),
+                        y: spec.get::<Option<f64>>("y")?.unwrap_or(rest.y),
+                        rot: spec.get::<Option<f64>>("rot")?.unwrap_or(rest.rot),
+                        scale: spec.get::<Option<f64>>("scale")?.unwrap_or(rest.scale),
+                    },
+                ));
+            }
+            let poses: HashMap<&str, Pose> = poses.iter().map(|(k, p)| (k.as_str(), *p)).collect();
+            let frame = this.0.pose(&poses).map_err(Error::external)?;
+            lua.create_userdata(LuaFrame(Arc::new(frame)))
+        });
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct LuaScene3d(pub Arc<Scene3d>);
 impl UserData for LuaScene3d {}
 
@@ -39,18 +69,13 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
-            let len = positional_len(&commands, "path")?;
-            if len > MAX_PATH_COMMANDS {
-                return Err(Error::runtime(format!(
-                    "path has {len} commands; maximum is {MAX_PATH_COMMANDS}"
-                )));
-            }
-            let mut elements = Vec::with_capacity(len);
-            for index in 1..=len {
-                elements.push(command(commands.get(index)?, index)?);
-            }
-            let path = Path::new(elements).map_err(Error::external)?;
-            lua.create_userdata(LuaPath(Arc::new(path)))
+            lua.create_userdata(LuaPath(Arc::new(path(&commands, "path")?)))
+        })?,
+    )?;
+    gfx.set(
+        "drawing",
+        lua.create_function(|lua, spec: Table| {
+            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec)?)))
         })?,
     )?;
     gfx.set(
@@ -256,6 +281,88 @@ fn quat(table: Table, owner: &str) -> mlua::Result<Quat> {
         table.get(3)?,
         table.get(4)?,
     ))
+}
+
+fn path(commands: &Table, owner: &str) -> mlua::Result<Path> {
+    let len = positional_len(commands, owner)?;
+    if len > MAX_PATH_COMMANDS {
+        return Err(Error::runtime(format!(
+            "{owner} has {len} commands; maximum is {MAX_PATH_COMMANDS}"
+        )));
+    }
+    let mut elements = Vec::with_capacity(len);
+    for index in 1..=len {
+        elements.push(command(commands.get(index)?, index)?);
+    }
+    Path::new(elements).map_err(Error::external)
+}
+
+/// A drawing module is pure data — paths are command lists, not `gfx.path` handles — so the same
+/// table can be rewritten by an editor or moved into a document without changing shape.
+fn drawing(spec: &Table) -> mlua::Result<Drawing> {
+    named_fields(spec, "drawing", &["size", "parts"])?;
+    let size = point(need(spec, "drawing", "size")?, "drawing.size")?;
+    let parts: Table = need(spec, "drawing", "parts")?;
+    let mut specs = Vec::new();
+    for index in 1..=positional_len(&parts, "drawing.parts")? {
+        let part: Table = parts.get(index)?;
+        let owner = format!("drawing part {index}");
+        named_fields(&part, &owner, &["id", "parent", "pivot", "shapes"])?;
+        let shapes = match part.get::<Option<Table>>("shapes")? {
+            None => Vec::new(),
+            Some(list) => {
+                let mut shapes = Vec::new();
+                for i in 1..=positional_len(&list, &format!("{owner}.shapes"))? {
+                    shapes.extend(shape(list.get(i)?, &format!("{owner} shape {i}"))?);
+                }
+                shapes
+            }
+        };
+        specs.push(PartSpec {
+            id: need(&part, &owner, "id")?,
+            parent: part.get("parent")?,
+            pivot: point(need(&part, &owner, "pivot")?, &format!("{owner}.pivot"))?,
+            shapes,
+        });
+    }
+    Drawing::new(size.x, size.y, specs).map_err(Error::external)
+}
+
+/// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
+fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
+    named_fields(&spec, owner, &["path", "fill", "stroke"])?;
+    let path = Arc::new(path(
+        &need(&spec, owner, "path")?,
+        &format!("{owner}.path"),
+    )?);
+    let mut items = Vec::new();
+    if let Some(color) = spec.get::<Option<String>>("fill")? {
+        let brush = Brush::solid(crate::parse_color(&color)?).map_err(Error::external)?;
+        items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+    }
+    if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
+        if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
+            return Err(Error::runtime(format!(
+                "{owner}.stroke needs width and color"
+            )));
+        }
+        let brush = Brush::solid(crate::parse_color(&stroke.get::<String>(2)?)?)
+            .map_err(Error::external)?;
+        let style = StrokeStyle::new(
+            stroke.get(1)?,
+            StrokeCap::Round,
+            StrokeJoin::Round,
+            4.0,
+            Vec::new(),
+            0.0,
+        )
+        .map_err(Error::external)?;
+        items.push(Item::stroke(path, Arc::new(brush), style));
+    }
+    if items.is_empty() {
+        return Err(Error::runtime(format!("{owner} needs fill or stroke")));
+    }
+    Ok(items)
 }
 
 fn command(command: Table, index: usize) -> mlua::Result<PathEl> {

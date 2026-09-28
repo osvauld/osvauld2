@@ -7,6 +7,7 @@
 mod anim;
 pub mod coords;
 mod drag;
+pub mod drawing;
 mod editor;
 mod el;
 pub mod frame;

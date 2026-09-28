@@ -122,6 +122,46 @@ error, not an ignored extra.
 There is no text inside a frame, no arcs, and no internal clips yet; labels are `ui.text`
 siblings positioned by layout, which is what the demo charts' axes do.
 
+## Drawings (experimental)
+
+A drawing is a character or prop as **pure data** — a module of tables, numbers and strings, no
+functions and no `gfx` handles — so an agent can edit it and a future editor can rewrite it.
+`gfx.drawing(module)` validates it; `drawing:pose(overrides)` returns an ordinary `gfx.frame`.
+
+```lua
+-- hero.lua
+return {
+	size = { 160, 240 },
+	parts = {                                            -- list order is draw order
+		{ id = "arm_far", parent = "body", pivot = { 56, 98 }, shapes = { … } },
+		{ id = "body", pivot = { 80, 166 }, shapes = {
+			{ path = { {"move",66,88}, {"line",94,88}, … , {"close"} },
+			  fill = "#f84aa7", stroke = { 2, "#1b1b3a" } },
+		} },
+		{ id = "hip", parent = "body", pivot = { 80, 166 } }, -- no shapes: a group
+	},
+}
+
+-- main.lua
+local hero = gfx.drawing(require("hero"))
+local waving = hero:pose({ arm_near = { rot = -150 }, head = { rot = 8 } })
+ui.frame({ id = "hero", visual = waving })
+```
+
+- **Parts** are what move; **shapes** are the painting inside a part — fill under stroke, sharing
+  one path. A shape needs `fill`, `stroke` or both; strokes join and cap round.
+- `parent` is the hierarchy and list order is draw order, independently: a far arm belongs to the
+  body and still draws behind it. A parent may be listed after its child.
+- Coordinates, paths and `pivot` (required) are all in the drawing's own space.
+- A pose override is `{ x, y, rot, scale }` — `rot` in degrees — about the part's pivot; children
+  follow. Naming a part that doesn't exist is an error.
+- Each posed part is a named group, so `on_hover`/`on_click` on the `ui.frame` report the part id
+  as `e.shape`.
+- `pose` builds a new frame: pose once at module scope, not in `view`. Clips, `use` and paint
+  beyond solid colours are not built yet — `clips = …` and `use = …` are errors.
+
+`demo_apps/hero` is the reference.
+
 ## 3D scenes (experimental proof)
 
 `gfx.scene3d` compiles a bounded immutable scene containing a perspective camera and up to 256
