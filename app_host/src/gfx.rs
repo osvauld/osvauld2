@@ -328,6 +328,20 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
     Drawing::new(size.x, size.y, specs).map_err(Error::external)
 }
 
+/// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
+pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
+    let owner = format!("world entity {index}");
+    named_fields(&spec, &owner, &["id", "pos", "drawing"])?;
+    let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
+    Ok(world::EntitySpec {
+        id: need(&spec, &owner, "id")?,
+        pos: (pos.x, pos.y),
+        drawing: need_gfx(&spec, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
+            d.0.clone()
+        })?,
+    })
+}
+
 /// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
 fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
     named_fields(&spec, owner, &["path", "fill", "stroke"])?;

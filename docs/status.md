@@ -420,8 +420,16 @@ pivots, carries children with their parent, and compiles to an ordinary Frame of
 so hits report the part id. Lua has strict `gfx.drawing(module)` over a pure-data module (paths as
 command lists, solid fill, `{width, color}` round-joined stroke) and `drawing:pose({...})`; `clips`
 and `use` are rejected until their slices. `demo_apps/hero` shows one drawing in four poses with
-part hover; `scripts/smoke_hero.py` (in `SMOKES`) pins reachability and part hits. Clips, the
-Animator, `ui.world`, controller and physics are unbuilt.
+part hover; `scripts/smoke_hero.py` (in `SMOKES`) pins reachability and part hits. **Slice 2
+landed:** a new `world` crate — the only `bevy_ecs` dependent, pinned `=0.18.1` because 0.19 needs
+Rust 1.95 and the toolchain is 1.92 — holds `World2d`, whose all-or-nothing `reconcile` spawns,
+keeps and despawns entities by author id (`pos` read only at spawn; a new drawing handle replaces
+the look) and whose `frame` emits one entity-named instance each, in list order. Lua `ui.world`
+reconciles into a per-app registry that outlives reload (carried like the console) and is swept
+only after a successful walk; it paints through the ordinary frame leaf, so runtime is unchanged.
+`demo_apps/world` and `scripts/smoke_world.py` (in `SMOKES`) pin spawn/despawn, entity hits, and
+survival across a hot reload that edits `pos`. Clips/Animator, controller and physics are unbuilt;
+entities are placed but never moved, and there is no world-level `DumpTree` inspection yet.
 
 ### Environment — composable 3D interfaces and worlds
 

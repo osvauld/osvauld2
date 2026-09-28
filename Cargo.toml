@@ -8,6 +8,7 @@ members = [
   "shell2",
   "runtime",
   "app_host",
+  "world",
   "lua_tree",
   "osvauld-rpc",
   "workspace",

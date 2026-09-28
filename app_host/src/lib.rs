@@ -22,7 +22,7 @@ use runtime::{
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,7 +148,16 @@ pub struct Ctx<'a, M> {
     pub errors: Vec<String>,
     pub path: String,
     pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    pub worlds: Worlds,
+    /// Worlds this walk drew. Marked before a world's description is checked, so a bad
+    /// description keeps the last good world rather than dropping it.
+    pub worlds_seen: HashSet<String>,
 }
+
+/// Retained worlds by `ui.world` id. Outlives the VM, like the console: reload must not reset a
+/// game, and a hidden tab runs no view, so nothing sweeps it.
+pub type Worlds = Rc<RefCell<HashMap<String, world::World2d>>>;
+
 impl<'a, M> Ctx<'a, M> {
     fn new(handlers: &'a mut Handlers, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> Self {
         Self {
@@ -157,6 +166,8 @@ impl<'a, M> Ctx<'a, M> {
             errors: Vec::new(),
             path: String::new(),
             to_msg,
+            worlds: Worlds::default(),
+            worlds_seen: HashSet::new(),
         }
     }
 }
@@ -225,6 +236,7 @@ pub struct LuaApp<M> {
     /// Shared like [`Self::cores`] so the whole-struct swap in [`reload`](Self::reload) keeps
     /// the log: the console, like the cores, outlives the VM it reports on.
     console: Rc<RefCell<VecDeque<String>>>,
+    worlds: Worlds,
     resolve: Resolve,
     wake: Wake,
 }
@@ -408,6 +420,7 @@ impl<M: 'static> LuaApp<M> {
             resolve,
             wake,
             console: Rc::new(RefCell::new(VecDeque::new())),
+            worlds: Worlds::default(),
         })
     }
 
@@ -476,6 +489,7 @@ impl<M: 'static> LuaApp<M> {
         staged.handlers.borrow_mut().clear();
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
+        staged.worlds = self.worlds.clone();
         *self = staged;
         for name in dropped {
             let note =
@@ -665,8 +679,13 @@ impl<M: 'static> LuaApp<M> {
         let mut handlers = self.handlers.borrow_mut();
         handlers.clear();
         let mut context = Ctx::new(&mut handlers, self.to_msg.clone());
+        context.worlds = self.worlds.clone();
         let el = match walk(tree, &mut context) {
-            Ok(el) => el,
+            Ok(el) => {
+                let seen = &context.worlds_seen;
+                self.worlds.borrow_mut().retain(|id, _| seen.contains(id));
+                el
+            }
             Err(e) => {
                 let msg = reason(&e);
                 context.errors.push(msg.clone());
@@ -940,6 +959,7 @@ ui = {
     text_area = tagger("text_area"),
     frame = tagger("frame"),
     scene3d = tagger("scene3d"),
+    world = tagger("world"),
     overlay = tagger("overlay"),
 }
 
@@ -1253,6 +1273,40 @@ fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<
     Ok(anchor.overlay(panel, dismiss, Placement { side, align }, Anchor::Element))
 }
 
+/// Entities are the positional children, as data: the world owns them, so they are not walked
+/// as elements. Paints through the ordinary frame leaf, so layout and hits need nothing new.
+fn build_world<M>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+    let id = node
+        .get::<Option<String>>("id")?
+        .ok_or_else(|| mlua::Error::runtime("world needs an id"))?;
+    if !context.worlds_seen.insert(id.clone()) {
+        return Err(mlua::Error::runtime(format!("two worlds share the id {id:?}")));
+    }
+    let size = |field: &str| -> mlua::Result<f64> {
+        node.get::<Option<f64>>(field)?
+            .ok_or_else(|| mlua::Error::runtime(format!("world needs {field}")))
+    };
+    let (width, height) = (size("width")?, size("height")?);
+    let mut specs = Vec::new();
+    for index in 1..=max_index(node) {
+        match node.get::<Value>(index)? {
+            Value::Boolean(false) => {} // `friend or false`, the same idiom as child elements
+            Value::Table(spec) => specs.push(gfx::entity(spec, index)?),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "world entity {index} must be a table or false, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    let mut worlds = context.worlds.borrow_mut();
+    let world = worlds.entry(id).or_default();
+    world.reconcile(specs).map_err(mlua::Error::external)?;
+    let visual = world.frame(width, height).map_err(mlua::Error::external)?;
+    Ok(frame_el(Arc::new(visual)))
+}
+
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
     if tag == "overlay" {
         return build_overlay(node, context);
@@ -1283,6 +1337,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 .clone();
             frame_el(visual)
         }
+        "world" => build_world(&node, context)?,
         "scene3d" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
@@ -1338,6 +1393,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
+        "world" => &["width", "height"],
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;

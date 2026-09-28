@@ -461,6 +461,67 @@ fn a_drawing_module_is_checked_strictly() {
     }
 }
 
+/// Walks `view` into a fresh context sharing `worlds`, the way successive frames share the app's.
+fn walk_world(lua: &mlua::Lua, worlds: &Worlds, view: &str) -> mlua::Result<()> {
+    let node: Table = lua.load(view).eval()?;
+    let mut handlers = Handlers::new();
+    let mut ctx = Ctx::new(&mut handlers, identity());
+    ctx.worlds = worlds.clone();
+    walk(node, &mut ctx).map(|_| ())
+}
+
+#[test]
+fn a_world_keeps_its_entities_across_views_by_id() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |entities: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 400, height = 300, {entities} }})")
+    };
+    let hero = "{ id = 'hero', pos = { 10, 20 }, drawing = hero }";
+    let chest = "{ id = 'chest', pos = { 200, 100 }, drawing = hero }";
+
+    walk_world(&lua, &worlds, &room(&format!("{hero}, {chest}"))).unwrap();
+    let moved = room("{ id = 'hero', pos = { 99, 99 }, drawing = hero }");
+    walk_world(&lua, &worlds, &moved).unwrap();
+    let room_world = &worlds.borrow()["room"];
+    assert!(room_world.transform("chest").is_none(), "missing id despawns");
+    let t = room_world.transform("hero").unwrap();
+    assert_eq!((t.x, t.y), (10.0, 20.0), "pos is read only at spawn");
+}
+
+#[test]
+fn a_bad_world_description_keeps_the_last_good_world() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |entities: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 400, height = 300, {entities} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ id = 'hero', pos = { 1, 2 }, drawing = hero }")).unwrap();
+    let cases = [
+        (room("{ id = 'hero', pos = { 1, 2 }, drawing = hero, speed = 3 }"), "world entity 1: unknown field speed"),
+        (room("{ id = 'hero', pos = { 1, 2 } }"), "world entity 1 needs drawing"),
+        (room("{ id = 'hero', pos = { 1, 2 }, drawing = gfx.solid('#fff') }"), "must be a gfx.drawing"),
+        (room("{ id = 'a', pos = {0,0}, drawing = hero }, { id = 'a', pos = {0,0}, drawing = hero }"), "duplicate entity id"),
+        (format!("{HERO} return ui.world({{ id = 'room', height = 300 }})"), "world needs width"),
+        (
+            format!("{HERO} return ui.col({{ ui.world({{ id = 'room', width = 1, height = 1, {{ id = 'hero', pos = {{ 1, 2 }}, drawing = hero }} }}), ui.world({{ id = 'room', width = 1, height = 1 }}) }})"),
+            "two worlds share the id",
+        ),
+    ];
+    for (view, wanted) in cases {
+        let node: Table = lua.load(&view).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut ctx = Ctx::new(&mut handlers, identity());
+        ctx.worlds = worlds.clone();
+        let err = match walk(node, &mut ctx) {
+            Err(e) => e.to_string(),
+            Ok(_) => ctx.errors.join("\n"), // a child's error is carded in place, not raised
+        };
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        assert!(worlds.borrow()["room"].transform("hero").is_some(), "{view}");
+    }
+}
+
 /// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",
 /// which names neither the field nor the call — two different mistakes produced byte-identical
 /// text. Each message must now name what is missing, and no two may read the same.

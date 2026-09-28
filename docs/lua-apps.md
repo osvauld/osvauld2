@@ -162,6 +162,37 @@ ui.frame({ id = "hero", visual = waving })
 
 `demo_apps/hero` is the reference.
 
+## Worlds (experimental)
+
+`ui.world` is an element that **keeps state between frames**: a retained world of entities, kept by
+`id`. You describe the entities; the world spawns, keeps and despawns them to match.
+
+```lua
+local hero = gfx.drawing(require("hero"))
+
+ui.world({
+	id = "room", width = 720, height = 400, fill = "#2a3b33",
+	on_hover = function(e) hot = e.shape end,         -- e.shape is the entity id
+	{ id = "hero", pos = { 120, 80 }, drawing = hero },
+	friend and { id = "friend", pos = { 320, 100 }, drawing = hero } or false,
+})
+```
+
+- Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
+  handle) — nothing else. `false` drops out, like a child element. List order is draw order.
+- **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
+  is; re-sending a different `pos` does not move it.
+- An id the description no longer lists is despawned. A new `drawing` handle replaces the look;
+  make drawings once at module scope so the handle is stable.
+- `id`, `width` and `height` are required; ordinary box and paint props (`fill`, `radius`,
+  `stroke`) and pointer handlers apply to the element.
+- The world outlives hot reload and survives a hidden tab. It is dropped when a successful frame
+  no longer draws its id. A bad description is an error and keeps the last good world.
+- Nothing moves yet: animation, input and collision are the next slices of
+  [2d-world.md](design/2d-world.md).
+
+`demo_apps/world` is the reference.
+
 ## 3D scenes (experimental proof)
 
 `gfx.scene3d` compiles a bounded immutable scene containing a perspective camera and up to 256
