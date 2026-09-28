@@ -31,7 +31,37 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         id: id.into(),
         pos,
         drawing: drawing.clone(),
+        clip: None,
     }
+}
+
+/// Slides the drawing's `body` part 100 right over one second, then holds.
+fn slide() -> Arc<Clip> {
+    use crate::clip::{Easing, Key, Prop, Track};
+    let key = |time, value| Key {
+        time,
+        value,
+        easing: Easing::Linear,
+    };
+    let track = Track {
+        part: "body".into(),
+        prop: Prop::X,
+        keys: vec![key(0.0, 0.0), key(1.0, 100.0)],
+    };
+    Arc::new(Clip::new(1.0, false, vec![track]).unwrap())
+}
+
+fn playing(id: &str, drawing: &Arc<Drawing>, clip: &Arc<Clip>) -> EntitySpec {
+    EntitySpec {
+        clip: Some(clip.clone()),
+        ..spec(id, (0.0, 0.0), drawing)
+    }
+}
+
+/// Which entity is at `x` along the 8px-tall row the test drawing sits on.
+fn at(world: &World2d, x: f64) -> Option<String> {
+    let hit = world.frame(200.0, 100.0).unwrap().hit(Point::new(x, 4.0))?;
+    Some(hit.id.to_string())
 }
 
 fn ids(world: &World2d) -> Vec<String> {
@@ -116,4 +146,70 @@ fn a_bad_description_leaves_the_last_good_world() {
         world.reconcile(vec![spec("", (0.0, 0.0), &d)]),
         Err(WorldError::EmptyId)
     ));
+}
+
+#[test]
+fn a_clip_plays_on_the_world_clock_from_when_it_appears() {
+    let (d, clip) = (drawing(), slide());
+    let mut world = World2d::default();
+    world.tick(10.0);
+    world.reconcile(vec![playing("hero", &d, &clip)]).unwrap();
+    assert_eq!(
+        at(&world, 4.0).as_deref(),
+        Some("hero"),
+        "starts at its first key"
+    );
+    world.tick(10.5);
+    world.reconcile(vec![playing("hero", &d, &clip)]).unwrap();
+    assert_eq!(
+        at(&world, 4.0),
+        None,
+        "the same handle keeps playing, not restarting"
+    );
+    assert_eq!(at(&world, 54.0).as_deref(), Some("hero"));
+}
+
+#[test]
+fn a_new_clip_handle_restarts_and_no_clip_returns_to_rest() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world
+        .reconcile(vec![playing("hero", &d, &slide())])
+        .unwrap();
+    world.tick(0.5);
+    world
+        .reconcile(vec![playing("hero", &d, &slide())])
+        .unwrap();
+    assert_eq!(at(&world, 4.0).as_deref(), Some("hero"), "restarted at 0.5");
+    world.tick(2.0);
+    world.reconcile(vec![spec("hero", (0.0, 0.0), &d)]).unwrap();
+    assert_eq!(at(&world, 4.0).as_deref(), Some("hero"), "back at rest");
+}
+
+#[test]
+fn a_clip_naming_a_part_its_drawing_lacks_is_refused() {
+    use crate::clip::{Easing, Key, Prop, Track};
+    let key = Key {
+        time: 0.0,
+        value: 1.0,
+        easing: Easing::Linear,
+    };
+    let track = Track {
+        part: "wing".into(),
+        prop: Prop::Rot,
+        keys: vec![key],
+    };
+    let wing = Arc::new(Clip::new(1.0, true, vec![track]).unwrap());
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![spec("hero", (0.0, 0.0), &d)]).unwrap();
+    assert!(matches!(
+        world.reconcile(vec![playing("hero", &d, &wing)]),
+        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
+    ));
+    assert_eq!(
+        at(&world, 4.0).as_deref(),
+        Some("hero"),
+        "last good world kept"
+    );
 }

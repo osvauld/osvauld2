@@ -75,7 +75,7 @@ General blur is not native and is deferred.
 walk = {
   length = 0.6, loop = true,
   tracks = {
-    leg_l = { rot = { {0, -20}, {0.3, 20, "ease"}, {0.6, -20} } },
+    leg_l = { rot = { {0, -20}, {0.3, 20, "in_out"}, {0.6, -20} } },
     body  = { y   = { {0, 0}, {0.15, -2}, {0.3, 0} } },
   },
   events = { {0.3, "step"}, {0.6, "step"} },       -- reach Lua as on_clip
@@ -87,6 +87,10 @@ the world clock; the virtual clock makes "screenshot at t = 0.3" exact. Fundamen
 order: tracks and keyframes, easing, loop/once/hold, events, playback speed, transitions (walk →
 run crossfade), layers (legs walk while arms shoot). Tweens are two-key clips; sprite animation is
 a track of frame indices.
+
+*Built 2026-09-28 (slice 3):* tracks, keys, easing and loop/once-hold. A key's easing shapes the
+segment arriving at it. A clip plays from when its handle first appears on an entity; switching
+handles is how Lua switches clips. Events, speed, transitions and layers are not built.
 
 ## 4. The world element
 
@@ -157,7 +161,8 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
    rotated/moved about their pivots, so hierarchy is checkable by screenshot before any Animator.
    `clips` and `use` are rejected as unknown until their slices.
 2. **`ui.world` + reconcile.** Entities spawn, update and despawn by id in `bevy_ecs`.
-3. **Animator.** Clips play in Rust; the hero idles and walks in place.
+3. **Animator.** Clips play in Rust; the hero idles and walks in place. *(Landed with an idle and
+   the chest's open/close on click; the walk cycle waits for the controller.)*
 4. **Controller.** WASD moves the hero; Lua switches `play`.
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 
@@ -169,11 +174,12 @@ Networking, clock sync across peers, tilemaps, `gfx.image` and AI players are ou
 - paths are in **drawing-absolute** coordinates; a part rotates about its `pivot`, also absolute;
 - drawings compile in **Rust** through `gfx.drawing(module)` — strict validation like the rest of
   `gfx`, and the part tree is kept for the Animator rather than flattened in Lua.
+- the first easing set is **`linear` and `in_out`** (smoothstep), named, not cubic-bezier numbers;
+  more names join when a clip needs them. *(Was open with `linear`, `ease`, `step` recommended.)*
+- the first animatable properties are **`x`, `y`, `rot`, `scale`** — exactly `Pose`. *(Was open
+  with `opacity` also recommended; it waits for a Pose field.)*
 
 **Open:**
-- the first easing set (recommended: `linear`, `ease`, `step`) versus cubic-bezier numbers;
-- the first animatable properties (recommended: `x`, `y`, `rot`, `scale`, `opacity`; colour and
-  path morphing later);
 - how a drawing module is named and loaded (`require` vs a declared `drawing = "hero"`);
 - which Frame caps rise, to what, and whether instances keep counting at expanded cost;
 - the event batch shape Lua receives, and the read-only view's API.

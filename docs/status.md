@@ -428,8 +428,17 @@ the look) and whose `frame` emits one entity-named instance each, in list order.
 reconciles into a per-app registry that outlives reload (carried like the console) and is swept
 only after a successful walk; it paints through the ordinary frame leaf, so runtime is unchanged.
 `demo_apps/world` and `scripts/smoke_world.py` (in `SMOKES`) pin spawn/despawn, entity hits, and
-survival across a hot reload that edits `pos`. Clips/Animator, controller and physics are unbuilt;
-entities are placed but never moved, and there is no world-level `DumpTree` inspection yet.
+survival across a hot reload that edits `pos`. **Slice 3 landed:** `world::clip::Clip` validates
+keyframe tracks (`x`/`y`/`rot`/`scale` per part; `linear`/`in_out` easing on the arriving segment;
+loop or play-once-and-hold) and samples to part poses. An entity's `clip` handle becomes an
+`Animator` stamped with the world clock when the handle first appears (same handle keeps playing,
+new handle restarts, none returns to rest; a clip naming an unknown part is refused). A world with a
+clip playing attaches the runtime's `on_frame` and routes it as `LuaMsg::TickWorld`, which sets the
+clock in Rust without calling Lua; `on_frame` on a world is therefore an error. Lua has strict
+`gfx.clip{length, loop, tracks}`. `demo_apps/world` idles the hero and opens the chest lid on
+click; `smoke_world.py` clicks and uses `rpc.advance` to check the lid open and closed. Not built:
+clip events, speed, transitions, layers; a finished once-clip keeps the world ticking. Controller
+and physics are unbuilt; entities are never moved, and there is no world-level `DumpTree` yet.
 
 ### Environment — composable 3D interfaces and worlds
 

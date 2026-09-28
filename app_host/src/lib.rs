@@ -121,6 +121,8 @@ pub enum LuaMsg {
     CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
     CallKey(Key, runtime::KeyInput),
+    /// A `ui.world`'s frame tick: sets that world's clock in Rust, no Lua runs.
+    TickWorld(String, f64),
 }
 
 /// A second element with the same id and handler would silently take the first one's events.
@@ -760,7 +762,7 @@ impl<M: 'static> LuaApp<M> {
                     event.set("super", input.mods.super_)?;
                 }
             }
-            LuaMsg::Call(_) | LuaMsg::CallStr(_, _) => {}
+            LuaMsg::Call(_) | LuaMsg::CallStr(_, _) | LuaMsg::TickWorld(_, _) => {}
         }
         Ok(event)
     }
@@ -768,6 +770,12 @@ impl<M: 'static> LuaApp<M> {
     pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
+        if let LuaMsg::TickWorld(id, elapsed) = &msg {
+            if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
+                world.tick(*elapsed);
+            }
+            return;
+        }
         let handlers = self.handlers.borrow();
 
         // A message can outlive the view that registered its key (a click spans press to
@@ -779,6 +787,7 @@ impl<M: 'static> LuaApp<M> {
             | LuaMsg::CallWheel(k, _, _)
             | LuaMsg::CallFrame(k, _, _)
             | LuaMsg::CallKey(k, _) => k,
+            LuaMsg::TickWorld(..) => unreachable!("handled above"),
         };
         let Some(h) = handlers.get(key) else {
             return;
@@ -1275,7 +1284,7 @@ fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<
 
 /// Entities are the positional children, as data: the world owns them, so they are not walked
 /// as elements. Paints through the ordinary frame leaf, so layout and hits need nothing new.
-fn build_world<M>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     let id = node
         .get::<Option<String>>("id")?
         .ok_or_else(|| mlua::Error::runtime("world needs an id"))?;
@@ -1287,6 +1296,11 @@ fn build_world<M>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
             .ok_or_else(|| mlua::Error::runtime(format!("world needs {field}")))
     };
     let (width, height) = (size("width")?, size("height")?);
+    if !node.get::<Value>("on_frame")?.is_nil() {
+        return Err(mlua::Error::runtime(
+            "a world runs its own frame clock; put on_frame on an element around it",
+        ));
+    }
     let mut specs = Vec::new();
     for index in 1..=max_index(node) {
         match node.get::<Value>(index)? {
@@ -1301,10 +1315,17 @@ fn build_world<M>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
         }
     }
     let mut worlds = context.worlds.borrow_mut();
-    let world = worlds.entry(id).or_default();
+    let world = worlds.entry(id.clone()).or_default();
     world.reconcile(specs).map_err(mlua::Error::external)?;
     let visual = world.frame(width, height).map_err(mlua::Error::external)?;
-    Ok(frame_el(Arc::new(visual)))
+    let el = frame_el(Arc::new(visual));
+    if !world.animating() {
+        return Ok(el);
+    }
+    let to_msg = context.to_msg.clone();
+    Ok(el.on_frame(id.clone(), move |tick| {
+        to_msg(LuaMsg::TickWorld(id.clone(), tick.elapsed))
+    }))
 }
 
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {

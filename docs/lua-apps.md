@@ -179,7 +179,7 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) — nothing else. `false` drops out, like a child element. List order is draw order.
+  handle) and optionally `clip` (a `gfx.clip` handle) — nothing else. `false` drops out, like a child element. List order is draw order.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
   is; re-sending a different `pos` does not move it.
 - An id the description no longer lists is despawned. A new `drawing` handle replaces the look;
@@ -188,10 +188,39 @@ ui.world({
   `stroke`) and pointer handlers apply to the element.
 - The world outlives hot reload and survives a hidden tab. It is dropped when a successful frame
   no longer draws its id. A bad description is an error and keeps the last good world.
-- Nothing moves yet: animation, input and collision are the next slices of
-  [2d-world.md](design/2d-world.md).
+- Input and collision are the next slices of [2d-world.md](design/2d-world.md).
 
-`demo_apps/world` is the reference.
+### Clips
+
+A clip is animation as data, played by the world in Rust — no Lua runs per frame.
+
+```lua
+local open = gfx.clip({
+	length = 0.5,                -- seconds; required
+	loop = false,                -- default: play once and hold the last pose
+	tracks = { lid = { rot = { {0, 0}, {0.5, -100, "in_out"} } } },
+})
+ui.world({ id = "room", width = 720, height = 400,
+	{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid_open and open or nil },
+})
+```
+
+- `tracks` maps a part id to properties `x`, `y`, `rot` (degrees) and `scale`, each a list of
+  keys `{time, value, easing?}` — offsets from the rest pose about the part's pivot, like
+  `pose`. Key times rise strictly within `0..length`.
+- Easing is `"linear"` (the default) or `"in_out"`, and shapes the segment *arriving* at that
+  key. Before its first key a track holds the first value; after its last, the last. A looped
+  clip's last key should match its first.
+- A clip plays from the moment its **handle** first appears on the entity, on the runtime's
+  frame clock (virtual offscreen, so `rpc.advance` lands on exact times). Re-sending the same
+  handle keeps it playing; a different handle restarts; no `clip` returns to rest. Make clips
+  once at module scope, and switch clips by switching handles.
+- A clip naming a part its drawing lacks is an error. Unknown fields are errors — `events`,
+  speed, transitions and layers are not built yet.
+- A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
+  error; put it on an element around the world.
+
+`demo_apps/world` is the reference: an idle hero and a chest whose lid opens on click.
 
 ## 3D scenes (experimental proof)
 

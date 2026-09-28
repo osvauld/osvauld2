@@ -1,9 +1,12 @@
 local C = require("theme")
 local hero = gfx.drawing(require("hero"))
 local chest = gfx.drawing(require("chest"))
+local clips = require("clips")
+local idle, open, close = gfx.clip(clips.idle), gfx.clip(clips.open), gfx.clip(clips.close)
 
 local friend = false -- whether the second hero is described; the world spawns/despawns to match
 local hot = nil -- the entity under the pointer
+local lid = nil -- the chest's clip: nil at rest, then open/close; a new handle restarts it
 
 local function button(id, label, on_click)
 	return ui.button({
@@ -17,14 +20,18 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
+		ui.text({ "click the chest", color = C.muted, font_size = 13, no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is.
 		ui.world({
 			id = "room", width = C.width, height = C.height, fill = C.floor, radius = 10,
 			stroke = { 3, C.border },
 			on_hover = function(e) hot = e.phase ~= "leave" and e.shape or nil end,
-			{ id = "hero", pos = { 120, 80 }, drawing = hero },
-			{ id = "chest", pos = { 520, 240 }, drawing = chest },
-			friend and { id = "friend", pos = { 320, 100 }, drawing = hero } or false,
+			on_click = function(e)
+				if e.shape == "chest" then lid = lid == open and close or open end
+			end,
+			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle },
+			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
+			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
 		ui.row({ gap = 10,
 			button("add", "add friend", function() friend = true end),

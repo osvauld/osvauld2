@@ -48,6 +48,16 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.frame(1)
     assert entity_at(400, 230) == "—", "friend despawned"
 
+    # Clips play in Rust on the virtual clock. Closed, the lid covers (568, 260); clicking the
+    # chest plays `open` (0.5s), which swings the lid back off that point, and `close` returns it.
+    assert entity_at(568, 260) == "chest"
+    for step, wanted in [("open", "—"), ("close", "chest")]:
+        s.rpc.click_at(room["x"] + 570, room["y"] + 300)
+        s.rpc.frame(1)
+        s.rpc.advance(0.6)
+        s.rpc.frame(2)
+        assert entity_at(568, 260) == wanted, f"after {step}"
+
     # Hot reload with the hero's spawn pos changed: the world survives, so the hero stays put.
     source = s.rpc.read_file_versioned(item, "main.lua")
     result = s.rpc.edit_file(item, "main.lua", source["revision"], [
@@ -62,4 +72,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, survives reload")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload")

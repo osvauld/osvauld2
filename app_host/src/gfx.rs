@@ -14,6 +14,7 @@ use runtime::frame::{
 use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
+use world::clip::{Clip, Easing, Key, Prop, Track};
 
 #[derive(Clone)]
 #[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
@@ -57,6 +58,10 @@ impl UserData for LuaDrawing {
 }
 
 #[derive(Clone)]
+pub(crate) struct LuaClip(pub Arc<Clip>);
+impl UserData for LuaClip {}
+
+#[derive(Clone)]
 pub(crate) struct LuaScene3d(pub Arc<Scene3d>);
 impl UserData for LuaScene3d {}
 
@@ -76,6 +81,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "drawing",
         lua.create_function(|lua, spec: Table| {
             lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec)?)))
+        })?,
+    )?;
+    gfx.set(
+        "clip",
+        lua.create_function(|lua, spec: Table| {
+            lua.create_userdata(LuaClip(Arc::new(clip(&spec)?)))
         })?,
     )?;
     gfx.set(
@@ -331,7 +342,7 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    named_fields(&spec, &owner, &["id", "pos", "drawing"])?;
+    named_fields(&spec, &owner, &["id", "pos", "drawing", "clip"])?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
     Ok(world::EntitySpec {
         id: need(&spec, &owner, "id")?,
@@ -339,7 +350,63 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
         drawing: need_gfx(&spec, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
             d.0.clone()
         })?,
+        clip: match spec.get::<Value>("clip")? {
+            Value::Nil => None,
+            _ => Some(need_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?),
+        },
     })
+}
+
+/// `tracks = { part = { prop = { {time, value, easing?}, ... } } }`. Parts are sorted so a bad
+/// clip reports the same error every run, whatever order Lua's table walk takes.
+fn clip(spec: &Table) -> mlua::Result<Clip> {
+    named_fields(spec, "clip", &["length", "loop", "tracks"])?;
+    let by_part: Table = need(spec, "clip", "tracks")?;
+    let mut parts = Vec::new();
+    for pair in by_part.pairs::<String, Table>() {
+        parts.push(pair.map_err(|e| Error::runtime(format!("clip.tracks: {e}")))?);
+    }
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut tracks = Vec::new();
+    for (part, props) in parts {
+        let owner = format!("clip track {part}");
+        named_fields(&props, &owner, &["x", "y", "rot", "scale"])?;
+        let props_by_name = [("x", Prop::X), ("y", Prop::Y), ("rot", Prop::Rot), ("scale", Prop::Scale)];
+        for (name, prop) in props_by_name {
+            let Some(list) = props.get::<Option<Table>>(name)? else {
+                continue;
+            };
+            let owner = format!("{owner}.{name}");
+            let mut keys = Vec::new();
+            for i in 1..=positional_len(&list, &owner)? {
+                keys.push(key(list.get(i)?, &format!("{owner} key {i}"))?);
+            }
+            tracks.push(Track { part: part.clone(), prop, keys });
+        }
+    }
+    let looped = spec.get::<Option<bool>>("loop")?.unwrap_or(false);
+    Clip::new(need(spec, "clip", "length")?, looped, tracks).map_err(Error::external)
+}
+
+fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
+    let easing = match positional_len(&spec, owner)? {
+        2 => Easing::Linear,
+        3 => match spec.get::<String>(3)?.as_str() {
+            "linear" => Easing::Linear,
+            "in_out" => Easing::InOut,
+            other => {
+                return Err(Error::runtime(format!(
+                    "{owner}: unknown easing {other:?}, expected linear or in_out"
+                )));
+            }
+        },
+        n => {
+            return Err(Error::runtime(format!(
+                "{owner} must be {{time, value, easing?}}, got {n} values"
+            )));
+        }
+    };
+    Ok(Key { time: spec.get(1)?, value: spec.get(2)?, easing })
 }
 
 /// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.

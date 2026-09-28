@@ -522,6 +522,74 @@ fn a_bad_world_description_keeps_the_last_good_world() {
     }
 }
 
+/// Slides the hero's body 100 right over a second; the test hero sits at the room's origin.
+const SLIDE: &str = r##"
+    local slide = gfx.clip({ length = 1, tracks = { body = { x = { {0, 0}, {1, 100} } } } })
+"##;
+
+#[test]
+fn a_world_with_a_clip_ticks_in_rust_and_poses_on_its_clock() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let entity = |clip: &str| format!("{{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero {clip} }}");
+    let view = format!(
+        "{HERO} {SLIDE} return function() return ui.col({{ \
+            ui.world({{ id = 'room', width = 200, height = 100, {} }}), \
+            ui.world({{ id = 'still', width = 200, height = 100, {} }}) }}) end",
+        entity(", clip = slide"),
+        entity("")
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let info = app.view().info();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(info.children[0].handlers, vec!["on_frame"], "an animated world asks for ticks");
+    assert!(info.children[1].handlers.is_empty(), "a still world does not");
+
+    let hit = |app: &LuaApp<LuaMsg>, x: f64| {
+        let frame = app.worlds.borrow()["room"].frame(200.0, 100.0).unwrap();
+        frame.hit(runtime::vello::kurbo::Point::new(x, 20.0)).map(|h| h.id.to_string())
+    };
+    assert_eq!(hit(&app, 16.0).as_deref(), Some("hero"));
+    app.update(LuaMsg::TickWorld("room".into(), 0.5));
+    assert_eq!(hit(&app, 16.0), None, "the body slid away");
+    assert_eq!(hit(&app, 66.0).as_deref(), Some("hero"));
+}
+
+#[test]
+fn a_clip_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let clip = |spec: &str| format!("return gfx.clip({{ {spec} }})");
+    let cases = [
+        (clip("length = 1, tracks = {}, events = {}"), "clip: unknown field events"),
+        (clip("tracks = {}"), "clip needs length"),
+        (clip("length = 1, tracks = { body = { alpha = {} } }"), "clip track body: unknown field alpha"),
+        (clip("length = 1, tracks = { body = { x = { {0, 1, 'bounce'} } } }"), "unknown easing \"bounce\""),
+        (clip("length = 1, tracks = { body = { x = { {0} } } }"), "must be {time, value, easing?}, got 1"),
+        (clip("length = 1, tracks = { body = { x = { {2, 1} } } }"), "outside 0..=length"),
+        (clip("length = 0, tracks = {}"), "length must be a positive number"),
+    ];
+    for (source, wanted) in cases {
+        let err = lua.load(&source).eval::<Value>().unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+
+    let worlds = Worlds::default();
+    let room = |extra: &str| {
+        format!("{HERO} {SLIDE} return ui.world({{ id = 'room', width = 1, height = 1, {extra} \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, clip = CLIP }} }})")
+    };
+    let wing = "gfx.clip({ length = 1, tracks = { wing = { rot = { {0, 1} } } } })";
+    let err = walk_world(&lua, &worlds, &room("").replace("CLIP", wing)).unwrap_err();
+    assert!(err.to_string().contains("unknown part \"wing\""), "{err}");
+    let err = walk_world(&lua, &worlds, &room("").replace("CLIP", "hero")).unwrap_err();
+    assert!(err.to_string().contains("must be a gfx.clip"), "{err}");
+    let ticking = room("on_frame = function() end,").replace("CLIP", "slide");
+    let err = walk_world(&lua, &worlds, &ticking).unwrap_err();
+    assert!(err.to_string().contains("runs its own frame clock"), "{err}");
+}
+
 /// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",
 /// which names neither the field nor the call — two different mistakes produced byte-identical
 /// text. Each message must now name what is missing, and no two may read the same.
