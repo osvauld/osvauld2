@@ -159,6 +159,13 @@ impl Drawing {
         Ok(Frame::new(self.width, self.height, None, items)?)
     }
 
+    /// Where part `id` sits under a pose: maps the drawing's rest coordinates to posed ones, so
+    /// a point drawn on the part follows it. `None` if the drawing has no such part.
+    pub fn part_at(&self, id: &str, overrides: &HashMap<&str, Pose>) -> Option<Affine> {
+        let i = self.parts.iter().position(|p| &*p.id == id)?;
+        Some(self.world(i, overrides, &mut vec![None; self.parts.len()]))
+    }
+
     fn world(
         &self,
         i: usize,

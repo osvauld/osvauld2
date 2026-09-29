@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::{Component, Entity, World};
 use runtime::drawing::{Drawing, DrawingError};
 use runtime::frame::{Frame, FrameError, Item};
-use runtime::vello::kurbo::Affine;
+use runtime::vello::kurbo::{Affine, Point};
 
 use crate::clip::Clip;
 
@@ -27,6 +27,16 @@ pub struct EntitySpec {
     pub controller: Option<Controller>,
     /// Mirrored within the drawing's box: a side view drawn facing right, shown facing left.
     pub flip: bool,
+    pub attach: Option<Attach>,
+}
+
+/// Carried: the entity's origin rides at `at` — a point in the carrier's drawing at rest — as the
+/// carrier's `part` moves and animates. Removing it leaves the entity where it was last carried.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attach {
+    pub to: String,
+    pub part: String,
+    pub at: (f64, f64),
 }
 
 /// Two key codes driving one axis: `neg` held is -1, `pos` held is +1, both or neither is 0.
@@ -94,6 +104,13 @@ struct Appearance {
     rest: Arc<Frame>,
 }
 
+#[derive(Component)]
+struct Attached {
+    to: Entity,
+    part: String,
+    at: Point,
+}
+
 /// The held direction `tick` last reported, so it reports only a change.
 #[derive(Component, Default, PartialEq)]
 struct Heading(i8, i8);
@@ -128,6 +145,8 @@ pub enum WorldError {
     EmptyId,
     #[error("entity {0:?}: controller speed must be a finite number, zero or more")]
     Speed(String),
+    #[error("entity {0:?}: {1}")]
+    Attach(String, String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -168,6 +187,22 @@ impl World2d {
             };
             all_rests.push(rest);
         }
+        for spec in &specs {
+            let Some(a) = &spec.attach else { continue };
+            let bad = |why: String| Err(WorldError::Attach(spec.id.clone(), why));
+            let Some(carrier) = specs.iter().find(|s| s.id == a.to) else {
+                return bad(format!("attached to {:?}, which the world does not describe", a.to));
+            };
+            if carrier.id == spec.id {
+                return bad("attached to itself".into());
+            }
+            if carrier.attach.is_some() {
+                return bad(format!("attached to {:?}, which is itself attached", a.to));
+            }
+            if !carrier.drawing.has_part(&a.part) {
+                return bad(format!("{:?} has no part {:?}", a.to, a.part));
+            }
+        }
         self.controlled = specs.iter().any(|s| s.controller.is_some());
         if !self.wants_keys() {
             self.held.clear(); // key events stop arriving, so nothing can release them later
@@ -177,6 +212,7 @@ impl World2d {
             .any(|s| s.clip.is_some() || s.controller.is_some());
         let mut next = HashMap::with_capacity(specs.len());
         let mut order = Vec::with_capacity(specs.len());
+        let mut carried = Vec::new();
         for (spec, rest) in specs.into_iter().zip(all_rests) {
             let entity = match self.by_id.remove(&spec.id) {
                 Some(entity) => entity,
@@ -202,15 +238,74 @@ impl World2d {
                 Some(controller) => e.insert(controller),
                 None => e.remove::<(Controller, Heading)>(),
             };
+            e.remove::<Attached>();
+            if let Some(a) = spec.attach {
+                carried.push((entity, a));
+            }
             self.animate(entity, spec.clip);
             next.insert(spec.id, entity);
             order.push(entity);
+        }
+        for (entity, a) in carried {
+            let (to, at) = (next[&a.to], Point::new(a.at.0, a.at.1));
+            let attached = Attached { to, part: a.part, at };
+            self.ecs.entity_mut(entity).insert(attached);
         }
         for (_, gone) in self.by_id.drain() {
             self.ecs.despawn(gone);
         }
         (self.by_id, self.order) = (next, order);
+        self.follow();
         Ok(())
+    }
+
+    /// Carried entities take their place from their carrier's part, as posed now.
+    fn follow(&mut self) {
+        for &entity in &self.order {
+            let p = {
+                let Some(a) = self.ecs.get::<Attached>(entity) else {
+                    continue;
+                };
+                let e = self.ecs.entity(a.to);
+                let look = e.get::<Appearance>().expect("every entity has an Appearance");
+                let poses = match e.get::<Animator>() {
+                    Some(anim) => anim.clip.sample(self.clock - anim.started),
+                    None => HashMap::new(),
+                };
+                let part = look.drawing.part_at(&a.part, &poses).expect("checked at reconcile");
+                let p = self.place(a.to) * part * a.at;
+                // Mirrored with a flipped carrier: the point then marks the box's right edge.
+                let own = self.ecs.get::<Appearance>(entity).expect("every entity has one");
+                let t = self.ecs.get::<Transform>(entity).expect("every entity has one");
+                let shift = if look.flip { own.drawing.size().0 * t.scale } else { 0.0 };
+                Point::new(p.x - shift, p.y)
+            };
+            let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
+            (t.x, t.y) = (p.x, p.y);
+        }
+    }
+
+    /// Where an entity's drawing box goes: its transform, mirrored within the box if flipped.
+    fn place(&self, entity: Entity) -> Affine {
+        let e = self.ecs.entity(entity);
+        let t = e.get::<Transform>().expect("every entity has a Transform");
+        let look = e.get::<Appearance>().expect("every entity has an Appearance");
+        match look.flip {
+            true => t.affine() * Affine::new([-1.0, 0.0, 0.0, 1.0, look.drawing.size().0, 0.0]),
+            false => t.affine(),
+        }
+    }
+
+    /// The bottom of the entity's box; a carried entity stands on its carrier's feet, just in
+    /// front of it.
+    fn feet(&self, entity: Entity) -> (f64, u8) {
+        let e = self.ecs.entity(entity);
+        if let Some(a) = e.get::<Attached>() {
+            return (self.feet(a.to).0, 1);
+        }
+        let t = e.get::<Transform>().expect("every entity has a Transform");
+        let look = e.get::<Appearance>().expect("every entity has an Appearance");
+        (t.y + look.drawing.size().1 * t.scale, 0)
     }
 
     /// Each entity is an instance named by its id, so a hit on the world reports which entity.
@@ -220,12 +315,8 @@ impl World2d {
             .iter()
             .map(|&entity| {
                 let e = self.ecs.entity(entity);
-                let (Some(t), Some(name), Some(look)) = (
-                    e.get::<Transform>(),
-                    e.get::<Name>(),
-                    e.get::<Appearance>(),
-                ) else {
-                    unreachable!("reconcile gives every entity all three");
+                let (Some(name), Some(look)) = (e.get::<Name>(), e.get::<Appearance>()) else {
+                    unreachable!("reconcile gives every entity both");
                 };
                 let posed = match e.get::<Animator>() {
                     Some(a) => {
@@ -234,17 +325,13 @@ impl World2d {
                     }
                     None => look.rest.clone(),
                 };
-                let mut place = t.affine();
-                let (w, h) = look.drawing.size();
-                if look.flip {
-                    place *= Affine::new([-1.0, 0.0, 0.0, 1.0, w, 0.0]); // flip within its box
-                }
-                let feet = t.y + h * t.scale;
-                Ok((feet, Item::instance(place, posed)?.with_id(name.0.as_str())))
+                let item = Item::instance(self.place(entity), posed)?;
+                Ok((self.feet(entity), item.with_id(name.0.as_str())))
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
         if self.stacking == Order::Feet {
-            items.sort_by(|a, b| a.0.total_cmp(&b.0)); // stable, so ties keep list order
+            // Stable, so ties keep list order.
+            items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         }
         let items = items.into_iter().map(|(_, item)| item).collect();
         Ok(Frame::new(width, height, None, items)?)
@@ -275,6 +362,7 @@ impl World2d {
                 (t.x, t.y) = (t.x + dx / length * step, t.y + dy / length * step);
             }
         }
+        self.follow();
         for &entity in &self.order {
             let e = self.ecs.entity(entity);
             let ended = e

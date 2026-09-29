@@ -58,15 +58,6 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.frame(2)
         assert entity_at(568, 260) == wanted, f"after {step}"
 
-    # The same through a world action: E is a press the world routes to Lua's `on_action`.
-    for step, wanted in [("open", "—"), ("close", "chest")]:
-        s.rpc.keyboard("KeyE", "e", True)
-        s.rpc.frame(1)
-        s.rpc.keyboard("KeyE", "e", False)
-        s.rpc.advance(0.6)
-        s.rpc.frame(2)
-        assert entity_at(568, 260) == wanted, f"E: after {step}"
-
     # Hot reload with the hero's spawn pos changed: the world survives, so the hero stays put.
     source = s.rpc.read_file_versioned(item, "main.lua")
     result = s.rpc.edit_file(item, "main.lua", source["revision"], [
@@ -168,8 +159,27 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.frame(2)
     assert entity_at(541, 275) == "hero", "feet below the chest's: the hero is in front"
 
+    # Carrying: E is an action; Lua attaches the chest to the hero's body, and Rust keeps it there.
+    # Held in front, the chest covers the hero's body; walking left (a flipped view) carries it
+    # ~80 left, and after E again it stays where it was dropped while the hero walks off.
+    assert entity_at(560, 250) == "hero", "standing next to the chest"
+    tap("KeyE", "e")
+    assert entity_at(560, 250) == "chest", "picked up, held in front of the hero"
+    s.rpc.keyboard("KeyA", "a", True)
+    s.rpc.frame(30)
+    s.rpc.keyboard("KeyA", "a", False)
+    s.rpc.frame(2)
+    assert (entity_at(480, 250), entity_at(560, 250)) == ("chest", "—"), "carried left"
+    tap("KeyE", "e")
+    s.rpc.keyboard("KeyD", "d", True)
+    s.rpc.frame(60)
+    s.rpc.keyboard("KeyD", "d", False)
+    s.rpc.frame(2)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+    assert (entity_at(480, 250), entity_at(635, 250)) == ("chest", "hero"), "dropped, left behind"
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry")

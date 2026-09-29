@@ -109,12 +109,13 @@ fn a_rotated_parent_carries_its_child_about_the_parent_pivot() {
             ..Pose::default()
         },
     )]);
-    let world = drawing.world(0, &overrides, &mut [None, None]);
+    let world = drawing.part_at("hand", &overrides).unwrap();
     let p = world * Point::new(20.0, 10.0); // the hand's pivot, 10 right of the arm's
     assert!(
         (p.x - 10.0).abs() < 1e-9 && (p.y - 20.0).abs() < 1e-9,
         "{p:?}"
     );
+    assert_eq!(drawing.part_at("ghost", &overrides), None);
 }
 
 #[test]

@@ -54,6 +54,30 @@ return {
 			arm_far = { rot = { {0, 0}, {0.225, 30, "in_out"}, {0.45, 0, "in_out"} } },
 		},
 	},
+	-- Holding something in front: both arms turn in toward the middle, the body breathes.
+	carry = {
+		length = 1.2, loop = true,
+		tracks = {
+			body = { y = { {0, 0}, {0.6, -2, "in_out"}, {1.2, 0, "in_out"} } },
+			arm_near = { rot = { {0, 35} } },
+			arm_far = { rot = { {0, -35} } },
+		},
+	},
+	-- Walking while holding: the walk's legs and bob, the carry's arms. One clip plays at a time
+	-- (no layers yet), so the two are combined here by hand.
+	carry_walk = {
+		length = 0.5, loop = true,
+		tracks = {
+			leg_l = { rot = { {0, 22}, {0.25, -22, "in_out"}, {0.5, 22, "in_out"} } },
+			leg_r = { rot = { {0, -22}, {0.25, 22, "in_out"}, {0.5, -22, "in_out"} } },
+			arm_near = { rot = { {0, 35} } },
+			arm_far = { rot = { {0, -35} } },
+			body = { y = {
+				{0, 0}, {0.125, -3, "in_out"}, {0.25, 0, "in_out"},
+				{0.375, -3, "in_out"}, {0.5, 0, "in_out"},
+			} },
+		},
+	},
 	-- The lid swings back about its hinge and holds there.
 	open = { length = 0.5, tracks = { lid = { rot = { {0, 0}, {0.5, -100, "in_out"} } } } },
 	close = { length = 0.4, tracks = { lid = { rot = { {0, -100}, {0.4, 0, "in_out"} } } } },

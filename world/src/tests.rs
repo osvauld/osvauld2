@@ -40,6 +40,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         clip: None,
         controller: None,
         flip: false,
+        attach: None,
     }
 }
 
@@ -395,4 +396,93 @@ fn a_once_clip_reports_its_end_once_per_play() {
     world.reconcile(vec![playing("hero", &d, &slide())]).unwrap();
     world.tick(3.0, 0.1);
     assert_eq!(world.drain_events(), [ended()], "a new handle is a new play");
+}
+
+fn carried(on: &str, part: &str, d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        attach: Some(Attach {
+            to: on.into(),
+            part: part.into(),
+            at: (2.0, -5.0),
+        }),
+        ..spec("chest", (300.0, 300.0), d)
+    }
+}
+
+#[test]
+fn a_carried_entity_rides_its_carriers_part_and_stays_where_dropped() {
+    let (d, glide) = (drawing(), slide());
+    let hero = EntitySpec {
+        clip: Some(glide.clone()), // moves `body` 100 right over a second
+        ..controlled(&d, wasd(100.0))
+    };
+    let mut world = World2d::default();
+    world.set_order(Order::Feet);
+    world
+        .reconcile(vec![carried("hero", "body", &d), hero])
+        .unwrap();
+    let at = |world: &World2d| {
+        let t = world.transform("chest").unwrap();
+        (t.x, t.y)
+    };
+    assert_eq!(at(&world), (2.0, -5.0), "placed at once, not at its pos");
+    assert_eq!(
+        ids(&world),
+        ["hero", "chest"],
+        "in front of its carrier, though its own feet are higher"
+    );
+
+    world.key("KeyD", true);
+    world.tick(0.5, 0.5);
+    assert_eq!(at(&world), (102.0, -5.0), "the hero walked 50, the body slid 50");
+
+    let hero = EntitySpec {
+        clip: Some(glide),
+        ..controlled(&d, wasd(100.0))
+    };
+    world
+        .reconcile(vec![spec("chest", (0.0, 0.0), &d), hero])
+        .unwrap();
+    world.tick(1.0, 0.5);
+    assert_eq!(at(&world), (102.0, -5.0), "dropped where it was carried");
+}
+
+#[test]
+fn a_flipped_carrier_mirrors_the_carried_box_not_just_its_point() {
+    let d = drawing(); // 8 wide
+    let hero = EntitySpec {
+        flip: true,
+        ..spec("hero", (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world
+        .reconcile(vec![hero, carried("hero", "body", &d)])
+        .unwrap();
+    // `at` x = 2 mirrors to 6, which is now the chest's right edge: 6 - 8.
+    assert_eq!(world.transform("chest").unwrap().x, -2.0);
+}
+
+#[test]
+fn a_bad_attach_is_refused() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = || spec("hero", (0.0, 0.0), &d);
+    let cases = [
+        (vec![carried("ghost", "body", &d)], "which the world does not describe"),
+        (vec![carried("chest", "body", &d)], "attached to itself"),
+        (vec![carried("hero", "wing", &d), hero()], "\"hero\" has no part \"wing\""),
+        (
+            vec![carried("hero", "body", &d), carried("chest", "body", &d)],
+            "duplicate",
+        ),
+    ];
+    for (specs, wanted) in cases {
+        let err = world.reconcile(specs).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    let mut rider = carried("hero", "body", &d);
+    rider.id = "rider".into();
+    let chain = vec![hero(), carried("rider", "body", &d), rider];
+    let err = world.reconcile(chain).unwrap_err().to_string();
+    assert!(err.contains("which is itself attached"), "{err}");
 }

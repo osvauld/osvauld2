@@ -342,7 +342,7 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    let fields = ["id", "pos", "drawing", "clip", "controller", "flip"];
+    let fields = ["id", "pos", "drawing", "clip", "controller", "flip", "attach"];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
     let controller = match maybe_table(&spec, &owner, "controller")? {
@@ -367,7 +367,19 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
         clip: maybe_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?,
         controller,
         flip,
+        attach: match maybe_table(&spec, &owner, "attach")? {
+            Some(a) => Some(attach(&a, &format!("{owner}.attach"))?),
+            None => None,
+        },
     })
+}
+
+/// `{ to = id, part = id, at = {x, y} }` — `at` is a point in the carrier's drawing at rest.
+fn attach(spec: &Table, owner: &str) -> mlua::Result<world::Attach> {
+    named_fields(spec, owner, &["to", "part", "at"])?;
+    let at = point(need(spec, owner, "at")?, &format!("{owner}.at"))?;
+    let (to, part) = (need(spec, owner, "to")?, need(spec, owner, "part")?);
+    Ok(world::Attach { to, part, at: (at.x, at.y) })
 }
 
 /// An optional table field: absent is `None`, and anything but a table says which field it was.

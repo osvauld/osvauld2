@@ -5,6 +5,7 @@ local chest = gfx.drawing(require("chest"))
 local clips = require("clips")
 local idle, walk = gfx.clip(clips.idle), gfx.clip(clips.walk)
 local walk_side, jump = gfx.clip(clips.walk_side), gfx.clip(clips.jump)
+local carry, carry_walk = gfx.clip(clips.carry), gfx.clip(clips.carry_walk)
 
 -- A view per facing: what to draw, what to play while walking, and whether to mirror. The side
 -- view is drawn facing right, so left is the same drawing flipped.
@@ -40,9 +41,17 @@ local lid = nil -- the chest's clip: nil at rest, then open/close; a new handle 
 local heading = "still" -- the hero's held direction, as the world last reported it
 local face, walking = "down", false -- the hero's facing and gait, decided on each on_move
 local jumping = false -- set by the jump action, cleared when the jump clip ends
+local carrying = false -- whether the chest rides on the hero; E picks it up and puts it down
 
 local function toggle_lid()
 	lid = lid == open and close or open
+end
+
+-- The hero's clip for the moment: this is the app's state machine, not the world's.
+local function hero_clip()
+	if jumping then return jump end
+	if carrying then return walking and carry_walk or carry end
+	return walking and views[face].walk or idle
 end
 
 local function button(id, label, on_click)
@@ -57,7 +66,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks · Space jumps · E or a click opens the chest", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks · Space jumps · E carries the chest · a click opens it", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -71,7 +80,7 @@ return function()
 			-- Moments come to Lua; the per-frame work (walking, playing clips) stays in the world.
 			actions = { interact = "KeyE", jump = "Space" },
 			on_action = function(e)
-				if e.action == "interact" then toggle_lid() end
+				if e.action == "interact" then carrying = not carrying end -- anywhere, until slice 5
 				if e.action == "jump" then jumping = true end -- already in the air: no double jump
 			end,
 			on_clip_end = function(e)
@@ -83,8 +92,10 @@ return function()
 				face = face_for(e.dx, e.dy, face)
 			end,
 			{ id = "hero", pos = { 120, 80 }, drawing = views[face].drawing, flip = views[face].flip,
-				clip = jumping and jump or walking and views[face].walk or idle, controller = wasd },
-			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
+				clip = hero_clip(), controller = wasd },
+			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
+			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
+				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
 		ui.row({ gap = 10,

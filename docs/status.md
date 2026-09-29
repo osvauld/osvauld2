@@ -467,7 +467,14 @@ the flip and walk-or-idle; the smoke's facing checks pass unchanged. **Chunk C l
 primitive was needed — a jump is a once clip lifting the root part while the entity's feet stay
 put. The one Rust addition is `on_clip_end` (`WorldEvent::ClipEnd`, once per play). The demo
 jumps on Space with no double jump, all in Lua; the smoke checks the head rises, lands, and a
-second jump replays (which only `on_clip_end` makes possible). Next: `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
+second jump replays (which only `on_clip_end` makes possible). **Chunk D landed:** `attach = { to, part, at }` —
+the world places a carried entity at its carrier's part each tick (`Drawing::part_at` gives a
+part's posed transform), draws it just in front of the carrier, and leaves it where it was on
+detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
+until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
+Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-view carry point,
+and skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
+frame, so Lua re-describes the world each frame while it animates). Not built: walls/physics, key-code validation, and a
 world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds

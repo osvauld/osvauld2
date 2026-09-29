@@ -179,7 +179,8 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `flip` — nothing else.
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip` and `attach` —
+  nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -193,6 +194,11 @@ ui.world({
   no longer draws its id. A bad description is an error and keeps the last good world.
 - `flip = true` mirrors the drawing within its box — a side view drawn facing right, shown
   facing left.
+- `attach = { to = "hero", part = "body", at = { 32, 120 } }` carries the entity: its box's
+  top-left rides at `at` — a point in the carrier's drawing at rest — as that part moves and
+  animates (a flipped carrier mirrors the box too). It draws just in front of its carrier. Remove
+  `attach` and it stays where it was last carried. The carrier must be described, not itself
+  attached, and have the part.
 - Collision is the next slice of [2d-world.md](design/2d-world.md).
 
 ### Clips

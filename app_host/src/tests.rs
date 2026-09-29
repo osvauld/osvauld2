@@ -675,6 +675,28 @@ fn a_controller_is_checked_strictly() {
 }
 
 #[test]
+fn an_attach_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |attach: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }}, \
+            {{ id = 'chest', pos = {{ 0, 0 }}, drawing = hero, attach = {attach} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ to = 'hero', part = 'body', at = { 1, 2 } }")).unwrap();
+    let cases = [
+        ("'hero'", "world entity 2.attach must be a table, got string"),
+        ("{ to = 'hero', part = 'body' }", "world entity 2.attach needs at"),
+        ("{ to = 'hero', prat = 'body', at = { 1, 2 } }", "attach: unknown field prat"),
+        ("{ to = 'hero', part = 'wing', at = { 1, 2 } }", "\"hero\" has no part \"wing\""),
+    ];
+    for (attach, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(attach)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn flip_is_a_boolean() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();
