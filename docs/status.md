@@ -455,8 +455,14 @@ the smoke tells views apart by outline (profile nose asymmetry, back-view bun).
 **Slice 4c, chunk 1 landed:** `ui.world { order = "y" }` sets `world::Order::Feet` — a stable sort
 by the bottom of each entity's box (y + height × scale, rotation ignored), so ties keep list order.
 The smoke walks the hero onto the chest and checks a leg is covered a step above and in front a step
-below. Not built: jump, walls/physics, discrete actions, key-code validation, and a world-level
-`DumpTree`.
+below. **Slice 4c, chunk A landed:** moments leave the world as `WorldEvent`s — `on_action` for a
+fresh press of a key named in the world's `actions`, `on_move` when a controlled entity's held
+direction changes — queued in `World2d` and handed to Lua by `LuaApp::world_events` after a tick
+or key. The demo opens the chest on E and shows the last heading; the smoke checks both. A jump
+done in Rust was built and dropped the same day: a press is a decision, so it belongs to Lua.
+Next: facing and clip choice move to Lua (chunk B), a height primitive so jump is a Lua-played
+clip (C), and `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
+world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds
 

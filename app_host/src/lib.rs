@@ -772,6 +772,38 @@ impl<M: 'static> LuaApp<M> {
         Ok(event)
     }
 
+    /// Hands the world's queued moments to its `on_action` / `on_move`; one without a handler
+    /// is dropped.
+    fn world_events(&self, id: &str) {
+        let events = match self.worlds.borrow_mut().get_mut(id) {
+            Some(world) => world.drain_events(),
+            None => return,
+        };
+        for event in events {
+            let result = (|| {
+                let table = self.vm.create_table()?;
+                let name = match event {
+                    world::WorldEvent::Action(action) => {
+                        table.set("action", action)?;
+                        "on_action"
+                    }
+                    world::WorldEvent::Move { id: entity, dx, dy } => {
+                        table.set("id", entity)?;
+                        table.set("dx", dx)?;
+                        table.set("dy", dy)?;
+                        "on_move"
+                    }
+                };
+                let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
+                handler.map_or(Ok(()), |h| h.call::<()>(table))
+            })();
+            if let Err(e) = result {
+                eprintln!("handler error: {e}");
+                self.log(format!("handler error: {e}"));
+            }
+        }
+    }
+
     pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
@@ -788,6 +820,7 @@ impl<M: 'static> LuaApp<M> {
                     _ => unreachable!(),
                 }
             }
+            self.world_events(id);
             return;
         }
         let handlers = self.handlers.borrow();
@@ -1326,6 +1359,22 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             )));
         }
     }
+    let actions = world_actions(node)?;
+    for handler in ["on_action", "on_move"] {
+        match node.get::<Value>(handler)? {
+            Value::Nil => {}
+            Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "world {handler} must be a function, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    if actions.is_empty() != node.get::<Value>("on_action")?.is_nil() {
+        return Err(mlua::Error::runtime("a world's actions and on_action come together"));
+    }
     let mut specs = Vec::new();
     for index in 1..=max_index(node) {
         match node.get::<Value>(index)? {
@@ -1343,6 +1392,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     let world = worlds.entry(id.clone()).or_default();
     world.reconcile(specs).map_err(mlua::Error::external)?;
     world.set_order(order);
+    world.set_actions(actions);
     let visual = world.frame(width, height).map_err(mlua::Error::external)?;
     let mut el = frame_el(Arc::new(visual));
     if world.wants_keys() {
@@ -1356,6 +1406,31 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         });
     }
     Ok(el)
+}
+
+/// `actions = { jump = "Space" }`: action name to key code, sorted so events come in a stable
+/// order when two actions share a key.
+fn world_actions(node: &Table) -> mlua::Result<Vec<(String, String)>> {
+    let Some(table) = node.get::<Option<Table>>("actions")? else {
+        return Ok(Vec::new());
+    };
+    let mut actions = Vec::new();
+    for pair in table.pairs::<Value, Value>() {
+        match pair? {
+            (Value::String(name), Value::String(code)) => {
+                actions.push((name.to_str()?.to_owned(), code.to_str()?.to_owned()))
+            }
+            (name, code) => {
+                return Err(mlua::Error::runtime(format!(
+                    "world actions map a name to a key code, got {} = {}",
+                    name.type_name(),
+                    code.type_name()
+                )));
+            }
+        }
+    }
+    actions.sort();
+    Ok(actions)
 }
 
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
@@ -1444,7 +1519,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
-        "world" => &["width", "height", "order"],
+        "world" => &["width", "height", "order", "actions", "on_action", "on_move"],
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;

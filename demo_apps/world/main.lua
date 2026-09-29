@@ -25,6 +25,11 @@ local wasd = {
 local friend = false -- whether the second hero is described; the world spawns/despawns to match
 local hot = nil -- the entity under the pointer
 local lid = nil -- the chest's clip: nil at rest, then open/close; a new handle restarts it
+local heading = "still" -- the hero's held direction, as the world last reported it
+
+local function toggle_lid()
+	lid = lid == open and close or open
+end
 
 local function button(id, label, on_click)
 	return ui.button({
@@ -38,7 +43,8 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks the hero · click the chest", color = C.muted, font_size = 13, no_wrap = true }),
+		ui.text({ "WASD walks the hero · E or a click opens the chest", color = C.muted, font_size = 13,
+			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
 		ui.world({
@@ -46,7 +52,15 @@ return function()
 			stroke = { 3, C.border },
 			on_hover = function(e) hot = e.phase ~= "leave" and e.shape or nil end,
 			on_click = function(e)
-				if e.shape == "chest" then lid = lid == open and close or open end
+				if e.shape == "chest" then toggle_lid() end
+			end,
+			-- Moments come to Lua; the per-frame work (walking, playing clips) stays in the world.
+			actions = { interact = "KeyE" },
+			on_action = function(e)
+				if e.action == "interact" then toggle_lid() end
+			end,
+			on_move = function(e)
+				heading = (e.dx == 0 and e.dy == 0) and "still" or (e.dx .. "," .. e.dy)
 			end,
 			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd,
 				facing = views },
@@ -58,5 +72,6 @@ return function()
 			button("remove", "remove friend", function() friend = false end),
 		}),
 		ui.text({ "entity: " .. (hot or "—"), color = C.muted, font_size = 13, no_wrap = true }),
+		ui.text({ "heading: " .. heading, color = C.muted, font_size = 13, no_wrap = true }),
 	})
 end

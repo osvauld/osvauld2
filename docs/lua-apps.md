@@ -243,9 +243,28 @@ local wasd = {
   runtime's frame `dt`, capped at 0.1s after a stall, so `rpc.frame(n)` is the exact way to drive
   it offscreen — `rpc.advance` moves by at most one capped step.
 - While moving, `moving` plays in place of the entity's `clip`; when it stops, `clip` restarts.
-- A world with a controller takes keyboard input itself (it attaches `on_key`, and releases every
-  key on blur), so `on_key` on a `ui.world` is an error. A world without one leaves keys alone.
+- A world with a controller or actions takes keyboard input itself (it attaches `on_key`, and
+  releases every key on blur), so `on_key` on a `ui.world` is an error. A world with neither
+  leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
+
+### Moments — `on_action` and `on_move`
+
+The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
+a second at most, never once a frame.
+
+```lua
+actions = { interact = "KeyE", jump = "Space" },
+on_action = function(e) if e.action == "interact" then toggle_lid() end end,
+on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is stopped
+```
+
+- `actions` maps an action name to a key code. `on_action(e)` gets `e.action` on a fresh press —
+  a held key's repeats are not presses. `actions` and `on_action` come together or not at all.
+- `on_move(e)` gets `e.id`, `e.dx`, `e.dy` when a controlled entity's held direction changes:
+  it starts, turns or stops. Standing still at spawn is not a change.
+- Actions are the world's, not an entity's: the press is the player's, and Lua decides which
+  entity it concerns.
 
 ### Facing
 
@@ -270,7 +289,7 @@ facing = {
 - Hits still name the entity, whatever view is showing.
 
 `demo_apps/world` is the reference: a hero who idles and walks with WASD, and a chest whose lid
-opens on click.
+opens on click or on E, through `on_action`.
 
 ## 3D scenes (experimental proof)
 

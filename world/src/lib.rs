@@ -3,7 +3,8 @@
 //! once an entity exists its placement belongs to the world. List order is draw order unless the
 //! world sorts by feet (`Order::Feet`). Nothing
 //! outside this crate sees ECS types. Held keys and motion live here too: Lua describes a
-//! controller once, and `tick` moves the entity every frame without Lua.
+//! controller once, and `tick` moves the entity every frame without Lua. Moments — a press, a
+//! change of direction — queue as `WorldEvent`s for Lua to decide on.
 
 pub mod clip;
 pub mod facing;
@@ -44,6 +45,15 @@ pub struct Controller {
     pub axis_x: Option<Axis>,
     pub axis_y: Option<Axis>,
     pub moving: Option<Arc<Clip>>,
+}
+
+/// A moment for Lua; per-frame work never makes one.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorldEvent {
+    /// An entity's held direction changed: `dx`, `dy` are each -1, 0 or 1, and both 0 is stopped.
+    Move { id: String, dx: i8, dy: i8 },
+    /// A fresh press of the key an action names; a held key's repeats are not presses.
+    Action(String),
 }
 
 /// How entities stack when drawn.
@@ -103,6 +113,10 @@ impl Appearance {
 #[derive(Component)]
 struct Moving;
 
+/// The held direction `tick` last reported, so it reports only a change.
+#[derive(Component, Default, PartialEq)]
+struct Heading(i8, i8);
+
 #[derive(Component)]
 struct Animator {
     clip: Arc<Clip>,
@@ -116,6 +130,9 @@ pub struct World2d {
     ticking: bool,
     controlled: bool,
     held: HashSet<String>,
+    /// `(action, key code)`, as the world's `actions` name them.
+    actions: Vec<(String, String)>,
+    events: Vec<WorldEvent>,
     by_id: HashMap<String, Entity>,
     order: Vec<Entity>,
     stacking: Order,
@@ -181,7 +198,7 @@ impl World2d {
             all_rests.push(rests);
         }
         self.controlled = specs.iter().any(|s| s.controller.is_some());
-        if !self.controlled {
+        if !self.wants_keys() {
             self.held.clear(); // key events stop arriving, so nothing can release them later
         }
         self.ticking = specs
@@ -213,7 +230,7 @@ impl World2d {
             });
             match spec.controller {
                 Some(controller) => e.insert(controller),
-                None => e.remove::<(Controller, Moving)>(),
+                None => e.remove::<(Controller, Moving, Heading)>(),
             };
             self.animate(entity);
             next.insert(spec.id, entity);
@@ -278,7 +295,14 @@ impl World2d {
             };
             let (dx, dy) = (self.axis(&c.axis_x), self.axis(&c.axis_y));
             let (length, step) = ((dx * dx + dy * dy).sqrt(), c.speed * dt);
+            let heading = Heading(dx as i8, dy as i8);
             let mut e = self.ecs.entity_mut(entity);
+            if e.get::<Heading>() != Some(&heading) && (e.contains::<Heading>() || length > 0.0) {
+                let id = e.get::<Name>().expect("every entity has a Name").0.clone();
+                let (dx, dy) = (heading.0, heading.1);
+                self.events.push(WorldEvent::Move { id, dx, dy });
+            }
+            e.insert(heading);
             if length > 0.0 {
                 let mut t = e
                     .get_mut::<Transform>()
@@ -293,12 +317,30 @@ impl World2d {
         }
     }
 
-    /// A key went down or up; `code` is the physical key name, as a controller's axes name it.
+    /// A key went down or up; `code` is the physical key name, as axes and actions name it.
     pub fn key(&mut self, code: &str, down: bool) {
-        match down {
-            true => self.held.insert(code.to_string()),
-            false => self.held.remove(code),
-        };
+        if !down {
+            self.held.remove(code);
+            return;
+        }
+        if self.held.insert(code.to_string()) {
+            for (action, _) in self.actions.iter().filter(|(_, key)| key == code) {
+                self.events.push(WorldEvent::Action(action.clone()));
+            }
+        }
+    }
+
+    /// Names the keys whose presses reach Lua as actions.
+    pub fn set_actions(&mut self, actions: Vec<(String, String)>) {
+        self.actions = actions;
+        if !self.wants_keys() {
+            self.held.clear();
+        }
+    }
+
+    /// The moments since the last drain, oldest first.
+    pub fn drain_events(&mut self) -> Vec<WorldEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Focus left, so no key is known to be down any more.
@@ -315,9 +357,10 @@ impl World2d {
         self.ticking
     }
 
-    /// Whether any entity has a controller — only then should the world take keys.
+    /// Whether any entity has a controller or the world has actions — only then should it take
+    /// keys.
     pub fn wants_keys(&self) -> bool {
-        self.controlled
+        self.controlled || !self.actions.is_empty()
     }
 
     fn axis(&self, axis: &Option<Axis>) -> f64 {

@@ -167,8 +167,15 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
    held keys or velocity, so the controller carries `moving = clip`, played in Rust while it moves
    — still vocabulary, not content. Landed that way.)*
    *4b, added 2026-09-28:* facing — per-direction views (front, back, side mirrored for left),
-   chosen by the controller's movement. *4c:* draw order by feet (landed as `order = "y"`), and jump as height
-   above the ground position (so order and collision keep using the feet).
+   chosen by the controller's movement. *4c:* draw order by feet (landed as `order = "y"`), and
+   jump as height above the ground position (so order and collision keep using the feet).
+   *Revised 2026-09-29:* 4b put two decisions in Rust — which way the entity faces and which
+   clip plays — and a Rust jump would have added a third. The rule, sharpened: **Rust does what
+   happens every frame; Lua decides what happens at a moment**, told by an event. 4c is now:
+   A, events (`actions` → `on_action`, `on_move` on a change of held direction) — *landed*;
+   B, facing and clip choice move to Lua on `on_move`, Rust keeping only a mirror primitive;
+   C, a height primitive a clip can animate, so a jump is Lua deciding and a clip playing;
+   D, `attach` — an entity placed at another's part each frame, for carrying the chest.
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 
 Networking, clock sync across peers, tilemaps, `gfx.image` and AI players are out of scope.

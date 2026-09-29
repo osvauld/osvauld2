@@ -589,6 +589,64 @@ fn a_controlled_world_takes_keys_and_moves_in_rust() {
 }
 
 #[test]
+fn a_world_hands_its_moments_to_on_action_and_on_move() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ jump = 'Space' }}, \
+             on_action = function(e) table.insert(heard, e.action) end, \
+             on_move = function(e) table.insert(heard, e.id .. ':' .. e.dx .. ',' .. e.dy) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, \
+               controller = {{ speed = 100, axis_x = {{ neg = 'KeyA', pos = 'KeyD' }} }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let key = |code: &str, down| {
+        LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+            code: Some(code.into()), key: String::new(), down, repeat: false, cancelled: false,
+            mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+        })
+    };
+    app.update(key("Space", true));
+    app.update(key("Space", true));
+    app.update(key("KeyD", true));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 0.1));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 0.2));
+    app.update(key("KeyD", false));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 0.3));
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let heard = app.view().info().children[0].text.clone();
+    assert_eq!(heard.as_deref(), Some("jump hero:1,0 hero:0,0"));
+}
+
+#[test]
+fn a_world_action_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room =
+        |props: &str| format!("return ui.world({{ id = 'room', width = 1, height = 1, {props} }})");
+    let f = "function() end";
+    let both = format!("actions = {{ jump = 'Space' }}, on_action = {f}");
+    walk_world(&lua, &worlds, &room(&both)).unwrap();
+    walk_world(&lua, &worlds, &room(&format!("on_move = {f}"))).unwrap();
+    let cases = [
+        ("actions = { jump = 'Space' }".to_string(), "actions and on_action come together"),
+        (format!("on_action = {f}"), "actions and on_action come together"),
+        (format!("actions = {{ 'Space' }}, on_action = {f}"), "map a name to a key code, got integer = string"),
+        ("on_move = 3".to_string(), "world on_move must be a function, got integer"),
+    ];
+    for (props, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(&props)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_controller_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

@@ -58,6 +58,15 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.frame(2)
         assert entity_at(568, 260) == wanted, f"after {step}"
 
+    # The same through a world action: E is a press the world routes to Lua's `on_action`.
+    for step, wanted in [("open", "—"), ("close", "chest")]:
+        s.rpc.keyboard("KeyE", "e", True)
+        s.rpc.frame(1)
+        s.rpc.keyboard("KeyE", "e", False)
+        s.rpc.advance(0.6)
+        s.rpc.frame(2)
+        assert entity_at(568, 260) == wanted, f"E: after {step}"
+
     # Hot reload with the hero's spawn pos changed: the world survives, so the hero stays put.
     source = s.rpc.read_file_versioned(item, "main.lua")
     result = s.rpc.edit_file(item, "main.lua", source["revision"], [
@@ -70,11 +79,14 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
 
     # WASD through the real keyboard path: held D moves the hero right at 160/s in Rust. The body
     # starts under (200, 210); half a second of frames carries it ~80 right, and releasing stops it.
+    # The world reports the change of direction to Lua (`on_move`), not every frame.
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(30)
+    assert readout(s.rpc.dump_tree(item), "heading: ") == "1,0", "on_move reported the start"
     s.rpc.keyboard("KeyD", "d", False)
     s.rpc.frame(2)
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
+    assert readout(s.rpc.dump_tree(item), "heading: ") == "still", "on_move reported the stop"
     assert entity_at(200, 210) == "—", "the hero walked away"
     assert entity_at(285, 210) == "hero", "the hero walked ~80 right"
     s.rpc.frame(30)
@@ -136,4 +148,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move")

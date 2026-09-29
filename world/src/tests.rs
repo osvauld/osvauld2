@@ -462,3 +462,50 @@ fn feet_order_draws_the_lower_entity_in_front_and_ties_keep_list_order() {
     world.set_order(Order::Feet);
     assert_eq!(ids(&world), ["high", "level", "low"]);
 }
+
+#[test]
+fn a_move_event_marks_each_change_of_held_direction_not_each_frame() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world
+        .reconcile(vec![controlled(&d, wasd(100.0, None))])
+        .unwrap();
+    let moved = |dx, dy| WorldEvent::Move {
+        id: "hero".into(),
+        dx,
+        dy,
+    };
+    world.tick(0.0, 0.1);
+    assert_eq!(world.drain_events(), [], "standing still at spawn is not news");
+
+    world.key("KeyD", true);
+    world.tick(0.1, 0.1);
+    world.tick(0.2, 0.1);
+    assert_eq!(world.drain_events(), [moved(1, 0)], "the start, not every frame");
+    world.key("KeyW", true);
+    world.tick(0.3, 0.1);
+    world.key("KeyD", false);
+    world.key("KeyW", false);
+    world.tick(0.4, 0.1);
+    assert_eq!(
+        world.drain_events(),
+        [moved(1, -1), moved(0, 0)],
+        "a turn, then the stop"
+    );
+}
+
+#[test]
+fn an_action_fires_on_a_fresh_press_only() {
+    let mut world = World2d::default();
+    assert!(!world.wants_keys());
+    world.set_actions(vec![("jump".into(), "Space".into())]);
+    assert!(world.wants_keys(), "actions alone take keys");
+    world.key("Space", true);
+    world.key("Space", true); // a repeat while held
+    world.key("KeyQ", true);
+    let jump = || WorldEvent::Action("jump".into());
+    assert_eq!(world.drain_events(), [jump()]);
+    world.key("Space", false);
+    world.key("Space", true);
+    assert_eq!(world.drain_events(), [jump()], "pressed again");
+}
