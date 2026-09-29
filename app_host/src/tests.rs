@@ -617,6 +617,31 @@ fn a_controller_is_checked_strictly() {
 }
 
 #[test]
+fn a_facing_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |facing: &str| {
+        format!("{HERO} {SLIDE} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, facing = {facing} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ up = { drawing = hero, moving = slide }, side = {} }"))
+        .unwrap();
+    let wing = "gfx.clip({ length = 1, tracks = { wing = { rot = { {0, 1} } } } })";
+    let cases = [
+        ("'side'".to_string(), "facing must be a table, got string"),
+        ("{ north = {} }".to_string(), "facing: unknown field north"),
+        ("{ up = hero }".to_string(), "facing.up must be a table, got userdata"),
+        ("{ up = { drawing = slide } }".to_string(), "facing.up.drawing must be a gfx.drawing"),
+        ("{ side = { speed = 3 } }".to_string(), "facing.side: unknown field speed"),
+        (format!("{{ left = {{ clip = {wing} }} }}"), "unknown part \"wing\""),
+    ];
+    for (facing, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(&facing)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_clip_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let clip = |spec: &str| format!("return gfx.clip({{ {spec} }})");

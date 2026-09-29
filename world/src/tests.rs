@@ -8,6 +8,12 @@ use runtime::vello::peniko::{Color, Fill};
 use super::*;
 
 fn drawing() -> Arc<Drawing> {
+    drawing_of("body")
+}
+
+/// A right triangle filling the box above its diagonal: on the row y = 4 it covers x 4..8, so a
+/// hit there tells whether it is mirrored.
+fn drawing_of(part: &str) -> Arc<Drawing> {
     let path = Path::new(vec![
         PathEl::MoveTo((0.0, 0.0).into()),
         PathEl::LineTo((8.0, 0.0).into()),
@@ -18,7 +24,7 @@ fn drawing() -> Arc<Drawing> {
     let brush = Brush::solid(Color::from_rgba8(0, 0, 255, 255)).unwrap();
     let shape = Item::fill(Arc::new(path), Arc::new(brush), Fill::NonZero);
     let part = PartSpec {
-        id: "body".into(),
+        id: part.into(),
         parent: None,
         pivot: Point::ZERO,
         shapes: vec![shape],
@@ -33,6 +39,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         drawing: drawing.clone(),
         clip: None,
         controller: None,
+        facing: Facings::default(),
     }
 }
 
@@ -127,7 +134,7 @@ fn a_new_drawing_handle_replaces_the_look() {
     world.reconcile(vec![spec("hero", (0.0, 0.0), &b)]).unwrap();
     assert_eq!(world.by_id["hero"], entity, "same entity, new look");
     assert!(Arc::ptr_eq(
-        &world.ecs.get::<Look>(entity).unwrap().drawing,
+        &world.ecs.get::<Appearance>(entity).unwrap().drawing,
         &b
     ));
 }
@@ -340,4 +347,102 @@ fn a_bad_controller_is_refused() {
         Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
     ));
     assert!(!world.needs_ticks(), "nothing was accepted");
+}
+
+fn view(drawing: &Arc<Drawing>, moving: Option<&Arc<Clip>>) -> Option<facing::View> {
+    Some(facing::View {
+        drawing: Some(drawing.clone()),
+        clip: None,
+        moving: moving.cloned(),
+    })
+}
+
+/// Holds `code` for one zero-length tick — it turns without moving — then lets go.
+fn turn(world: &mut World2d, code: &str) {
+    world.key(code, true);
+    world.tick(0.0, 0.0);
+    world.key(code, false);
+}
+
+#[test]
+fn left_mirrors_the_side_view_and_stopping_keeps_the_facing() {
+    let d = drawing();
+    let hero = EntitySpec {
+        facing: Facings {
+            side: view(&d, None),
+            ..Facings::default()
+        },
+        ..controlled(&d, wasd(10.0, None))
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero]).unwrap();
+    assert_eq!(
+        (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
+        (true, false)
+    );
+
+    turn(&mut world, "KeyA");
+    world.tick(0.0, 0.0);
+    assert_eq!(
+        world.facing("hero"),
+        Some(facing::Dir::Left),
+        "kept after stopping"
+    );
+    assert_eq!(
+        (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
+        (false, true)
+    );
+    turn(&mut world, "KeyD");
+    assert_eq!(
+        (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
+        (true, false)
+    );
+}
+
+#[test]
+fn a_facing_brings_its_own_drawing_and_moving_clip() {
+    let (front, back, walk, walk_up) = (drawing(), drawing(), slide(), slide());
+    let hero = EntitySpec {
+        facing: Facings {
+            up: view(&back, Some(&walk_up)),
+            ..Facings::default()
+        },
+        ..controlled(&front, wasd(10.0, Some(walk.clone())))
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero]).unwrap();
+    let showing = |world: &World2d| {
+        let e = world.ecs.entity(world.by_id["hero"]);
+        let look = e.get::<Appearance>().unwrap();
+        look.shown(*e.get::<facing::Dir>().unwrap(), e.get::<Controller>())
+            .drawing
+            .clone()
+    };
+    world.key("KeyW", true);
+    world.tick(1.0, 0.1);
+    assert!(Arc::ptr_eq(&showing(&world), &back));
+    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk_up));
+    world.key("KeyW", false);
+    world.key("KeyS", true);
+    world.tick(2.0, 0.1);
+    assert!(Arc::ptr_eq(&showing(&world), &front));
+    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk));
+}
+
+#[test]
+fn every_facing_is_checked_against_the_clips_it_plays() {
+    let (front, back) = (drawing(), drawing_of("torso"));
+    let hero = EntitySpec {
+        clip: Some(slide()), // moves `body`, which the back view lacks
+        facing: Facings {
+            up: view(&back, None),
+            ..Facings::default()
+        },
+        ..spec("hero", (0.0, 0.0), &front)
+    };
+    let mut world = World2d::default();
+    assert!(matches!(
+        world.reconcile(vec![hero]),
+        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
+    ));
 }

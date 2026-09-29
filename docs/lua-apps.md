@@ -179,7 +179,7 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle) and `controller` — nothing else. `false` drops out, like a child element. List order is draw order.
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `facing` — nothing else. `false` drops out, like a child element. List order is draw order.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
   is; re-sending a different `pos` does not move it.
 - An id the description no longer lists is despawned. A new `drawing` handle replaces the look;
@@ -244,6 +244,28 @@ local wasd = {
 - A world with a controller takes keyboard input itself (it attaches `on_key`, and releases every
   key on blur), so `on_key` on a `ui.world` is an error. A world without one leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
+
+### Facing
+
+A top-down character is drawn as views — front, back, side — and the world shows the one for the
+way it last moved. The entity's own `drawing` is the front (facing down).
+
+```lua
+facing = {
+	up = { drawing = hero_back },
+	side = { drawing = hero_side, moving = walk_side },   -- drawn facing right
+}
+```
+
+- Views are `down`, `up`, `side` and `left`, each `{ drawing, clip, moving }`; whatever a view
+  leaves out falls back to the entity's own `drawing`, `clip` and controller `moving`.
+- `left` is `side` mirrored within the drawing's box unless given itself — give it for a
+  character that is not symmetric.
+- The controller sets the facing: the larger component of the move wins, an exact diagonal keeps
+  the current facing if it can, and stopping keeps the way it last moved.
+- Every view's drawing is checked against every clip it can play, so views share part ids (the
+  demo's three hero drawings all have `head`, `body`, `leg_l`…).
+- Hits still name the entity, whatever view is showing.
 
 `demo_apps/world` is the reference: a hero who idles and walks with WASD, and a chest whose lid
 opens on click.

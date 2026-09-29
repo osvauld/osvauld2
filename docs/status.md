@@ -444,9 +444,16 @@ controller exists and routing it as `LuaMsg::KeyWorld` (a cancel releases all), 
 world is an error. `tick(elapsed, dt)` moves along held axes at `speed × dt` (diagonals
 normalised) and plays `moving` while moving, the entity's own clip when still; a reconcile does not
 restart a walk. Clips are checked by part name via `Drawing::has_part`. The demo hero walks with
-WASD; `smoke_world.py` holds D through `rpc.keyboard` and checks the hero moved and stopped. Not
-built: walls/physics (entities can leave the box), discrete actions, facing, key-code validation,
-and a world-level `DumpTree`.
+WASD; `smoke_world.py` holds D through `rpc.keyboard` and checks the hero moved and stopped.
+**Slice 4b landed:** `world::facing` — the controller sets a `Dir` (larger move component wins, an
+exact diagonal keeps the facing, stopping keeps it) and an entity's `facing = { down, up, side,
+left }` views (each `{drawing, clip, moving}`, falling back to the entity's own) pick what shows;
+`left` mirrors `side` within the drawing's box unless given. One `Appearance` component caches the
+rest pose per distinct drawing; every view's drawing is checked against every clip it can play.
+`Drawing::size` was added for the mirror. The demo has back and side hero drawings and a side walk;
+the smoke tells views apart by outline (profile nose asymmetry, back-view bun). Not built:
+walls/physics, draw order by feet (list order still decides overlap), jump, discrete actions,
+key-code validation, and a world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds
 

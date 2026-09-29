@@ -80,8 +80,46 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.frame(30)
     assert entity_at(285, 210) == "hero", "released, the hero stopped"
 
+    # Facing: the world shows a view per direction. Hits name the entity, not the part, so each
+    # view is told apart by its outline, measured by bisecting outward from a point inside it:
+    # the profile's nose makes the head lopsided against the body's centre (mirrored for left),
+    # and the back view's bun raises the top of the head.
+    def reach(x, y, dx, dy):
+        inside, outside = 0, 90
+        while outside - inside > 1:
+            mid = (inside + outside) // 2
+            if entity_at(x + mid * dx, y + mid * dy) == "hero":
+                inside = mid
+            else:
+                outside = mid
+        return inside
+
+    def outline():
+        hx, head_y, body_y = 280, 80 + 61, 80 + 128  # the hero stands near (200, 80) by now
+        body_mid = hx + (reach(hx, body_y, 1, 0) - reach(hx, body_y, -1, 0)) / 2
+        lopsided = (hx + reach(hx, head_y, 1, 0) - body_mid) - (body_mid - hx + reach(hx, head_y, -1, 0))
+        return lopsided, reach(hx, head_y, 0, -1)
+
+    def tap(code, key):
+        s.rpc.keyboard(code, key, True)
+        s.rpc.frame(1)
+        s.rpc.keyboard(code, key, False)
+        s.rpc.frame(2)
+
+    lopsided, top = outline()
+    assert lopsided > 12 and top < 47, ("facing right: profile", lopsided, top)
+    tap("KeyA", "a")
+    lopsided, top = outline()
+    assert lopsided < -12 and top < 47, ("facing left: mirrored profile", lopsided, top)
+    tap("KeyW", "w")
+    lopsided, top = outline()
+    assert abs(lopsided) < 10 and top > 47, ("facing up: back view with its bun", lopsided, top)
+    tap("KeyS", "s")
+    lopsided, top = outline()
+    assert abs(lopsided) < 10 and top < 47, ("facing down: front view", lopsided, top)
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views")

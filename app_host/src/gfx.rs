@@ -15,6 +15,7 @@ use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
 use world::clip::{Clip, Easing, Key, Prop, Track};
+use world::facing::{Facings, View};
 
 #[derive(Clone)]
 #[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
@@ -342,29 +343,75 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    named_fields(&spec, &owner, &["id", "pos", "drawing", "clip", "controller"])?;
+    let fields = ["id", "pos", "drawing", "clip", "controller", "facing"];
+    named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
+    let controller = match maybe_table(&spec, &owner, "controller")? {
+        Some(c) => Some(controller(&c, &format!("{owner}.controller"))?),
+        None => None,
+    };
+    let facing = match maybe_table(&spec, &owner, "facing")? {
+        Some(f) => facings(&f, &format!("{owner}.facing"))?,
+        None => Default::default(),
+    };
     Ok(world::EntitySpec {
         id: need(&spec, &owner, "id")?,
         pos: (pos.x, pos.y),
         drawing: need_gfx(&spec, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
             d.0.clone()
         })?,
-        clip: match spec.get::<Value>("clip")? {
-            Value::Nil => None,
-            _ => Some(need_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?),
-        },
-        controller: match spec.get::<Value>("controller")? {
-            Value::Nil => None,
-            Value::Table(c) => Some(controller(&c, &format!("{owner}.controller"))?),
-            other => {
-                return Err(Error::runtime(format!(
-                    "{owner}.controller must be a table, got {}",
-                    other.type_name()
-                )));
-            }
-        },
+        clip: maybe_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?,
+        controller,
+        facing,
     })
+}
+
+/// `{ down, up, side, left }`, each `{ drawing, clip, moving }`; whatever a view leaves out
+/// falls back to the entity's own. `side` is drawn facing right; `left` defaults to it mirrored.
+fn facings(spec: &Table, owner: &str) -> mlua::Result<Facings> {
+    named_fields(spec, owner, &["down", "up", "side", "left"])?;
+    let view = |field: &str| -> mlua::Result<Option<View>> {
+        let Some(v) = maybe_table(spec, owner, field)? else {
+            return Ok(None);
+        };
+        let owner = format!("{owner}.{field}");
+        named_fields(&v, &owner, &["drawing", "clip", "moving"])?;
+        let clip = |f| maybe_gfx(&v, &owner, f, "a gfx.clip", |c: &LuaClip| c.0.clone());
+        Ok(Some(View {
+            drawing: maybe_gfx(&v, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
+                d.0.clone()
+            })?,
+            clip: clip("clip")?,
+            moving: clip("moving")?,
+        }))
+    };
+    Ok(Facings { down: view("down")?, up: view("up")?, side: view("side")?, left: view("left")? })
+}
+
+/// An optional table field: absent is `None`, and anything but a table says which field it was.
+fn maybe_table(spec: &Table, owner: &str, field: &str) -> mlua::Result<Option<Table>> {
+    match spec.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::Table(t) => Ok(Some(t)),
+        other => Err(Error::runtime(format!(
+            "{owner}.{field} must be a table, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// An optional handle field: absent is `None`, anything else must be the right handle.
+fn maybe_gfx<T: 'static, R>(
+    spec: &Table,
+    owner: &str,
+    field: &str,
+    what: &str,
+    take: impl Fn(&T) -> R,
+) -> mlua::Result<Option<R>> {
+    match spec.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        _ => need_gfx(spec, owner, field, what, take).map(Some),
+    }
 }
 
 /// Key codes are physical names (`"KeyW"`, `"ArrowLeft"`), the same as `on_key`'s `e.code`.
@@ -383,10 +430,7 @@ fn controller(spec: &Table, owner: &str) -> mlua::Result<world::Controller> {
     if axis_x.is_none() && axis_y.is_none() {
         return Err(Error::runtime(format!("{owner} needs axis_x or axis_y")));
     }
-    let moving = match spec.get::<Value>("moving")? {
-        Value::Nil => None,
-        _ => Some(need_gfx(spec, owner, "moving", "a gfx.clip", |c: &LuaClip| c.0.clone())?),
-    };
+    let moving = maybe_gfx(spec, owner, "moving", "a gfx.clip", |c: &LuaClip| c.0.clone())?;
     let speed = need(spec, owner, "speed")?;
     Ok(world::Controller { speed, axis_x, axis_y, moving })
 }

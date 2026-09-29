@@ -5,6 +5,7 @@
 //! controller once, and `tick` moves the entity every frame without Lua.
 
 pub mod clip;
+pub mod facing;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use runtime::frame::{Frame, FrameError, Item};
 use runtime::vello::kurbo::Affine;
 
 use crate::clip::Clip;
+use crate::facing::{Dir, Facings, Shown};
 
 pub struct EntitySpec {
     pub id: String,
@@ -23,6 +25,7 @@ pub struct EntitySpec {
     /// Played from when this handle first appears on the entity; the same handle keeps playing.
     pub clip: Option<Arc<Clip>>,
     pub controller: Option<Controller>,
+    pub facing: Facings,
 }
 
 /// Two key codes driving one axis: `neg` held is -1, `pos` held is +1, both or neither is 0.
@@ -61,15 +64,28 @@ impl Transform {
 #[derive(Component)]
 struct Name(String);
 
+/// Everything the entity can show, plus the rest pose of each distinct drawing among its views —
+/// posing is the cost, so reconcile carries unchanged ones over.
 #[derive(Component)]
-struct Look {
+struct Appearance {
     drawing: Arc<Drawing>,
-    rest: Arc<Frame>,
+    clip: Option<Arc<Clip>>,
+    facing: Facings,
+    rests: Vec<(Arc<Drawing>, Arc<Frame>)>,
 }
 
-/// The entity's own clip, played whenever it is not moving under a controller's `moving` clip.
-#[derive(Component)]
-struct OwnClip(Arc<Clip>);
+impl Appearance {
+    fn shown<'a>(&'a self, dir: Dir, controller: Option<&'a Controller>) -> Shown<'a> {
+        let moving = controller.and_then(|c| c.moving.as_ref());
+        self.facing
+            .shown(dir, &self.drawing, self.clip.as_ref(), moving)
+    }
+
+    fn rest(&self, drawing: &Arc<Drawing>) -> Option<&Arc<Frame>> {
+        let mut rests = self.rests.iter();
+        rests.find(|(d, _)| Arc::ptr_eq(d, drawing)).map(|(_, f)| f)
+    }
+}
 
 /// Set by `tick` while a controller is moving its entity; kept across reconciles.
 #[derive(Component)]
@@ -111,7 +127,7 @@ impl World2d {
     /// description leaves the last good world in place.
     pub fn reconcile(&mut self, specs: Vec<EntitySpec>) -> Result<(), WorldError> {
         let mut seen = HashSet::with_capacity(specs.len());
-        let mut looks = Vec::with_capacity(specs.len());
+        let mut all_rests = Vec::with_capacity(specs.len());
         for spec in &specs {
             if spec.id.is_empty() {
                 return Err(WorldError::EmptyId);
@@ -119,26 +135,37 @@ impl World2d {
             if !seen.insert(spec.id.as_str()) {
                 return Err(WorldError::DuplicateId(spec.id.clone()));
             }
-            let current = self
-                .by_id
-                .get(&spec.id)
-                .and_then(|&e| self.ecs.get::<Look>(e));
-            let unchanged = current.is_some_and(|look| Arc::ptr_eq(&look.drawing, &spec.drawing));
-            let moving = spec.controller.as_ref().and_then(|c| c.moving.as_ref());
-            for clip in spec.clip.iter().chain(moving) {
-                if let Some(part) = clip.parts().find(|p| !spec.drawing.has_part(p)) {
-                    return Err(DrawingError::UnknownPart(part.to_string()).into());
-                }
-            }
             if let Some(c) = &spec.controller
                 && !(c.speed.is_finite() && c.speed >= 0.0)
             {
                 return Err(WorldError::Speed(spec.id.clone()));
             }
-            looks.push(match unchanged {
-                true => None,
-                false => Some(Arc::new(spec.drawing.pose(&HashMap::new())?)),
-            });
+            let current = self
+                .by_id
+                .get(&spec.id)
+                .and_then(|&e| self.ecs.get::<Appearance>(e));
+            let moving = spec.controller.as_ref().and_then(|c| c.moving.as_ref());
+            let mut rests: Vec<(Arc<Drawing>, Arc<Frame>)> = Vec::new();
+            for dir in Dir::ALL {
+                let shown = spec
+                    .facing
+                    .shown(dir, &spec.drawing, spec.clip.as_ref(), moving);
+                // A clip may move only parts the drawing it plays on has, in every facing.
+                for clip in shown.clip.iter().chain(shown.moving.iter()) {
+                    if let Some(part) = clip.parts().find(|p| !shown.drawing.has_part(p)) {
+                        return Err(DrawingError::UnknownPart(part.to_string()).into());
+                    }
+                }
+                if rests.iter().any(|(d, _)| Arc::ptr_eq(d, shown.drawing)) {
+                    continue;
+                }
+                let rest = match current.and_then(|a| a.rest(shown.drawing)) {
+                    Some(rest) => rest.clone(),
+                    None => Arc::new(shown.drawing.pose(&HashMap::new())?),
+                };
+                rests.push((shown.drawing.clone(), rest));
+            }
+            all_rests.push(rests);
         }
         self.controlled = specs.iter().any(|s| s.controller.is_some());
         if !self.controlled {
@@ -149,18 +176,10 @@ impl World2d {
             .any(|s| s.clip.is_some() || s.controller.is_some());
         let mut next = HashMap::with_capacity(specs.len());
         let mut order = Vec::with_capacity(specs.len());
-        for (spec, rest) in specs.into_iter().zip(looks) {
-            let look = rest.map(|rest| Look {
-                drawing: spec.drawing,
-                rest,
-            });
-            let entity = match (self.by_id.remove(&spec.id), look) {
-                (Some(entity), Some(look)) => {
-                    self.ecs.entity_mut(entity).insert(look);
-                    entity
-                }
-                (Some(entity), None) => entity,
-                (None, look) => {
+        for (spec, rests) in specs.into_iter().zip(all_rests) {
+            let entity = match self.by_id.remove(&spec.id) {
+                Some(entity) => entity,
+                None => {
                     let (x, y) = spec.pos;
                     let transform = Transform {
                         x,
@@ -168,17 +187,17 @@ impl World2d {
                         rot: 0.0,
                         scale: 1.0,
                     };
-                    let look = look.expect("a new entity always has a fresh look");
-                    self.ecs
-                        .spawn((transform, Name(spec.id.clone()), look))
-                        .id()
+                    let name = Name(spec.id.clone());
+                    self.ecs.spawn((transform, name, Dir::default())).id()
                 }
             };
             let mut e = self.ecs.entity_mut(entity);
-            match spec.clip {
-                Some(clip) => e.insert(OwnClip(clip)),
-                None => e.remove::<OwnClip>(),
-            };
+            e.insert(Appearance {
+                drawing: spec.drawing,
+                clip: spec.clip,
+                facing: spec.facing,
+                rests,
+            });
             match spec.controller {
                 Some(controller) => e.insert(controller),
                 None => e.remove::<(Controller, Moving)>(),
@@ -200,18 +219,32 @@ impl World2d {
             .order
             .iter()
             .map(|&entity| {
-                let (Some(t), Some(name), Some(look)) = (
-                    self.ecs.get::<Transform>(entity),
-                    self.ecs.get::<Name>(entity),
-                    self.ecs.get::<Look>(entity),
+                let e = self.ecs.entity(entity);
+                let (Some(t), Some(name), Some(look), Some(&dir)) = (
+                    e.get::<Transform>(),
+                    e.get::<Name>(),
+                    e.get::<Appearance>(),
+                    e.get::<Dir>(),
                 ) else {
-                    unreachable!("reconcile spawns every entity with all three");
+                    unreachable!("reconcile gives every entity all four");
                 };
-                let posed = match self.ecs.get::<Animator>(entity) {
-                    Some(a) => Arc::new(look.drawing.pose(&a.clip.sample(self.clock - a.started))?),
-                    None => look.rest.clone(),
+                let shown = look.shown(dir, e.get::<Controller>());
+                let posed = match e.get::<Animator>() {
+                    Some(a) => {
+                        let poses = a.clip.sample(self.clock - a.started);
+                        Arc::new(shown.drawing.pose(&poses)?)
+                    }
+                    None => look
+                        .rest(shown.drawing)
+                        .expect("posed at reconcile")
+                        .clone(),
                 };
-                Ok(Item::instance(t.affine(), posed)?.with_id(name.0.as_str()))
+                let mut place = t.affine();
+                if shown.mirrored {
+                    let (w, _) = shown.drawing.size();
+                    place *= Affine::new([-1.0, 0.0, 0.0, 1.0, w, 0.0]); // flip within its box
+                }
+                Ok(Item::instance(place, posed)?.with_id(name.0.as_str()))
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
         Ok(Frame::new(width, height, None, items)?)
@@ -233,7 +266,8 @@ impl World2d {
                     .get_mut::<Transform>()
                     .expect("every entity has a Transform");
                 (t.x, t.y) = (t.x + dx / length * step, t.y + dy / length * step);
-                e.insert(Moving);
+                let dir = Dir::of(dx, dy, *e.get::<Dir>().expect("every entity has a Dir"));
+                e.insert((Moving, dir));
             } else {
                 e.remove::<Moving>();
             }
@@ -271,15 +305,16 @@ impl World2d {
         })
     }
 
-    /// Plays the clip the entity should show now: the controller's `moving` clip while it moves,
-    /// else its own. Switching handles restarts from the current clock; the same one continues.
+    /// Plays the clip the entity should show now, for its facing: the `moving` clip while it
+    /// moves, else its own. Switching handles restarts from the current clock; the same continues.
     fn animate(&mut self, entity: Entity) {
         let e = self.ecs.entity(entity);
         let moving = e.contains::<Moving>();
-        let wanted = e
-            .get::<Controller>()
-            .and_then(|c| c.moving.clone().filter(|_| moving))
-            .or_else(|| e.get::<OwnClip>().map(|own| own.0.clone()));
+        let (Some(look), Some(&dir)) = (e.get::<Appearance>(), e.get::<Dir>()) else {
+            unreachable!("reconcile gives every entity an Appearance and a Dir");
+        };
+        let shown = look.shown(dir, e.get::<Controller>());
+        let wanted = shown.moving.filter(|_| moving).or(shown.clip).cloned();
         match wanted {
             None => {
                 self.ecs.entity_mut(entity).remove::<Animator>();
@@ -302,6 +337,10 @@ impl World2d {
 
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
+    }
+
+    pub fn facing(&self, id: &str) -> Option<Dir> {
+        self.ecs.get::<Dir>(*self.by_id.get(id)?).copied()
     }
 }
 

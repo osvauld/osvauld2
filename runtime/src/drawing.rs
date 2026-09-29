@@ -131,6 +131,10 @@ impl Drawing {
         })
     }
 
+    pub fn size(&self) -> (f64, f64) {
+        (self.width, self.height)
+    }
+
     pub fn has_part(&self, id: &str) -> bool {
         self.parts.iter().any(|p| &*p.id == id)
     }

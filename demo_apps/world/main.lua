@@ -1,8 +1,17 @@
 local C = require("theme")
 local hero = gfx.drawing(require("hero"))
+local hero_back, hero_side = gfx.drawing(require("hero_back")), gfx.drawing(require("hero_side"))
 local chest = gfx.drawing(require("chest"))
 local clips = require("clips")
 local idle, walk = gfx.clip(clips.idle), gfx.clip(clips.walk)
+local walk_side = gfx.clip(clips.walk_side)
+
+-- Front is the entity's own drawing (facing down); the world picks a view by the way it moves,
+-- and mirrors `side` for left.
+local views = {
+	up = { drawing = hero_back },
+	side = { drawing = hero_side, moving = walk_side },
+}
 local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
 
 -- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
@@ -38,7 +47,8 @@ return function()
 			on_click = function(e)
 				if e.shape == "chest" then lid = lid == open and close or open end
 			end,
-			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd },
+			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd,
+				facing = views },
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
