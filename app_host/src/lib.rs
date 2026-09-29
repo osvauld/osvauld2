@@ -772,8 +772,8 @@ impl<M: 'static> LuaApp<M> {
         Ok(event)
     }
 
-    /// Hands the world's queued moments to its `on_action` / `on_move`; one without a handler
-    /// is dropped.
+    /// Hands the world's queued moments to its `on_action` / `on_move` / `on_clip_end`; one
+    /// without a handler is dropped.
     fn world_events(&self, id: &str) {
         let events = match self.worlds.borrow_mut().get_mut(id) {
             Some(world) => world.drain_events(),
@@ -792,6 +792,10 @@ impl<M: 'static> LuaApp<M> {
                         table.set("dx", dx)?;
                         table.set("dy", dy)?;
                         "on_move"
+                    }
+                    world::WorldEvent::ClipEnd(entity) => {
+                        table.set("id", entity)?;
+                        "on_clip_end"
                     }
                 };
                 let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
@@ -1360,7 +1364,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move"] {
+    for handler in ["on_action", "on_move", "on_clip_end"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
@@ -1519,7 +1523,9 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
-        "world" => &["width", "height", "order", "actions", "on_action", "on_move"],
+        "world" => {
+            &["width", "height", "order", "actions", "on_action", "on_move", "on_clip_end"]
+        }
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;

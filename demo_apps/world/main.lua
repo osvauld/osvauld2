@@ -4,7 +4,7 @@ local hero_back, hero_side = gfx.drawing(require("hero_back")), gfx.drawing(requ
 local chest = gfx.drawing(require("chest"))
 local clips = require("clips")
 local idle, walk = gfx.clip(clips.idle), gfx.clip(clips.walk)
-local walk_side = gfx.clip(clips.walk_side)
+local walk_side, jump = gfx.clip(clips.walk_side), gfx.clip(clips.jump)
 
 -- A view per facing: what to draw, what to play while walking, and whether to mirror. The side
 -- view is drawn facing right, so left is the same drawing flipped.
@@ -39,6 +39,7 @@ local hot = nil -- the entity under the pointer
 local lid = nil -- the chest's clip: nil at rest, then open/close; a new handle restarts it
 local heading = "still" -- the hero's held direction, as the world last reported it
 local face, walking = "down", false -- the hero's facing and gait, decided on each on_move
+local jumping = false -- set by the jump action, cleared when the jump clip ends
 
 local function toggle_lid()
 	lid = lid == open and close or open
@@ -56,7 +57,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks the hero · E or a click opens the chest", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks · Space jumps · E or a click opens the chest", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -68,9 +69,13 @@ return function()
 				if e.shape == "chest" then toggle_lid() end
 			end,
 			-- Moments come to Lua; the per-frame work (walking, playing clips) stays in the world.
-			actions = { interact = "KeyE" },
+			actions = { interact = "KeyE", jump = "Space" },
 			on_action = function(e)
 				if e.action == "interact" then toggle_lid() end
+				if e.action == "jump" then jumping = true end -- already in the air: no double jump
+			end,
+			on_clip_end = function(e)
+				if e.id == "hero" then jumping = false end
 			end,
 			on_move = function(e)
 				walking = e.dx ~= 0 or e.dy ~= 0
@@ -78,7 +83,7 @@ return function()
 				face = face_for(e.dx, e.dy, face)
 			end,
 			{ id = "hero", pos = { 120, 80 }, drawing = views[face].drawing, flip = views[face].flip,
-				clip = walking and views[face].walk or idle, controller = wasd },
+				clip = jumping and jump or walking and views[face].walk or idle, controller = wasd },
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),

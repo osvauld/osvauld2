@@ -98,6 +98,11 @@ impl Clip {
     }
 
     /// The part names this clip moves — checked against a drawing when the two meet.
+    /// Whether a once clip has reached its end `time` seconds in; a looped clip never does.
+    pub fn done(&self, time: f64) -> bool {
+        !self.looped && time >= self.length
+    }
+
     pub fn parts(&self) -> impl Iterator<Item = &str> {
         self.tracks.iter().map(|t| t.part.as_str())
     }

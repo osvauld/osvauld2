@@ -51,6 +51,8 @@ pub enum WorldEvent {
     Move { id: String, dx: i8, dy: i8 },
     /// A fresh press of the key an action names; a held key's repeats are not presses.
     Action(String),
+    /// A once clip on this entity reached its end and now holds; reported once per play.
+    ClipEnd(String),
 }
 
 /// How entities stack when drawn.
@@ -100,6 +102,7 @@ struct Heading(i8, i8);
 struct Animator {
     clip: Arc<Clip>,
     started: f64,
+    ended: bool,
 }
 
 #[derive(Default)]
@@ -272,6 +275,17 @@ impl World2d {
                 (t.x, t.y) = (t.x + dx / length * step, t.y + dy / length * step);
             }
         }
+        for &entity in &self.order {
+            let e = self.ecs.entity(entity);
+            let ended = e
+                .get::<Animator>()
+                .is_some_and(|a| !a.ended && a.clip.done(elapsed - a.started));
+            if ended {
+                let id = e.get::<Name>().expect("every entity has a Name").0.clone();
+                self.ecs.get_mut::<Animator>(entity).expect("checked above").ended = true;
+                self.events.push(WorldEvent::ClipEnd(id));
+            }
+        }
     }
 
     /// A key went down or up; `code` is the physical key name, as axes and actions name it.
@@ -338,6 +352,7 @@ impl World2d {
                 e.insert(Animator {
                     clip,
                     started: self.clock,
+                    ended: false,
                 });
             }
             Some(_) => {}

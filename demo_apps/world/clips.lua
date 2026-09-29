@@ -40,6 +40,20 @@ return {
 			} },
 		},
 	},
+	-- A jump, played once: the body — and everything hanging off it — rises and falls while the
+	-- entity's feet stay where they are, so draw order ignores the jump. Legs tuck, arms lift.
+	jump = {
+		length = 0.45,
+		tracks = {
+			body = { y = {
+				{0, 0}, {0.1, -28}, {0.225, -40, "in_out"}, {0.35, -28, "in_out"}, {0.45, 0},
+			} },
+			leg_l = { y = { {0, 0}, {0.225, -10, "in_out"}, {0.45, 0, "in_out"} } },
+			leg_r = { y = { {0, 0}, {0.225, -10, "in_out"}, {0.45, 0, "in_out"} } },
+			arm_near = { rot = { {0, 0}, {0.225, -30, "in_out"}, {0.45, 0, "in_out"} } },
+			arm_far = { rot = { {0, 0}, {0.225, 30, "in_out"}, {0.45, 0, "in_out"} } },
+		},
+	},
 	-- The lid swings back about its hinge and holds there.
 	open = { length = 0.5, tracks = { lid = { rot = { {0, 0}, {0.5, -100, "in_out"} } } } },
 	close = { length = 0.4, tracks = { lid = { rot = { {0, -100}, {0.4, 0, "in_out"} } } } },

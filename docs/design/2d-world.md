@@ -175,7 +175,8 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
    A, events (`actions` → `on_action`, `on_move` on a change of held direction) — *landed*;
    B, facing and clip choice move to Lua on `on_move`, Rust keeping only a mirror primitive
    (`flip`) — *landed*;
-   C, a height primitive a clip can animate, so a jump is Lua deciding and a clip playing;
+   C, a height primitive a clip can animate, so a jump is Lua deciding and a clip playing —
+   *landed without the primitive:* the clip lifts the root part, and `on_clip_end` tells Lua;
    D, `attach` — an entity placed at another's part each frame, for carrying the chest.
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 

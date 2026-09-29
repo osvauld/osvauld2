@@ -249,7 +249,7 @@ local wasd = {
   leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
 
-### Moments — `on_action` and `on_move`
+### Moments — `on_action`, `on_move` and `on_clip_end`
 
 The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
 a second at most, never once a frame.
@@ -266,6 +266,11 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
   it starts, turns or stops. Standing still at spawn is not a change.
 - Actions are the world's, not an entity's: the press is the player's, and Lua decides which
   entity it concerns.
+- `on_clip_end(e)` gets `e.id` when a once clip on that entity reaches its end — once per play;
+  re-sending the same handle is the same play. A looped clip never ends.
+- A jump is all three together, with no jump in Rust: `on_action` sets `jumping`, the hero
+  describes `clip = jumping and jump or …` (a once clip lifting `body`, which the other parts hang
+  off — the feet stay put, so draw order ignores it), and `on_clip_end` clears `jumping`.
 
 ### Facing and gait — decided in Lua
 

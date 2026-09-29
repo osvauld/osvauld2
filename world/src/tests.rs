@@ -376,3 +376,23 @@ fn an_action_fires_on_a_fresh_press_only() {
     world.key("Space", true);
     assert_eq!(world.drain_events(), [jump()], "pressed again");
 }
+
+#[test]
+fn a_once_clip_reports_its_end_once_per_play() {
+    let (d, once) = (drawing(), slide()); // one second, then holds
+    let mut world = World2d::default();
+    world.reconcile(vec![playing("hero", &d, &once)]).unwrap();
+    world.tick(0.5, 0.1);
+    assert_eq!(world.drain_events(), [], "still playing");
+    world.tick(1.0, 0.1);
+    world.tick(1.5, 0.1);
+    let ended = || WorldEvent::ClipEnd("hero".into());
+    assert_eq!(world.drain_events(), [ended()], "once, then it holds quietly");
+
+    world.reconcile(vec![playing("hero", &d, &once)]).unwrap();
+    world.tick(2.0, 0.1);
+    assert_eq!(world.drain_events(), [], "the same handle is the same play");
+    world.reconcile(vec![playing("hero", &d, &slide())]).unwrap();
+    world.tick(3.0, 0.1);
+    assert_eq!(world.drain_events(), [ended()], "a new handle is a new play");
+}

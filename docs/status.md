@@ -463,8 +463,11 @@ done in Rust was built and dropped the same day: a press is a decision, so it be
 **Chunk B landed:** facing and clip choice moved to Lua. `world::facing` (`Dir`, `Facings`,
 views) and the controller's `moving` clip are gone; the entity carries `flip` (mirror within the
 box), one rest pose, and a clip changed only by reconcile. The demo's `on_move` picks the view,
-the flip and walk-or-idle; the smoke's facing checks pass unchanged. Next: a height primitive so
-jump is a Lua-played clip (C), and `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
+the flip and walk-or-idle; the smoke's facing checks pass unchanged. **Chunk C landed:** no height
+primitive was needed — a jump is a once clip lifting the root part while the entity's feet stay
+put. The one Rust addition is `on_clip_end` (`WorldEvent::ClipEnd`, once per play). The demo
+jumps on Space with no double jump, all in Lua; the smoke checks the head rises, lands, and a
+second jump replays (which only `on_clip_end` makes possible). Next: `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
 world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds

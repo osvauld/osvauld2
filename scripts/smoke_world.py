@@ -92,6 +92,30 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.frame(30)
     assert entity_at(285, 210) == "hero", "released, the hero stopped"
 
+    # Jump: Space is an action; Lua plays the once `jump` clip and clears it on `on_clip_end`.
+    # Standing, (280, 100) is just above the head; at the top of the jump the head covers it.
+    assert entity_at(280, 100) == "—", "above the head"
+    s.rpc.keyboard("Space", " ", True)
+    s.rpc.frame(1)
+    s.rpc.keyboard("Space", " ", False)
+    s.rpc.advance(0.2)
+    s.rpc.frame(1)
+    assert entity_at(280, 100) == "hero", "mid-jump, the head is up there"
+    s.rpc.advance(0.4)
+    s.rpc.frame(2)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+    assert entity_at(280, 100) == "—", "landed"
+    assert entity_at(285, 210) == "hero", "the feet never moved"
+    # Only `on_clip_end` clearing `jumping` lets the clip handle change and a second jump replay.
+    s.rpc.keyboard("Space", " ", True)
+    s.rpc.frame(1)
+    s.rpc.keyboard("Space", " ", False)
+    s.rpc.advance(0.2)
+    s.rpc.frame(1)
+    assert entity_at(280, 100) == "hero", "a second jump, after on_clip_end"
+    s.rpc.advance(0.4)
+    s.rpc.frame(2)
+
     # Facing: the world shows a view per direction. Hits name the entity, not the part, so each
     # view is told apart by its outline, measured by bisecting outward from a point inside it:
     # the profile's nose makes the head lopsided against the body's centre (mirrored for left),
@@ -148,4 +172,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump")
