@@ -39,7 +39,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         drawing: drawing.clone(),
         clip: None,
         controller: None,
-        facing: Facings::default(),
+        flip: false,
     }
 }
 
@@ -222,7 +222,7 @@ fn a_clip_naming_a_part_its_drawing_lacks_is_refused() {
     );
 }
 
-fn wasd(speed: f64, moving: Option<Arc<Clip>>) -> Controller {
+fn wasd(speed: f64) -> Controller {
     let axis = |neg: &str, pos: &str| {
         Some(Axis {
             neg: neg.into(),
@@ -233,7 +233,6 @@ fn wasd(speed: f64, moving: Option<Arc<Clip>>) -> Controller {
         speed,
         axis_x: axis("KeyA", "KeyD"),
         axis_y: axis("KeyW", "KeyS"),
-        moving,
     }
 }
 
@@ -244,17 +243,12 @@ fn controlled(d: &Arc<Drawing>, controller: Controller) -> EntitySpec {
     }
 }
 
-fn now_playing(world: &World2d) -> (Arc<Clip>, f64) {
-    let a = world.ecs.get::<Animator>(world.by_id["hero"]).unwrap();
-    (a.clip.clone(), a.started)
-}
-
 #[test]
 fn a_controller_moves_along_held_axes_and_a_diagonal_is_no_faster() {
     let d = drawing();
     let mut world = World2d::default();
     world
-        .reconcile(vec![controlled(&d, wasd(100.0, None))])
+        .reconcile(vec![controlled(&d, wasd(100.0))])
         .unwrap();
     assert!(world.needs_ticks());
     world.tick(0.0, 0.5);
@@ -288,163 +282,36 @@ fn a_controller_moves_along_held_axes_and_a_diagonal_is_no_faster() {
 }
 
 #[test]
-fn the_moving_clip_plays_only_while_moving_and_survives_reconcile() {
-    let (d, walk, idle) = (drawing(), slide(), slide());
-    let describe = |world: &mut World2d| {
-        let hero = EntitySpec {
-            clip: Some(idle.clone()),
-            ..controlled(&d, wasd(10.0, Some(walk.clone())))
-        };
-        world.reconcile(vec![hero]).unwrap();
-    };
-    let mut world = World2d::default();
-    describe(&mut world);
-    assert!(Arc::ptr_eq(&now_playing(&world).0, &idle));
-
-    world.key("KeyD", true);
-    world.tick(1.0, 0.1);
-    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk));
-    describe(&mut world);
-    world.tick(2.0, 0.1);
-    let (clip, started) = now_playing(&world);
-    assert!(
-        Arc::ptr_eq(&clip, &walk),
-        "a reconcile does not stop the walk"
-    );
-    assert_eq!(started, 1.0, "nor restart it");
-
-    world.key("KeyD", false);
-    world.tick(3.0, 0.1);
-    let (clip, started) = now_playing(&world);
-    assert!(Arc::ptr_eq(&clip, &idle));
-    assert_eq!(started, 3.0);
-}
-
-#[test]
 fn a_bad_controller_is_refused() {
-    use crate::clip::{Easing, Key, Prop, Track};
-    let key = Key {
-        time: 0.0,
-        value: 1.0,
-        easing: Easing::Linear,
-    };
-    let track = Track {
-        part: "wing".into(),
-        prop: Prop::Rot,
-        keys: vec![key],
-    };
-    let flap = Arc::new(Clip::new(1.0, true, vec![track]).unwrap());
     let d = drawing();
     let mut world = World2d::default();
     for speed in [f64::NAN, -1.0] {
         assert!(matches!(
-            world.reconcile(vec![controlled(&d, wasd(speed, None))]),
+            world.reconcile(vec![controlled(&d, wasd(speed))]),
             Err(WorldError::Speed(_))
         ));
     }
-    assert!(matches!(
-        world.reconcile(vec![controlled(&d, wasd(1.0, Some(flap)))]),
-        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
-    ));
     assert!(!world.needs_ticks(), "nothing was accepted");
 }
 
-fn view(drawing: &Arc<Drawing>, moving: Option<&Arc<Clip>>) -> Option<facing::View> {
-    Some(facing::View {
-        drawing: Some(drawing.clone()),
-        clip: None,
-        moving: moving.cloned(),
-    })
-}
-
-/// Holds `code` for one zero-length tick — it turns without moving — then lets go.
-fn turn(world: &mut World2d, code: &str) {
-    world.key(code, true);
-    world.tick(0.0, 0.0);
-    world.key(code, false);
-}
-
 #[test]
-fn left_mirrors_the_side_view_and_stopping_keeps_the_facing() {
+fn flip_mirrors_the_drawing_within_its_box() {
     let d = drawing();
-    let hero = EntitySpec {
-        facing: Facings {
-            side: view(&d, None),
-            ..Facings::default()
-        },
-        ..controlled(&d, wasd(10.0, None))
-    };
     let mut world = World2d::default();
-    world.reconcile(vec![hero]).unwrap();
+    world.reconcile(vec![spec("hero", (0.0, 0.0), &d)]).unwrap();
     assert_eq!(
         (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
         (true, false)
     );
-
-    turn(&mut world, "KeyA");
-    world.tick(0.0, 0.0);
-    assert_eq!(
-        world.facing("hero"),
-        Some(facing::Dir::Left),
-        "kept after stopping"
-    );
+    let flipped = EntitySpec {
+        flip: true,
+        ..spec("hero", (0.0, 0.0), &d)
+    };
+    world.reconcile(vec![flipped]).unwrap();
     assert_eq!(
         (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
         (false, true)
     );
-    turn(&mut world, "KeyD");
-    assert_eq!(
-        (at(&world, 6.0).is_some(), at(&world, 2.0).is_some()),
-        (true, false)
-    );
-}
-
-#[test]
-fn a_facing_brings_its_own_drawing_and_moving_clip() {
-    let (front, back, walk, walk_up) = (drawing(), drawing(), slide(), slide());
-    let hero = EntitySpec {
-        facing: Facings {
-            up: view(&back, Some(&walk_up)),
-            ..Facings::default()
-        },
-        ..controlled(&front, wasd(10.0, Some(walk.clone())))
-    };
-    let mut world = World2d::default();
-    world.reconcile(vec![hero]).unwrap();
-    let showing = |world: &World2d| {
-        let e = world.ecs.entity(world.by_id["hero"]);
-        let look = e.get::<Appearance>().unwrap();
-        look.shown(*e.get::<facing::Dir>().unwrap(), e.get::<Controller>())
-            .drawing
-            .clone()
-    };
-    world.key("KeyW", true);
-    world.tick(1.0, 0.1);
-    assert!(Arc::ptr_eq(&showing(&world), &back));
-    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk_up));
-    world.key("KeyW", false);
-    world.key("KeyS", true);
-    world.tick(2.0, 0.1);
-    assert!(Arc::ptr_eq(&showing(&world), &front));
-    assert!(Arc::ptr_eq(&now_playing(&world).0, &walk));
-}
-
-#[test]
-fn every_facing_is_checked_against_the_clips_it_plays() {
-    let (front, back) = (drawing(), drawing_of("torso"));
-    let hero = EntitySpec {
-        clip: Some(slide()), // moves `body`, which the back view lacks
-        facing: Facings {
-            up: view(&back, None),
-            ..Facings::default()
-        },
-        ..spec("hero", (0.0, 0.0), &front)
-    };
-    let mut world = World2d::default();
-    assert!(matches!(
-        world.reconcile(vec![hero]),
-        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
-    ));
 }
 
 #[test]
@@ -468,7 +335,7 @@ fn a_move_event_marks_each_change_of_held_direction_not_each_frame() {
     let d = drawing();
     let mut world = World2d::default();
     world
-        .reconcile(vec![controlled(&d, wasd(100.0, None))])
+        .reconcile(vec![controlled(&d, wasd(100.0))])
         .unwrap();
     let moved = |dx, dy| WorldEvent::Move {
         id: "hero".into(),

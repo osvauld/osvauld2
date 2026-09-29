@@ -179,7 +179,8 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `facing` — nothing else. `false` drops out, like a child element. List order is draw order,
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `flip` — nothing else.
+  `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
@@ -190,7 +191,9 @@ ui.world({
   `stroke`) and pointer handlers apply to the element.
 - The world outlives hot reload and survives a hidden tab. It is dropped when a successful frame
   no longer draws its id. A bad description is an error and keeps the last good world.
-- Collision and discrete actions are the next slice of [2d-world.md](design/2d-world.md).
+- `flip = true` mirrors the drawing within its box — a side view drawn facing right, shown
+  facing left.
+- Collision is the next slice of [2d-world.md](design/2d-world.md).
 
 ### Clips
 
@@ -232,7 +235,6 @@ local wasd = {
 	speed = 160,                               -- units a second; required
 	axis_x = { neg = "KeyA", pos = "KeyD" },   -- at least one axis
 	axis_y = { neg = "KeyW", pos = "KeyS" },
-	moving = walk,                             -- optional gfx.clip played while it moves
 }
 { id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd }
 ```
@@ -242,7 +244,6 @@ local wasd = {
 - Both keys of an axis held cancel; a diagonal is no faster than a straight line. Movement uses the
   runtime's frame `dt`, capped at 0.1s after a stall, so `rpc.frame(n)` is the exact way to drive
   it offscreen — `rpc.advance` moves by at most one capped step.
-- While moving, `moving` plays in place of the entity's `clip`; when it stops, `clip` restarts.
 - A world with a controller or actions takes keyboard input itself (it attaches `on_key`, and
   releases every key on blur), so `on_key` on a `ui.world` is an error. A world with neither
   leaves keys alone.
@@ -266,26 +267,28 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
 - Actions are the world's, not an entity's: the press is the player's, and Lua decides which
   entity it concerns.
 
-### Facing
+### Facing and gait — decided in Lua
 
-A top-down character is drawn as views — front, back, side — and the world shows the one for the
-way it last moved. The entity's own `drawing` is the front (facing down).
+The world reports a change of direction; Lua picks what the entity shows. A top-down character is
+drawn as views — front, back, side — sharing part ids so one clip plays on all of them.
 
 ```lua
-facing = {
-	up = { drawing = hero_back },
-	side = { drawing = hero_side, moving = walk_side },   -- drawn facing right
+local views = {
+	down = { drawing = hero, walk = walk },
+	up = { drawing = hero_back, walk = walk },
+	right = { drawing = hero_side, walk = walk_side },
+	left = { drawing = hero_side, walk = walk_side, flip = true },   -- the side view, mirrored
 }
+on_move = function(e)
+	walking = e.dx ~= 0 or e.dy ~= 0
+	face = face_for(e.dx, e.dy, face)     -- the app's own rule; stopping keeps the facing
+end,
+{ id = "hero", drawing = views[face].drawing, flip = views[face].flip,
+	clip = walking and views[face].walk or idle, controller = wasd },
 ```
 
-- Views are `down`, `up`, `side` and `left`, each `{ drawing, clip, moving }`; whatever a view
-  leaves out falls back to the entity's own `drawing`, `clip` and controller `moving`.
-- `left` is `side` mirrored within the drawing's box unless given itself — give it for a
-  character that is not symmetric.
-- The controller sets the facing: the larger component of the move wins, an exact diagonal keeps
-  the current facing if it can, and stopping keeps the way it last moved.
-- Every view's drawing is checked against every clip it can play, so views share part ids (the
-  demo's three hero drawings all have `head`, `body`, `leg_l`…).
+- The clip switches on the frame after the move starts: Rust moves on the tick, Lua re-describes
+  after `on_move`.
 - Hits still name the entity, whatever view is showing.
 
 `demo_apps/world` is the reference: a hero who idles and walks with WASD, and a chest whose lid

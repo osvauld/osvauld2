@@ -6,11 +6,13 @@ local clips = require("clips")
 local idle, walk = gfx.clip(clips.idle), gfx.clip(clips.walk)
 local walk_side = gfx.clip(clips.walk_side)
 
--- Front is the entity's own drawing (facing down); the world picks a view by the way it moves,
--- and mirrors `side` for left.
+-- A view per facing: what to draw, what to play while walking, and whether to mirror. The side
+-- view is drawn facing right, so left is the same drawing flipped.
 local views = {
-	up = { drawing = hero_back },
-	side = { drawing = hero_side, moving = walk_side },
+	down = { drawing = hero, walk = walk },
+	up = { drawing = hero_back, walk = walk },
+	right = { drawing = hero_side, walk = walk_side },
+	left = { drawing = hero_side, walk = walk_side, flip = true },
 }
 local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
 
@@ -19,13 +21,24 @@ local wasd = {
 	speed = 160,
 	axis_x = { neg = "KeyA", pos = "KeyD" },
 	axis_y = { neg = "KeyW", pos = "KeyS" },
-	moving = walk,
 }
+
+-- Which way to face for a held direction. On a diagonal, keep the current facing if it is one of
+-- the two; otherwise the sideways one. Stopping keeps the facing.
+local function face_for(dx, dy, current)
+	local h = dx < 0 and "left" or dx > 0 and "right" or nil
+	local v = dy < 0 and "up" or dy > 0 and "down" or nil
+	if h and v then
+		return (current == h or current == v) and current or h
+	end
+	return h or v or current
+end
 
 local friend = false -- whether the second hero is described; the world spawns/despawns to match
 local hot = nil -- the entity under the pointer
 local lid = nil -- the chest's clip: nil at rest, then open/close; a new handle restarts it
 local heading = "still" -- the hero's held direction, as the world last reported it
+local face, walking = "down", false -- the hero's facing and gait, decided on each on_move
 
 local function toggle_lid()
 	lid = lid == open and close or open
@@ -60,10 +73,12 @@ return function()
 				if e.action == "interact" then toggle_lid() end
 			end,
 			on_move = function(e)
-				heading = (e.dx == 0 and e.dy == 0) and "still" or (e.dx .. "," .. e.dy)
+				walking = e.dx ~= 0 or e.dy ~= 0
+				heading = walking and (e.dx .. "," .. e.dy) or "still"
+				face = face_for(e.dx, e.dy, face)
 			end,
-			{ id = "hero", pos = { 120, 80 }, drawing = hero, clip = idle, controller = wasd,
-				facing = views },
+			{ id = "hero", pos = { 120, 80 }, drawing = views[face].drawing, flip = views[face].flip,
+				clip = walking and views[face].walk or idle, controller = wasd },
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),

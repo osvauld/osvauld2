@@ -70,7 +70,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # Hot reload with the hero's spawn pos changed: the world survives, so the hero stays put.
     source = s.rpc.read_file_versioned(item, "main.lua")
     result = s.rpc.edit_file(item, "main.lua", source["revision"], [
-        {"old_text": 'pos = { 120, 80 }, drawing = hero', "new_text": 'pos = { 400, 80 }, drawing = hero'},
+        {"old_text": 'pos = { 120, 80 }, drawing = views', "new_text": 'pos = { 400, 80 }, drawing = views'},
     ])
     assert result["persisted"] and result["activation"] == "activated", result
     s.rpc.frame(2)

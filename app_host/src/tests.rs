@@ -663,7 +663,7 @@ fn a_controller_is_checked_strictly() {
         ("{ speed = 1, axis_y = { neg = 'KeyW', up = 'KeyS' } }".to_string(), "axis_y: unknown field up"),
         ("{ speed = 1, axis_y = { neg = 'KeyW' } }".to_string(), "axis_y needs pos"),
         (format!("{{ speed = -5, {x} }}"), "controller speed must be a finite number"),
-        (format!("{{ speed = 1, {x}, moving = hero }}"), "moving must be a gfx.clip"),
+        (format!("{{ speed = 1, {x}, moving = hero }}"), "controller: unknown field moving"),
     ];
     for (controller, wanted) in cases {
         let err = walk_world(&lua, &worlds, &room(&controller)).unwrap_err().to_string();
@@ -675,28 +675,24 @@ fn a_controller_is_checked_strictly() {
 }
 
 #[test]
-fn a_facing_is_checked_strictly() {
+fn flip_is_a_boolean() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();
-    let room = |facing: &str| {
-        format!("{HERO} {SLIDE} return ui.world({{ id = 'room', width = 1, height = 1, \
-            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, facing = {facing} }} }})")
+    let room = |flip: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, flip = {flip} }} }})")
     };
-    walk_world(&lua, &worlds, &room("{ up = { drawing = hero, moving = slide }, side = {} }"))
-        .unwrap();
-    let wing = "gfx.clip({ length = 1, tracks = { wing = { rot = { {0, 1} } } } })";
+    walk_world(&lua, &worlds, &room("true")).unwrap();
     let cases = [
-        ("'side'".to_string(), "facing must be a table, got string"),
-        ("{ north = {} }".to_string(), "facing: unknown field north"),
-        ("{ up = hero }".to_string(), "facing.up must be a table, got userdata"),
-        ("{ up = { drawing = slide } }".to_string(), "facing.up.drawing must be a gfx.drawing"),
-        ("{ side = { speed = 3 } }".to_string(), "facing.side: unknown field speed"),
-        (format!("{{ left = {{ clip = {wing} }} }}"), "unknown part \"wing\""),
+        ("'left'", "world entity 1.flip must be a boolean, got string"),
+        ("{ side = {} }", "world entity 1.flip must be a boolean, got table"),
     ];
-    for (facing, wanted) in cases {
-        let err = walk_world(&lua, &worlds, &room(&facing)).unwrap_err().to_string();
+    for (flip, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(flip)).unwrap_err().to_string();
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
+    let err = walk_world(&lua, &worlds, &room("true, facing = {}")).unwrap_err().to_string();
+    assert!(err.contains("unknown field facing"), "{err}");
 }
 
 #[test]

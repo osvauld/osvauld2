@@ -173,7 +173,8 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
    clip plays — and a Rust jump would have added a third. The rule, sharpened: **Rust does what
    happens every frame; Lua decides what happens at a moment**, told by an event. 4c is now:
    A, events (`actions` → `on_action`, `on_move` on a change of held direction) — *landed*;
-   B, facing and clip choice move to Lua on `on_move`, Rust keeping only a mirror primitive;
+   B, facing and clip choice move to Lua on `on_move`, Rust keeping only a mirror primitive
+   (`flip`) — *landed*;
    C, a height primitive a clip can animate, so a jump is Lua deciding and a clip playing;
    D, `attach` — an entity placed at another's part each frame, for carrying the chest.
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.

@@ -15,7 +15,6 @@ use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
 use world::clip::{Clip, Easing, Key, Prop, Track};
-use world::facing::{Facings, View};
 
 #[derive(Clone)]
 #[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
@@ -343,16 +342,21 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    let fields = ["id", "pos", "drawing", "clip", "controller", "facing"];
+    let fields = ["id", "pos", "drawing", "clip", "controller", "flip"];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
     let controller = match maybe_table(&spec, &owner, "controller")? {
         Some(c) => Some(controller(&c, &format!("{owner}.controller"))?),
         None => None,
     };
-    let facing = match maybe_table(&spec, &owner, "facing")? {
-        Some(f) => facings(&f, &format!("{owner}.facing"))?,
-        None => Default::default(),
+    // Checked by hand: mlua reads any value as a bool by truthiness, so `flip = "left"` would pass.
+    let flip = match spec.get::<Value>("flip")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.flip must be a boolean, got {what}")));
+        }
     };
     Ok(world::EntitySpec {
         id: need(&spec, &owner, "id")?,
@@ -362,30 +366,8 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
         })?,
         clip: maybe_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?,
         controller,
-        facing,
+        flip,
     })
-}
-
-/// `{ down, up, side, left }`, each `{ drawing, clip, moving }`; whatever a view leaves out
-/// falls back to the entity's own. `side` is drawn facing right; `left` defaults to it mirrored.
-fn facings(spec: &Table, owner: &str) -> mlua::Result<Facings> {
-    named_fields(spec, owner, &["down", "up", "side", "left"])?;
-    let view = |field: &str| -> mlua::Result<Option<View>> {
-        let Some(v) = maybe_table(spec, owner, field)? else {
-            return Ok(None);
-        };
-        let owner = format!("{owner}.{field}");
-        named_fields(&v, &owner, &["drawing", "clip", "moving"])?;
-        let clip = |f| maybe_gfx(&v, &owner, f, "a gfx.clip", |c: &LuaClip| c.0.clone());
-        Ok(Some(View {
-            drawing: maybe_gfx(&v, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
-                d.0.clone()
-            })?,
-            clip: clip("clip")?,
-            moving: clip("moving")?,
-        }))
-    };
-    Ok(Facings { down: view("down")?, up: view("up")?, side: view("side")?, left: view("left")? })
 }
 
 /// An optional table field: absent is `None`, and anything but a table says which field it was.
@@ -416,7 +398,7 @@ fn maybe_gfx<T: 'static, R>(
 
 /// Key codes are physical names (`"KeyW"`, `"ArrowLeft"`), the same as `on_key`'s `e.code`.
 fn controller(spec: &Table, owner: &str) -> mlua::Result<world::Controller> {
-    named_fields(spec, owner, &["speed", "axis_x", "axis_y", "moving"])?;
+    named_fields(spec, owner, &["speed", "axis_x", "axis_y"])?;
     let axis = |field: &str| -> mlua::Result<Option<world::Axis>> {
         let Some(axis) = spec.get::<Option<Table>>(field)? else {
             return Ok(None);
@@ -430,9 +412,8 @@ fn controller(spec: &Table, owner: &str) -> mlua::Result<world::Controller> {
     if axis_x.is_none() && axis_y.is_none() {
         return Err(Error::runtime(format!("{owner} needs axis_x or axis_y")));
     }
-    let moving = maybe_gfx(spec, owner, "moving", "a gfx.clip", |c: &LuaClip| c.0.clone())?;
     let speed = need(spec, owner, "speed")?;
-    Ok(world::Controller { speed, axis_x, axis_y, moving })
+    Ok(world::Controller { speed, axis_x, axis_y })
 }
 
 /// `tracks = { part = { prop = { {time, value, easing?}, ... } } }`. Parts are sorted so a bad

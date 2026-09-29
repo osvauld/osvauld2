@@ -460,8 +460,11 @@ fresh press of a key named in the world's `actions`, `on_move` when a controlled
 direction changes — queued in `World2d` and handed to Lua by `LuaApp::world_events` after a tick
 or key. The demo opens the chest on E and shows the last heading; the smoke checks both. A jump
 done in Rust was built and dropped the same day: a press is a decision, so it belongs to Lua.
-Next: facing and clip choice move to Lua (chunk B), a height primitive so jump is a Lua-played
-clip (C), and `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
+**Chunk B landed:** facing and clip choice moved to Lua. `world::facing` (`Dir`, `Facings`,
+views) and the controller's `moving` clip are gone; the entity carries `flip` (mirror within the
+box), one rest pose, and a clip changed only by reconcile. The demo's `on_move` picks the view,
+the flip and walk-or-idle; the smoke's facing checks pass unchanged. Next: a height primitive so
+jump is a Lua-played clip (C), and `attach` for carrying (D). Not built: walls/physics, key-code validation, and a
 world-level `DumpTree`.
 
 ### Environment — composable 3D interfaces and worlds
