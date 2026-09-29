@@ -167,7 +167,7 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
    held keys or velocity, so the controller carries `moving = clip`, played in Rust while it moves
    — still vocabulary, not content. Landed that way.)*
    *4b, added 2026-09-28:* facing — per-direction views (front, back, side mirrored for left),
-   chosen by the controller's movement. *4c, planned:* draw order by feet, and jump as height
+   chosen by the controller's movement. *4c:* draw order by feet (landed as `order = "y"`), and jump as height
    above the ground position (so order and collision keep using the feet).
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 

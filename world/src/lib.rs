@@ -1,6 +1,7 @@
 //! A retained 2D world: entities kept by author id across frames in a `bevy_ecs` World. Lua
 //! describes; `reconcile` spawns, updates and despawns to match. `pos` is read only at spawn —
-//! once an entity exists its placement belongs to the world. List order is draw order. Nothing
+//! once an entity exists its placement belongs to the world. List order is draw order unless the
+//! world sorts by feet (`Order::Feet`). Nothing
 //! outside this crate sees ECS types. Held keys and motion live here too: Lua describes a
 //! controller once, and `tick` moves the entity every frame without Lua.
 
@@ -43,6 +44,17 @@ pub struct Controller {
     pub axis_x: Option<Axis>,
     pub axis_y: Option<Axis>,
     pub moving: Option<Arc<Clip>>,
+}
+
+/// How entities stack when drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    /// The description's list order, back to front.
+    #[default]
+    List,
+    /// The lower an entity's feet (the bottom of its box) on screen, the nearer it draws — a
+    /// top-down room. Ties keep list order. Rotation is ignored.
+    Feet,
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -106,6 +118,7 @@ pub struct World2d {
     held: HashSet<String>,
     by_id: HashMap<String, Entity>,
     order: Vec<Entity>,
+    stacking: Order,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,7 +228,7 @@ impl World2d {
 
     /// Each entity is an instance named by its id, so a hit on the world reports which entity.
     pub fn frame(&self, width: f64, height: f64) -> Result<Frame, WorldError> {
-        let items = self
+        let mut items = self
             .order
             .iter()
             .map(|&entity| {
@@ -240,13 +253,18 @@ impl World2d {
                         .clone(),
                 };
                 let mut place = t.affine();
+                let (w, h) = shown.drawing.size();
                 if shown.mirrored {
-                    let (w, _) = shown.drawing.size();
                     place *= Affine::new([-1.0, 0.0, 0.0, 1.0, w, 0.0]); // flip within its box
                 }
-                Ok(Item::instance(place, posed)?.with_id(name.0.as_str()))
+                let feet = t.y + h * t.scale;
+                Ok((feet, Item::instance(place, posed)?.with_id(name.0.as_str())))
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
+        if self.stacking == Order::Feet {
+            items.sort_by(|a, b| a.0.total_cmp(&b.0)); // stable, so ties keep list order
+        }
+        let items = items.into_iter().map(|(_, item)| item).collect();
         Ok(Frame::new(width, height, None, items)?)
     }
 
@@ -286,6 +304,10 @@ impl World2d {
     /// Focus left, so no key is known to be down any more.
     pub fn release_all(&mut self) {
         self.held.clear();
+    }
+
+    pub fn set_order(&mut self, order: Order) {
+        self.stacking = order;
     }
 
     /// Whether anything plays or moves — only then does the world need the frame clock.

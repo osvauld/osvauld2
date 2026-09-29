@@ -39,9 +39,10 @@ return function()
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
 		ui.text({ "WASD walks the hero · click the chest", color = C.muted, font_size = 13, no_wrap = true }),
-		-- `pos` is where an entity spawns; after that the world owns where it is.
+		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
+		-- stacks by feet: whoever stands lower draws in front.
 		ui.world({
-			id = "room", width = C.width, height = C.height, fill = C.floor, radius = 10,
+			id = "room", width = C.width, height = C.height, fill = C.floor, radius = 10, order = "y",
 			stroke = { 3, C.border },
 			on_hover = function(e) hot = e.phase ~= "leave" and e.shape or nil end,
 			on_click = function(e)

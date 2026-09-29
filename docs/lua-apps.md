@@ -179,7 +179,9 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `facing` — nothing else. `false` drops out, like a child element. List order is draw order.
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller` and `facing` — nothing else. `false` drops out, like a child element. List order is draw order,
+  unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
+  lower draws in front, ties keeping list order — a top-down room.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
   is; re-sending a different `pos` does not move it.
 - An id the description no longer lists is despawned. A new `drawing` handle replaces the look;

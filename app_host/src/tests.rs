@@ -642,6 +642,19 @@ fn a_facing_is_checked_strictly() {
 }
 
 #[test]
+fn a_world_order_is_y_or_nil() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |order: &str| {
+        format!("return ui.world({{ id = 'room', width = 1, height = 1, order = {order} }})")
+    };
+    walk_world(&lua, &worlds, &room("'y'")).unwrap();
+    walk_world(&lua, &worlds, &room("nil")).unwrap();
+    let err = walk_world(&lua, &worlds, &room("'z'")).unwrap_err().to_string();
+    assert!(err.contains("world order must be \"y\" or nil, got \"z\""), "{err}");
+}
+
+#[test]
 fn a_clip_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let clip = |spec: &str| format!("return gfx.clip({{ {spec} }})");

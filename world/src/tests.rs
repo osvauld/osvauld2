@@ -446,3 +446,19 @@ fn every_facing_is_checked_against_the_clips_it_plays() {
         Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
     ));
 }
+
+#[test]
+fn feet_order_draws_the_lower_entity_in_front_and_ties_keep_list_order() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world
+        .reconcile(vec![
+            spec("low", (0.0, 5.0), &d),
+            spec("high", (20.0, 0.0), &d),
+            spec("level", (40.0, 0.0), &d),
+        ])
+        .unwrap();
+    assert_eq!(ids(&world), ["low", "high", "level"]);
+    world.set_order(Order::Feet);
+    assert_eq!(ids(&world), ["high", "level", "low"]);
+}

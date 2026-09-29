@@ -118,8 +118,22 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     lopsided, top = outline()
     assert abs(lopsided) < 10 and top < 47, ("facing down: front view", lopsided, top)
 
+    # Draw order by feet (`order = "y"`): walk the hero onto the chest so their feet are level,
+    # with a leg crossing (541, 275). A step up puts the hero behind the chest, a step down in front.
+    s.rpc.keyboard("KeyD", "d", True)
+    s.rpc.frame(102)
+    s.rpc.keyboard("KeyD", "d", False)
+    s.rpc.frame(2)
+    tap("KeyW", "w")
+    assert entity_at(541, 275) == "chest", "feet above the chest's: the hero is behind it"
+    s.rpc.keyboard("KeyS", "s", True)
+    s.rpc.frame(3)
+    s.rpc.keyboard("KeyS", "s", False)
+    s.rpc.frame(2)
+    assert entity_at(541, 275) == "hero", "feet below the chest's: the hero is in front"
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet")

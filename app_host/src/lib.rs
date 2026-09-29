@@ -1310,6 +1310,15 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             .ok_or_else(|| mlua::Error::runtime(format!("world needs {field}")))
     };
     let (width, height) = (size("width")?, size("height")?);
+    let order = match node.get::<Option<String>>("order")?.as_deref() {
+        None => world::Order::List,
+        Some("y") => world::Order::Feet,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "world order must be \"y\" or nil, got {other:?}"
+            )));
+        }
+    };
     for (handler, what) in [("on_frame", "frame clock"), ("on_key", "keys")] {
         if !node.get::<Value>(handler)?.is_nil() {
             return Err(mlua::Error::runtime(format!(
@@ -1333,6 +1342,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     let mut worlds = context.worlds.borrow_mut();
     let world = worlds.entry(id.clone()).or_default();
     world.reconcile(specs).map_err(mlua::Error::external)?;
+    world.set_order(order);
     let visual = world.frame(width, height).map_err(mlua::Error::external)?;
     let mut el = frame_el(Arc::new(visual));
     if world.wants_keys() {
@@ -1434,7 +1444,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
-        "world" => &["width", "height"],
+        "world" => &["width", "height", "order"],
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;
