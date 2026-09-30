@@ -7,6 +7,7 @@
 //! change of direction — queue as `WorldEvent`s for Lua to decide on.
 
 pub mod clip;
+mod physics;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use runtime::frame::{Frame, FrameError, Item};
 use runtime::vello::kurbo::{Affine, Point};
 
 use crate::clip::Clip;
+use crate::physics::Physics;
+pub use crate::physics::{Collider, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -28,6 +31,7 @@ pub struct EntitySpec {
     /// Mirrored within the drawing's box: a side view drawn facing right, shown facing left.
     pub flip: bool,
     pub attach: Option<Attach>,
+    pub collider: Option<Collider>,
 }
 
 /// Carried: the entity's origin rides at `at` — a point in the carrier's drawing at rest — as the
@@ -104,6 +108,14 @@ struct Appearance {
     rest: Arc<Frame>,
 }
 
+/// The entity's body in `Physics`, rebuilt only when its collider or kind of body changes.
+#[derive(Component)]
+struct Solid {
+    collider: Collider,
+    moves: bool,
+    body: rapier2d::prelude::RigidBodyHandle,
+}
+
 #[derive(Component)]
 struct Attached {
     to: Entity,
@@ -135,6 +147,7 @@ pub struct World2d {
     by_id: HashMap<String, Entity>,
     order: Vec<Entity>,
     stacking: Order,
+    physics: Physics,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,6 +160,8 @@ pub enum WorldError {
     Speed(String),
     #[error("entity {0:?}: {1}")]
     Attach(String, String),
+    #[error("entity {0:?}: {1}")]
+    Collider(String, String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -170,6 +185,10 @@ impl World2d {
                 && !(c.speed.is_finite() && c.speed >= 0.0)
             {
                 return Err(WorldError::Speed(spec.id.clone()));
+            }
+            if let Some(c) = &spec.collider {
+                c.check()
+                    .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             }
             // A clip may move only parts its drawing has.
             if let Some(clip) = &spec.clip
@@ -229,6 +248,20 @@ impl World2d {
                 }
             };
             let mut e = self.ecs.entity_mut(entity);
+            let moves = spec.controller.is_some();
+            let kept = e.get::<Solid>().is_some_and(|s| {
+                spec.collider.as_ref() == Some(&s.collider) && s.moves == moves
+            });
+            if !kept {
+                if let Some(old) = e.take::<Solid>() {
+                    self.physics.remove(old.body);
+                }
+                if let Some(collider) = spec.collider {
+                    let t = e.get::<Transform>().expect("every entity has a Transform");
+                    let body = self.physics.add(&collider, (t.x, t.y), moves);
+                    e.insert(Solid { collider, moves, body });
+                }
+            }
             e.insert(Appearance {
                 drawing: spec.drawing,
                 flip: spec.flip,
@@ -252,6 +285,9 @@ impl World2d {
             self.ecs.entity_mut(entity).insert(attached);
         }
         for (_, gone) in self.by_id.drain() {
+            if let Some(s) = self.ecs.get::<Solid>(gone) {
+                self.physics.remove(s.body);
+            }
             self.ecs.despawn(gone);
         }
         (self.by_id, self.order) = (next, order);

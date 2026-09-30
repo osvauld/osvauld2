@@ -371,6 +371,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Some(a) => Some(attach(&a, &format!("{owner}.attach"))?),
             None => None,
         },
+        collider: None,
     })
 }
 

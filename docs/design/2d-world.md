@@ -1,7 +1,8 @@
 # 2D world — drawings, animation and a Rust-run game world
 
 Status: **design draft, 2026-09-28; nothing built.** Agreed in conversation, not yet reviewed as a
-contract. This is the 2D, game-first slice of the [Environment runtime](environment-runtime.md):
+contract. *Updated 2026-09-29:* slices 1–4 are built, including 4b–4c (§7); slice 5, Rapier, is
+next. `docs/status.md` says what is real. This is the 2D, game-first slice of the [Environment runtime](environment-runtime.md):
 it narrows that plan's World, scheduler and Rapier2D rows to one milestone. Names and Lua shapes
 below are proposals until the slice that builds them lands.
 
@@ -32,6 +33,16 @@ string id with a parent and a pivot. A Rust change that names a game concept is 
 
 No Lua runs per tick to move a hero. `on_frame` stays the escape hatch for custom behaviour, still
 experimental per the parent plan's Gate 0.
+
+*Revised 2026-09-29 — the rule, sharpened:* **Rust does what happens every frame; Lua decides what
+happens at a moment**, told by an event (`on_action`, `on_move`, `on_clip_end`, later `on_enter`).
+The table's transformation row is superseded: Rust never switches a clip on its own — Lua picks
+`clip`, the facing view and `flip` when a moment arrives, which makes the character's state
+machine app code (see §7, 4c). Two refinements of "no Lua per tick": no *game logic* runs per
+tick, but the runtime still re-runs `view` every rendered frame while the world animates, so the
+description is rebuilt and reconciled each frame — skipping that when only a world ticked is an
+optimisation not yet built. And Lua cannot read live positions yet; §4's read-only view is the
+plan, not Rust writing into Lua's state tables (Rust would have to know the app's state shape).
 
 ## 2. Drawings — our own vector representation
 
@@ -182,6 +193,9 @@ animation and it stays open. It exercises all five blocks. Slices, each visible 
 5. **Rapier.** Static walls, the chest sensor, `on_enter`, the E action, the chest's open clip.
 
 Networking, clock sync across peers, tilemaps, `gfx.image` and AI players are out of scope.
+*Note 2026-09-29:* "networking" here means wiring the world, not building a network layer —
+Osvauld is already federated and carries ephemeral data besides Loro sync, so a shared room is
+the world riding that, not new transport.
 
 ## 8. Decisions
 

@@ -41,6 +41,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         controller: None,
         flip: false,
         attach: None,
+        collider: None,
     }
 }
 
@@ -485,4 +486,61 @@ fn a_bad_attach_is_refused() {
     let chain = vec![hero(), carried("rider", "body", &d), rider];
     let err = world.reconcile(chain).unwrap_err().to_string();
     assert!(err.contains("which is itself attached"), "{err}");
+}
+
+fn solid(id: &str, pos: (f64, f64), shape: Shape, at: (f64, f64), d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        collider: Some(Collider { shape, at }),
+        ..spec(id, pos, d)
+    }
+}
+
+#[test]
+fn a_collider_becomes_a_body_placed_by_its_centre() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = solid("wall", (10.0, 20.0), Shape::Rect(100.0, 12.0), (0.0, 0.0), &d);
+    let hero = solid("hero", (0.0, 0.0), Shape::Circle(3.0), (4.0, 8.0), &d);
+    world.reconcile(vec![wall, hero, spec("ghost", (0.0, 0.0), &d)]).unwrap();
+    // A rect's `at` is its corner, a circle's its centre; an entity without a collider has none.
+    assert_eq!(world.physics.centres(), [(4.0, 8.0), (60.0, 26.0)]);
+}
+
+#[test]
+fn a_body_is_kept_while_its_collider_is_and_goes_with_it() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = || solid("wall", (0.0, 0.0), Shape::Rect(4.0, 4.0), (0.0, 0.0), &d);
+    let body = |w: &World2d| w.ecs.get::<Solid>(w.by_id["wall"]).map(|s| s.body);
+    world.reconcile(vec![wall()]).unwrap();
+    let first = body(&world);
+    world.reconcile(vec![wall()]).unwrap();
+    assert_eq!(body(&world), first, "the same collider keeps its body");
+    let wider = solid("wall", (0.0, 0.0), Shape::Rect(8.0, 4.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wider]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 2.0)], "a changed collider replaces its body");
+    world.reconcile(vec![spec("wall", (0.0, 0.0), &d)]).unwrap();
+    assert_eq!(world.physics.centres(), [], "dropping the collider drops the body");
+    world.reconcile(vec![wall()]).unwrap();
+    world.reconcile(vec![]).unwrap();
+    assert_eq!(world.physics.centres(), [], "despawning drops the body");
+}
+
+#[test]
+fn a_bad_collider_is_refused() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let cases = [
+        (Shape::Circle(0.0), (0.0, 0.0), "above zero"),
+        (Shape::Rect(4.0, f64::NAN), (0.0, 0.0), "above zero"),
+        (Shape::Circle(2.0), (f64::INFINITY, 0.0), "at must be finite"),
+    ];
+    for (shape, at, wanted) in cases {
+        let err = world
+            .reconcile(vec![solid("wall", (0.0, 0.0), shape, at, &d)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    assert_eq!(world.physics.centres(), [], "nothing was applied");
 }

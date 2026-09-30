@@ -473,9 +473,14 @@ part's posed transform), draws it just in front of the carrier, and leaves it wh
 detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
 until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
 Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-view carry point,
-and skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
-frame, so Lua re-describes the world each frame while it animates). Not built: walls/physics, key-code validation, and a
-world-level `DumpTree`.
+skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
+frame, so Lua re-describes the world each frame while it animates), and letting a world stop
+ticking once every clip is a finished once clip (a held pose still asks for frames).
+**Slice 5 (Rapier) started — 5a chunk 1:** `world` depends on `rapier2d`. An entity's
+`collider` (`{ circle | rect, at }`, plain data) becomes a Rapier body — fixed, or kinematic under
+a controller — kept while unchanged and dropped with the collider or the entity. Nothing collides
+yet and Lua cannot write `collider`: chunk 2 moves controlled entities through the character
+controller, chunk 3 parses it and walls the demo.
 
 ### Environment — composable 3D interfaces and worlds
 
