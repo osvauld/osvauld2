@@ -2,6 +2,7 @@
 //! when a controller moves it. Only shapes live here; drawings never reach Rapier, and no Rapier
 //! type leaves this crate.
 
+use rapier2d::control::{CharacterLength, KinematicCharacterController};
 use rapier2d::prelude::*;
 
 /// A collision shape in the entity's drawing units. Plain data, not tied to an entity, so an
@@ -44,13 +45,29 @@ impl Collider {
     }
 }
 
-#[derive(Default)]
+/// Top-down: nothing falls, and every surface is a wall to slide along — no ground to snap to,
+/// no slope too steep to climb.
+const WALKER: KinematicCharacterController = KinematicCharacterController {
+    up: Vector::Y,
+    offset: CharacterLength::Relative(0.01),
+    slide: true,
+    autostep: None,
+    max_slope_climb_angle: std::f32::consts::FRAC_PI_2,
+    min_slope_slide_angle: std::f32::consts::FRAC_PI_2,
+    snap_to_ground: None,
+    normal_nudge_factor: 1.0e-4,
+};
+
 pub(crate) struct Physics {
-    bodies: RigidBodySet,
-    colliders: ColliderSet,
-    islands: IslandManager,
-    impulse_joints: ImpulseJointSet,
-    multibody_joints: MultibodyJointSet,
+    world: PhysicsWorld,
+}
+
+impl Default for Physics {
+    fn default() -> Self {
+        let mut world = PhysicsWorld::new();
+        world.gravity = Vector::ZERO;
+        Self { world }
+    }
 }
 
 impl Physics {
@@ -62,31 +79,53 @@ impl Physics {
             true => RigidBodyBuilder::kinematic_position_based(),
             false => RigidBodyBuilder::fixed(),
         };
-        let body = self.bodies.insert(body.translation(at));
         let shape = match c.shape {
             Shape::Circle(r) => ColliderBuilder::ball(r as f32),
             Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
         };
-        self.colliders
-            .insert_with_parent(shape, body, &mut self.bodies);
-        body
+        self.world.insert(body.translation(at), shape).0
     }
 
     pub(crate) fn remove(&mut self, body: RigidBodyHandle) {
-        self.bodies.remove(
-            body,
-            &mut self.islands,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            true,
+        self.world.remove_body(body);
+    }
+
+    /// Brings Rapier's picture up to date — bodies added or moved since — before anything asks it.
+    pub(crate) fn step(&mut self, dt: f64) {
+        if dt > 0.0 {
+            self.world.integration_parameters.dt = dt as f32;
+            self.world.step();
+        }
+    }
+
+    /// Moves `body` as far along `wanted` as the other colliders allow, sliding along what it
+    /// meets, and says how far that was.
+    pub(crate) fn slide(
+        &mut self,
+        body: RigidBodyHandle,
+        wanted: (f64, f64),
+        dt: f64,
+    ) -> (f64, f64) {
+        let rb = &self.world.bodies[body];
+        let (pose, shape) = (
+            *rb.position(),
+            self.world.colliders[rb.colliders()[0]].shared_shape(),
         );
+        let queries = self
+            .world
+            .query_pipeline_with_filter(QueryFilter::default().exclude_rigid_body(body));
+        let wanted = Vector::new(wanted.0 as f32, wanted.1 as f32);
+        let moved = WALKER.move_shape(dt as f32, &queries, &**shape, &pose, wanted, |_| {});
+        let to = pose.translation + moved.translation;
+        self.world.bodies[body].set_translation(to, true);
+        (moved.translation.x as f64, moved.translation.y as f64)
     }
 
     /// Every collider's centre, for tests.
     #[cfg(test)]
     pub(crate) fn centres(&self) -> Vec<(f32, f32)> {
         let mut centres: Vec<_> = self
+            .world
             .colliders
             .iter()
             .map(|(_, c)| (c.translation().x, c.translation().y))

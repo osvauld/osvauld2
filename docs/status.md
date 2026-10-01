@@ -476,11 +476,17 @@ Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-v
 skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
 frame, so Lua re-describes the world each frame while it animates), and letting a world stop
 ticking once every clip is a finished once clip (a held pose still asks for frames).
-**Slice 5 (Rapier) started — 5a chunk 1:** `world` depends on `rapier2d`. An entity's
-`collider` (`{ circle | rect, at }`, plain data) becomes a Rapier body — fixed, or kinematic under
-a controller — kept while unchanged and dropped with the collider or the entity. Nothing collides
-yet and Lua cannot write `collider`: chunk 2 moves controlled entities through the character
-controller, chunk 3 parses it and walls the demo.
+**Slice 5 (Rapier) started — 5a, walls, landed:** `world` depends on `rapier2d`. An entity's
+`collider` (`{ circle | rect, at }`, plain data, strict in Lua) becomes a Rapier body — fixed, or
+kinematic under a controller — kept while unchanged and dropped with the collider or the entity.
+`tick` moves a solid controlled entity through Rapier's character controller, set up for
+top-down (no gravity, no ground snap, no slope limits): it stops at walls and slides along them,
+the same in every direction. The world's frame is clipped to its box (`Frame::clipped()`,
+opt-in; other frames still spill). The demo has thin side walls and a tall back wall, and the
+hero collides by a circle at its feet; the smoke checks it stops at the east and back walls.
+Next: 5b, a solid chest that cannot be carried into a wall or dropped inside one; 5c, a sensor
+(`on_enter`/`on_exit`) so E works only near the chest; 5d, dynamic bodies. Soft bodies (rope,
+cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
 

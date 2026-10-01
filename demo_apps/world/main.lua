@@ -17,6 +17,28 @@ local views = {
 }
 local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
 
+-- The room's walls: a plain bar each, solid all along. Only the collider stops anyone; the
+-- drawing is just so you can see it.
+local function bar(w, h)
+	return gfx.drawing({ size = { w, h }, parts = { { id = "bar", pivot = { 0, 0 }, shapes = {
+		{ path = { {"move",0,0}, {"line",w,0}, {"line",w,h}, {"line",0,h}, {"close"} }, fill = C.border },
+	} } } })
+end
+local T = 12 -- wall thickness
+local across, down = bar(C.width, T), bar(T, C.height)
+-- The back wall stands tall, as in a room seen from above and in front: the hero walks along its
+-- foot with the whole body inside the room. Its collider is the whole wall.
+local BACK = 190
+local back = gfx.drawing({ size = { C.width, BACK }, parts = { { id = "wall", pivot = { 0, 0 }, shapes = {
+	{ path = { {"move",0,0}, {"line",C.width,0}, {"line",C.width,BACK}, {"line",0,BACK}, {"close"} },
+		fill = C.wall },
+	{ path = { {"move",0,BACK-T}, {"line",C.width,BACK-T}, {"line",C.width,BACK}, {"line",0,BACK},
+		{"close"} }, fill = C.border },
+} } } })
+local function wall(id, x, y, drawing, w, h)
+	return { id = id, pos = { x, y }, drawing = drawing, collider = { rect = { w, h } } }
+end
+
 -- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
 local wasd = {
 	speed = 160,
@@ -66,7 +88,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks · Space jumps · E carries the chest · a click opens it", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks, walls stop you · Space jumps · E carries the chest · a click opens it", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -91,8 +113,14 @@ return function()
 				heading = walking and (e.dx .. "," .. e.dy) or "still"
 				face = face_for(e.dx, e.dy, face)
 			end,
+			-- The hero collides by its feet: the drawing is a body standing up out of the floor, so
+			-- the head may pass in front of the top wall.
 			{ id = "hero", pos = { 120, 80 }, drawing = views[face].drawing, flip = views[face].flip,
-				clip = hero_clip(), controller = wasd },
+				clip = hero_clip(), controller = wasd, collider = { circle = 16, at = { 80, 222 } } },
+			wall("wall:n", 0, 0, back, C.width, BACK),
+			wall("wall:s", 0, C.height - T, across, C.width, T),
+			wall("wall:w", 0, 0, down, T, C.height),
+			wall("wall:e", C.width - T, 0, down, T, C.height),
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
 				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil },

@@ -84,8 +84,9 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert entity_at(285, 210) == "hero", "released, the hero stopped"
 
     # Jump: Space is an action; Lua plays the once `jump` clip and clears it on `on_clip_end`.
-    # Standing, (280, 100) is just above the head; at the top of the jump the head covers it.
-    assert entity_at(280, 100) == "—", "above the head"
+    # Standing, (280, 100) is the back wall just above the head; at the top of the jump the head
+    # covers it.
+    assert entity_at(280, 100) == "wall:n", "above the head"
     s.rpc.keyboard("Space", " ", True)
     s.rpc.frame(1)
     s.rpc.keyboard("Space", " ", False)
@@ -95,7 +96,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.advance(0.4)
     s.rpc.frame(2)
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
-    assert entity_at(280, 100) == "—", "landed"
+    assert entity_at(280, 100) == "wall:n", "landed"
     assert entity_at(285, 210) == "hero", "the feet never moved"
     # Only `on_clip_end` clearing `jumping` lets the clip handle change and a second jump replay.
     s.rpc.keyboard("Space", " ", True)
@@ -178,8 +179,23 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
     assert (entity_at(480, 250), entity_at(635, 250)) == ("chest", "hero"), "dropped, left behind"
 
+    # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
+    # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
+    # wall, the whole hero still in the room — the world clips anything that spills past it.
+    s.rpc.keyboard("KeyD", "d", True)
+    s.rpc.frame(120)
+    s.rpc.keyboard("KeyD", "d", False)
+    s.rpc.frame(2)
+    assert (entity_at(700, 210), entity_at(714, 210)) == ("hero", "wall:e"), "stopped at the east wall"
+    s.rpc.keyboard("KeyW", "w", True)
+    s.rpc.frame(120)
+    s.rpc.keyboard("KeyW", "w", False)
+    s.rpc.frame(2)
+    assert entity_at(680, 30) == "hero", "stopped at the back wall, head inside the room"
+    assert entity_at(680, 196) == "hero", "feet at the foot of the back wall"
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls")

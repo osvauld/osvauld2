@@ -2,7 +2,7 @@
 
 Status: **design draft, 2026-09-28; nothing built.** Agreed in conversation, not yet reviewed as a
 contract. *Updated 2026-09-29:* slices 1–4 are built, including 4b–4c (§7); slice 5, Rapier, is
-next. `docs/status.md` says what is real. This is the 2D, game-first slice of the [Environment runtime](environment-runtime.md):
+under way (5a, walls, landed 2026-10-01). `docs/status.md` says what is real. This is the 2D, game-first slice of the [Environment runtime](environment-runtime.md):
 it narrows that plan's World, scheduler and Rapier2D rows to one milestone. Names and Lua shapes
 below are proposals until the slice that builds them lands.
 

@@ -294,6 +294,7 @@ pub struct Frame {
     baseline: Option<f64>,
     items: Vec<Item>,
     stats: FrameStats,
+    clipped: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -348,7 +349,15 @@ impl Frame {
             baseline,
             items,
             stats,
+            clipped: false,
         })
+    }
+
+    /// Nothing outside the box draws or answers a hit. Opt-in: a frame's size is otherwise only
+    /// its layout claim, and its contents may spill past it.
+    pub fn clipped(mut self) -> Self {
+        self.clipped = true;
+        self
     }
 
     pub fn size(&self) -> (f64, f64) {
@@ -365,7 +374,13 @@ impl Frame {
     }
 
     pub(crate) fn draw(&self, scene: &mut Scene, transform: Affine, alpha: f32) {
+        if !self.clipped {
+            return draw_items(scene, &self.items, transform, alpha);
+        }
+        let bounds = Rect::new(0.0, 0.0, self.width, self.height);
+        scene.push_clip_layer(peniko::Fill::NonZero, transform, &bounds);
         draw_items(scene, &self.items, transform, alpha);
+        scene.pop_layer();
     }
 
     /// The topmost named shape under `p`, which is given in this frame's own coordinates.
@@ -376,6 +391,9 @@ impl Frame {
     pub fn hit(&self, p: Point) -> Option<FrameHit> {
         if self.stats.hittable == 0 {
             return None; // nothing in here can be named, so nothing in here is worth walking
+        }
+        if self.clipped && !Rect::new(0.0, 0.0, self.width, self.height).contains(p) {
+            return None; // what spills past a clipped box is not drawn, so not touchable
         }
         find(&self.items, p, Affine::IDENTITY)
     }

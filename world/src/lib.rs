@@ -370,13 +370,15 @@ impl World2d {
             items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         }
         let items = items.into_iter().map(|(_, item)| item).collect();
-        Ok(Frame::new(width, height, None, items)?)
+        // Clipped: a head or hand spilling past the room's edge is not drawn outside it.
+        Ok(Frame::new(width, height, None, items)?.clipped())
     }
 
     /// One frame: `elapsed` is the runtime's frame clock, which clips play against; `dt` is the
     /// step controllers move by (the runtime caps it after a stall).
     pub fn tick(&mut self, elapsed: f64, dt: f64) {
         self.clock = elapsed;
+        self.physics.step(dt);
         for entity in self.order.clone() {
             let Some(c) = self.ecs.get::<Controller>(entity) else {
                 continue;
@@ -392,10 +394,16 @@ impl World2d {
             }
             e.insert(heading);
             if length > 0.0 {
+                // A solid entity goes only as far as the others let it.
+                let wanted = (dx / length * step, dy / length * step);
+                let (mx, my) = match e.get::<Solid>() {
+                    Some(s) => self.physics.slide(s.body, wanted, dt),
+                    None => wanted,
+                };
                 let mut t = e
                     .get_mut::<Transform>()
                     .expect("every entity has a Transform");
-                (t.x, t.y) = (t.x + dx / length * step, t.y + dy / length * step);
+                (t.x, t.y) = (t.x + mx, t.y + my);
             }
         }
         self.follow();

@@ -342,7 +342,7 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
-    let fields = ["id", "pos", "drawing", "clip", "controller", "flip", "attach"];
+    let fields = ["id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider"];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
     let controller = match maybe_table(&spec, &owner, "controller")? {
@@ -371,8 +371,33 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Some(a) => Some(attach(&a, &format!("{owner}.attach"))?),
             None => None,
         },
-        collider: None,
+        collider: match maybe_table(&spec, &owner, "collider")? {
+            Some(c) => Some(collider(&c, &format!("{owner}.collider"))?),
+            None => None,
+        },
     })
+}
+
+/// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
+/// units; `at` (default the origin) is a circle's centre, a rect's top-left corner.
+fn collider(spec: &Table, owner: &str) -> mlua::Result<world::Collider> {
+    named_fields(spec, owner, &["circle", "rect", "at"])?;
+    let shape = match (spec.get::<Value>("circle")?, maybe_table(spec, owner, "rect")?) {
+        (Value::Nil, Some(size)) => {
+            let size = point(size, &format!("{owner}.rect"))?;
+            world::Shape::Rect(size.x, size.y)
+        }
+        (Value::Nil, None) => return Err(Error::runtime(format!("{owner} needs circle or rect"))),
+        (_, None) => world::Shape::Circle(need(spec, owner, "circle")?),
+        (_, Some(_)) => {
+            return Err(Error::runtime(format!("{owner} is a circle or a rect, not both")));
+        }
+    };
+    let at = match maybe_table(spec, owner, "at")? {
+        Some(at) => point(at, &format!("{owner}.at"))?,
+        None => Point::ZERO,
+    };
+    Ok(world::Collider { shape, at: (at.x, at.y) })
 }
 
 /// `{ to = id, part = id, at = {x, y} }` — `at` is a point in the carrier's drawing at rest.

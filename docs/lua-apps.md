@@ -179,8 +179,8 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip` and `attach` —
-  nothing else.
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach` and
+  `collider` — nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -189,7 +189,8 @@ ui.world({
 - An id the description no longer lists is despawned. A new `drawing` handle replaces the look;
   make drawings once at module scope so the handle is stable.
 - `id`, `width` and `height` are required; ordinary box and paint props (`fill`, `radius`,
-  `stroke`) and pointer handlers apply to the element.
+  `stroke`) and pointer handlers apply to the element. The world clips to its box: a head or
+  hand spilling past the edge is neither drawn nor hit there.
 - The world outlives hot reload and survives a hidden tab. It is dropped when a successful frame
   no longer draws its id. A bad description is an error and keeps the last good world.
 - `flip = true` mirrors the drawing within its box — a side view drawn facing right, shown
@@ -199,7 +200,14 @@ ui.world({
   animates (a flipped carrier mirrors the box too). It draws just in front of its carrier. Remove
   `attach` and it stays where it was last carried. The carrier must be described, not itself
   attached, and have the part.
-- Collision is the next slice of [2d-world.md](design/2d-world.md).
+- `collider = { circle = 16, at = { 80, 222 } }` or `{ rect = { 720, 12 } }` makes the entity
+  solid, in its drawing's units: `at` (default `{0, 0}`) is a circle's centre or a rect's
+  top-left corner. An entity with a controller stops at solid entities and slides along them;
+  one without never moves, so it is a wall. Give a character a small circle at its feet, not its
+  whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
+  Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+- Solid carried things, sensors and dynamic bodies are the rest of slice 5 in
+  [2d-world.md](design/2d-world.md).
 
 ### Clips
 

@@ -544,3 +544,75 @@ fn a_bad_collider_is_refused() {
     }
     assert_eq!(world.physics.centres(), [], "nothing was applied");
 }
+
+/// A hero whose feet are a circle of radius 4 at (4, 4), and a wall whose left face is x = 20.
+fn walled() -> World2d {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let wall = solid("wall", (20.0, -50.0), Shape::Rect(10.0, 400.0), (0.0, 0.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, wall]).unwrap();
+    world
+}
+
+#[test]
+fn a_solid_hero_stops_at_a_wall() {
+    let mut world = walled();
+    world.key("KeyD", true);
+    for i in 1..=20 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    // The circle's right edge (x + 8) rests against the wall, a hair short of touching.
+    let x = world.transform("hero").unwrap().x;
+    assert!((11.8..=12.0).contains(&x), "stopped at {x}");
+}
+
+/// Rapier's controller knows an "up"; top-down, no direction may be special.
+#[test]
+fn walls_stop_the_hero_the_same_way_in_every_direction() {
+    let d = drawing();
+    // A room 100 across, inside walls 10 thick; the hero's circle (radius 4) starts in the middle.
+    let wall = |id: &str, pos, size: (f64, f64)| {
+        solid(id, pos, Shape::Rect(size.0, size.1), (0.0, 0.0), &d)
+    };
+    for (key, axis, wanted) in [("KeyD", 0, 96.0), ("KeyA", 0, 4.0), ("KeyS", 1, 96.0), ("KeyW", 1, 4.0)] {
+        let hero = EntitySpec {
+            controller: Some(wasd(100.0)),
+            ..solid("hero", (50.0, 50.0), Shape::Circle(4.0), (0.0, 0.0), &d)
+        };
+        let mut world = World2d::default();
+        world
+            .reconcile(vec![
+                hero,
+                wall("n", (-10.0, -10.0), (120.0, 10.0)),
+                wall("s", (-10.0, 100.0), (120.0, 10.0)),
+                wall("w", (-10.0, 0.0), (10.0, 100.0)),
+                wall("e", (100.0, 0.0), (10.0, 100.0)),
+            ])
+            .unwrap();
+        world.key(key, true);
+        for i in 1..=20 {
+            world.tick(i as f64 * 0.1, 0.1);
+        }
+        let t = world.transform("hero").unwrap();
+        let at = [t.x, t.y][axis];
+        assert!((at - wanted).abs() < 0.2, "{key}: stopped at {at}, wanted {wanted}");
+    }
+}
+
+#[test]
+fn a_solid_hero_slides_along_a_wall() {
+    let mut world = walled();
+    world.key("KeyD", true);
+    world.key("KeyS", true);
+    for i in 1..=10 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    // Blocked across, it keeps the diagonal's downward share: about 70 a second.
+    let t = world.transform("hero").unwrap();
+    assert!((11.8..=12.0).contains(&t.x), "stopped at x {}", t.x);
+    assert!(t.y > 60.0, "slid only to y {}", t.y);
+}
