@@ -486,8 +486,11 @@ opt-in; other frames still spill). The demo has thin side walls and a tall back 
 hero collides by a circle at its feet; the smoke checks it stops at the east and back walls.
 **5b chunk 1 landed:** a carried entity has no body (it is off the floor) and gets one again
 where it is let go; the demo chest is solid by its footprint, and the smoke's draw-order route now
-walks round it. Next: 5b chunk 2, a dynamic drop — the let-go entity keeps its carrier's
-momentum, slides, bounces off walls and settles; 5c, a sensor
+walks round it. **5b chunk 2 landed:** a let-go entity becomes a dynamic body
+with its carrier's last `Velocity`, slides (friction 6, bounce 0.5, no spin) with Rapier copying
+it back to `Transform` each tick, and settles to fixed once slow and not pressed into anything —
+so one let go inside a wall is pushed out first (Rapier does that slowly, and keeps ~0.012 of
+resting overlap on purpose). Next: a fall clip so a dropped chest reaches the floor; 5c, a sensor
 (`on_enter`/`on_exit`) so E works only near the chest; 5d, dynamic bodies. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

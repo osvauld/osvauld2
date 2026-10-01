@@ -637,6 +637,75 @@ fn a_carried_solid_is_off_the_floor_until_put_down() {
     assert_eq!(cx as f64, x + 10.0 + 4.0, "put down, solid again where it was let go");
 }
 
+/// A hero walking right at 100 with a solid 8×8 box held 20 ahead of it, let go after `walk`
+/// ticks; then `after` ticks with no key held. `wall_x` adds a wall whose left face is there.
+/// Says the box's x each tick after the drop, and whether it is still sliding.
+fn drop_box(walk: usize, wall_x: Option<f64>, after: usize) -> (Vec<f64>, bool) {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+        }),
+        ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let wall = || wall_x.map(|x| solid("wall", (x, -50.0), Shape::Rect(10.0, 100.0), (0.0, 0.0), &d));
+    let mut world = World2d::default();
+    world.reconcile([hero(), held(true)].into_iter().chain(wall()).collect()).unwrap();
+    let mut clock = 0.0;
+    let mut tick = |world: &mut World2d| {
+        clock += 0.05;
+        world.tick(clock, 0.05);
+    };
+    world.key("KeyD", walk > 0);
+    for _ in 0..walk {
+        tick(&mut world);
+    }
+    world.reconcile([hero(), held(false)].into_iter().chain(wall()).collect()).unwrap();
+    world.key("KeyD", false);
+    let xs = (0..after)
+        .map(|_| {
+            tick(&mut world);
+            world.transform("box").unwrap().x
+        })
+        .collect();
+    (xs, world.needs_ticks() && world.ecs.get::<Solid>(world.by_id["box"]).unwrap().sliding)
+}
+
+#[test]
+fn a_let_go_body_keeps_its_carriers_momentum_then_settles() {
+    let (xs, sliding) = drop_box(4, None, 40);
+    // Let go at x 40 (the hero walked 20), moving at 100: it slides on, slowing to a stop.
+    let (first, last) = (xs[0], *xs.last().unwrap());
+    assert!(first > 40.0 && first < xs[3], "it keeps moving: {xs:?}");
+    assert!((50.0..70.0).contains(&last), "slid to {last}");
+    assert!(xs.windows(2).all(|w| w[1] >= w[0]), "forward only, slowing: {xs:?}");
+    assert!(!sliding, "come to rest, it is fixed again");
+}
+
+#[test]
+fn a_let_go_body_bounces_off_a_wall() {
+    // Let go at x 40 heading right, with a wall at 52 — the box's right edge is 4 short of it.
+    let (xs, _) = drop_box(4, Some(52.0), 40);
+    let furthest = xs.iter().cloned().fold(f64::MIN, f64::max);
+    assert!(furthest <= 44.1, "stopped by the wall, not through it: {furthest}");
+    assert!(*xs.last().unwrap() < furthest - 1.0, "and came back off it: {xs:?}");
+}
+
+#[test]
+fn a_body_let_go_inside_a_wall_is_pushed_out() {
+    // Standing still, let go at x 20 to 28, with a wall from 25: three units deep in it.
+    let (xs, sliding) = drop_box(0, Some(25.0), 60);
+    let last = *xs.last().unwrap();
+    assert!(last + 8.0 <= 25.1, "pushed out to {last}: {xs:?}");
+    assert!(!sliding, "and at rest");
+}
+
 #[test]
 fn a_solid_hero_slides_along_a_wall() {
     let mut world = walled();

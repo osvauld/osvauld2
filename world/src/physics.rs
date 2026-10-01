@@ -37,7 +37,7 @@ impl Collider {
     }
 
     /// Rapier places shapes by their centre.
-    fn centre(&self) -> (f64, f64) {
+    pub(crate) fn centre(&self) -> (f64, f64) {
         match self.shape {
             Shape::Circle(_) => self.at,
             Shape::Rect(w, h) => (self.at.0 + w / 2.0, self.at.1 + h / 2.0),
@@ -58,6 +58,20 @@ const WALKER: KinematicCharacterController = KinematicCharacterController {
     normal_nudge_factor: 1.0e-4,
 };
 
+/// How a let-go entity slides: speed lost per second (it slows to rest in about half a second),
+/// and the share of speed kept off a wall. It does not spin — the drawing stays upright.
+const FRICTION: f32 = 6.0;
+const BOUNCE: f32 = 0.5;
+/// Slower than this, in drawing units a second, a sliding body has come to rest.
+const AT_REST: f32 = 4.0;
+
+/// What moves a body: nothing, the world's controller, or Rapier from a starting velocity.
+pub(crate) enum Body {
+    Fixed,
+    Moved,
+    Thrown(f64, f64),
+}
+
 pub(crate) struct Physics {
     world: PhysicsWorld,
 }
@@ -72,18 +86,53 @@ impl Default for Physics {
 
 impl Physics {
     /// A body for an entity whose origin is at `origin`. The entity's scale is not applied.
-    pub(crate) fn add(&mut self, c: &Collider, origin: (f64, f64), moves: bool) -> RigidBodyHandle {
+    pub(crate) fn add(&mut self, c: &Collider, origin: (f64, f64), kind: Body) -> RigidBodyHandle {
         let (cx, cy) = c.centre();
         let at = Vector::new((origin.0 + cx) as f32, (origin.1 + cy) as f32);
-        let body = match moves {
-            true => RigidBodyBuilder::kinematic_position_based(),
-            false => RigidBodyBuilder::fixed(),
+        let body = match kind {
+            Body::Fixed => RigidBodyBuilder::fixed(),
+            Body::Moved => RigidBodyBuilder::kinematic_position_based(),
+            Body::Thrown(vx, vy) => RigidBodyBuilder::dynamic()
+                .linvel(Vector::new(vx as f32, vy as f32))
+                .linear_damping(FRICTION)
+                .lock_rotations(),
         };
         let shape = match c.shape {
             Shape::Circle(r) => ColliderBuilder::ball(r as f32),
             Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
         };
+        let shape = shape
+            .restitution(BOUNCE)
+            .restitution_combine_rule(CoefficientCombineRule::Max)
+            .friction(0.0);
         self.world.insert(body.translation(at), shape).0
+    }
+
+    /// Where Rapier has a body now: its shape's centre.
+    pub(crate) fn centre_of(&self, body: RigidBodyHandle) -> (f64, f64) {
+        let at = self.world.bodies[body].translation();
+        (at.x as f64, at.y as f64)
+    }
+
+    /// A thrown body that has slowed to rest becomes fixed — an obstacle again, and no more work.
+    /// Not while it is still pressed into something: Rapier pushes it out slowly, so it would
+    /// otherwise settle inside a wall. Resting contact keeps about 0.012 of overlap on purpose.
+    pub(crate) fn settle(&mut self, body: RigidBodyHandle) -> bool {
+        let collider = self.world.bodies[body].colliders()[0];
+        let pressed = self
+            .world
+            .narrow_phase
+            .contact_pairs_with(collider)
+            .any(|pair| {
+                let mut points = pair.manifolds.iter().flat_map(|m| m.points.iter());
+                points.any(|p| p.dist < -0.05)
+            });
+        let rb = &mut self.world.bodies[body];
+        let resting = !pressed && rb.linvel().length() < AT_REST;
+        if resting {
+            rb.set_body_type(RigidBodyType::Fixed, true);
+        }
+        resting
     }
 
     pub(crate) fn remove(&mut self, body: RigidBodyHandle) {

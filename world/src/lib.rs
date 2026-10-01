@@ -18,7 +18,7 @@ use runtime::frame::{Frame, FrameError, Item};
 use runtime::vello::kurbo::{Affine, Point};
 
 use crate::clip::Clip;
-use crate::physics::Physics;
+use crate::physics::{Body, Physics};
 pub use crate::physics::{Collider, Shape};
 
 pub struct EntitySpec {
@@ -114,7 +114,13 @@ struct Solid {
     collider: Collider,
     moves: bool,
     body: rapier2d::prelude::RigidBodyHandle,
+    /// Let go and still sliding: Rapier moves it until it settles.
+    sliding: bool,
 }
+
+/// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
+#[derive(Component, Default)]
+struct Velocity(f64, f64);
 
 #[derive(Component)]
 struct Attached {
@@ -247,6 +253,11 @@ impl World2d {
                     self.ecs.spawn((transform, name)).id()
                 }
             };
+            // Let go this frame: it leaves with its carrier's velocity.
+            let thrown = self.ecs.get::<Attached>(entity).map(|a| {
+                let v = self.ecs.get::<Velocity>(a.to);
+                v.map_or((0.0, 0.0), |v| (v.0, v.1))
+            });
             let mut e = self.ecs.entity_mut(entity);
             let moves = spec.controller.is_some();
             // Carried is off the floor: no body until it is put down, then one where it was let go.
@@ -260,8 +271,19 @@ impl World2d {
                 }
                 if let Some(collider) = collider {
                     let t = e.get::<Transform>().expect("every entity has a Transform");
-                    let body = self.physics.add(&collider, (t.x, t.y), moves);
-                    e.insert(Solid { collider, moves, body });
+                    let kind = match (moves, thrown) {
+                        (true, _) => Body::Moved,
+                        (false, Some((vx, vy))) => Body::Thrown(vx, vy),
+                        (false, None) => Body::Fixed,
+                    };
+                    let sliding = matches!(kind, Body::Thrown(..));
+                    let body = self.physics.add(&collider, (t.x, t.y), kind);
+                    e.insert(Solid {
+                        collider,
+                        moves,
+                        body,
+                        sliding,
+                    });
                 }
             }
             e.insert(Appearance {
@@ -295,6 +317,21 @@ impl World2d {
         (self.by_id, self.order) = (next, order);
         self.follow();
         Ok(())
+    }
+
+    /// Let-go entities go where Rapier slid them, until they settle.
+    fn slide_thrown(&mut self) {
+        for &entity in &self.order {
+            let Some(s) = self.ecs.get::<Solid>(entity).filter(|s| s.sliding) else {
+                continue;
+            };
+            let ((x, y), (cx, cy), body) = (self.physics.centre_of(s.body), s.collider.centre(), s.body);
+            let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
+            (t.x, t.y) = (x - cx, y - cy);
+            if self.physics.settle(body) {
+                self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = false;
+            }
+        }
     }
 
     /// Carried entities take their place from their carrier's part, as posed now.
@@ -381,6 +418,7 @@ impl World2d {
     pub fn tick(&mut self, elapsed: f64, dt: f64) {
         self.clock = elapsed;
         self.physics.step(dt);
+        self.slide_thrown();
         for entity in self.order.clone() {
             let Some(c) = self.ecs.get::<Controller>(entity) else {
                 continue;
@@ -406,6 +444,12 @@ impl World2d {
                     .get_mut::<Transform>()
                     .expect("every entity has a Transform");
                 (t.x, t.y) = (t.x + mx, t.y + my);
+                e.insert(match dt > 0.0 {
+                    true => Velocity(mx / dt, my / dt),
+                    false => Velocity::default(),
+                });
+            } else {
+                e.insert(Velocity::default());
             }
         }
         self.follow();
@@ -459,7 +503,8 @@ impl World2d {
 
     /// Whether anything plays or moves — only then does the world need the frame clock.
     pub fn needs_ticks(&self) -> bool {
-        self.ticking
+        let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
+        self.ticking || self.order.iter().any(sliding)
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take
