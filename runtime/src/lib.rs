@@ -35,6 +35,7 @@ use crate::id::Id;
 use crate::layout::PlacedKind;
 use crate::state::Slot;
 use crate::zoom::Zoom;
+pub use crate::zoom::DEFAULT_RANGE as DEFAULT_ZOOM_RANGE;
 use editor::Field;
 use scroll::*;
 use std::collections::HashSet;
@@ -711,7 +712,7 @@ impl<A: App> Runner<A> {
             if let Some(axes) = p.behaviour.zoom
                 && let Some(id) = &p.id
             {
-                store.get_or::<Zoom>(id, Slot::Zoom);
+                store.get_or::<Zoom>(id, Slot::Zoom).range = p.behaviour.zoom_range;
                 if let Some(hit_rect) = visible {
                     hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
                 }

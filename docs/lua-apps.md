@@ -493,6 +493,7 @@ before `fade`.
 | | `fade` | `{target_opacity, ms}` |
 | | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
+| | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
 | input | `value` · `autofocus` | string · bool |
 

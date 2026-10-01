@@ -1245,6 +1245,30 @@ fn on_key_delivers_named_event_and_cancellation_to_lua() {
     assert!(got.get::<Option<String>>("code").unwrap().is_none());
 }
 
+/// `zoom_min` / `zoom_max` widen or narrow a camera; they need one, and a range to zoom in.
+#[test]
+fn zoom_limits_are_checked() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let run = |props: &str| {
+        let node: Table = lua.load(format!("return ui.col({{ {props} }})")).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut cx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut cx).err().map(|e| e.to_string())
+    };
+    assert_eq!(run("id = 'v', zoomable = true, zoom_max = 40"), None);
+    assert_eq!(run("id = 'v', zoom_x = true, zoom_min = 0.1, zoom_max = 8"), None);
+    let cases = [
+        ("id = 'v', zoom_max = 40", "zoom_max needs zoomable or zoom_x"),
+        ("id = 'v', zoomable = true, zoom_max = 0", "zoom_max must be a positive scale"),
+        ("id = 'v', zoomable = true, zoom_min = 5", "zoom_min must be below zoom_max"),
+        ("id = 'v', zoomable = true, zoom_min = 2, zoom_max = 1", "zoom_min must be below zoom_max"),
+    ];
+    for (props, wanted) in cases {
+        let err = run(props).unwrap_or_default();
+        assert!(err.contains(wanted), "{props}: wanted {wanted:?}, got {err:?}");
+    }
+}
+
 #[test]
 fn on_key_needs_a_stable_id() {
     let (lua, _) = sandboxed_vm().unwrap();

@@ -541,7 +541,9 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   kind. The hero seed's colours and stroke width are vars, and a stage entity's own `vars` make a
   variant: the room's `rival` is the hero in teal. The inspector lists the asset's vars (swatch and
   value: one edit recolours every shape naming it); a shape's colour and width fields take
-  `@name` of a var of the right kind, and typing a plain value unlinks it.
+  `@name` of a var of the right kind, and typing a plain value unlinks it. A zoomable takes
+  `zoom_min` / `zoom_max` (default 0.4–3, the old fixed clamp); the editor's viewport zooms to
+  20×, 50× the asset.
   **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
   its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
   pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.

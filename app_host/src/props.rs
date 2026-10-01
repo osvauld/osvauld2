@@ -22,6 +22,30 @@ fn missing_id<'a>(id: Option<&'a str>, prop: &str) -> mlua::Result<&'a str> {
     id.ok_or_else(|| mlua::Error::runtime(format!("{prop} needs an id")))
 }
 
+/// `zoom_min` / `zoom_max` bound a camera, so they need one, must be a positive scale, and the
+/// pair must leave room to zoom — checked here, since each builder sees only its own value.
+fn zoom_limit(node: &Table, prop: &str, v: &Value) -> mlua::Result<()> {
+    let camera = node.contains_key("zoomable")? || node.contains_key("zoom_x")?;
+    if !camera {
+        return Err(mlua::Error::runtime(format!("{prop} needs zoomable or zoom_x")));
+    }
+    let scale = f32::from_prop(v)?;
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(mlua::Error::runtime(format!("{prop} must be a positive scale")));
+    }
+    let bound = |k: &str, default: f32| -> mlua::Result<f32> {
+        match node.get::<Value>(k)? {
+            Value::Nil => Ok(default),
+            other => f32::from_prop(&other),
+        }
+    };
+    let (lo, hi) = runtime::DEFAULT_ZOOM_RANGE;
+    if bound("zoom_min", lo)? >= bound("zoom_max", hi)? {
+        return Err(mlua::Error::runtime("zoom_min must be below zoom_max"));
+    }
+    Ok(())
+}
+
 impl FromProp for f32 {
     fn from_prop(v: &Value) -> mlua::Result<Self> {
         v.as_f32()
@@ -295,6 +319,8 @@ impl<M: 'static> Registry<M> {
         prop!(scale, f32),
         prop!(zoomable),
         prop!(zoom_x),
+        prop!(zoom_min, f32),
+        prop!(zoom_max, f32),
         // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
         prop!(scroll_x),
         prop!(scroll_y),
@@ -333,6 +359,9 @@ pub(crate) fn apply<M: 'static>(
         {
             if k == "zoomable" || k == "zoom_x" {
                 missing_id(id, &k)?;
+            }
+            if k == "zoom_min" || k == "zoom_max" {
+                zoom_limit(node, &k, &v)?;
             }
             if k == "press_scale" {
                 missing_id(id, "press_scale")?;

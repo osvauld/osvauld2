@@ -319,6 +319,8 @@ pub(crate) struct Behaviour<M> {
     pub opacity: f32,
     pub scale: f32,
     pub zoom: Option<(bool, bool)>,
+    /// A zoomable's `(min, max)` scale.
+    pub zoom_range: (f32, f32),
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
@@ -357,6 +359,7 @@ impl<M> Default for Behaviour<M> {
             opacity: 1.0,
             scale: 1.0,
             zoom: None,
+            zoom_range: crate::zoom::DEFAULT_RANGE,
             slide: None,
             fade: None,
             tint: None,
@@ -734,6 +737,16 @@ impl<M> El<M> {
     }
     pub fn zoom_x(mut self) -> Self {
         self.behaviour.zoom = Some((true, false));
+        self
+    }
+    /// The furthest a zoomable zooms out, as a scale (0.4 by default). Keep it below `zoom_max`.
+    pub fn zoom_min(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.0 = scale;
+        self
+    }
+    /// The furthest a zoomable zooms in, as a scale (3 by default).
+    pub fn zoom_max(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.1 = scale;
         self
     }
 

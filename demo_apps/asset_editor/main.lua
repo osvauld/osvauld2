@@ -256,6 +256,7 @@ return function()
 				w_full = true,
 				center = true,
 				zoomable = true,
+				zoom_max = 20, -- on top of the canvas's own 2.5×: 50× the asset, for fingers and eyelashes
 				body,
 			}),
 		}),
