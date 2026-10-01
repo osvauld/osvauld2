@@ -43,14 +43,19 @@ local function scaled_fill(fill, z)
 	return { [kind] = out }
 end
 
+-- A lone length may be a var, `"@line"`: it stays a name here, and the vars scale instead.
+local function len(v, z)
+	return type(v) == "number" and v * z or v
+end
+
 local function scaled_shape(s, z)
 	if s.shadow then
 		local sh, r = s.shadow, s.shadow.rect
 		local rect = { r[1] * z, r[2] * z, r[3] * z, r[4] * z }
-		local radius = (sh.radius or 0) * z
-		return { shadow = { rect = rect, radius = radius, blur = sh.blur * z, color = sh.color } }
+		local radius = len(sh.radius or 0, z)
+		return { shadow = { rect = rect, radius = radius, blur = len(sh.blur, z), color = sh.color } }
 	end
-	local stroke = s.stroke and { s.stroke[1] * z, s.stroke[2] }
+	local stroke = s.stroke and { len(s.stroke[1], z), s.stroke[2] }
 	return { path = scaled_path(s.path, z), fill = scaled_fill(s.fill, z), stroke = stroke }
 end
 
@@ -77,7 +82,11 @@ local function canvas_drawing(parts, z, outline)
 		}
 	end
 	local size = M.asset.size
-	return gfx.drawing({ size = { size[1] * z, size[2] * z }, parts = out })
+	local vars = {} -- a number var is always a length
+	for name, v in pairs(M.asset.vars or {}) do
+		vars[name] = len(v, z)
+	end
+	return gfx.drawing({ size = { size[1] * z, size[2] * z }, vars = vars, parts = out })
 end
 
 local function visual(parts)

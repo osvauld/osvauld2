@@ -562,6 +562,40 @@ fn shadows_draw_in_drawings_and_frames() {
     assert!(ok);
 }
 
+/// `"@name"` stands for a drawing's var wherever a colour or a lone number does — a fill, a
+/// stroke's width and ink, a gradient stop, a shadow's radius, blur and colour — and draws exactly
+/// what the literal would.
+#[test]
+fn drawing_vars_draw_as_their_values() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let frames: (Value, Value) = lua
+        .load(
+            r##"
+            local function hero(c)
+                return gfx.drawing({ size = { 40, 40 }, vars = c.vars, parts = { { id = "a",
+                    pivot = { 20, 20 }, shapes = {
+                    { shadow = { rect = { 4, 8, 32, 32 }, radius = c.round, blur = c.blur,
+                        color = c.shade } },
+                    { path = { {"move",4,4}, {"line",36,4}, {"line",36,36}, {"close"} },
+                        fill = c.skin, stroke = { c.line, c.ink } },
+                    { path = { {"move",4,4}, {"line",36,36}, {"close"} }, fill = { linear = {
+                        from = { 0, 0 }, to = { 40, 0 }, stops = { { 0, c.skin }, { 1, c.ink } } } } },
+                } } } }):pose({})
+            end
+            local vars = { skin = "#e8b894", ink = "#1b1b3a", shade = "#00000066", line = 2,
+                blur = 4, round = 16 }
+            local named = {}
+            for k in pairs(vars) do named[k] = "@" .. k end
+            named.vars = vars
+            return hero(named), hero(vars)
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let debug = |v: &Value| format!("{:?}", v.as_userdata().unwrap().borrow::<crate::gfx::LuaFrame>().unwrap().0);
+    assert_eq!(debug(&frames.0), debug(&frames.1));
+}
+
 #[test]
 fn a_drawing_module_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -638,6 +672,30 @@ fn a_drawing_module_is_checked_strictly() {
                 "pivot = { 0, 0 }, shapes = { { shadow = { rect = { 0, 0, 4, 4 }, blur = 0, color = '#000' } } }",
             ),
             "shape 1.shadow: shadow needs",
+        ),
+        (
+            part("pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, fill = '@skn' } }"),
+            "shape 1.fill: no var @skn",
+        ),
+        (
+            "return gfx.drawing({ size = { 1, 1 }, parts = {}, vars = { skin = '#nope' } })".into(),
+            "drawing.vars.skin:",
+        ),
+        (
+            "return gfx.drawing({ size = { 1, 1 }, parts = {}, vars = { skin = {} } })".into(),
+            "drawing.vars.skin must be a colour or a number, got table",
+        ),
+        (
+            "return gfx.drawing({ size = { 1, 1 }, vars = { w = 2 }, parts = { { id = 'a', \
+             pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, fill = '@w' } } } } })"
+                .into(),
+            "shape 1.fill: that var is a number",
+        ),
+        (
+            "return gfx.linear_gradient({ from = { 0, 0 }, to = { 1, 0 }, \
+             stops = { { 0, '@skin' }, { 1, '#000' } } })"
+                .into(),
+            "linear_gradient stop 1: no var @skin",
         ),
     ];
     for (source, wanted) in cases {

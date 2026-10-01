@@ -170,6 +170,12 @@ ui.frame({ id = "hero", visual = waving })
   standard deviation; positive), `radius` 0 by default. A circle is a rect with `radius` half its
   width. List it before the shape it falls under; the pointer goes through it. Only rounded
   rectangles blur — a soft shadow of any other outline is not built.
+- **Vars** name values once: `vars = { skin = "#e8b894", line = 2 }` beside `size` and `parts`,
+  then `"@skin"` wherever a colour goes (fill, stroke colour, gradient stop, shadow colour) and
+  `"@line"` wherever a lone number goes (stroke width, shadow `radius` and `blur`). A var is a
+  colour string or a number; an unknown name or the wrong kind is an error naming the shape.
+  Path points stay literal. Outside a drawing (`gfx.linear_gradient`, `gfx.shadow`) there are no
+  vars.
 - `pose` builds a new frame: pose once at module scope, not in `view`. Clips and `use` are not
   built yet — `clips = …` and `use = …` are errors.
 

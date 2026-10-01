@@ -527,7 +527,10 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   (`mount = { to, socket }`, no position), and dragging a mounted entity away unequips it.
   **Inspector:** the selected part's pivot and each shape's fill, stroke width and ink (a shadow's
   blur and colour) are inputs — Enter writes one value if it parses, a bad one turns red and writes
-  nothing, the canvas redraws from the edit. Not built: editing gradients, stage entity fields,
+  nothing, the canvas redraws from the edit. **Vars:** a drawing's `vars = { skin = "#…", line = 2 }`
+  stand in as `"@skin"` for any colour and `"@line"` for a lone number (stroke width, shadow radius
+  and blur), resolved once by `gfx.drawing`; the editor and stage pass the asset's `vars` through.
+  Not built: variants (overriding vars per use), vars in the inspector, editing gradients, stage entity fields,
   dragging points (E2b), adding parts, the clip timeline, stage play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
 
 ### Environment — composable 3D interfaces and worlds

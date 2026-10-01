@@ -130,6 +130,14 @@ a clip to check an edit animates. The agent covers creation well, so the pen too
 Built so far: the inspector (selected part's pivot, fills, strokes, shadow blur and colour, as
 inputs — Enter writes if it parses). Gradients show but don't edit; colours are typed hex.
 
+*Revised 2026-10-01 — palette became `vars`, and P1 is built.* What we're formalising isn't skins
+but an asset's **inputs**: named values with defaults that its user may override — the inputs
+half of the asset's interface, beside sockets and plugs (attach), clips (behaviour) and events
+(out). So the field is `vars`, and a var is a colour **or a lone number** (stroke width, shadow
+radius and blur): any value substituted whole. Path points stay literal — "arm length" moves many
+points at once and needs expressions or part scaling, a separate step. Read "palette" and
+"token" below as `vars` and `@name`.
+
 **Palette tokens.** An asset names its colours once; shapes refer to the name.
 
 ```lua
@@ -163,7 +171,7 @@ switch that seeds default points from the shape's bounds. Their geometry — lin
 centre and radius, sweep centre and start angle — is handles on the canvas, sharing the point-drag
 machinery of E2b.
 
-**Slices:** P1 `gfx.drawing` resolves `palette` → P2 variants → P3 palette in the inspector,
+**Slices:** P1 `gfx.drawing` resolves `vars` (built) → P2 variants → P3 palette in the inspector,
 colour fields take tokens → seeds move to tokens → C1a picker (square, hue, hex) → C1b alpha and
 palette swatches → Ga gradient stops, kind, extend → Gb gradient handles with E2b point handles.
 
@@ -259,6 +267,19 @@ Any asset whose plug `kind` matches a socket's mounts there, and rides the socke
 every clip: in play, a mount is `attach = { to, part = socket.part, at = socket.at - plug.at }`.
 `width` lets the editor scale to fit and warn on a mismatch. The same shape serves wearables,
 held items (a sword in `hand_r`), and a button's icon.
+
+*2026-10-01, from the world session:* the world maps `at` through the carrier part's current pose
+and mirrors it when the carrier is flipped, but does not copy flip over — stage play sets the
+mounted entity's `flip` to its host's. The carried box never rotates or scales, so a socket on a
+part that turns (the hero's `idle` tilts the head 3°) moves the plug off the socket by up to
+`|plug.at|` — about 3 units for the hat. Asked of the world session: a mount that turns and
+scales with its part, before S2. **Agreed:** `attach = { to, part, at = socket.at,
+pivot = plug.at, turn = true }` places the mount by carrier × part (composed through its
+parents) × translate(`at`) × translate(−`pivot`), so the hat turns about its brim. `turn` and
+`pivot` are opt-in (a carried chest stays upright). With `turn` the carrier's mirror is already
+in the transform, so setting `flip` too is an error; without it, stage play sets `flip` as above.
+A carried entity has no body — collider and sensor off while attached; dropped, it is upright.
+The world session builds it.
 
 **Behaviour interfaces.** An asset can claim to implement one: `implements = { "toggle" }`, where
 `toggle` means *clips `on`, `off`, `to_on`, `to_off` and a `knob` part*. A Lua component is

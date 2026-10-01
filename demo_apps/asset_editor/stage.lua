@@ -15,7 +15,7 @@ local function rest(name)
 		if not parts then
 			return nil -- seeded this frame; it shows from the next
 		end
-		local frame = gfx.drawing({ size = a.size, parts = parts }):pose({})
+		local frame = gfx.drawing({ size = a.size, vars = a.vars, parts = parts }):pose({})
 		rests[name] = { frame = frame, asset = a }
 	end
 	return rests[name]
