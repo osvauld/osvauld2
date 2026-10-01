@@ -3726,9 +3726,10 @@ fn asset_editor_seeds_draws_and_selects() {
 }
 
 /// Stage edit draws the room's entities and moves one by dragging it: live while dragging, one
-/// write on release. The hat rides the hero's `head_top` socket, so it has no position to drag.
+/// write on release. Dropping the hat's plug near the hero's `head_top` socket equips it; dragging
+/// it away again unequips it where it lands.
 #[test]
-fn asset_editor_stage_moves_an_entity() {
+fn asset_editor_stage_moves_and_equips() {
     let mut app = asset_editor();
     let _ = app.view();
     click(&mut app, "asset:room");
@@ -3737,47 +3738,48 @@ fn asset_editor_stage_moves_an_entity() {
     let canvas = &info.children[0].children[0].children[0]; // a stage has no clip bar
     assert_eq!(canvas.id.as_deref(), Some("stage-canvas"));
 
-    let drag = |app: &mut LuaApp<LuaMsg>, phase: &'static str, shape: &str, x: f32, y: f32| {
-        let args = DragArgs {
-            phase,
-            at: (x, y),
-            delta: (0.0, 0.0),
-            scale: 1.0,
-            origin: (0.0, 0.0),
-            shape: Shape(Some((shape.into(), 0.0, 0.0))),
-            t: 0.0,
-        };
-        app.update(LuaMsg::CallDrag(Key::new("stage-canvas", "on_drag"), args));
-        let _ = app.view();
-    };
-    // The chest moves by the pointer's travel, (40, 20); the hat is mounted, so it won't move.
-    let gesture = [
-        ("start", 0.0, 0.0),
-        ("move", 20.0, 10.0),
-        ("end", 40.0, 20.0),
-    ];
-    for (who, x0, y0) in [("chest", 500.0, 280.0), ("hat", 200.0, 120.0)] {
-        for (phase, dx, dy) in gesture {
-            drag(&mut app, phase, who, x0 + dx, y0 + dy);
+    // One gesture, start to end, moving by (dx, dy) through a midpoint.
+    let drag = |app: &mut LuaApp<LuaMsg>, who: &str, (x, y): (f32, f32), (dx, dy): (f32, f32)| {
+        for (phase, f) in [("start", 0.0), ("move", 0.5), ("end", 1.0)] {
+            let args = DragArgs {
+                phase,
+                at: (x + dx * f, y + dy * f),
+                delta: (0.0, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+                shape: Shape(Some((who.into(), 0.0, 0.0))),
+                t: 0.0,
+            };
+            app.update(LuaMsg::CallDrag(Key::new("stage-canvas", "on_drag"), args));
+            let _ = app.view();
         }
-    }
-    let console = app.console(100);
-    assert!(console.is_empty(), "{console:?}");
-
-    let moved: String = app
-        .vm
-        .load(
-            r#"
+    };
+    let stage = |app: &LuaApp<LuaMsg>| -> String {
+        let at = r#"
             local at = {}
             for _, e in ipairs(asset:open("room").scene.entities) do
-                at[#at + 1] = e.id .. "=" .. (e.pos and (e.pos[1] .. "," .. e.pos[2]) or "mounted")
+                local where = e.mount and ("on " .. e.mount.to .. "." .. e.mount.socket)
+                    or (e.pos[1] .. "," .. e.pos[2])
+                at[#at + 1] = e.id .. "=" .. where
             end
             return table.concat(at, " ")
-            "#,
-        )
-        .eval()
-        .unwrap();
-    assert_eq!(moved, "chest=500,270 hero=140,110 hat=mounted");
+        "#;
+        app.vm.load(at).eval().unwrap()
+    };
+
+    drag(&mut app, "chest", (500.0, 280.0), (40.0, 20.0));
+    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=320,300");
+
+    // The hat's plug (its pos + {32, 44}) to the socket (the hero's pos + {80, 34}).
+    drag(&mut app, "hat", (330.0, 320.0), (-132.0, -200.0));
+    let equipped = "chest=500,270 hero=140,110 hat=on hero.head_top";
+    assert_eq!(stage(&app), equipped);
+
+    // Pulled off from where it sits on the head, (188, 100), it lands by its travel.
+    drag(&mut app, "hat", (200.0, 110.0), (150.0, 150.0));
+    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=338,250");
+    let console = app.console(100);
+    assert!(console.is_empty(), "{console:?}");
 }
 
 #[test]

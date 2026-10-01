@@ -522,8 +522,9 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   toggle: gradients, glow, shadows, a knob that rolls and becomes a moon), `chest` and `hat`, each
   seeded per missing root; selects parts on a zoomable canvas drawn from a scaled copy of the data;
   plays any clip in place (the canvas becomes a `ui.world`). **Stage edit:** the `room` scene
-  places hero, chest and a hat mounted on the hero's `head_top` socket by its plug; entities drag,
-  one write on release. Not built: dragging points (E2), adding parts, the clip timeline, stage
+  places hero, chest and a hat; entities drag, one write on release. Dragging a plug near a socket
+  of its kind rings every fitting socket and snaps to the near one: release there **equips**
+  (`mount = { to, socket }`, no position), and dragging a mounted entity away unequips it. Not built: dragging points (E2), adding parts, the clip timeline, stage
   play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
 
 ### Environment — composable 3D interfaces and worlds

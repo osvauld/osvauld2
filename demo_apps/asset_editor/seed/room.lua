@@ -6,7 +6,8 @@ return {
 		entities = {
 			{ id = "chest", asset = "chest", pos = { 460, 250 } },
 			{ id = "hero", asset = "hero", pos = { 140, 110 }, clip = "idle" },
-			{ id = "hat", asset = "hat", mount = { to = "hero", socket = "head_top" } },
+			-- On the floor: drag its brim onto the hero's head and it equips onto `head_top`.
+			{ id = "hat", asset = "hat", pos = { 320, 300 } },
 		},
 	},
 }
