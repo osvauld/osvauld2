@@ -8,7 +8,7 @@ mod crdt;
 mod gfx;
 mod modules;
 mod props;
-pub use crdt::{Cores, Docs, Resolve, Wake};
+pub use crdt::{Cores, DocKey, Docs, Resolve, Wake};
 
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
@@ -597,40 +597,50 @@ impl<M: 'static> LuaApp<M> {
             .collect()
     }
 
-    /// Every open runtime-data doc as `{ name: deep JSON }`. Names sorted, so two dumps of
-    /// the same state are byte-comparable. This is the *live* core state — writes the app
-    /// has not flushed to the vault yet are already visible here. (loro's own `ToJson`
-    /// trait is exactly `serde_json::to_value`, used directly here — one less import that
-    /// lives behind an internal-crate re-export.)
+    /// Every open runtime-data doc as `{ name: deep JSON }`, an asset as `asset:<name>` — a
+    /// label for reading, not an address. Keys sorted, so two dumps of the same state are
+    /// byte-comparable. This is the *live* core state — writes the app has not flushed to the
+    /// vault yet are already visible here. (loro's own `ToJson` trait is exactly
+    /// `serde_json::to_value`, used directly here — one less import that lives behind an
+    /// internal-crate re-export.)
     pub fn docs_json(&self) -> serde_json::Value {
         let cores = self.cores.borrow();
-        let mut names: Vec<&String> = cores.keys().collect();
-        names.sort();
+        let mut keys: Vec<&DocKey> = cores.keys().collect();
+        keys.sort();
         serde_json::Value::Object(
-            names
-                .into_iter()
-                .map(|n| {
-                    (
-                        n.clone(),
-                        serde_json::to_value(cores[n].doc.get_deep_value())
-                            .unwrap_or(serde_json::Value::Null),
-                    )
+            keys.into_iter()
+                .map(|k| {
+                    let label = match k {
+                        DocKey::Own(name) => name.clone(),
+                        DocKey::Asset(name) => format!("asset:{name}"),
+                    };
+                    let value = serde_json::to_value(cores[k].doc.get_deep_value());
+                    (label, value.unwrap_or(serde_json::Value::Null))
                 })
                 .collect(),
         )
     }
 
-    /// Every currently open doc's name — what a host-side sync loop needs before it can reach
-    /// any of them, since `Cores` itself stays private.
+    /// Every currently open doc of the app's own — what a host-side sync loop needs before it
+    /// can reach any of them, since `Cores` itself stays private. Assets are not listed: they
+    /// live in another item.
     pub fn open_doc_names(&self) -> Vec<String> {
-        self.cores.borrow().keys().cloned().collect()
+        let cores = self.cores.borrow();
+        cores
+            .keys()
+            .filter_map(|k| match k {
+                DocKey::Own(name) => Some(name.clone()),
+                DocKey::Asset(_) => None,
+            })
+            .collect()
     }
 
-    /// Reach one open doc's live `LoroDoc` by name, for a host-side concern (sync) that has to
+    /// Reach one open doc of the app's own by name, for a host-side concern (sync) that has to
     /// read or `import` it directly rather than through the Lua mirror. `None` if nothing has
     /// opened that name — the same "not open" a Lua `doc:open` would otherwise report.
     pub fn with_doc<R>(&self, name: &str, f: impl FnOnce(&LoroDoc) -> R) -> Option<R> {
-        self.cores.borrow().get(name).map(|core| f(&core.doc))
+        let key = DocKey::Own(name.to_string());
+        self.cores.borrow().get(&key).map(|core| f(&core.doc))
     }
 
     pub fn view(&self) -> El<M> {
@@ -859,7 +869,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     /// Save every doc whose version has moved since its last successful save. `put` is the
-    /// vault write — `(doc name, snapshot bytes)`.
+    /// vault write — `(doc key, snapshot bytes)`; the host routes an asset to its own item.
     ///
     /// The shell calls this **after** `update`, not from inside it: MCP and peer writes never
     /// pass through `update` at all, and one call site has to cover all three writers.
@@ -868,7 +878,7 @@ impl<M: 'static> LuaApp<M> {
     /// first would present as "my card vanished after a restart", which is unfindable.
     pub fn flush(
         &mut self,
-        mut put: impl FnMut(&str, &[u8]) -> Result<(), String>,
+        mut put: impl FnMut(&DocKey, &[u8]) -> Result<(), String>,
     ) -> Result<(), String> {
         // Over the *cores*, not the current VM's open docs. A doc the previous source opened and
         // the new one does not still holds unflushed writes, and iterating the mirrors would

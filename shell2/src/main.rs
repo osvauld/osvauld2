@@ -32,7 +32,7 @@ use crate::{
     space::{SpaceScreen, SpaceScreenMsg},
 };
 use app_host::{
-    LuaApp, Resolve, SourceEdit, Wake, edit_source_file as edit_source_doc_file,
+    DocKey, LuaApp, Resolve, SourceEdit, Wake, edit_source_file as edit_source_doc_file,
     read_source_file_versioned as read_source_doc_file_versioned,
     write_source_file as write_source_doc_file,
 };
@@ -51,7 +51,10 @@ use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
     KeyInput, Mods, ScreenshotRequest, col, row, text,
 };
-use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem, WorkspaceMeta};
+use vault::{
+    ASSET_DOC, ItemKind, PreparedAccount, UnlockedAccount, Vault, VaultError, WorkspaceItem,
+    WorkspaceMeta,
+};
 
 use crate::signup::{SignupForm, SignupMsg};
 
@@ -167,7 +170,18 @@ fn resolver(vault: &Vault, ws_id: &str, item_id: &str) -> Resolve {
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
     // Not `.ok().flatten()`: a vault read failure must not masquerade as "no doc yet", or the
     // app opens empty and the first flush writes that emptiness over the real board.
-    Rc::new(move |name| v.get_doc(&ws, &it, name).map_err(|e| e.to_string()))
+    Rc::new(move |key| {
+        let found = match key {
+            DocKey::Own(name) => v.get_doc(&ws, &it, name),
+            // An asset not created yet reads as never saved; its first save creates it.
+            DocKey::Asset(name) => match v.item_named(&ws, name, ItemKind::Asset) {
+                Ok(Some(asset)) => v.get_doc(&ws, &asset.id, ASSET_DOC),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            },
+        };
+        found.map_err(|e| e.to_string())
+    })
 }
 
 /// [`resolver`], plus one more thing to check first: if the local vault has nothing yet *and*
@@ -185,10 +199,13 @@ fn resolver_with_node(
 ) -> Resolve {
     let local = resolver(vault, ws_id, item_id);
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
-    Rc::new(move |name| {
-        if let Some(bytes) = local(name)? {
+    Rc::new(move |key| {
+        if let Some(bytes) = local(key)? {
             return Ok(Some(bytes));
         }
+        let DocKey::Own(name) = key else {
+            return Ok(None); // pulling an asset from the node is slice 2c
+        };
         let socket = kunki::bridge::socket_path();
         Ok(node::pull_doc(
             &socket,
@@ -347,9 +364,26 @@ fn persist(
     vault: &Vault,
     ws_id: &str,
     item_id: &str,
-) -> impl FnMut(&str, &[u8]) -> Result<(), String> {
+) -> impl FnMut(&DocKey, &[u8]) -> Result<(), String> {
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
-    move |name, bytes| v.put_doc(&ws, &it, bytes, name).map_err(|e| e.to_string())
+    move |key, bytes| {
+        let saved = match key {
+            DocKey::Own(name) => v.put_doc(&ws, &it, bytes, name),
+            DocKey::Asset(name) => asset_item(&v, &ws, name)
+                .and_then(|asset| v.put_doc(&ws, &asset.id, bytes, ASSET_DOC)),
+        };
+        saved.map_err(|e| e.to_string())
+    }
+}
+
+/// The asset named `name` in `ws_id`, created on its first save — an app makes an asset by
+/// writing to it. Two peers doing so at once each make one; [`Vault::item_named`]'s
+/// oldest-wins picks the same one everywhere.
+fn asset_item(vault: &Vault, ws_id: &str, name: &str) -> Result<WorkspaceItem, VaultError> {
+    match vault.item_named(ws_id, name, ItemKind::Asset)? {
+        Some(asset) => Ok(asset),
+        None => vault.create_item(ws_id, name, ItemKind::Asset),
+    }
 }
 
 /// The auth family's second half, as a free function so tests can drive it without a
@@ -402,7 +436,10 @@ fn kind_from_str(kind: &str) -> Result<ItemKind, String> {
         "table" => Ok(ItemKind::Table),
         "app" => Ok(ItemKind::App),
         "canvas" => Ok(ItemKind::Canvas),
-        other => Err(format!("unknown kind {other:?} (doc, table, app, canvas)")),
+        "asset" => Ok(ItemKind::Asset),
+        other => Err(format!(
+            "unknown kind {other:?} (doc, table, app, canvas, asset)"
+        )),
     }
 }
 
@@ -1729,9 +1766,11 @@ impl App for Shell {
             let ws = o.ws_id.clone();
             let mut dirtied = Vec::new();
             let mut put = persist(&vault, &ws, item_id);
-            let result = o.app.flush(|name, bytes| {
-                dirtied.push(name.to_string());
-                put(name, bytes)
+            let result = o.app.flush(|key, bytes| {
+                if let DocKey::Own(name) = key {
+                    dirtied.push(name.clone());
+                }
+                put(key, bytes)
             });
             if let Err(e) = result {
                 failed = Some(format!("save failed: {e}"));

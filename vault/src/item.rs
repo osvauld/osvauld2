@@ -21,7 +21,13 @@ pub enum ItemKind {
     Table,
     App,
     Canvas,
+    /// A drawing with its clips — data any app in the workspace opens by name. Its content is
+    /// the item's doc named [`ASSET_DOC`]; it has no source.
+    Asset,
 }
+
+/// The one doc an [`ItemKind::Asset`] keeps its content in.
+pub const ASSET_DOC: &str = "asset";
 
 impl ItemKind {
     pub fn as_str(&self) -> &'static str {
@@ -30,6 +36,7 @@ impl ItemKind {
             ItemKind::Table => "table",
             ItemKind::App => "app",
             ItemKind::Canvas => "canvas",
+            ItemKind::Asset => "asset",
         }
     }
 
@@ -41,6 +48,7 @@ impl ItemKind {
             "table" => Some(ItemKind::Table),
             "app" => Some(ItemKind::App),
             "canvas" => Some(ItemKind::Canvas),
+            "asset" => Some(ItemKind::Asset),
             _ => None,
         }
     }

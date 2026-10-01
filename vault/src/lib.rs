@@ -18,7 +18,7 @@ pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
-pub use item::{ItemKind, WorkspaceItem};
+pub use item::{ASSET_DOC, ItemKind, WorkspaceItem};
 pub use workspace::WorkspaceMeta;
 
 use account::{did_to_filename, scan_dids};
@@ -335,6 +335,21 @@ impl Vault {
             b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id))
         });
         Ok(out)
+    }
+    /// The item named `name` of `kind` in `ws_id`. Names are not unique — two peers can each
+    /// create one offline — so the oldest wins (created, then id): every peer picks the same
+    /// item without asking the others.
+    pub fn item_named(
+        &self,
+        ws_id: &str,
+        name: &str,
+        kind: ItemKind,
+    ) -> Result<Option<WorkspaceItem>, VaultError> {
+        Ok(self
+            .items(ws_id)?
+            .into_iter()
+            .filter(|i| i.name == name && i.kind == kind)
+            .min_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id))))
     }
     /// `ws_id`/`item_id` come from a caller synced or published from elsewhere — never minted
     /// here — and both become part of the key, so they're checked the same way

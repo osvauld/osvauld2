@@ -240,7 +240,7 @@ fn seeded(app: &mut LuaApp<LuaMsg>) -> LoroValue {
         .take()
         .pop()
         .expect("seeding should have made the doc dirty");
-    assert_eq!(name, "board");
+    assert_eq!(name, own("board"));
     let doc = LoroDoc::new();
     doc.import(&bytes).unwrap();
     doc.get_deep_value()

@@ -21,6 +21,11 @@ fn no_cores() -> Cores {
     Rc::new(RefCell::new(HashMap::new()))
 }
 
+/// An app's own doc, by name — the key `doc:open(name)` files it under.
+fn own(name: &str) -> DocKey {
+    DocKey::Own(name.to_string())
+}
+
 fn noop_wake() -> Wake {
     std::sync::Arc::new(|| {})
 }
@@ -422,6 +427,141 @@ fn a_posed_drawing_is_an_ordinary_frame_named_by_part() {
     assert_eq!(walk(node, &mut ctx).unwrap().info().kind, "frame");
 }
 
+/// Probe for docs/design/assets.md: a drawing stored in a CRDT doc, read back through the mirror,
+/// is accepted by `gfx.drawing` as-is — the read side of an asset needs no copy.
+#[test]
+fn a_drawing_mirrored_from_a_doc_draws() {
+    let src = LoroDoc::new();
+    let main = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    main.insert(
+        0,
+        r##"
+        -- Writes must be tagged at every depth; a positional table is a list, anything else a map.
+        local function tag(v)
+            if type(v) ~= "table" then return v end
+            local out, n = {}, 0
+            for k, x in pairs(v) do out[k] = tag(x); n += 1 end
+            return (n == #v and n > 0) and doc.list(out) or doc.map(out)
+        end
+        local h = doc:open("hero")
+        if not h.parts then
+            h:set({ "size" }, tag({ 32, 48 }))
+            h:set({ "parts" }, tag({
+                { id = "body", pivot = { 16, 30 }, shapes = {
+                    { path = { {"move",8,16}, {"line",24,16}, {"line",24,36}, {"close"} },
+                      fill = "#f84aa7", stroke = { 1.5, "#1b1b3a" } } } },
+                { id = "leg", parent = "body", pivot = { 12, 34 }, shapes = {
+                    { path = { {"move",10,34}, {"line",14,34}, {"line",14,46}, {"close"} },
+                      fill = "#3b2f5c" } } },
+            }))
+        end
+        return function() return ui.text({ "hero" }) end
+        "##,
+    )
+    .unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let _ = app.view(); // the mirror is a frame behind the module-scope write
+
+    let posed: mlua::AnyUserData = app
+        .vm
+        .load(r#"return gfx.drawing(doc:open("hero")):pose({ leg = { rot = 20 } })"#)
+        .eval()
+        .unwrap();
+    let frame = posed.borrow::<gfx::LuaFrame>().unwrap();
+    let ids: Vec<_> = frame
+        .0
+        .items()
+        .iter()
+        .map(|i| i.id().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["body", "leg"]);
+}
+
+/// A shape's fill can be a linear gradient, as data — the drawing stays a plain table.
+#[test]
+fn a_drawing_shape_fills_with_a_linear_gradient() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let posed: mlua::AnyUserData = lua
+        .load(
+            r##"
+            local sky = gfx.drawing({ size = { 40, 20 }, parts = { { id = "sky", pivot = { 20, 10 },
+                shapes = { { path = { {"move",0,0}, {"line",40,0}, {"line",40,20}, {"close"} },
+                    fill = { linear = { from = { 0, 0 }, to = { 0, 20 }, extend = "reflect",
+                        stops = { { 0, "#4aa3ff" }, { 1, "#1b2a6b" } } } },
+                    stroke = { 1, "#ffffff" } } } } } })
+            return sky:pose({ sky = { rot = 30 } })
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let frame = posed.borrow::<gfx::LuaFrame>().unwrap();
+    let ids: Vec<_> = frame
+        .0
+        .items()
+        .iter()
+        .map(|i| i.id().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["sky"]);
+}
+
+/// Radial and sweep gradients, as drawing data and as `gfx` brushes — the same fields in both.
+#[test]
+fn radial_and_sweep_gradients_fill_drawings_and_frames() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let ok: bool = lua
+        .load(
+            r##"
+            local square = { {"move",0,0}, {"line",40,0}, {"line",40,40}, {"line",0,40}, {"close"} }
+            local stops = { { 0, "#fff7c2" }, { 1, "#ffb703" } }
+            local sun = gfx.drawing({ size = { 40, 40 }, parts = { { id = "sun", pivot = { 20, 20 },
+                shapes = {
+                    { path = square, fill = { radial = { center = { 20, 20 }, radius = 20,
+                        focus = { 14, 14 }, focus_radius = 2, stops = stops } } },
+                    { path = square, fill = { sweep = { center = { 20, 20 }, from_angle = -90,
+                        to_angle = 270, extend = "repeat", stops = stops } } },
+                } } } })
+            sun:pose({ sun = { rot = 30 } })
+            local p = gfx.path(square)
+            gfx.frame({ width = 40, height = 40,
+                gfx.fill({ path = p, brush = gfx.radial_gradient({ center = { 20, 20 }, radius = 20,
+                    stops = stops }) }),
+                gfx.fill({ path = p, brush = gfx.sweep_gradient({ center = { 20, 20 }, stops = stops }) }),
+            })
+            return true
+            "##,
+        )
+        .eval()
+        .unwrap();
+    assert!(ok);
+}
+
+/// A soft shadow is a shape kind in a drawing and an item in a frame — the same fields in both.
+#[test]
+fn shadows_draw_in_drawings_and_frames() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let ok: bool = lua
+        .load(
+            r##"
+            local knob = gfx.drawing({ size = { 40, 40 }, parts = { { id = "knob", pivot = { 20, 20 },
+                shapes = {
+                    { shadow = { rect = { 4, 8, 32, 32 }, radius = 16, blur = 4, color = "#00000066" } },
+                    { path = { {"move",4,4}, {"line",36,4}, {"line",36,36}, {"close"} }, fill = "#ffd166" },
+                } } } })
+            knob:pose({ knob = { rot = 45 } })
+            gfx.frame({ width = 10, height = 10,
+                gfx.shadow({ id = "s", rect = { 0, 0, 10, 4 }, blur = 2, color = "#000" }) })
+            return true
+            "##,
+        )
+        .eval()
+        .unwrap();
+    assert!(ok);
+}
+
 #[test]
 fn a_drawing_module_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -449,6 +589,55 @@ fn a_drawing_module_is_checked_strictly() {
         (
             format!("{HERO} return hero:pose({{ body = {{ spin = 1 }} }})"),
             "pose: unknown field spin",
+        ),
+        (
+            part("pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, fill = 3 } }"),
+            "shape 1.fill must be a color or a gradient",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, fill = { conic = {} } } }",
+            ),
+            "fill: unknown field conic",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, \
+                 fill = { linear = {}, radial = {} } } }",
+            ),
+            "shape 1.fill takes one gradient",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, \
+                 fill = { radial = { center = { 4, 4 }, stops = { { 0, '#fff' }, { 1, '#000' } } } } } }",
+            ),
+            "shape 1.fill.radial needs radius",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { path = { {'move',0,0} }, \
+                 fill = { linear = { from = { 0, 0 }, to = { 0, 9 }, stops = { { 0, '#fff' } } } } } }",
+            ),
+            "shape 1.fill.linear: gradient needs between 2 and 64 ordered stops",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { shadow = { rect = { 0, 0, 4, 4 } }, fill = '#000' } }",
+            ),
+            "shape 1: unknown field fill",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { shadow = { rect = { 0, 0, 4 }, blur = 1, color = '#000' } } }",
+            ),
+            "shape 1.shadow.rect needs x, y, w and h",
+        ),
+        (
+            part(
+                "pivot = { 0, 0 }, shapes = { { shadow = { rect = { 0, 0, 4, 4 }, blur = 0, color = '#000' } } }",
+            ),
+            "shape 1.shadow: shadow needs",
         ),
     ];
     for (source, wanted) in cases {
@@ -1448,7 +1637,7 @@ use loro::{ExportMode, LoroText};
 /// A resolver that serves `snapshot` under one name and nothing else — the shape shell2
 /// builds around `Vault::get_doc`, minus the vault.
 fn serving(name: &'static str, snapshot: Vec<u8>) -> Resolve {
-    Rc::new(move |n: &str| Ok((n == name).then(|| snapshot.clone())))
+    Rc::new(move |k: &DocKey| Ok((*k == own(name)).then(|| snapshot.clone())))
 }
 
 fn snapshot_of(doc: &LoroDoc) -> Vec<u8> {
@@ -1474,6 +1663,47 @@ fn open_imports_and_mirrors() {
         .unwrap();
     assert_eq!(got, "b/Todo");
     assert_eq!(docs.borrow().len(), 1);
+}
+
+/// `asset:open("board")` and `doc:open("board")` share a name and nothing else: the resolver is
+/// asked for each by its own key, and each gets its own mirror.
+#[test]
+fn an_asset_and_an_own_doc_of_one_name_are_two_docs() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
+    let snapshot = snapshot_of(&board(&["from the asset"]));
+    let resolve: Resolve = Rc::new(move |k: &DocKey| {
+        Ok((*k == DocKey::Asset("board".into())).then(|| snapshot.clone()))
+    });
+    install(&lua, docs.clone(), no_cores(), resolve, noop_wake()).unwrap();
+
+    let (asset_title, own_cards): (String, bool) = lua
+        .load(
+            r#"
+            local a, d = asset:open("board"), doc:open("board")
+            return a.cards[1].title, d.cards ~= nil
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(asset_title, "from the asset");
+    assert!(
+        !own_cards,
+        "the app's own board must not see the asset's data"
+    );
+    assert_eq!(docs.borrow().len(), 2);
+}
+
+/// A write to an asset is flushed under the asset's key, so the host can route it to the
+/// asset's item rather than the app's.
+#[test]
+fn an_asset_write_flushes_under_the_asset_key() {
+    let mut app =
+        board_app_writing(r#"asset:open("hero"):set({"meta"}, doc.map{ title = "hero" })"#);
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    let keys: Vec<_> = puts.take().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, [DocKey::Asset("hero".into())]);
 }
 
 /// Apps call `open` every frame, so the warm path must hand back the *same* table — a fresh
@@ -1627,7 +1857,7 @@ fn board_app(resolve: Resolve) -> LuaApp<LuaMsg> {
 
 fn cards_len(app: &LuaApp<LuaMsg>) -> usize {
     let docs = app.docs.borrow();
-    let mirror = &docs.get("board").unwrap().mirror;
+    let mirror = &docs.get(&own("board")).unwrap().mirror;
     mirror.get::<Table>("cards").unwrap().raw_len()
 }
 
@@ -1640,7 +1870,7 @@ fn external_write_reaches_the_mirror_on_next_view() {
     assert_eq!(cards_len(&app), 2);
 
     // `LoroDoc::clone` is a reference clone, so this is the app's own doc, not a fork.
-    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = board_doc(&app);
     let extra = doc
         .get_movable_list("cards")
         .insert_container(2, LoroMap::new())
@@ -1653,7 +1883,7 @@ fn external_write_reaches_the_mirror_on_next_view() {
     assert_eq!(
         app.docs
             .borrow()
-            .get("board")
+            .get(&own("board"))
             .unwrap()
             .core
             .version
@@ -1671,7 +1901,7 @@ fn view_without_a_write_does_not_repatch() {
     let app = board_app(serving("board", snapshot_of(&board(&["a"]))));
     let _ = app.view();
     let e = app.docs.borrow();
-    let e = e.get("board").unwrap();
+    let e = e.get(&own("board")).unwrap();
     assert_eq!(e.core.version.load(Ordering::Relaxed), 0);
     assert_eq!(e.mirrored, 0);
 }
@@ -1680,7 +1910,7 @@ fn view_without_a_write_does_not_repatch() {
 #[test]
 fn many_writes_are_one_patch() {
     let app = board_app(serving("board", snapshot_of(&board(&["a"]))));
-    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = board_doc(&app);
     for t in ["b", "c", "d"] {
         let m = doc
             .get_movable_list("cards")
@@ -1692,7 +1922,7 @@ fn many_writes_are_one_patch() {
     assert_eq!(
         app.docs
             .borrow()
-            .get("board")
+            .get(&own("board"))
             .unwrap()
             .core
             .version
@@ -1702,7 +1932,7 @@ fn many_writes_are_one_patch() {
 
     let _ = app.view();
     let docs = app.docs.borrow();
-    let e = docs.get("board").unwrap();
+    let e = docs.get(&own("board")).unwrap();
     assert_eq!(e.mirrored, 3, "one patch, catching up all three commits");
     drop(docs);
     assert_eq!(cards_len(&app), 4);
@@ -1747,7 +1977,7 @@ fn an_import_asks_for_a_frame() {
     let app = board_app_waking(serving("board", snapshot_of(&base)), wake);
     assert_eq!(hits.load(Ordering::Relaxed), 0, "opening is not a change");
 
-    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = board_doc(&app);
     doc.import(&update_adding("b", &base)).unwrap();
 
     assert_eq!(hits.load(Ordering::Relaxed), 1);
@@ -1768,7 +1998,7 @@ fn a_local_write_does_not_ask_for_a_frame() {
     let (wake, hits) = counting_wake();
     let app = board_app_waking(serving("board", snapshot_of(&board(&["a"]))), wake);
 
-    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = board_doc(&app);
     let m = doc
         .get_movable_list("cards")
         .push_container(LoroMap::new())
@@ -1779,7 +2009,7 @@ fn a_local_write_does_not_ask_for_a_frame() {
     assert_eq!(
         app.docs
             .borrow()
-            .get("board")
+            .get(&own("board"))
             .unwrap()
             .core
             .version
@@ -1808,7 +2038,7 @@ fn a_batch_of_changes_is_one_poke() {
         m.insert("title", t).unwrap();
         peer.commit();
     }
-    let doc = app.docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = board_doc(&app);
     doc.import(&peer.export(ExportMode::Snapshot).unwrap())
         .unwrap();
 
@@ -2106,15 +2336,20 @@ fn scan_for_id_skips_elements_that_cannot_match() {
 
 // ── persistence: LuaApp::flush ────────────────────────────────────────────────
 // Assumes:
-//   pub fn flush(&mut self, put: impl FnMut(&str, &[u8]) -> Result<(), String>)
+//   pub fn flush(&mut self, put: impl FnMut(&DocKey, &[u8]) -> Result<(), String>)
 //       -> Result<(), String>
 // and a `saved: u64` watermark on `DocEntry`, beside `mirrored`.
 
 /// Writes straight to the doc rather than through `:set`, so these stay valid while the Lua
 /// write API is still being designed. This is also what MCP and peer writes will look like.
+/// The app's live board doc — a reference clone, so writes to it are the app's own.
+fn board_doc(app: &LuaApp<LuaMsg>) -> LoroDoc {
+    app.docs.borrow()[&own("board")].core.doc.clone()
+}
+
 fn add_card(app: &LuaApp<LuaMsg>, title: &str) {
     let docs = app.docs.borrow();
-    let doc = &docs.get("board").unwrap().core.doc;
+    let doc = &docs.get(&own("board")).unwrap().core.doc;
     let cards = doc.get_movable_list("cards");
     let m = cards.insert_container(cards.len(), LoroMap::new()).unwrap();
     m.insert("title", title).unwrap();
@@ -2123,22 +2358,22 @@ fn add_card(app: &LuaApp<LuaMsg>, title: &str) {
 
 fn card_title(app: &LuaApp<LuaMsg>, i: usize) -> String {
     let docs = app.docs.borrow();
-    let mirror = &docs.get("board").unwrap().mirror;
+    let mirror = &docs.get(&own("board")).unwrap().mirror;
     let cards: Table = mirror.get("cards").unwrap();
     cards.get::<Table>(i).unwrap().get("title").unwrap()
 }
 
 /// Everything `flush` handed to the vault.
 #[derive(Default)]
-struct Puts(RefCell<Vec<(String, Vec<u8>)>>);
+struct Puts(RefCell<Vec<(DocKey, Vec<u8>)>>);
 
 impl Puts {
-    fn take(&self) -> Vec<(String, Vec<u8>)> {
+    fn take(&self) -> Vec<(DocKey, Vec<u8>)> {
         self.0.borrow_mut().drain(..).collect()
     }
-    fn recorder(&self) -> impl FnMut(&str, &[u8]) -> Result<(), String> + '_ {
-        move |name, bytes| {
-            self.0.borrow_mut().push((name.to_string(), bytes.to_vec()));
+    fn recorder(&self) -> impl FnMut(&DocKey, &[u8]) -> Result<(), String> + '_ {
+        move |key, bytes| {
+            self.0.borrow_mut().push((key.clone(), bytes.to_vec()));
             Ok(())
         }
     }
@@ -2154,7 +2389,7 @@ fn flush_writes_a_dirty_doc() {
 
     let got = puts.take();
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].0, "board", "the doc's name is the storage key");
+    assert_eq!(got[0].0, own("board"), "the doc's key is the storage key");
     assert!(!got[0].1.is_empty());
 }
 
@@ -2348,7 +2583,7 @@ fn writing() -> (Lua, LoroDoc) {
     lua.load(r#"board = doc:open("board") board:set({"meta"}, doc.map{})"#)
         .exec()
         .unwrap();
-    let doc = docs.borrow().get("board").unwrap().core.doc.clone();
+    let doc = docs.borrow().get(&own("board")).unwrap().core.doc.clone();
     (lua, doc)
 }
 
@@ -2679,7 +2914,7 @@ fn a_card_written_from_lua_survives_a_restart() {
 
     let saved = puts.take();
     let (name, bytes) = saved.first().expect("the board should have been saved");
-    assert_eq!(name, "board");
+    assert_eq!(*name, own("board"));
 
     let reopened = board_app(serving("board", bytes.clone()));
     assert_eq!(cards_len(&reopened), 1);
@@ -2997,7 +3232,7 @@ fn the_kanban_loads_and_seeds_its_board() {
     let (name, bytes) = saved
         .first()
         .expect("seeding should have made the doc dirty");
-    assert_eq!(name, "board");
+    assert_eq!(*name, own("board"));
     assert_eq!(ids_in(bytes, "columns"), ["c-todo", "c-doing", "c-done"]);
     assert_eq!(ids_in(bytes, "cards"), ["k1", "k2", "k3", "k4"]);
 }
@@ -3047,7 +3282,7 @@ fn the_kanban_renders_its_seeded_board() {
     // Repatches the mirror, which the closure below reads.
     let _ = app.view();
     let docs = app.docs.borrow();
-    let mirror = &docs.get("board").unwrap().mirror;
+    let mirror = &docs.get(&own("board")).unwrap().mirror;
     assert_eq!(mirror.get::<Table>("cards").unwrap().raw_len(), 4);
     assert_eq!(mirror.get::<Table>("columns").unwrap().raw_len(), 3);
     drop(docs);
@@ -3142,7 +3377,7 @@ fn the_kanban_moves_a_card_across_modules() {
 /// A card's column, read out of the mirror by id.
 fn card_col(app: &LuaApp<LuaMsg>, id: &str) -> String {
     let docs = app.docs.borrow();
-    let cards: Table = docs.get("board").unwrap().mirror.get("cards").unwrap();
+    let cards: Table = docs[&own("board")].mirror.get("cards").unwrap();
     for i in 1..=cards.raw_len() {
         let card: Table = cards.get(i).unwrap();
         if card.get::<String>("id").unwrap() == id {
@@ -3155,7 +3390,7 @@ fn card_col(app: &LuaApp<LuaMsg>, id: &str) -> String {
 /// A column's stored width, read out of the mirror by id.
 fn col_w(app: &LuaApp<LuaMsg>, id: &str) -> f64 {
     let docs = app.docs.borrow();
-    let cols: Table = docs.get("board").unwrap().mirror.get("columns").unwrap();
+    let cols: Table = docs[&own("board")].mirror.get("columns").unwrap();
     for i in 1..=cols.raw_len() {
         let c: Table = cols.get(i).unwrap();
         if c.get::<String>("id").unwrap() == id {
@@ -3344,6 +3579,166 @@ fn frame_orbits_demo_loads_and_builds_its_frame_leaf() {
     assert_eq!(frame.kind, "frame", "demo did not produce a Frame leaf");
     assert_eq!(frame.handlers, vec!["on_frame"]);
     assert!(app.error.is_none(), "demo failed: {:?}", app.error);
+}
+
+/// The asset editor seeds the `hero` asset on first open, draws it from the asset, and survives
+/// selecting a part from the list, clearing it from the canvas, and switching to the toggle —
+/// whose seed must draw, and whose clips must all be valid clips.
+fn asset_editor() -> LuaApp<LuaMsg> {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for name in [
+        "main.lua",
+        "model.lua",
+        "stage.lua",
+        "theme.lua",
+        "seed/hero.lua",
+        "seed/clips.lua",
+        "seed/toggle.lua",
+        "seed/chest.lua",
+        "seed/hat.lua",
+        "seed/room.lua",
+    ] {
+        let body = std::fs::read_to_string(format!("../demo_apps/asset_editor/{name}"))
+            .unwrap_or_else(|_| panic!("asset_editor/{name} on disk"));
+        files
+            .insert_container(name, LoroText::new())
+            .unwrap()
+            .insert(0, &body)
+            .unwrap();
+    }
+    src.commit();
+    LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap()
+}
+
+fn click(app: &mut LuaApp<LuaMsg>, id: &str) {
+    let at = Key::new(id, "on_click");
+    app.update(LuaMsg::CallAt(at, 0.0, 0.0, Shape::default(), None));
+}
+
+#[test]
+fn asset_editor_seeds_draws_and_selects() {
+    let mut app = asset_editor();
+
+    let info = app.view().info();
+    assert!(app.error.is_none(), "editor failed: {:?}", app.error);
+    // The canvas sits inside the zoomable viewport, under the clip bar.
+    let canvas = |info: &runtime::ElInfo| {
+        let viewport = &info.children[0].children[1];
+        viewport.children[0].id.clone().unwrap()
+    };
+    assert_eq!(canvas(&info), "canvas", "the canvas should draw the asset");
+
+    for target in ["part:arm_near", "canvas", "asset:toggle", "part:knob"] {
+        app.update(LuaMsg::CallAt(
+            Key::new(target, "on_click"),
+            0.0,
+            0.0,
+            Shape::default(),
+            None,
+        ));
+        let _ = app.view();
+        let console = app.console(100);
+        assert!(console.is_empty(), "{target}: {console:?}");
+    }
+    assert!(app.error.is_none(), "editor failed: {:?}", app.error);
+
+    // Play mode swaps the canvas for a world, `stage`, playing the clip; pressing again restarts
+    // it, and "edit" brings the frame back.
+    for (target, kind) in [
+        ("clip:to_night", "stage"),
+        ("clip:to_night", "stage"),
+        ("mode:edit", "canvas"),
+    ] {
+        app.update(LuaMsg::CallAt(
+            Key::new(target, "on_click"),
+            0.0,
+            0.0,
+            Shape::default(),
+            None,
+        ));
+        let info = app.view().info();
+        let console = app.console(100);
+        assert!(console.is_empty(), "{target}: {console:?}");
+        assert_eq!(canvas(&info), kind, "{target}");
+    }
+
+    let clips: usize = app
+        .vm
+        .load(
+            r#"
+            local toggle = asset:open("toggle")
+            gfx.drawing({ size = toggle.size, parts = toggle.views.front.parts }):pose({})
+            local n = 0
+            for _, clip in pairs(toggle.clips) do gfx.clip(clip); n += 1 end
+            return n
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(clips, 4);
+
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    let mut keys: Vec<_> = puts.take().into_iter().map(|(k, _)| k).collect();
+    keys.sort();
+    let seeded = [DocKey::Asset("hero".into()), DocKey::Asset("toggle".into())];
+    assert_eq!(keys, seeded); // each seed is its asset's
+}
+
+/// Stage edit draws the room's entities and moves one by dragging it: live while dragging, one
+/// write on release. The hat rides the hero's `head_top` socket, so it has no position to drag.
+#[test]
+fn asset_editor_stage_moves_an_entity() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "asset:room");
+    let _ = app.view(); // the room and the assets it shows seed here
+    let info = app.view().info();
+    let canvas = &info.children[0].children[0].children[0]; // a stage has no clip bar
+    assert_eq!(canvas.id.as_deref(), Some("stage-canvas"));
+
+    let drag = |app: &mut LuaApp<LuaMsg>, phase: &'static str, shape: &str, x: f32, y: f32| {
+        let args = DragArgs {
+            phase,
+            at: (x, y),
+            delta: (0.0, 0.0),
+            scale: 1.0,
+            origin: (0.0, 0.0),
+            shape: Shape(Some((shape.into(), 0.0, 0.0))),
+            t: 0.0,
+        };
+        app.update(LuaMsg::CallDrag(Key::new("stage-canvas", "on_drag"), args));
+        let _ = app.view();
+    };
+    // The chest moves by the pointer's travel, (40, 20); the hat is mounted, so it won't move.
+    let gesture = [
+        ("start", 0.0, 0.0),
+        ("move", 20.0, 10.0),
+        ("end", 40.0, 20.0),
+    ];
+    for (who, x0, y0) in [("chest", 500.0, 280.0), ("hat", 200.0, 120.0)] {
+        for (phase, dx, dy) in gesture {
+            drag(&mut app, phase, who, x0 + dx, y0 + dy);
+        }
+    }
+    let console = app.console(100);
+    assert!(console.is_empty(), "{console:?}");
+
+    let moved: String = app
+        .vm
+        .load(
+            r#"
+            local at = {}
+            for _, e in ipairs(asset:open("room").scene.entities) do
+                at[#at + 1] = e.id .. "=" .. (e.pos and (e.pos[1] .. "," .. e.pos[2]) or "mounted")
+            end
+            return table.concat(at, " ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(moved, "chest=500,270 hero=140,110 hat=mounted");
 }
 
 #[test]
@@ -3675,7 +4070,7 @@ fn tally_loads_views_and_clicks() {
     app.flush(puts.recorder()).unwrap();
     let saved = puts.take();
     let (name, bytes) = saved.first().expect("the tally doc should have been saved");
-    assert_eq!(name, "tally");
+    assert_eq!(*name, own("tally"));
 
     let back = LoroDoc::new();
     back.import(bytes).unwrap();

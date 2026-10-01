@@ -124,17 +124,17 @@ fn a_reload_does_not_resubscribe() {
     let before = app
         .cores
         .borrow()
-        .get("board")
+        .get(&own("board"))
         .unwrap()
         .version
         .load(Ordering::Relaxed);
-    let doc = app.cores.borrow().get("board").unwrap().doc.clone();
+    let doc = app.cores.borrow().get(&own("board")).unwrap().doc.clone();
     doc.get_map("meta").insert("title", "x").unwrap();
     doc.commit();
     let after = app
         .cores
         .borrow()
-        .get("board")
+        .get(&own("board"))
         .unwrap()
         .version
         .load(Ordering::Relaxed);

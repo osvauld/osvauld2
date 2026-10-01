@@ -70,7 +70,7 @@ fn tree_of(app: &LuaApp<LuaMsg>) -> Table {
 
 fn notes_len(app: &LuaApp<LuaMsg>) -> usize {
     let docs = app.docs.borrow();
-    docs.get("scratch")
+    docs.get(&own("scratch"))
         .unwrap()
         .mirror
         .get::<Table>("notes")

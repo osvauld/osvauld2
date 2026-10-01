@@ -477,6 +477,30 @@ and skipping `view` when only a world ticked (today the runtime re-runs `view` e
 frame, so Lua re-describes the world each frame while it animates). Not built: walls/physics, key-code validation, and a
 world-level `DumpTree`.
 
+### Assets — shared drawings, an asset editor, stages
+
+**Design draft 2026-09-29:** [assets.md](design/assets.md) — a drawing with its clips is data in a
+workspace asset that any app opens by name; editors are many and disposable; stages place assets
+together; sockets and plugs are the interface for swappable pieces. **Landed 2026-10-01 (branch
+`assets`):**
+- **Storage and `asset:open`.** `ItemKind::Asset` (its content is the item's doc `asset`) and
+  `Vault::item_named` (oldest wins on duplicate names). `app_host` keys open docs by
+  `DocKey::Own | Asset`; `asset:open(name)` shares `doc:open`'s mirror, writes, reload and flush.
+  The shell routes an asset's reads and saves to its own item, creating it on first save. A doc
+  mirror goes straight into `gfx.drawing`. Not built: syncing assets through the node (2c), and one
+  shared doc per asset across open apps (chunk 3) — two apps editing one asset, the last save wins.
+- **Paint.** Drawing fills take `linear`, `radial` and `sweep` gradients as data, and
+  `gfx.radial_gradient` / `gfx.sweep_gradient` join `gfx.linear_gradient` (one parser for all).
+  A shape can be a soft shadow — `Item::Shadow`, Vello's blurred rounded rect, paint only, never
+  hit — also as `gfx.shadow`. Not built: blurring other outlines, part-level clipping, opacity.
+- **The asset editor** (`demo_apps/asset_editor`): opens `hero`, `toggle` (a detailed day/night
+  toggle: gradients, glow, shadows, a knob that rolls and becomes a moon), `chest` and `hat`, each
+  seeded per missing root; selects parts on a zoomable canvas drawn from a scaled copy of the data;
+  plays any clip in place (the canvas becomes a `ui.world`). **Stage edit:** the `room` scene
+  places hero, chest and a hat mounted on the hero's `head_top` socket by its plug; entities drag,
+  one write on release. Not built: dragging points (E2), adding parts, the clip timeline, stage
+  play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
+
 ### Environment — composable 3D interfaces and worlds
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the

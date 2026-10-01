@@ -12,7 +12,7 @@ use runtime::frame::{
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
 };
 use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
-use runtime::vello::kurbo::{Affine, PathEl, Point};
+use runtime::vello::kurbo::{Affine, PathEl, Point, Rect};
 use runtime::vello::peniko::Fill;
 use world::clip::{Clip, Easing, Key, Prop, Track};
 
@@ -99,44 +99,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     gfx.set(
         "linear_gradient",
         lua.create_function(|lua, spec: Table| {
-            named_fields(&spec, "linear_gradient", &["from", "to", "stops", "extend"])?;
-            let start = point(
-                need(&spec, "linear_gradient", "from")?,
-                "linear_gradient.from",
-            )?;
-            let end = point(need(&spec, "linear_gradient", "to")?, "linear_gradient.to")?;
-            let stop_table: Table = need(&spec, "linear_gradient", "stops")?;
-            let len = positional_len(&stop_table, "linear_gradient.stops")?;
-            if len > MAX_GRADIENT_STOPS {
-                return Err(Error::runtime(format!(
-                    "linear_gradient has too many stops: {len}"
-                )));
-            }
-            let mut stops = Vec::with_capacity(len);
-            for index in 1..=len {
-                let stop: Table = stop_table.get(index)?;
-                if positional_len(&stop, &format!("linear_gradient stop {index}"))? != 2 {
-                    return Err(Error::runtime(format!(
-                        "linear_gradient stop {index} needs offset and color"
-                    )));
-                }
-                stops.push(
-                    GradientStop::new(stop.get(1)?, crate::parse_color(&stop.get::<String>(2)?)?)
-                        .map_err(Error::external)?,
-                );
-            }
-            let extend = match spec.get::<Option<String>>("extend")?.as_deref() {
-                None | Some("pad") => Extend::Pad,
-                Some("repeat") => Extend::Repeat,
-                Some("reflect") => Extend::Reflect,
-                Some(value) => {
-                    return Err(Error::runtime(format!("unknown gradient extend {value:?}")));
-                }
-            };
-            let brush = Brush::linear(start, end, stops, extend).map_err(Error::external)?;
+            let brush = gradient("linear", &spec, "linear_gradient")?;
             lua.create_userdata(LuaBrush(Arc::new(brush)))
         })?,
     )?;
+    for kind in ["radial", "sweep"] {
+        let name = format!("{kind}_gradient");
+        let owner = name.clone();
+        let make = lua.create_function(move |lua, spec: Table| {
+            let brush = gradient(kind, &spec, &owner)?;
+            lua.create_userdata(LuaBrush(Arc::new(brush)))
+        })?;
+        gfx.set(name, make)?;
+    }
     gfx.set(
         "text_surface",
         lua.create_function(|lua, spec: Table| {
@@ -223,6 +198,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         function gfx.stroke(t) t._gfx = "stroke" return t end
         function gfx.group(t) t._gfx = "group" return t end
         function gfx.instance(t) t._gfx = "instance" return t end
+        function gfx.shadow(t) t._gfx = "shadow" return t end
         "#,
     )
     .exec()
@@ -480,17 +456,140 @@ fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
     Ok(Key { time: spec.get(1)?, value: spec.get(2)?, easing })
 }
 
+/// The fields every gradient shares: `stops = { {offset, color}, … }` and `extend`.
+fn stops_and_extend(spec: &Table, owner: &str) -> mlua::Result<(Vec<GradientStop>, Extend)> {
+    let stop_table: Table = need(spec, owner, "stops")?;
+    let len = positional_len(&stop_table, &format!("{owner}.stops"))?;
+    if len > MAX_GRADIENT_STOPS {
+        return Err(Error::runtime(format!("{owner} has too many stops: {len}")));
+    }
+    let mut stops = Vec::with_capacity(len);
+    for index in 1..=len {
+        let stop: Table = stop_table.get(index)?;
+        if positional_len(&stop, &format!("{owner} stop {index}"))? != 2 {
+            return Err(Error::runtime(format!(
+                "{owner} stop {index} needs offset and color"
+            )));
+        }
+        stops.push(
+            GradientStop::new(stop.get(1)?, crate::parse_color(&stop.get::<String>(2)?)?)
+                .map_err(Error::external)?,
+        );
+    }
+    let extend = match spec.get::<Option<String>>("extend")?.as_deref() {
+        None | Some("pad") => Extend::Pad,
+        Some("repeat") => Extend::Repeat,
+        Some("reflect") => Extend::Reflect,
+        Some(value) => return Err(Error::runtime(format!("unknown gradient extend {value:?}"))),
+    };
+    Ok((stops, extend))
+}
+
+/// The three gradients, from the fields of `gfx.linear_gradient` / `radial_gradient` /
+/// `sweep_gradient` — also what a drawing's `fill = { linear | radial | sweep = … }` holds.
+/// `owner` names it in errors.
+fn gradient(kind: &str, spec: &Table, owner: &str) -> mlua::Result<Brush> {
+    let at = |field: &str| -> mlua::Result<Point> {
+        point(need(spec, owner, field)?, &format!("{owner}.{field}"))
+    };
+    let tail = ["stops", "extend"];
+    let brush = match kind {
+        "linear" => {
+            named_fields(spec, owner, &[&["from", "to"][..], &tail].concat())?;
+            let (stops, extend) = stops_and_extend(spec, owner)?;
+            Brush::linear(at("from")?, at("to")?, stops, extend)
+        }
+        // `focus` and `focus_radius` are the start circle: by default a point at the centre.
+        "radial" => {
+            let fields = [&["center", "radius", "focus", "focus_radius"][..], &tail].concat();
+            named_fields(spec, owner, &fields)?;
+            let (stops, extend) = stops_and_extend(spec, owner)?;
+            let center = at("center")?;
+            let focus = match spec.get::<Option<Table>>("focus")? {
+                Some(f) => point(f, &format!("{owner}.focus"))?,
+                None => center,
+            };
+            let focus_radius = spec.get::<Option<f64>>("focus_radius")?.unwrap_or(0.0);
+            let end = (center, need(spec, owner, "radius")?);
+            Brush::radial((focus, focus_radius), end, stops, extend)
+        }
+        // Angles in degrees, like `rot` everywhere else; a full turn by default.
+        "sweep" => {
+            let fields = [&["center", "from_angle", "to_angle"][..], &tail].concat();
+            named_fields(spec, owner, &fields)?;
+            let (stops, extend) = stops_and_extend(spec, owner)?;
+            let from: f64 = spec.get::<Option<f64>>("from_angle")?.unwrap_or(0.0);
+            let to: f64 = spec.get::<Option<f64>>("to_angle")?.unwrap_or(360.0);
+            let (from, to) = (from.to_radians(), to.to_radians());
+            Brush::sweep(at("center")?, from, to, stops, extend)
+        }
+        _ => unreachable!("callers pass a known kind"),
+    };
+    brush.map_err(|e| Error::runtime(format!("{owner}: {e}")))
+}
+
+/// A drawing's `fill`: a colour string, or one gradient as data — `{ linear = {…} }`,
+/// `{ radial = {…} }` or `{ sweep = {…} }` — not a `gfx` handle, so a drawing stays pure data.
+/// Gradient geometry is in the drawing's own space and moves with the part.
+fn paint(value: Value, owner: &str) -> mlua::Result<Brush> {
+    match value {
+        Value::String(color) => {
+            Brush::solid(crate::parse_color(&color.to_str()?)?).map_err(Error::external)
+        }
+        Value::Table(t) => {
+            named_fields(&t, owner, &["linear", "radial", "sweep"])?;
+            let mut kinds = ["linear", "radial", "sweep"].into_iter();
+            let Some(kind) = kinds.find(|k| t.contains_key(*k).unwrap_or(false)) else {
+                let wanted = "needs linear, radial or sweep";
+                return Err(Error::runtime(format!("{owner} {wanted}")));
+            };
+            if t.pairs::<Value, Value>().count() > 1 {
+                return Err(Error::runtime(format!("{owner} takes one gradient")));
+            }
+            gradient(kind, &need(&t, owner, kind)?, &format!("{owner}.{kind}"))
+        }
+        other => Err(Error::runtime(format!(
+            "{owner} must be a color or a gradient, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// A soft shadow from `{ rect = {x, y, w, h}, radius?, blur, color }` — `gfx.shadow`'s fields,
+/// also a drawing shape's `shadow`. Paint only: the pointer goes through it.
+fn shadow(spec: &Table, owner: &str) -> mlua::Result<Item> {
+    let r: Table = need(spec, owner, "rect")?;
+    if positional_len(&r, &format!("{owner}.rect"))? != 4 {
+        return Err(Error::runtime(format!("{owner}.rect needs x, y, w and h")));
+    }
+    let (x, y, w, h): (f64, f64, f64, f64) = (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+    let radius = spec.get::<Option<f64>>("radius")?.unwrap_or(0.0);
+    let blur: f64 = need(spec, owner, "blur")?;
+    let color = crate::parse_color(&need::<String>(spec, owner, "color")?)?;
+    Item::shadow(Rect::new(x, y, x + w, y + h), radius, blur, color)
+        .map_err(|e| Error::runtime(format!("{owner}: {e}")))
+}
+
 /// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
 fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
+    if let Some(s) = spec.get::<Option<Table>>("shadow")? {
+        named_fields(&spec, owner, &["shadow"])?;
+        let owner = format!("{owner}.shadow");
+        named_fields(&s, &owner, &["rect", "radius", "blur", "color"])?;
+        return Ok(vec![shadow(&s, &owner)?]);
+    }
     named_fields(&spec, owner, &["path", "fill", "stroke"])?;
     let path = Arc::new(path(
         &need(&spec, owner, "path")?,
         &format!("{owner}.path"),
     )?);
     let mut items = Vec::new();
-    if let Some(color) = spec.get::<Option<String>>("fill")? {
-        let brush = Brush::solid(crate::parse_color(&color)?).map_err(Error::external)?;
-        items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+    match spec.get::<Value>("fill")? {
+        Value::Nil => {}
+        fill => {
+            let brush = paint(fill, &format!("{owner}.fill"))?;
+            items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+        }
     }
     if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
         if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
@@ -614,6 +713,11 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
             )?;
             let instance = Item::instance(transform(&spec)?, frame).map_err(Error::external)?;
             named(&spec, instance)
+        }
+        "shadow" => {
+            let fields = ["_gfx", "id", "rect", "radius", "blur", "color"];
+            named_fields(&spec, "shadow", &fields)?;
+            named(&spec, shadow(&spec, "shadow")?)
         }
         _ => Err(Error::runtime(format!(
             "Frame item {index}: unknown kind {kind:?}"
