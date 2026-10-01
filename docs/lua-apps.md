@@ -180,7 +180,7 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider` and `sensor` — nothing else.
+  `collider`, `sensor` and `loose` — nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -214,7 +214,7 @@ ui.world({
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
-  one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown` or `none`), `velocity`
+  one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
   `length`, `looped`). Check a world by reading it, not by probing pixels.
 - A carried entity is off the floor: its collider and sensor go while `attach` is set. Let go,
@@ -226,6 +226,11 @@ ui.world({
 - `sensor = { circle = 72, at = { 48, 68 } }` is a zone in the same shape words: it blocks
   nothing, and `on_zone` reports what comes into it and leaves it. An entity may have a
   `collider`, a `sensor`, both, or neither.
+- `loose = true` (or `loose = { bounce = 0.9, friction = 0.5 }`) hands an entity to physics: a
+  walker pushes it, it bounces off what it hits and the floor slows it. `bounce` is the share of
+  speed kept off a wall, 0 to 1 (default 0.5); `friction` is speed lost per second, 0 or more
+  (default 6, a heavy crate; a ball wants under 1). It needs a `collider`, and cannot have a
+  `controller`. At rest it sleeps, still loose, and the next push wakes it.
 
 ### Clips
 

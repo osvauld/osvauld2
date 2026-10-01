@@ -721,6 +721,30 @@ fn an_attach_is_checked_strictly() {
 }
 
 #[test]
+fn a_loose_thing_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |loose: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {loose} }} }})")
+    };
+    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }"] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("1", "world entity 1.loose must be true or a table, got integer"),
+        ("{ bounce = 'high' }", "loose.bounce must be a number, got string"),
+        ("{ bouncy = 1 }", "loose: unknown field bouncy"),
+        ("{ bounce = 2 }", "bounce must be from 0 to 1, got 2"),
+        ("{ friction = -1 }", "friction must be 0 or more, got -1"),
+    ];
+    for (loose, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(loose)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_collider_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

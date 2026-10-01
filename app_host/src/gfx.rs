@@ -344,6 +344,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
+        "loose",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -381,8 +382,38 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Some(c) => Some(collider(&c, &format!("{owner}.sensor"))?),
             None => None,
         },
-        loose: None,
+        loose: loose(&spec, &owner)?,
     })
+}
+
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n }` with either left
+/// to its default; `false` or absent, it is not loose. The world checks the ranges.
+fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
+    let m = match spec.get::<Value>("loose")? {
+        Value::Nil | Value::Boolean(false) => return Ok(None),
+        Value::Boolean(true) => return Ok(Some(world::Material::default())),
+        Value::Table(m) => m,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.loose must be true or a table, got {what}")));
+        }
+    };
+    let owner = format!("{owner}.loose");
+    named_fields(&m, &owner, &["bounce", "friction"])?;
+    let d = world::Material::default();
+    let number = |field: &str, or: f64| match m.get::<Value>(field)? {
+        Value::Nil => Ok(or),
+        Value::Integer(n) => Ok(n as f64),
+        Value::Number(n) => Ok(n),
+        other => {
+            let what = other.type_name();
+            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
+        }
+    };
+    Ok(Some(world::Material {
+        bounce: number("bounce", d.bounce)?,
+        friction: number("friction", d.friction)?,
+    }))
 }
 
 /// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
