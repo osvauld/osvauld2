@@ -125,6 +125,48 @@ Select part or shape → drag points and curve handles → pivot and part operat
 reorder, add a part for fingers) → fill and stroke → create rect and ellipse → pen tool → scrub
 a clip to check an edit animates. The agent covers creation well, so the pen tool comes last.
 
+## 4b. Colour: palette tokens, a picker, gradient control (talked through 2026-10-01)
+
+Built so far: the inspector (selected part's pivot, fills, strokes, shadow blur and colour, as
+inputs — Enter writes if it parses). Gradients show but don't edit; colours are typed hex.
+
+**Palette tokens.** An asset names its colours once; shapes refer to the name.
+
+```lua
+palette = { skin = "#e8b894", outline = "#1b1b3a", shirt = "#f84aa7" },
+-- …
+{ path = { … }, fill = "@shirt", stroke = { 2, "@outline" } }
+```
+
+One edit recolours every shape that uses the token; an agent edits meaning ("make the shirt
+teal") rather than hunting hex; a widget's tokens are its theme, so an app can restyle the toggle.
+
+- **`gfx.drawing` resolves them**, so every consumer — editor, world, apps — gets them free. An
+  unknown token is an error naming the shape, like any other bad field.
+- Tokens may stand wherever a colour does: fills, stroke colours, gradient stops, shadow colours.
+- **Variants** are `gfx.drawing(data, { palette = { shirt = "#2ec4b6" } })`: overrides merged over
+  the asset's palette, compiled once per variant — a team colour or a night version without
+  copying the asset. Not per pose: that would rebuild brushes every frame.
+- No alpha modifier (`"@skin/50"`) in v1; a glow that needs one gets its own token.
+- Later: a socket may hand its host's palette to whatever it mounts, so a hat can wear the
+  hero's colours. Interface work, after stage play.
+
+**The picker** (`colour.lua`, reused by the inspector, gradient stops and stage fields): a swatch
+on each colour field opens an overlay with a saturation/value square, a hue strip, an alpha
+strip and a hex field — the square and strips are stacked linear gradients in one frame. Its
+swatches are the asset's palette, so you pick `@outline`, not a lookalike. A drag updates the
+picker only; release writes once.
+
+**Gradients** have two kinds of control. Their colours — stops, kind, extend — are fields: a
+preview strip, one row per stop (offset 0–1, colour via the picker), add and remove, a kind
+switch that seeds default points from the shape's bounds. Their geometry — linear from/to, radial
+centre and radius, sweep centre and start angle — is handles on the canvas, sharing the point-drag
+machinery of E2b.
+
+**Slices:** P1 `gfx.drawing` resolves `palette` → P2 variants → P3 palette in the inspector,
+colour fields take tokens → seeds move to tokens → C1a picker (square, hue, hex) → C1b alpha and
+palette swatches → Ga gradient stops, kind, extend → Gb gradient handles with E2b point handles.
+
 ## 5. Motion and physics
 
 Three kinds of motion, in build order:
@@ -271,3 +313,5 @@ Consequences for stage play (S2):
   import is planned nowhere;
 - the paint the editor's style panel wants: radial and sweep gradients, clips, blend modes and
   group opacity are Vello-native and each a small exposure slice ([2D world](2d-world.md) §2).
+  *2026-10-01:* radial and sweep gradients and soft shadows are built; clips and opacity are ours
+  in §5d; blend modes remain open.
