@@ -501,7 +501,11 @@ front of the hero and `lift` raises its drawing into the hands, so let go, `fall
 footprint already on the floor; picking it up shuts the lid. **Lenient reconcile:** a clip track
 for a part the drawing lacks is skipped and noted once to the console (`World2d::drain_notes`,
 drained after each view) instead of refusing the world — asked for by the assets session, whose
-drawings change live; `attach` to a missing part stays an error. Next: 5d, dynamic bodies beyond the
+drawings change live; `attach` to a missing part stays an error. **Turning mounts:** `attach` takes
+`pivot` (the carried drawing's own point placed on `at`) and `turn = true` (it takes on the part's
+rotation, scale and mirror about that pivot) — asked for by the assets session so a hat stays on a
+nodding head; without `turn` a carried thing stays upright as before. Next: world inspection in
+`dump_tree` (positions, bodies, velocities, zones, then hints) and test pushes over the bridge, then 5d, dynamic bodies beyond the
 drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

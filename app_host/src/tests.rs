@@ -704,7 +704,11 @@ fn an_attach_is_checked_strictly() {
             {{ id = 'chest', pos = {{ 0, 0 }}, drawing = hero, attach = {attach} }} }})")
     };
     walk_world(&lua, &worlds, &room("{ to = 'hero', part = 'body', at = { 1, 2 } }")).unwrap();
+    let turned = "{ to = 'hero', part = 'body', at = { 1, 2 }, pivot = { 3, 4 }, turn = true }";
+    walk_world(&lua, &worlds, &room(turned)).unwrap();
     let cases = [
+        ("{ to = 'hero', part = 'body', at = { 1, 2 }, turn = 1 }", "turn must be a boolean"),
+        ("{ to = 'hero', part = 'body', at = { 1, 2 }, pivot = 3 }", "pivot must be a table"),
         ("'hero'", "world entity 2.attach must be a table, got string"),
         ("{ to = 'hero', part = 'body' }", "world entity 2.attach needs at"),
         ("{ to = 'hero', prat = 'body', at = { 1, 2 } }", "attach: unknown field prat"),

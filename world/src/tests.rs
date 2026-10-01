@@ -414,6 +414,8 @@ fn carried(on: &str, part: &str, d: &Arc<Drawing>) -> EntitySpec {
             to: on.into(),
             part: part.into(),
             at: (2.0, -5.0),
+            pivot: (0.0, 0.0),
+            turn: false,
         }),
         ..spec("chest", (300.0, 300.0), d)
     }
@@ -472,6 +474,78 @@ fn a_flipped_carrier_mirrors_the_carried_box_not_just_its_point() {
     assert_eq!(world.transform("chest").unwrap().x, -2.0);
 }
 
+/// A hat whose plug (1, 2) mounts on the hero's `body` at (8, 0).
+fn hat(turn: bool, d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        attach: Some(Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (8.0, 0.0),
+            pivot: (1.0, 2.0),
+            turn,
+        }),
+        ..spec("hat", (50.0, 50.0), d)
+    }
+}
+
+/// Over a second the hero's `body` turns 90° and doubles in size about its pivot, (0, 0).
+fn nod() -> Arc<Clip> {
+    use crate::clip::{Easing, Key, Prop, Track};
+    let track = |prop, to| Track {
+        part: "body".into(),
+        prop,
+        keys: [(0.0, if prop == Prop::Scale { 1.0 } else { 0.0 }), (1.0, to)]
+            .map(|(time, value)| Key { time, value, easing: Easing::Linear })
+            .into(),
+    };
+    Arc::new(Clip::new(1.0, false, vec![track(Prop::Rot, 90.0), track(Prop::Scale, 2.0)]).unwrap())
+}
+
+/// Where the carried entity's own point `p` is drawn.
+fn drawn(world: &World2d, id: &str, p: (f64, f64)) -> (f64, f64) {
+    let q = world.place(world.by_id[id]) * Point::new(p.0, p.1);
+    ((q.x * 1e6).round() / 1e6, (q.y * 1e6).round() / 1e6)
+}
+
+#[test]
+fn an_upright_mount_puts_its_pivot_on_the_point() {
+    let d = drawing(); // 8 wide
+    let mut world = World2d::default();
+    world.reconcile(vec![spec("hero", (0.0, 0.0), &d), hat(false, &d)]).unwrap();
+    assert_eq!(drawn(&world, "hat", (1.0, 2.0)), (8.0, 0.0));
+
+    // Flipped, both mirror: `at` x 8 becomes 0, and the hat's own mirror keeps its plug on it.
+    let hero = EntitySpec { flip: true, ..spec("hero", (0.0, 0.0), &d) };
+    let hat = EntitySpec { flip: true, ..hat(false, &d) };
+    world.reconcile(vec![hero, hat]).unwrap();
+    assert_eq!(drawn(&world, "hat", (1.0, 2.0)), (0.0, 0.0), "the mirrored plug");
+    assert_eq!(drawn(&world, "hat", (1.0, 3.0)), (0.0, 1.0), "still upright");
+}
+
+#[test]
+fn a_turned_mount_takes_on_its_parts_rotation_scale_and_mirror_about_its_pivot() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let nod = nod(); // one handle, so flipping the hero does not restart the clip
+    let hero = |flip| EntitySpec { flip, ..playing("hero", &d, &nod) };
+    world.reconcile(vec![hero(false), hat(true, &d)]).unwrap();
+    world.tick(1.0, 0.0);
+    // `at` (8, 0) doubled and turned 90° is (0, 16); the plug stays on it.
+    assert_eq!(drawn(&world, "hat", (1.0, 2.0)), (0.0, 16.0), "on the socket");
+    // One unit down the hat is two units left: turned and doubled with the part.
+    assert_eq!(drawn(&world, "hat", (1.0, 3.0)), (-2.0, 16.0), "turned and scaled");
+    // Its box corner, (-1, -2) from the plug, doubled and turned, is what a drop starts from.
+    assert_eq!(drawn(&world, "hat", (0.0, 0.0)), (4.0, 14.0));
+    let t = world.transform("hat").unwrap();
+    assert!((t.x - 4.0).abs() < 1e-9 && (t.y - 14.0).abs() < 1e-9, "{t:?}");
+
+    // A flipped carrier mirrors the turned hat too, with no `flip` of its own.
+    world.reconcile(vec![hero(true), hat(true, &d)]).unwrap();
+    world.tick(1.0, 0.0);
+    assert_eq!(drawn(&world, "hat", (1.0, 2.0)), (8.0, 16.0), "on the mirrored socket");
+    assert_eq!(drawn(&world, "hat", (1.0, 3.0)), (10.0, 16.0), "mirrored: down is now right");
+}
+
 #[test]
 fn a_bad_attach_is_refused() {
     let d = drawing();
@@ -495,6 +569,9 @@ fn a_bad_attach_is_refused() {
     let chain = vec![hero(), carried("rider", "body", &d), rider];
     let err = world.reconcile(chain).unwrap_err().to_string();
     assert!(err.contains("which is itself attached"), "{err}");
+    let doubly = EntitySpec { flip: true, ..hat(true, &d) };
+    let err = world.reconcile(vec![hero(), doubly]).unwrap_err().to_string();
+    assert!(err.contains("which mirrors it too: drop flip"), "{err}");
 }
 
 fn solid(id: &str, pos: (f64, f64), shape: Shape, at: (f64, f64), d: &Arc<Drawing>) -> EntitySpec {
@@ -624,6 +701,8 @@ fn a_carried_solid_is_off_the_floor_until_put_down() {
             to: "hero".into(),
             part: "body".into(),
             at: (10.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
         }),
         ..solid("chest", (50.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
@@ -660,6 +739,8 @@ fn drop_box(walk: usize, wall_x: Option<f64>, after: usize) -> (Vec<f64>, bool) 
             to: "hero".into(),
             part: "body".into(),
             at: (20.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
         }),
         ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
@@ -784,6 +865,8 @@ fn carrying_takes_a_sensor_away_and_dropping_brings_it_back() {
             to: "hero".into(),
             part: "body".into(),
             at: (0.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
         }),
         ..zone("chest", (0.0, 0.0), Some(Shape::Rect(2.0, 2.0)), &d)
     };

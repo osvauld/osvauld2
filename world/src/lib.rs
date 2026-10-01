@@ -36,13 +36,17 @@ pub struct EntitySpec {
     pub sensor: Option<Collider>,
 }
 
-/// Carried: the entity's origin rides at `at` — a point in the carrier's drawing at rest — as the
-/// carrier's `part` moves and animates. Removing it leaves the entity where it was last carried.
+/// Carried: the entity's `pivot` — a point in its own drawing — rides at `at`, a point in the
+/// carrier's drawing at rest, as the carrier's `part` moves and animates. With `turn` it also
+/// takes on the part's rotation, scale and mirror (a hat on a nodding head); without, it stays
+/// upright (a chest in the arms). Removing it leaves the entity where it was last carried.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attach {
     pub to: String,
     pub part: String,
     pub at: (f64, f64),
+    pub pivot: (f64, f64),
+    pub turn: bool,
 }
 
 /// Two key codes driving one axis: `neg` held is -1, `pos` held is +1, both or neither is 0.
@@ -135,6 +139,9 @@ struct Attached {
     to: Entity,
     part: String,
     at: Point,
+    pivot: Point,
+    /// With `turn`: the whole placement, as `follow` last composed it.
+    turned: Option<Affine>,
 }
 
 /// The held direction `tick` last reported, so it reports only a change.
@@ -244,6 +251,9 @@ impl World2d {
             if !carrier.drawing.has_part(&a.part) {
                 return bad(format!("{:?} has no part {:?}", a.to, a.part));
             }
+            if a.turn && spec.flip {
+                return bad("turns with its carrier, which mirrors it too: drop flip".into());
+            }
         }
         self.controlled = specs.iter().any(|s| s.controller.is_some());
         if !self.wants_keys() {
@@ -327,7 +337,9 @@ impl World2d {
         }
         for (entity, a) in carried {
             let (to, at) = (next[&a.to], Point::new(a.at.0, a.at.1));
-            let attached = Attached { to, part: a.part, at };
+            let pivot = Point::new(a.pivot.0, a.pivot.1);
+            let turned = a.turn.then_some(Affine::IDENTITY);
+            let attached = Attached { to, part: a.part, at, pivot, turned };
             self.ecs.entity_mut(entity).insert(attached);
         }
         for (_, gone) in self.by_id.drain() {
@@ -408,20 +420,37 @@ impl World2d {
                 };
                 let part = look.drawing.part_at(&a.part, &poses).expect("checked at reconcile");
                 let p = self.place(a.to) * part * a.at;
-                // Mirrored with a flipped carrier: the point then marks the box's right edge.
                 let own = self.ecs.get::<Appearance>(entity).expect("every entity has one");
                 let t = self.ecs.get::<Transform>(entity).expect("every entity has one");
-                let shift = if look.flip { own.drawing.size().0 * t.scale } else { 0.0 };
-                Point::new(p.x - shift, p.y)
+                // Turned, the pivot is the centre the part's rotation and scale act about.
+                let turned = a.turned.map(|_| {
+                    let to_pivot = Affine::translate(a.at.to_vec2()) * Affine::scale(t.scale);
+                    self.place(a.to) * part * to_pivot * Affine::translate(-a.pivot.to_vec2())
+                });
+                // Upright under a flipped carrier, the entity is mirrored too (its own `flip`),
+                // so its pivot sits that far from its box's right edge instead.
+                let w = own.drawing.size().0;
+                let px = if look.flip { w - a.pivot.x } else { a.pivot.x };
+                match turned {
+                    Some(placed) => (placed * Point::ZERO, Some(placed)),
+                    None => (Point::new(p.x - px * t.scale, p.y - a.pivot.y * t.scale), None),
+                }
             };
+            let (p, turned) = p;
             let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
             (t.x, t.y) = (p.x, p.y);
+            if turned.is_some() {
+                self.ecs.get_mut::<Attached>(entity).expect("just read").turned = turned;
+            }
         }
     }
 
     /// Where an entity's drawing box goes: its transform, mirrored within the box if flipped.
     fn place(&self, entity: Entity) -> Affine {
         let e = self.ecs.entity(entity);
+        if let Some(placed) = e.get::<Attached>().and_then(|a| a.turned) {
+            return placed;
+        }
         let t = e.get::<Transform>().expect("every entity has a Transform");
         let look = e.get::<Appearance>().expect("every entity has an Appearance");
         match look.flip {

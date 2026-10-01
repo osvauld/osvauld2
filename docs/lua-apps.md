@@ -200,6 +200,13 @@ ui.world({
   animates (a flipped carrier mirrors the box too). It draws just in front of its carrier. Remove
   `attach` and it stays where it was last carried. The carrier must be described, not itself
   attached, and have the part.
+  - `pivot = { x, y }` (default `{0, 0}`, the box's top-left) is the point of the carried entity's
+    own drawing placed on `at` — a hat's plug, a sword's grip. Under a flipped carrier, give the
+    carried entity `flip = true` too; its mirrored pivot still lands on the point.
+  - `turn = true` makes it take on the part's rotation, scale and mirror, about its pivot: a hat
+    nods with the head, a sword swings with the hand. Without it the entity stays upright (a
+    chest in the arms). A turned entity mirrors with its carrier, so `flip` with `turn` is an
+    error. Turning is drawing only: a carried entity has no body, and let go it lands upright.
 - `collider = { circle = 16, at = { 80, 222 } }` or `{ rect = { 720, 12 } }` makes the entity
   solid, in its drawing's units: `at` (default `{0, 0}`) is a circle's centre or a rect's
   top-left corner. An entity with a controller stops at solid entities and slides along them;

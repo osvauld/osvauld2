@@ -409,10 +409,22 @@ fn collider(spec: &Table, owner: &str) -> mlua::Result<world::Collider> {
 
 /// `{ to = id, part = id, at = {x, y} }` — `at` is a point in the carrier's drawing at rest.
 fn attach(spec: &Table, owner: &str) -> mlua::Result<world::Attach> {
-    named_fields(spec, owner, &["to", "part", "at"])?;
+    named_fields(spec, owner, &["to", "part", "at", "pivot", "turn"])?;
     let at = point(need(spec, owner, "at")?, &format!("{owner}.at"))?;
+    let pivot = match maybe_table(spec, owner, "pivot")? {
+        Some(p) => point(p, &format!("{owner}.pivot"))?,
+        None => Point::ZERO,
+    };
+    let turn = match spec.get::<Value>("turn")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.turn must be a boolean, got {what}")));
+        }
+    };
     let (to, part) = (need(spec, owner, "to")?, need(spec, owner, "part")?);
-    Ok(world::Attach { to, part, at: (at.x, at.y) })
+    Ok(world::Attach { to, part, at: (at.x, at.y), pivot: (pivot.x, pivot.y), turn })
 }
 
 /// An optional table field: absent is `None`, and anything but a table says which field it was.
