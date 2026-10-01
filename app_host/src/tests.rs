@@ -3821,7 +3821,7 @@ fn asset_editor_stage_moves_and_equips() {
     click(&mut app, "asset:room");
     let _ = app.view(); // the room and the assets it shows seed here
     let info = app.view().info();
-    let canvas = &info.children[0].children[0].children[0]; // a stage has no clip bar
+    let canvas = &info.children[0].children[1].children[0]; // under the edit/play bar
     assert_eq!(canvas.id.as_deref(), Some("stage-canvas"));
 
     // One gesture, start to end, moving by (dx, dy) through a midpoint.
@@ -4930,6 +4930,49 @@ fn asset_editor_inspector_edits_a_part() {
     let info = field(&mut app, "field:leg_l:1:width", "-1").info();
     assert_eq!(leg(&app), "#ff0000 4 70", "a bad value writes nothing");
     assert_eq!(shown(&info, "field:leg_l:1:fill").as_deref(), Some("not a colour"), "the draft stays");
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let console = app.console(100);
+    assert!(console.is_empty(), "{console:?}");
+}
+
+/// Stage play turns the room into a world: the hero plays its clip, and a hat mounted on its
+/// head rides `head_top` as a turning attach. A bad entity would card the world in place, so the
+/// world element being there, by id, is the check.
+#[test]
+fn asset_editor_stage_plays_with_the_hat_on() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "asset:room");
+    let _ = app.view();
+    let _ = app.view();
+    let equip = r#"
+        local room = asset:open("room")
+        room:set({ "scene", "entities", "hat", "mount" }, doc.map({ to = "hero", socket = "head_top" }))
+        room:delete({ "scene", "entities", "hat", "pos" })
+    "#;
+    app.vm.load(equip).exec().unwrap();
+    let _ = app.view();
+    click(&mut app, "stage:play");
+    fn find<'a>(info: &'a runtime::ElInfo, id: &str) -> Option<&'a runtime::ElInfo> {
+        if info.id.as_deref() == Some(id) {
+            return Some(info);
+        }
+        info.children.iter().find_map(|c| find(c, id))
+    }
+    for _ in 0..3 {
+        let info = app.view().info();
+        fn texts(info: &runtime::ElInfo, out: &mut Vec<String>) {
+            out.extend(info.text.clone());
+            info.children.iter().for_each(|c| texts(c, out));
+        }
+        let mut shown = Vec::new();
+        texts(&info, &mut shown);
+        assert!(find(&info, "stage-play").is_some(), "the room should play as a world: {shown:?}");
+        assert!(find(&info, "stage-canvas").is_none());
+    }
+    click(&mut app, "stage:edit");
+    let info = app.view().info();
+    assert!(find(&info, "stage-canvas").is_some(), "edit brings the canvas back");
     assert!(app.error.is_none(), "{:?}", app.error);
     let console = app.console(100);
     assert!(console.is_empty(), "{console:?}");

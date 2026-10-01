@@ -247,7 +247,7 @@ return function()
 			fill = C.canvas,
 			pad = 12,
 			gap = 12,
-			parts and clip_bar() or false,
+			parts and clip_bar() or stage and Stage.bar(chip) or false,
 			-- Ctrl+wheel zooms around the pointer and a drag on empty space pans; clicks still
 			-- report canvas units, zoom undone.
 			ui.col({

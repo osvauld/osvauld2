@@ -7,6 +7,7 @@ local S = {}
 local rests = {} -- asset name → { frame = its rest pose, asset = its mirror }, built once
 local drag = nil -- { id, x0, y0, from, at, released } while an entity is moved
 local floor = nil -- the stage's backdrop, built on first use
+local play = nil -- { name, clips = { entity id → clip handle } } while a stage plays; nil is edit
 
 local function rest(name)
 	if not rests[name] then
@@ -15,8 +16,8 @@ local function rest(name)
 		if not parts then
 			return nil -- seeded this frame; it shows from the next
 		end
-		local frame = gfx.drawing({ size = a.size, vars = a.vars, parts = parts }):pose({})
-		rests[name] = { frame = frame, asset = a }
+		local drawing = gfx.drawing({ size = a.size, vars = a.vars, parts = parts })
+		rests[name] = { frame = drawing:pose({}), drawing = drawing, asset = a }
 	end
 	return rests[name]
 end
@@ -151,10 +152,75 @@ local function socket_marks()
 	return marks
 end
 
+-- Clip handles are made once per press of play, so each press starts every clip from its top.
+local function start(entities)
+	play = { name = M.name, clips = {} }
+	for _, e in ipairs(entities) do
+		local r = rest(e.asset)
+		local clip = e.clip and r and r.asset.clips and r.asset.clips[e.clip]
+		if clip then
+			play.clips[e.id] = gfx.clip(clip)
+		end
+	end
+end
+
+-- One world entity. A mounted one rides its socket's part with `turn`, pivoting on its own plug,
+-- so a hat nods with the head; the world carries only by an entity that is not itself carried.
+local function world_entity(e, by_id, at)
+	local r = rest(e.asset)
+	if not r or not at[e.id] then
+		return false
+	end
+	local out = { id = e.id, pos = at[e.id], drawing = r.drawing, clip = play.clips[e.id] }
+	local host = e.mount and by_id[e.mount.to]
+	local h = host and not host.mount and rest(host.asset)
+	local socket = h and h.asset.sockets and h.asset.sockets[e.mount.socket]
+	local plug = r.asset.plug
+	if socket and plug then
+		out.attach = { to = host.id, part = socket.part, at = socket.at, pivot = plug.at, turn = true }
+	end
+	return out
+end
+
+-- Stage play: the scene as a world, at drawing scale — the viewport's zoom does the rest.
+local function world(scene)
+	local at, by_id = placements(scene.entities), {}
+	for _, e in ipairs(scene.entities) do
+		by_id[e.id] = e
+	end
+	local w, h = scene.size[1], scene.size[2]
+	-- Entities are the world's own positional entries: a nested list would read as one entity.
+	local spec = { id = "stage-play", width = w, height = h, fill = C.floor }
+	for i, e in ipairs(scene.entities) do
+		spec[i] = world_entity(e, by_id, at)
+	end
+	return ui.world(spec)
+end
+
+-- "edit" and "play" for a stage, made with the editor's own chip.
+function S.bar(chip)
+	local playing = play ~= nil and play.name == M.name
+	local scene = M.asset.scene
+	return ui.row({
+		gap = 6,
+		chip("stage:edit", "edit", not playing, function()
+			play = nil
+		end),
+		chip("stage:play", "play", playing, function()
+			if scene then
+				start(scene.entities)
+			end
+		end),
+	})
+end
+
 function S.view()
 	local scene = M.asset.scene
 	if not scene then
 		return ui.text({ "opening the stage…", color = C.muted, no_wrap = true })
+	end
+	if play and play.name == M.name then
+		return world(scene)
 	end
 	local w, h = scene.size[1], scene.size[2]
 	last = placements(scene.entities)
