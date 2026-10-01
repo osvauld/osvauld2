@@ -78,6 +78,17 @@ return {
 			} },
 		},
 	},
+	-- Height is a pose, not a place: a carried chest is attached where it would stand on the floor
+	-- in front of the hero, and `lift` raises its drawing into the hero's hands. Its footprint
+	-- stays on the floor, so when it is let go it is already where it lands — `fall` only drops
+	-- the drawing back, speeding up, with one small bounce. 66 is hands to floor.
+	lift = { length = 0.2, tracks = { base = { y = { {0, 0}, {0.2, -66, "in_out"} } } } },
+	fall = {
+		length = 0.4,
+		tracks = { base = { y = {
+			{0, -66}, {0.12, -52}, {0.2, -30}, {0.26, 0}, {0.32, -10, "in_out"}, {0.4, 0, "in_out"},
+		} } },
+	},
 	-- The lid swings back about its hinge and holds there.
 	open = { length = 0.5, tracks = { lid = { rot = { {0, 0}, {0.5, -100, "in_out"} } } } },
 	close = { length = 0.4, tracks = { lid = { rot = { {0, -100}, {0.4, 0, "in_out"} } } } },

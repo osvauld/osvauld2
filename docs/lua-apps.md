@@ -208,7 +208,9 @@ ui.world({
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
 - A carried entity is off the floor: its collider and sensor go while `attach` is set. Let go,
   it keeps its carrier's momentum, slides, bounces off walls and settles where it stops — never
-  inside a wall.
+  inside a wall. Top-down, height is a pose, not a place: attach the thing where it would stand
+  on the floor and let a clip lift its drawing into the hands; let go, a `fall` clip drops the
+  drawing back to a footprint that never left the floor (the demo's `lift` / `fall`).
 - `sensor = { circle = 72, at = { 48, 68 } }` is a zone in the same shape words: it blocks
   nothing, and `on_zone` reports what comes into it and leaves it. An entity may have a
   `collider`, a `sensor`, both, or neither.

@@ -496,7 +496,9 @@ against the last tick's and queues only changes, which Lua gets as `on_zone(e)` 
 `e.who`, `e.phase`. Fixed-on-fixed never counts (walls); moved-on-fixed does, switched on per
 sensor. The demo's E picks the chest up only within its zone; the smoke checks E out of reach
 does nothing and `near` follows through pickup and drop. That completes the chest demo's
-mechanics. Next: a fall clip so a dropped chest reaches the floor; 5d, dynamic bodies beyond the
+mechanics. **Lift and fall** (Lua and clips only): the chest is attached at its floor spot in
+front of the hero and `lift` raises its drawing into the hands, so let go, `fall` drops it to a
+footprint already on the floor; picking it up shuts the lid. Next: 5d, dynamic bodies beyond the
 drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

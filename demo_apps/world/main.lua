@@ -16,6 +16,7 @@ local views = {
 	left = { drawing = hero_side, walk = walk_side, flip = true },
 }
 local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
+local lift, fall = gfx.clip(clips.lift), gfx.clip(clips.fall)
 
 -- The room's walls: a plain bar each, solid all along. Only the collider stops anyone; the
 -- drawing is just so you can see it.
@@ -65,9 +66,25 @@ local face, walking = "down", false -- the hero's facing and gait, decided on ea
 local jumping = false -- set by the jump action, cleared when the jump clip ends
 local carrying = false -- whether the chest rides on the hero; E picks it up and puts it down
 local near = false -- whether the hero stands in the chest's zone, as the world last reported
+local falling = false -- let go and still dropping to the floor; cleared when `fall` ends
 
 local function toggle_lid()
 	lid = lid == open and close or open
+end
+
+-- The chest's clip: one plays at a time, so lifting and falling stand in for the lid's.
+local function chest_clip()
+	if carrying then return lift end
+	if falling then return fall end
+	return lid
+end
+
+local function interact()
+	if carrying then
+		carrying, falling = false, true
+	elseif near then
+		carrying, lid = true, nil -- picked up, it shuts
+	end
 end
 
 -- The hero's clip for the moment: this is the app's state machine, not the world's.
@@ -104,11 +121,12 @@ return function()
 			actions = { interact = "KeyE", jump = "Space" },
 			on_action = function(e)
 				-- Carrying, E puts it down anywhere; otherwise only within reach of the chest.
-				if e.action == "interact" and (carrying or near) then carrying = not carrying end
+				if e.action == "interact" then interact() end
 				if e.action == "jump" then jumping = true end -- already in the air: no double jump
 			end,
 			on_clip_end = function(e)
 				if e.id == "hero" then jumping = false end
+				if e.id == "chest" then falling = false end -- `lift` ending is harmless here
 			end,
 			-- The chest's zone goes while it is carried and comes back where it is put down, so
 			-- `near` follows without Lua keeping it in step.
@@ -131,8 +149,8 @@ return function()
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
 			-- On the floor it is solid by its footprint, the bottom of its base; carried, the world
 			-- takes it off the floor.
-			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
-				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil,
+			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = chest_clip(),
+				attach = carrying and { to = "hero", part = "body", at = { 32, 186 } } or nil,
 				collider = { rect = { 80, 24 }, at = { 8, 56 } }, sensor = { circle = 72, at = { 48, 68 } } },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),

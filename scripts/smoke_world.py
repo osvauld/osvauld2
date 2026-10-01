@@ -184,6 +184,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert entity_at(560, 300) == "hero", "standing in front of the chest"
     assert near() == "yes", "on_zone: the hero walked into the chest's zone"
     tap("KeyE", "e")
+    s.rpc.frame(15)  # `lift` raises it from the floor into the hands
     assert entity_at(560, 300) == "chest", "picked up, held in front of the hero"
     assert near() == "no", "carried, the chest has no zone"
     # Carried, the chest is off the floor: it neither blocks the hero nor stops at its own
@@ -197,7 +198,9 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     s.rpc.keyboard("KeyD", "d", False)
     s.rpc.frame(2)
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
-    assert (entity_at(480, 300), entity_at(635, 250)) == ("chest", "hero"), "dropped, left behind"
+    # Let go, `fall` drops the drawing from the hands to where its footprint already was.
+    assert (entity_at(480, 300), entity_at(480, 370)) == ("—", "chest"), "fell to the floor"
+    assert entity_at(635, 250) == "hero", "and the hero walked off"
 
     # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
     # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
@@ -218,4 +221,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall")
