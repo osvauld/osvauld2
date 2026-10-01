@@ -58,18 +58,44 @@ const WALKER: KinematicCharacterController = KinematicCharacterController {
     normal_nudge_factor: 1.0e-4,
 };
 
-/// How a let-go entity slides: speed lost per second (it slows to rest in about half a second),
-/// and the share of speed kept off a wall. It does not spin — the drawing stays upright.
-const FRICTION: f32 = 6.0;
-const BOUNCE: f32 = 0.5;
+/// What a body Rapier moves is made of. It does not spin — the drawing stays upright.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Material {
+    /// The share of speed it keeps off what it hits: 0 dead, 1 as fast as it came.
+    pub bounce: f64,
+    /// How fast the floor slows it, as speed lost per second: 0 never slows; 6 stops a walker's
+    /// pace in about half a second.
+    pub friction: f64,
+}
+
+impl Default for Material {
+    /// A let-go chest's: a modest bounce, at rest in about half a second.
+    fn default() -> Self {
+        Self { bounce: 0.5, friction: 6.0 }
+    }
+}
+
+impl Material {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&self.bounce) {
+            return Err(format!("bounce must be from 0 to 1, got {}", self.bounce));
+        }
+        if !(self.friction.is_finite() && self.friction >= 0.0) {
+            return Err(format!("friction must be 0 or more, got {}", self.friction));
+        }
+        Ok(())
+    }
+}
+
 /// Slower than this, in drawing units a second, a sliding body has come to rest.
 const AT_REST: f32 = 4.0;
 
 /// What moves a body: nothing, the world's controller, or Rapier from a starting velocity.
+#[derive(Clone, Copy)]
 pub(crate) enum Body {
     Fixed,
     Moved,
-    Thrown(f64, f64),
+    Dynamic((f64, f64), Material),
 }
 
 pub(crate) struct Physics {
@@ -110,16 +136,21 @@ impl Physics {
         let body = match kind {
             Body::Fixed => RigidBodyBuilder::fixed(),
             Body::Moved => RigidBodyBuilder::kinematic_position_based(),
-            Body::Thrown(vx, vy) => RigidBodyBuilder::dynamic()
+            Body::Dynamic((vx, vy), m) => RigidBodyBuilder::dynamic()
                 .linvel(Vector::new(vx as f32, vy as f32))
-                .linear_damping(FRICTION)
+                .linear_damping(m.friction as f32)
                 .lock_rotations(),
+        };
+        // Walls and walkers keep nothing; a bounce is the moving body's own (the larger of two).
+        let bounce = match kind {
+            Body::Dynamic(_, m) => m.bounce as f32,
+            _ => 0.0,
         };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
         if let Some(c) = solid {
             let solid = shape(c, anchor)
-                .restitution(BOUNCE)
+                .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(0.0)
                 .user_data(owner as u128);
@@ -167,6 +198,15 @@ impl Physics {
     pub(crate) fn centre_of(&self, body: RigidBodyHandle) -> (f64, f64) {
         let at = self.world.bodies[body].translation();
         (at.x as f64, at.y as f64)
+    }
+
+    /// At rest until something touches it: nothing to step meanwhile.
+    pub(crate) fn sleep(&mut self, body: RigidBodyHandle) {
+        self.world.bodies[body].sleep();
+    }
+
+    pub(crate) fn asleep(&self, body: RigidBodyHandle) -> bool {
+        self.world.bodies[body].is_sleeping()
     }
 
     pub(crate) fn velocity(&self, body: RigidBodyHandle) -> (f64, f64) {

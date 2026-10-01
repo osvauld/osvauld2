@@ -510,9 +510,11 @@ shell's `DumpTree` puts it on the world's element (`world.entities`), and the wo
 reads the chest from it. Its first run caught a bug pixels never showed: a chest let go near the
 south wall landed half through it, Rapier put it to sleep pressed in, and it never settled — the
 world ticked forever. **Fix:** let go, a body comes from its carrier's body to its spot and stops
-against what is in the way (`Physics::bring_in`). Next: hints in the dump (what stopped a walker,
-what is settling), test pushes over the bridge, then 5d, dynamic bodies beyond the
-drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
+against what is in the way (`Physics::bring_in`). **5d chunk 1, loose bodies (world only):**
+`EntitySpec::loose` with a `Material` (`bounce` 0..1, `friction` as speed lost per second) makes a
+Rapier body that physics alone moves; it rests asleep, never fixed, so it can be pushed again, and
+spawned at rest it starts asleep. A bounce is now the moving thing's own (walls keep none). Next:
+the hero pushing loose things, then the Lua `loose` field and a ball and a crate in the demo. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds

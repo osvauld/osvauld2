@@ -43,6 +43,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         attach: None,
         collider: None,
         sensor: None,
+        loose: None,
     }
 }
 
@@ -980,4 +981,112 @@ fn a_body_let_go_across_a_wall_lands_on_its_carriers_side_and_settles() {
     }
     let seen = &world.inspect()[1];
     assert_eq!(seen.body, "fixed", "and settled: {seen:?}");
+}
+
+/// Carries a loose box 20 ahead at 100/s for four ticks and lets it go, with a wall at `wall_x`
+/// if any; says its x and x-velocity each tick after, from the inspection.
+fn fling(material: Material, wall_x: Option<f64>, after: usize) -> (Vec<(f64, f64)>, World2d) {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
+        }),
+        loose: Some(material),
+        ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let wall = || wall_x.map(|x| solid("wall", (x, -50.0), Shape::Rect(10.0, 100.0), (0.0, 0.0), &d));
+    let mut world = World2d::default();
+    world.reconcile([hero(), held(true)].into_iter().chain(wall()).collect()).unwrap();
+    world.key("KeyD", true);
+    let mut clock = 0.0;
+    for _ in 0..4 {
+        clock += 0.05;
+        world.tick(clock, 0.05);
+    }
+    world.reconcile([hero(), held(false)].into_iter().chain(wall()).collect()).unwrap();
+    world.key("KeyD", false);
+    let trace = (0..after)
+        .map(|_| {
+            clock += 0.05;
+            world.tick(clock, 0.05);
+            let b = &world.inspect()[1];
+            (b.pos.0, b.velocity.0)
+        })
+        .collect();
+    (trace, world)
+}
+
+#[test]
+fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
+    let rebound = |bounce| {
+        let (trace, _) = fling(Material { bounce, friction: 0.5 }, Some(52.0), 20);
+        trace.iter().map(|&(_, vx)| vx).fold(f64::MAX, f64::min)
+    };
+    // Let go at 100/s, 4 short of the wall: it hits almost at once, then comes back.
+    let (ball, crate_) = (rebound(0.9), rebound(0.1));
+    assert!(ball < -70.0, "a ball comes back fast: {ball}");
+    assert!(crate_ > -20.0, "a crate barely comes back: {crate_}");
+}
+
+#[test]
+fn friction_decides_how_far_a_loose_thing_slides() {
+    let slid = |friction| {
+        let (trace, _) = fling(Material { bounce: 0.5, friction }, None, 60);
+        trace.last().unwrap().0
+    };
+    let (ball, crate_) = (slid(0.5), slid(8.0));
+    // Let go at x 40: at 8 per second lost it stops within about 20; at 0.5 it rolls on and on.
+    assert!(crate_ < 60.0, "the crate stopped soon: {crate_}");
+    assert!(ball > crate_ + 100.0, "the ball rolled far further: {ball} vs {crate_}");
+}
+
+#[test]
+fn a_loose_thing_rests_asleep_and_stays_loose() {
+    let (_, world) = fling(Material::default(), None, 100);
+    let b = &world.inspect()[1];
+    assert_eq!((b.body, b.velocity), ("loose", (0.0, 0.0)), "not fixed: {b:?}");
+    let s = world.ecs.get::<Solid>(world.by_id["box"]).unwrap();
+    assert!(!s.sliding && world.physics.asleep(s.body), "asleep, so nothing to tick for it");
+
+    // Spawned at rest, it starts asleep: a world of only loose things at rest does not tick.
+    let d = drawing();
+    let crate_ = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("crate", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![crate_]).unwrap();
+    assert!(!world.needs_ticks());
+    assert_eq!(world.inspect()[0].body, "loose");
+}
+
+#[test]
+fn a_bad_loose_is_refused() {
+    let d = drawing();
+    let crate_ = |loose| EntitySpec {
+        loose: Some(loose),
+        ..solid("crate", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let fine = Material::default();
+    let shapeless = EntitySpec { collider: None, ..crate_(fine) };
+    let driven = EntitySpec { controller: Some(wasd(10.0)), ..crate_(fine) };
+    let cases = [
+        (shapeless, "loose needs a collider"),
+        (driven, "loose with a controller"),
+        (crate_(Material { bounce: 1.5, ..fine }), "bounce must be from 0 to 1, got 1.5"),
+        (crate_(Material { friction: f64::NAN, ..fine }), "friction must be 0 or more"),
+    ];
+    let mut world = World2d::default();
+    for (spec, wanted) in cases {
+        let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
 }

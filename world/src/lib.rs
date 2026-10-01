@@ -19,7 +19,7 @@ use runtime::vello::kurbo::{Affine, Point};
 
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, Shape};
+pub use crate::physics::{Collider, Material, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -34,6 +34,9 @@ pub struct EntitySpec {
     pub collider: Option<Collider>,
     /// A zone that blocks nothing; what moves into or out of it is reported.
     pub sensor: Option<Collider>,
+    /// Moved by physics alone — pushed, bounced, slowed by the floor — by its collider's shape.
+    /// It rests asleep, never fixed, so it can be pushed again.
+    pub loose: Option<Material>,
 }
 
 /// Carried: the entity's `pivot` — a point in its own drawing — rides at `at`, a point in the
@@ -56,7 +59,8 @@ pub struct EntityInspection {
     /// The drawing box's top-left, in world units.
     pub pos: (f64, f64),
     /// `"fixed"`, `"moved"` (a controller drives it), `"thrown"` (Rapier slides it until it
-    /// settles) or `"none"` (no collider or sensor, or carried).
+    /// settles), `"loose"` (Rapier moves it, always) or `"none"` (no collider or sensor, or
+    /// carried).
     pub body: &'static str,
     /// Per second: Rapier's for a thrown body, the last tick's step for a controlled one.
     pub velocity: (f64, f64),
@@ -152,8 +156,9 @@ struct Solid {
     sensor: Option<Collider>,
     moves: bool,
     body: rapier2d::prelude::RigidBodyHandle,
-    /// Let go and still sliding: Rapier moves it until it settles.
+    /// Moving under Rapier: let go and not yet settled, or loose and awake.
     sliding: bool,
+    loose: Option<Material>,
 }
 
 /// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
@@ -248,6 +253,16 @@ impl World2d {
             {
                 return Err(WorldError::Speed(spec.id.clone()));
             }
+            if let Some(m) = &spec.loose {
+                let bad = |why: String| Err(WorldError::Collider(spec.id.clone(), why));
+                if spec.collider.is_none() {
+                    return bad("loose needs a collider: physics moves it by its shape".into());
+                }
+                if spec.controller.is_some() {
+                    return bad("loose with a controller: one thing moves it, not two".into());
+                }
+                m.check().or_else(bad)?;
+            }
             for c in spec.collider.iter().chain(&spec.sensor) {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
@@ -320,8 +335,9 @@ impl World2d {
             let aloft = spec.attach.is_some();
             let collider = spec.collider.filter(|_| !aloft);
             let sensor = spec.sensor.filter(|_| !aloft);
+            let loose = spec.loose;
             let kept = e.get::<Solid>().is_some_and(|s| {
-                s.collider == collider && s.sensor == sensor && s.moves == moves
+                s.collider == collider && s.sensor == sensor && s.moves == moves && s.loose == loose
             });
             if !kept {
                 if let Some(old) = e.take::<Solid>() {
@@ -329,16 +345,22 @@ impl World2d {
                 }
                 if collider.is_some() || sensor.is_some() {
                     let t = e.get::<Transform>().expect("every entity has a Transform");
-                    let kind = match (moves, thrown, &collider) {
-                        (true, _, _) => Body::Moved,
-                        (false, Some((vx, vy)), Some(_)) => Body::Thrown(vx, vy),
+                    let kind = match (moves, thrown, &collider, loose) {
+                        (true, ..) => Body::Moved,
+                        (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
+                        (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
                         _ => Body::Fixed,
                     };
-                    let sliding = matches!(kind, Body::Thrown(..));
+                    let dynamic = matches!(kind, Body::Dynamic(..));
+                    let dropped = thrown.is_some();
                     let (solid, zone) = (collider.as_ref(), sensor.as_ref());
                     let owner = entity.to_bits();
                     let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner);
-                    if let (true, Some(from), Some(c)) = (sliding, carrier, solid) {
+                    // Loose from the start, it waits asleep; let go, it is on the move.
+                    if dynamic && !dropped {
+                        self.physics.sleep(body);
+                    }
+                    if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
                         self.physics.bring_in(body, from);
                         let ((x, y), (cx, cy)) = (self.physics.centre_of(body), c.centre());
                         let mut t = e.get_mut::<Transform>().expect("every entity has one");
@@ -349,7 +371,8 @@ impl World2d {
                         sensor,
                         moves,
                         body,
-                        sliding,
+                        sliding: dynamic && !self.physics.asleep(body),
+                        loose,
                     });
                 }
             }
@@ -392,16 +415,22 @@ impl World2d {
     /// Let-go entities go where Rapier slid them, until they settle.
     fn slide_thrown(&mut self) {
         for &entity in &self.order {
-            let Some(s) = self.ecs.get::<Solid>(entity).filter(|s| s.sliding) else {
+            let Some(s) = self.ecs.get::<Solid>(entity) else {
                 continue;
             };
+            let (body, loose) = (s.body, s.loose.is_some());
+            // A loose body rests asleep and wakes when something touches it; only a moving one
+            // needs following.
+            if !s.sliding && !(loose && !self.physics.asleep(body)) {
+                continue;
+            }
             let (cx, cy) = s.collider.as_ref().expect("only a solid slides").centre();
-            let ((x, y), body) = (self.physics.centre_of(s.body), s.body);
+            let (x, y) = self.physics.centre_of(body);
             let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
             (t.x, t.y) = (x - cx, y - cy);
-            if self.physics.settle(body) {
-                self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = false;
-            }
+            // Let go, it turns fixed at rest; loose, it only sleeps, to be pushed again.
+            let rest = if loose { self.physics.asleep(body) } else { self.physics.settle(body) };
+            self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = !rest;
         }
     }
 
@@ -682,12 +711,13 @@ impl World2d {
                 let solid = e.get::<Solid>();
                 let body = match solid {
                     None => "none",
+                    Some(s) if s.loose.is_some() => "loose",
                     Some(s) if s.sliding => "thrown",
                     Some(s) if s.moves => "moved",
                     Some(_) => "fixed",
                 };
                 let velocity = match (solid, e.get::<Velocity>()) {
-                    (Some(s), _) if s.sliding => self.physics.velocity(s.body),
+                    (Some(s), _) if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
                     (_, Some(v)) => (v.0, v.1),
                     _ => (0.0, 0.0),
                 };
