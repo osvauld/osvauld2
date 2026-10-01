@@ -4967,6 +4967,19 @@ fn asset_editor_inspector_edits_a_part() {
     let info = field(&mut app, "field:leg_l:1:width", "-1").info();
     assert_eq!(leg(&app), "#ff0000 4 70", "a bad value writes nothing");
     assert_eq!(shown(&info, "field:leg_l:1:fill").as_deref(), Some("not a colour"), "the draft stays");
+
+    // Vars: a field links a shape to a var by `@name` — only one the asset has, of the right
+    // kind — and a var's own field changes its value for every shape naming it.
+    let _ = field(&mut app, "field:leg_l:1:fill", "@trousers");
+    let _ = field(&mut app, "field:leg_l:1:width", "@line");
+    assert_eq!(leg(&app), "@trousers @line 70");
+    let _ = field(&mut app, "field:leg_l:1:fill", "@trouser");
+    let _ = field(&mut app, "field:leg_l:1:width", "@skin");
+    assert_eq!(leg(&app), "@trousers @line 70", "an unknown var or the wrong kind writes nothing");
+    let _ = field(&mut app, "var:trousers", "#123456");
+    let _ = field(&mut app, "var:line", "@line");
+    let vars: String = app.vm.load(r#"local v = asset:open("hero").vars return v.trousers .. " " .. v.line"#).eval().unwrap();
+    assert_eq!(vars, "#123456 2", "a var takes a plain value, not another var");
     assert!(app.error.is_none(), "{:?}", app.error);
     let console = app.console(100);
     assert!(console.is_empty(), "{console:?}");

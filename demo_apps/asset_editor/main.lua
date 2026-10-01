@@ -269,6 +269,7 @@ return function()
 			ui.text({ title, color = C.text, font_size = 15, no_wrap = true }),
 			ui.text({ listing, color = C.muted, font_size = 11, no_wrap = true }),
 			rows,
+			parts and Inspector.vars() or false,
 			Inspector.view(picked),
 		}),
 	})
