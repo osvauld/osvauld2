@@ -74,7 +74,8 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   `scripts/voice_eval.py` scores modes with PESQ/STOI/DNSMOS. Its reference must be studio-clean
   speech — a laptop-mic take skews PESQ/STOI against denoisers.
 - `voice dial <ticket>` (iroh `EndpointTicket`, carries the relay URL when online); ctrl-c
-  closes the connection so the peer ends at once.
+  closes the connection so the peer ends at once. `--delay <secs>` holds playback back
+  (headphones-only self-test).
 - not built: node relay (forward by `level` without decoding),
   DeepFilterNet, courier auth on the connection. `iroh-roq` was dropped: abandoned upstream,
   pinned to iroh 0.35.

@@ -29,7 +29,8 @@ const MAX_BUFFERED: usize = FRAME * 5;
 pub enum Error {
     #[error(
         "usage: voice listen | voice dial <ticket> | voice process <in.wav> <out.wav>\n\
-         \x20      all take --clean none|apm|rnn|rnn-gate (default apm)"
+         \x20      all take --clean none|apm|rnn|rnn-gate (default apm)\n\
+         \x20      listen/dial take --delay <secs>: hold playback back to hear yourself (headphones)"
     )]
     Usage,
     #[error("{0}: need 48 kHz mono WAV")]
@@ -76,14 +77,9 @@ async fn main() {
 
 async fn run() -> Result<(), Error> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = match args.iter().position(|a| a == "--clean") {
-        Some(i) => {
-            let mode = args.get(i + 1).ok_or(Error::Usage)?.parse()?;
-            args.drain(i..i + 2);
-            mode
-        }
-        None => Mode::Apm,
-    };
+    let mode = take_opt(&mut args, "--clean")?.map_or(Ok(Mode::Apm), |m| m.parse())?;
+    let delay: f32 =
+        take_opt(&mut args, "--delay")?.map_or(Ok(0.0), |d| d.parse().map_err(|_| Error::Usage))?;
     if let [cmd, input, output] = &args[..]
         && cmd == "process"
     {
@@ -127,12 +123,17 @@ async fn run() -> Result<(), Error> {
     // The echo canceller must hear exactly what the speaker plays, so it is fed from here
     // rather than from the receive thread, whose audio still sits in the jitter buffer.
     let mut played = Vec::with_capacity(APM_FRAME * 8);
+    // A test-only delay line: pre-filled with silence, pushed and popped at the same rate, so
+    // its length (the delay) stays fixed.
+    let mut delay_line = VecDeque::from(vec![0f32; (delay * RATE as f32) as usize]);
     let speaker = output.build_output_stream(
         config,
         move |out: &mut [f32], _: &_| {
             let mut buf = play_buf.lock().unwrap();
-            out.iter_mut()
-                .for_each(|s| *s = buf.pop_front().unwrap_or(0.0));
+            for s in out.iter_mut() {
+                delay_line.push_back(buf.pop_front().unwrap_or(0.0));
+                *s = delay_line.pop_front().unwrap_or(0.0);
+            }
             drop(buf);
             played.extend_from_slice(out);
             while played.len() >= APM_FRAME {
@@ -209,6 +210,15 @@ async fn run() -> Result<(), Error> {
     // Without this the close frame may never leave, and the peer waits out the idle timeout.
     endpoint.close().await;
     Ok(())
+}
+
+fn take_opt(args: &mut Vec<String>, name: &str) -> Result<Option<String>, Error> {
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Ok(None);
+    };
+    let value = args.get(i + 1).ok_or(Error::Usage)?.clone();
+    args.drain(i..i + 2);
+    Ok(Some(value))
 }
 
 // What the peer would hear: clean, Opus-encode, decode. A trailing partial frame is dropped.
