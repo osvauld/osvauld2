@@ -10,6 +10,7 @@ mod bridge;
 mod item;
 mod login;
 mod mnemonic;
+mod names;
 mod node;
 mod signup;
 mod space;
@@ -37,10 +38,9 @@ use app_host::{
     write_source_file as write_source_doc_file,
 };
 use base64::Engine as _;
-use courier::invite::InviteTicket;
+use courier::DesktopNodeRecord;
 use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
 use courier::token::{Scope, Token};
-use courier::{ConnectionTicket, DesktopNodeRecord};
 use kunki::push::Push;
 use loro::{Container, LoroDoc, ValueOrContainer};
 use osvauld_rpc::{
@@ -1295,14 +1295,7 @@ impl App for Shell {
                 std::thread::spawn(move || {
                     eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
                     let socket = kunki::bridge::socket_path();
-                    let now = node::now_secs();
-                    let claimed = if let Ok(t) = ConnectionTicket::from_text(&ticket) {
-                        node::claim(&socket, &vault, &t, now)
-                    } else if let Ok(t) = InviteTicket::from_text(&ticket) {
-                        node::claim_invite(&socket, &vault, t, now)
-                    } else {
-                        Err("not a recognized node ticket or invite".to_string())
-                    };
+                    let claimed = node::join(&socket, &vault, &ticket, node::now_secs());
                     let result = claimed.and_then(|record| {
                         node::save_relationship(&vault, &record)?;
                         Ok(record)

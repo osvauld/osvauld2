@@ -375,8 +375,9 @@ impl Admin {
             .vault
             .with_signer(|node| courier::invite::node_accept_invite(hello, node, now, &redeemed))
             .ok_or(NodeError::Locked)??;
-        self.vault
-            .put_entry(&invite_key(&welcome.redeemed_nonce), &[])?;
+        if let Some(spent) = &welcome.redeemed_nonce {
+            self.vault.put_entry(&invite_key(spent), &[])?;
+        }
         self.record(&welcome.token, Cause::Node, now)?;
         Ok(welcome)
     }
