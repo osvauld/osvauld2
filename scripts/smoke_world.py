@@ -41,6 +41,17 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert entity_at(570, 300) == "chest"
     assert entity_at(400, 230) == "—", "friend is not described yet"
 
+    # The chest's sensor: far from it, the hero is not near, and E does nothing.
+    def near():
+        return readout(s.rpc.dump_tree(item), "near the chest: ")
+
+    assert near() == "no"
+    s.rpc.keyboard("KeyE", "e", True)
+    s.rpc.frame(1)
+    s.rpc.keyboard("KeyE", "e", False)
+    s.rpc.frame(2)
+    assert entity_at(570, 300) == "chest", "E out of reach: the chest stays put"
+
     s.rpc.click(item, "add")
     s.rpc.frame(1)
     assert entity_at(400, 230) == "friend"
@@ -171,13 +182,16 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # Held in front, the chest covers the hero's body; walking left (a flipped view) carries it
     # ~80 left, and after E again it stays where it was dropped while the hero walks off.
     assert entity_at(560, 300) == "hero", "standing in front of the chest"
+    assert near() == "yes", "on_zone: the hero walked into the chest's zone"
     tap("KeyE", "e")
     assert entity_at(560, 300) == "chest", "picked up, held in front of the hero"
+    assert near() == "no", "carried, the chest has no zone"
     # Carried, the chest is off the floor: it neither blocks the hero nor stops at its own
     # footprint's old place.
     hold("KeyA", "a", 30)
     assert (entity_at(480, 300), entity_at(560, 300)) == ("chest", "—"), "carried left"
     tap("KeyE", "e")
+    assert near() == "yes", "put down beside the hero, its zone is back"
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(60)
     s.rpc.keyboard("KeyD", "d", False)
@@ -204,4 +218,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor")

@@ -773,7 +773,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     /// Hands the world's queued moments to its `on_action` / `on_move` / `on_clip_end` /
-    /// `on_enter` / `on_exit`; one
+    /// `on_zone`; one
     /// without a handler is dropped.
     fn world_events(&self, id: &str) {
         let events = match self.worlds.borrow_mut().get_mut(id) {
@@ -798,13 +798,16 @@ impl<M: 'static> LuaApp<M> {
                         table.set("id", entity)?;
                         "on_clip_end"
                     }
+                    // One handler, phased like `on_hover`: `on_enter` is already the Enter key.
                     world::WorldEvent::Enter { id: zone, who } => {
                         (table.set("id", zone)?, table.set("who", who)?);
-                        "on_enter"
+                        table.set("phase", "enter")?;
+                        "on_zone"
                     }
                     world::WorldEvent::Exit { id: zone, who } => {
                         (table.set("id", zone)?, table.set("who", who)?);
-                        "on_exit"
+                        table.set("phase", "leave")?;
+                        "on_zone"
                     }
                 };
                 let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
@@ -1373,7 +1376,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move", "on_clip_end", "on_enter", "on_exit"] {
+    for handler in ["on_action", "on_move", "on_clip_end", "on_zone"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
@@ -1534,7 +1537,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
         "scene3d" => &["scene"],
         "world" => &[
             "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
-            "on_enter", "on_exit",
+            "on_zone",
         ],
         _ => &[],
     };

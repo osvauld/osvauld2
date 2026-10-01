@@ -490,8 +490,14 @@ walks round it. **5b chunk 2 landed:** a let-go entity becomes a dynamic body
 with its carrier's last `Velocity`, slides (friction 6, bounce 0.5, no spin) with Rapier copying
 it back to `Transform` each tick, and settles to fixed once slow and not pressed into anything —
 so one let go inside a wall is pushed out first (Rapier does that slowly, and keeps ~0.012 of
-resting overlap on purpose). Next: a fall clip so a dropped chest reaches the floor; 5c, a sensor
-(`on_enter`/`on_exit`) so E works only near the chest; 5d, dynamic bodies. Soft bodies (rope,
+resting overlap on purpose). **5c landed:** `sensor` on any entity (the
+`collider` shape words, on the same body); each tick the world diffs Rapier's sensor overlaps
+against the last tick's and queues only changes, which Lua gets as `on_zone(e)` with `e.id`,
+`e.who`, `e.phase`. Fixed-on-fixed never counts (walls); moved-on-fixed does, switched on per
+sensor. The demo's E picks the chest up only within its zone; the smoke checks E out of reach
+does nothing and `near` follows through pickup and drop. That completes the chest demo's
+mechanics. Next: a fall clip so a dropped chest reaches the floor; 5d, dynamic bodies beyond the
+drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds

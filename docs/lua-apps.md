@@ -179,8 +179,8 @@ ui.world({
 ```
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
-  handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach` and
-  `collider` — nothing else.
+  handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
+  `collider` and `sensor` — nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -206,8 +206,12 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
-- Solid carried things, sensors and dynamic bodies are the rest of slice 5 in
-  [2d-world.md](design/2d-world.md).
+- A carried entity is off the floor: its collider and sensor go while `attach` is set. Let go,
+  it keeps its carrier's momentum, slides, bounces off walls and settles where it stops — never
+  inside a wall.
+- `sensor = { circle = 72, at = { 48, 68 } }` is a zone in the same shape words: it blocks
+  nothing, and `on_zone` reports what comes into it and leaves it. An entity may have a
+  `collider`, a `sensor`, both, or neither.
 
 ### Clips
 
@@ -263,7 +267,7 @@ local wasd = {
   leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
 
-### Moments — `on_action`, `on_move` and `on_clip_end`
+### Moments — `on_action`, `on_move`, `on_clip_end` and `on_zone`
 
 The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
 a second at most, never once a frame.
@@ -282,6 +286,12 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
   entity it concerns.
 - `on_clip_end(e)` gets `e.id` when a once clip on that entity reaches its end — once per play;
   re-sending the same handle is the same play. A looped clip never ends.
+- `on_zone(e)` gets `e.id` (the entity whose sensor it is), `e.who` and `e.phase` — `"enter"`
+  or `"leave"` — when something solid or moving comes into the zone or goes out of it; walls
+  never count. Taking a sensor away (carrying, despawning) is a leave for whoever was in it; a
+  despawned `who` leaves quietly. (`on_enter` is the Enter key on an input, so the world's is
+  `on_zone`, phased like `on_hover`.) The demo's reach to the chest is one flag:
+  `near = e.phase == "enter"`, and E picks up only when `near`.
 - A jump is all three together, with no jump in Rust: `on_action` sets `jumping`, the hero
   describes `clip = jumping and jump or …` (a once clip lifting `body`, which the other parts hang
   off — the feet stay put, so draw order ignores it), and `on_clip_end` clears `jumping`.

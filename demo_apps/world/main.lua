@@ -64,6 +64,7 @@ local heading = "still" -- the hero's held direction, as the world last reported
 local face, walking = "down", false -- the hero's facing and gait, decided on each on_move
 local jumping = false -- set by the jump action, cleared when the jump clip ends
 local carrying = false -- whether the chest rides on the hero; E picks it up and puts it down
+local near = false -- whether the hero stands in the chest's zone, as the world last reported
 
 local function toggle_lid()
 	lid = lid == open and close or open
@@ -88,7 +89,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks, walls stop you · Space jumps · E carries the chest · a click opens it", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks, walls stop you · Space jumps · E near the chest carries it · a click opens it", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -102,11 +103,17 @@ return function()
 			-- Moments come to Lua; the per-frame work (walking, playing clips) stays in the world.
 			actions = { interact = "KeyE", jump = "Space" },
 			on_action = function(e)
-				if e.action == "interact" then carrying = not carrying end -- anywhere, until slice 5
+				-- Carrying, E puts it down anywhere; otherwise only within reach of the chest.
+				if e.action == "interact" and (carrying or near) then carrying = not carrying end
 				if e.action == "jump" then jumping = true end -- already in the air: no double jump
 			end,
 			on_clip_end = function(e)
 				if e.id == "hero" then jumping = false end
+			end,
+			-- The chest's zone goes while it is carried and comes back where it is put down, so
+			-- `near` follows without Lua keeping it in step.
+			on_zone = function(e)
+				if e.id == "chest" and e.who == "hero" then near = e.phase == "enter" end
 			end,
 			on_move = function(e)
 				walking = e.dx ~= 0 or e.dy ~= 0
@@ -126,7 +133,7 @@ return function()
 			-- takes it off the floor.
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
 				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil,
-				collider = { rect = { 80, 24 }, at = { 8, 56 } } },
+				collider = { rect = { 80, 24 }, at = { 8, 56 } }, sensor = { circle = 72, at = { 48, 68 } } },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
 		ui.row({ gap = 10,
@@ -135,5 +142,7 @@ return function()
 		}),
 		ui.text({ "entity: " .. (hot or "—"), color = C.muted, font_size = 13, no_wrap = true }),
 		ui.text({ "heading: " .. heading, color = C.muted, font_size = 13, no_wrap = true }),
+		ui.text({ "near the chest: " .. (near and "yes" or "no"), color = C.muted, font_size = 13,
+			no_wrap = true }),
 	})
 end

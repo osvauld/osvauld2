@@ -69,7 +69,8 @@ pub enum WorldEvent {
     Action(String),
     /// A once clip on this entity reached its end and now holds; reported once per play.
     ClipEnd(String),
-    /// Something solid or moving came into this entity's sensor: `who` is its id.
+    /// Something solid or moving came into this entity's sensor: `who` is its id. Lua gets both
+    /// this and `Exit` as `on_zone`, with a phase.
     Enter { id: String, who: String },
     /// It left the sensor — or one of the two stopped being there, carried or despawned.
     Exit { id: String, who: String },

@@ -722,6 +722,20 @@ fn a_collider_is_checked_strictly() {
 }
 
 #[test]
+fn a_sensor_is_checked_like_a_collider() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |sensor: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, sensor = {sensor} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ circle = 40, at = { 4, 4 } }")).unwrap();
+    let err = walk_world(&lua, &worlds, &room("{ circle = 40, rect = { 1, 1 } }"));
+    let err = err.unwrap_err().to_string();
+    assert!(err.contains("world entity 1.sensor is a circle or a rect, not both"), "{err}");
+}
+
+#[test]
 fn flip_is_a_boolean() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();
