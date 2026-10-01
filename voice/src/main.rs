@@ -28,7 +28,7 @@ const MAX_BUFFERED: usize = FRAME * 5;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "usage: voice listen | voice dial <endpoint-id> <ip:port>... | voice process <in.wav> <out.wav>\n\
+        "usage: voice listen | voice dial <ticket> | voice process <in.wav> <out.wav>\n\
          \x20      all take --clean none|apm|rnn|rnn-gate (default apm)"
     )]
     Usage,
@@ -89,12 +89,10 @@ async fn run() -> Result<(), Error> {
     {
         return process_file(input, output, mode);
     }
-    let (_endpoint, conn) = match args.split_first() {
-        Some((cmd, [])) if cmd == "listen" => net::listen().await?,
-        Some((cmd, [id, addrs @ ..])) if cmd == "dial" => {
-            let id = id.parse().map_err(|_| Error::Usage)?;
-            let addrs = addrs.iter().map(|a| a.parse()).collect::<Result<_, _>>();
-            net::dial(id, addrs.map_err(|_| Error::Usage)?).await?
+    let (endpoint, conn) = match &args[..] {
+        [cmd] if cmd == "listen" => net::listen().await?,
+        [cmd, ticket] if cmd == "dial" => {
+            net::dial(ticket.parse().map_err(|_| Error::Usage)?).await?
         }
         _ => return Err(Error::Usage),
     };
@@ -201,7 +199,15 @@ async fn run() -> Result<(), Error> {
     mic.play()?;
     speaker.play()?;
     eprintln!("voice: in call, clean {mode:?}  (ctrl-c to quit)");
-    eprintln!("call ended: {}", conn.closed().await);
+    tokio::select! {
+        why = conn.closed() => eprintln!("call ended: {why}"),
+        _ = tokio::signal::ctrl_c() => {
+            conn.close(0u32.into(), b"hangup");
+            eprintln!("hung up");
+        }
+    }
+    // Without this the close frame may never leave, and the peer waits out the idle timeout.
+    endpoint.close().await;
     Ok(())
 }
 

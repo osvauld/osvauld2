@@ -12,13 +12,13 @@ extra="$*"
 cargo build -q --release -p voice --manifest-path "$root/Cargo.toml"
 tmux kill-session -t voice 2>/dev/null || true
 
-tmux new-session -d -s voice -x 200 -y 50 "$bin listen $extra 2>&1 | tee $log; read"
+tmux new-session -d -s voice -x 200 -y 50 "$bin listen $extra 2>&1 | tee -i $log"
+# Keep a pane readable after its peer hangs up (ctrl-c would otherwise close it).
+tmux set-option -t voice remain-on-exit on
 for _ in $(seq 1 50); do grep -q "voice dial" "$log" && break; sleep 0.2; done
 dial=$(grep -o "voice dial .*" "$log") || { echo "listener never printed a dial line:"; cat "$log"; exit 1; }
 
-read -ra args <<< "${dial#voice }"
-# Quoted because tmux hands this to the login shell, and zsh globs `[ipv6]:port`.
-tmux split-window -h -t voice "$bin $(printf '%q ' "${args[@]}") $extra; read"
+tmux split-window -h -t voice "$bin ${dial#voice } $extra"
 tmux select-layout -t voice even-horizontal
 
 if [[ -t 0 ]]; then
