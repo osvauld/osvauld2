@@ -8,6 +8,7 @@ return {
 	text = "#e7e9f3",
 	muted = "#8a8fa8",
 	accent = "#ffd166",
+	bad = "#ff6b6b", -- a field whose text does not parse
 	zoom = 2.5, -- drawing units to canvas units
 	panel_w = 220,
 }

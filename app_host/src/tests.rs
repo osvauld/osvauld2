@@ -3630,6 +3630,7 @@ fn asset_editor() -> LuaApp<LuaMsg> {
         "main.lua",
         "model.lua",
         "stage.lua",
+        "inspector.lua",
         "theme.lua",
         "seed/hero.lua",
         "seed/clips.lua",
@@ -4801,4 +4802,50 @@ fn pie_demo_reads_the_shape_the_runtime_names() {
     click(&mut app, "slice:search");
     let _ = app.view();
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
+/// The inspector edits the selected part: Enter writes a field that parses, a bad colour turns
+/// red and writes nothing, and the canvas redraws from the edit.
+#[test]
+fn asset_editor_inspector_edits_a_part() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "part:leg_l");
+    let _ = app.view();
+    let field = |app: &mut LuaApp<LuaMsg>, id: &str, v: &str| {
+        app.update(LuaMsg::CallStr(Key::new(id, "on_input"), v.into()));
+        app.update(LuaMsg::Call(Key::new(id, "on_enter")));
+        app.view()
+    };
+    let leg = |app: &LuaApp<LuaMsg>| -> String {
+        let at = r#"
+            for _, p in ipairs(asset:open("hero").views.front.parts) do
+                if p.id == "leg_l" then
+                    local s = p.shapes[1]
+                    return s.fill .. " " .. s.stroke[1] .. " " .. p.pivot[1]
+                end
+            end
+        "#;
+        app.vm.load(at).eval().unwrap()
+    };
+    // What a field shows: its draft while one is held, else the mirror's value.
+    fn shown(info: &runtime::ElInfo, id: &str) -> Option<String> {
+        if info.id.as_deref() == Some(id) {
+            return info.text.clone();
+        }
+        info.children.iter().find_map(|c| shown(c, id))
+    }
+    let _ = field(&mut app, "field:leg_l:1:fill", "#ff0000");
+    let _ = field(&mut app, "field:leg_l:1:width", "4");
+    let info = field(&mut app, "field:leg_l:pivot:x", "70").info();
+    assert_eq!(leg(&app), "#ff0000 4 70");
+    assert_eq!(shown(&info, "field:leg_l:1:fill").as_deref(), Some("#ff0000"));
+
+    let _ = field(&mut app, "field:leg_l:1:fill", "not a colour");
+    let info = field(&mut app, "field:leg_l:1:width", "-1").info();
+    assert_eq!(leg(&app), "#ff0000 4 70", "a bad value writes nothing");
+    assert_eq!(shown(&info, "field:leg_l:1:fill").as_deref(), Some("not a colour"), "the draft stays");
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let console = app.console(100);
+    assert!(console.is_empty(), "{console:?}");
 }

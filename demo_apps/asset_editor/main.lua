@@ -1,9 +1,10 @@
 local C = require("theme")
 local M = require("model")
 local Stage = require("stage")
+local Inspector = require("inspector")
 
 local selected = nil -- the selected part's id
-local built = { key = nil, frame = nil } -- the canvas visual; rebuilt when the selection changes
+local built = { key = nil, frame = nil } -- the canvas visual; rebuilt on a new selection or edit
 local play = nil -- { name, drawing, clip } while a clip plays on the canvas; nil is edit mode
 
 -- The canvas draws the asset scaled up by building a scaled copy, rather than scaling the
@@ -80,7 +81,7 @@ local function canvas_drawing(parts, z, outline)
 end
 
 local function visual(parts)
-	local key = M.name .. ":" .. (selected or "")
+	local key = M.name .. ":" .. (selected or "") .. ":" .. Inspector.rev
 	if built.key ~= key then
 		built.key = key
 		built.frame = canvas_drawing(parts, C.zoom, selected):pose({})
@@ -216,8 +217,10 @@ return function()
 	for name in pairs(M.scenes) do
 		table.insert(tabs, asset_tab(name))
 	end
+	local picked = nil
 	for _, p in ipairs(parts or {}) do
 		table.insert(rows, part_row(p))
+		picked = p.id == selected and p or picked
 	end
 	for _, r in ipairs(stage and Stage.rows() or {}) do
 		table.insert(rows, entity_row(r))
@@ -257,6 +260,7 @@ return function()
 			ui.text({ title, color = C.text, font_size = 15, no_wrap = true }),
 			ui.text({ listing, color = C.muted, font_size = 11, no_wrap = true }),
 			rows,
+			Inspector.view(picked),
 		}),
 	})
 end
