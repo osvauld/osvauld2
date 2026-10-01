@@ -141,6 +141,58 @@ impl Brush {
         if !valid_point(&start) || !valid_point(&end) || start == end {
             return Err(FrameError::InvalidGradientGeometry);
         }
+        Self::gradient(Gradient::new_linear(start, end), stops, extend)
+    }
+
+    /// Colour spreads from the start circle to the end circle. A zero start radius at the end's
+    /// centre is a plain circular glow; moving the start off-centre moves the light with it.
+    pub fn radial(
+        start: (Point, f64),
+        end: (Point, f64),
+        stops: Vec<GradientStop>,
+        extend: Extend,
+    ) -> Result<Self, FrameError> {
+        let radius_ok = |r: f64| (0.0..=MAX_FRAME_COORDINATE).contains(&r);
+        if !valid_point(&start.0)
+            || !valid_point(&end.0)
+            || !radius_ok(start.1)
+            || !radius_ok(end.1)
+            || end.1 == 0.0
+            || start == end
+        {
+            return Err(FrameError::InvalidGradientGeometry);
+        }
+        let (s, e) = ((start.0, start.1 as f32), (end.0, end.1 as f32));
+        Self::gradient(
+            Gradient::new_two_point_radial(s.0, s.1, e.0, e.1),
+            stops,
+            extend,
+        )
+    }
+
+    /// Colour turns around `center` from `start_angle` to `end_angle`, in radians from the positive
+    /// x axis towards positive y.
+    pub fn sweep(
+        center: Point,
+        start_angle: f64,
+        end_angle: f64,
+        stops: Vec<GradientStop>,
+        extend: Extend,
+    ) -> Result<Self, FrameError> {
+        let finite = start_angle.is_finite() && end_angle.is_finite();
+        if !valid_point(&center) || !finite || start_angle == end_angle {
+            return Err(FrameError::InvalidGradientGeometry);
+        }
+        let gradient = Gradient::new_sweep(center, start_angle as f32, end_angle as f32);
+        Self::gradient(gradient, stops, extend)
+    }
+
+    /// The part every gradient shares: ordered stops, and what happens past the ends.
+    fn gradient(
+        gradient: Gradient,
+        stops: Vec<GradientStop>,
+        extend: Extend,
+    ) -> Result<Self, FrameError> {
         if stops.len() < 2
             || stops.len() > MAX_GRADIENT_STOPS
             || stops.windows(2).any(|pair| pair[0].offset > pair[1].offset)
@@ -156,9 +208,7 @@ impl Brush {
             .iter()
             .map(|stop| (stop.offset, stop.color).into())
             .collect();
-        let gradient = Gradient::new_linear(start, end)
-            .with_extend(extend)
-            .with_stops(stops.as_slice());
+        let gradient = gradient.with_extend(extend).with_stops(stops.as_slice());
         Ok(Self(gradient.into()))
     }
 }
@@ -243,6 +293,14 @@ enum ItemKind {
         transform: Affine,
         frame: Arc<Frame>,
     },
+    /// `rect` with corners rounded by `radius`, blurred by `blur` (the gaussian's standard
+    /// deviation). Vello's fast path for soft shadows; paint only — never hit.
+    Shadow {
+        rect: Rect,
+        radius: f64,
+        blur: f64,
+        color: Color,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -268,6 +326,23 @@ impl Item {
     pub fn instance(transform: Affine, frame: Arc<Frame>) -> Result<Self, FrameError> {
         valid_transform(transform)?;
         Ok(Self::new(ItemKind::Instance { transform, frame }))
+    }
+
+    pub fn shadow(rect: Rect, radius: f64, blur: f64, color: Color) -> Result<Self, FrameError> {
+        let corners = [rect.x0, rect.y0, rect.x1, rect.y1];
+        let bounded = corners.iter().all(|v| v.abs() <= MAX_FRAME_COORDINATE);
+        let sized = rect.width() > 0.0 && rect.height() > 0.0;
+        let blur_ok = blur > 0.0 && blur <= MAX_FRAME_COORDINATE;
+        if !bounded || !sized || !(0.0..=MAX_FRAME_COORDINATE).contains(&radius) || !blur_ok {
+            return Err(FrameError::InvalidShadow); // NaN fails every comparison above
+        }
+        valid_color(color)?;
+        Ok(Self::new(ItemKind::Shadow {
+            rect,
+            radius,
+            blur,
+            color,
+        }))
     }
 
     fn new(kind: ItemKind) -> Self {
@@ -320,6 +395,10 @@ pub enum FrameError {
     InvalidDashPattern,
     #[error("stroke has more than {MAX_STROKE_DASHES} dash entries")]
     TooManyStrokeDashes,
+    #[error(
+        "shadow needs a finite, non-empty, bounded rect, a radius of zero or more and a positive blur"
+    )]
+    InvalidShadow,
     #[error("Frame nesting depth exceeds {MAX_FRAME_DEPTH}")]
     TooDeep,
     #[error("Frame expands to more than {MAX_FRAME_ITEMS} items")]
@@ -523,6 +602,15 @@ fn draw_items(scene: &mut Scene, items: &[Item], transform: Affine, alpha: f32) 
             } => {
                 draw_items(scene, frame.items(), transform * *local, alpha);
             }
+            ItemKind::Shadow {
+                rect,
+                radius,
+                blur,
+                color,
+            } => {
+                let color = color.multiply_alpha(alpha);
+                scene.draw_blurred_rounded_rect(transform, *rect, color, *radius, *blur);
+            }
         }
     }
 }
@@ -543,6 +631,7 @@ fn item_stats(items: &[Item], depth: usize) -> Result<FrameStats, FrameError> {
                 ..FrameStats::default()
             },
             ItemKind::Group { items, .. } => item_stats(items, depth + 1)?,
+            ItemKind::Shadow { .. } => FrameStats::default(),
             // A reused visual keeps its own names to itself — fifty instances of one resource
             // would otherwise all answer to the same ones.
             ItemKind::Instance { frame, .. } => FrameStats {

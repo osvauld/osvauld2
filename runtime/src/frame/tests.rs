@@ -518,6 +518,55 @@ fn gradient_rejects_bad_stops_and_geometry() {
 }
 
 #[test]
+fn radial_and_sweep_gradients_paint_with_their_stops() {
+    let two = || vec![stop(0.0), stop(1.0)];
+    let c = Point::new(10.0, 10.0);
+    let glow = Brush::radial((c, 0.0), (c, 8.0), two(), Extend::Pad).unwrap();
+    let lit = Brush::radial((Point::new(7.0, 7.0), 1.0), (c, 8.0), two(), Extend::Pad).unwrap();
+    let rim = Brush::sweep(c, 0.0, std::f64::consts::TAU, two(), Extend::Repeat).unwrap();
+    let items = [glow, lit, rim]
+        .into_iter()
+        .map(|b| Item::fill(square(0.0, 0.0, 20.0), Arc::new(b), Fill::NonZero))
+        .collect();
+    let frame = Frame::new(20.0, 20.0, None, items).unwrap();
+    let mut scene = Scene::new();
+
+    frame.draw(&mut scene, Affine::IDENTITY, 1.0);
+
+    assert_eq!(scene.encoding().draw_tags.len(), 3);
+    assert_eq!(scene.encoding().resources.color_stops.len(), 6);
+}
+
+#[test]
+fn radial_and_sweep_gradients_reject_degenerate_geometry() {
+    let two = || vec![stop(0.0), stop(1.0)];
+    let c = Point::new(1.0, 1.0);
+    let far = Point::new(2.0 * MAX_FRAME_COORDINATE, 0.0);
+    for (start, end) in [
+        ((c, 0.0), (c, 0.0)),      // no circle to spread to
+        ((c, 4.0), (c, 4.0)),      // start and end the same circle
+        ((c, -1.0), (c, 4.0)),     // negative radius
+        ((c, 0.0), (c, f64::NAN)), // non-finite radius
+        ((far, 0.0), (c, 4.0)),    // out-of-range centre
+    ] {
+        let got = Brush::radial(start, end, two(), Extend::Pad).unwrap_err();
+        assert_eq!(
+            got,
+            FrameError::InvalidGradientGeometry,
+            "{start:?} → {end:?}"
+        );
+    }
+    for (center, from, to) in [(c, 1.0, 1.0), (c, 0.0, f64::INFINITY), (far, 0.0, 1.0)] {
+        let got = Brush::sweep(center, from, to, two(), Extend::Pad).unwrap_err();
+        assert_eq!(
+            got,
+            FrameError::InvalidGradientGeometry,
+            "{center:?} {from} {to}"
+        );
+    }
+}
+
+#[test]
 fn frame_budgets_expanded_items_and_path_commands() {
     let item = fill(dot(1));
     assert_eq!(
@@ -623,4 +672,81 @@ fn renderer_emits_fills_for_nested_groups_and_instances() {
             Affine::translate((7.0, 8.0)) * Affine::scale(2.0),
         ]
     );
+}
+
+fn shade(rect: Rect) -> Result<Item, FrameError> {
+    Item::shadow(rect, 4.0, 3.0, Color::from_rgba8(0, 0, 0, 102))
+}
+
+#[test]
+fn a_shadow_draws_through_its_transform_in_list_order() {
+    let frame = Frame::new(
+        20.0,
+        20.0,
+        None,
+        vec![
+            Item::group(
+                Affine::translate((3.0, 4.0)),
+                vec![shade(Rect::new(0.0, 0.0, 10.0, 6.0)).unwrap()],
+            )
+            .unwrap(),
+            fill(square(0.0, 0.0, 10.0)),
+        ],
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+
+    frame.draw(&mut scene, Affine::scale(2.0), 1.0);
+
+    assert_eq!(frame.stats().expanded_path_commands, 5); // the shadow carries no path
+    assert_eq!(scene.encoding().draw_tags.len(), 2); // the shadow, then the square over it
+    assert_eq!(
+        scene.encoding().transforms[0].to_kurbo(),
+        Affine::scale(2.0) * Affine::translate((3.0, 4.0))
+    );
+}
+
+/// A shadow is paint: even named, the pointer goes through it to what is underneath.
+#[test]
+fn a_shadow_is_never_hit() {
+    let frame = Frame::new(
+        20.0,
+        20.0,
+        None,
+        vec![
+            fill(square(0.0, 0.0, 10.0)).with_id("pill"),
+            shade(Rect::new(0.0, 0.0, 20.0, 20.0))
+                .unwrap()
+                .with_id("shadow"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(hit(&frame, 2.0, 2.0).unwrap().0, "pill");
+    assert_eq!(hit(&frame, 15.0, 15.0), None);
+}
+
+#[test]
+fn a_shadow_rejects_degenerate_geometry_and_blur() {
+    let unit = Rect::new(0.0, 0.0, 1.0, 1.0);
+    let black = Color::BLACK;
+    for (rect, radius, blur) in [
+        (Rect::new(0.0, 0.0, 0.0, 5.0), 1.0, 1.0), // empty
+        (Rect::new(0.0, 0.0, f64::NAN, 5.0), 1.0, 1.0),
+        (
+            Rect::new(0.0, 0.0, 2.0 * MAX_FRAME_COORDINATE, 5.0),
+            1.0,
+            1.0,
+        ),
+        (unit, -1.0, 1.0),
+        (unit, 1.0, 0.0), // zero blur: a gaussian of width zero
+        (unit, 1.0, f64::INFINITY),
+    ] {
+        let got = Item::shadow(rect, radius, blur, black);
+        assert_eq!(
+            got.err(),
+            Some(FrameError::InvalidShadow),
+            "{rect:?} {radius} {blur}"
+        );
+    }
+    assert!(Item::shadow(unit, 0.0, 0.5, black).is_ok());
 }
