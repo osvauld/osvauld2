@@ -687,7 +687,12 @@ impl<M: 'static> LuaApp<M> {
         let el = match walk(tree, &mut context) {
             Ok(el) => {
                 let seen = &context.worlds_seen;
-                self.worlds.borrow_mut().retain(|id, _| seen.contains(id));
+                let mut worlds = self.worlds.borrow_mut();
+                worlds.retain(|id, _| seen.contains(id));
+                for (id, world) in worlds.iter_mut() {
+                    let notes = world.drain_notes().into_iter();
+                    context.errors.extend(notes.map(|n| format!("world {id:?}: {n}")));
+                }
                 el
             }
             Err(e) => {

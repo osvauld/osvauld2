@@ -198,31 +198,39 @@ fn a_new_clip_handle_restarts_and_no_clip_returns_to_rest() {
 }
 
 #[test]
-fn a_clip_naming_a_part_its_drawing_lacks_is_refused() {
+fn a_clip_track_for_a_part_the_drawing_lacks_is_skipped_and_noted_once() {
     use crate::clip::{Easing, Key, Prop, Track};
-    let key = Key {
-        time: 0.0,
-        value: 1.0,
+    let key = |time, value| Key {
+        time,
+        value,
         easing: Easing::Linear,
     };
-    let track = Track {
-        part: "wing".into(),
-        prop: Prop::Rot,
-        keys: vec![key],
+    let track = |part: &str, prop, keys| Track {
+        part: part.into(),
+        prop,
+        keys,
     };
-    let wing = Arc::new(Clip::new(1.0, true, vec![track]).unwrap());
+    // `body` slides 100 right over a second; `wing` is not in the drawing.
+    let tracks = vec![
+        track("body", Prop::X, vec![key(0.0, 0.0), key(1.0, 100.0)]),
+        track("wing", Prop::Rot, vec![key(0.0, 1.0)]),
+    ];
+    let both = Arc::new(Clip::new(1.0, false, tracks).unwrap());
     let d = drawing();
     let mut world = World2d::default();
-    world.reconcile(vec![spec("hero", (0.0, 0.0), &d)]).unwrap();
-    assert!(matches!(
-        world.reconcile(vec![playing("hero", &d, &wing)]),
-        Err(WorldError::Drawing(DrawingError::UnknownPart(_)))
-    ));
-    assert_eq!(
-        at(&world, 4.0).as_deref(),
-        Some("hero"),
-        "last good world kept"
-    );
+    world.reconcile(vec![playing("hero", &d, &both)]).unwrap();
+    world.tick(0.5, 0.5);
+    assert_eq!(at(&world, 56.0).as_deref(), Some("hero"), "the body's track still plays");
+    let wanted = "entity \"hero\": its clip moves \"wing\", which its drawing lacks — skipped";
+    assert_eq!(world.drain_notes(), [wanted]);
+    world.reconcile(vec![playing("hero", &d, &both)]).unwrap();
+    assert_eq!(world.drain_notes(), Vec::<String>::new(), "said once, not every frame");
+
+    // The part comes back (a drawing with a `wing`), then goes again: that is news again.
+    let winged = drawing_of("wing");
+    world.reconcile(vec![playing("hero", &winged, &both)]).unwrap();
+    world.reconcile(vec![playing("hero", &d, &both)]).unwrap();
+    assert_eq!(world.drain_notes().len(), 2, "body is missing from the winged one, then wing");
 }
 
 fn wasd(speed: f64) -> Controller {

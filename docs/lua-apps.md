@@ -240,8 +240,11 @@ ui.world({ id = "room", width = 720, height = 400,
   frame clock (virtual offscreen, so `rpc.advance` lands on exact times). Re-sending the same
   handle keeps it playing; a different handle restarts; no `clip` returns to rest. Make clips
   once at module scope, and switch clips by switching handles.
-- A clip naming a part its drawing lacks is an error. Unknown fields are errors — `events`,
-  speed, transitions and layers are not built yet.
+- A clip track naming a part the entity's drawing lacks is skipped, not an error — a drawing
+  edited live must not stop the world. The console says so once per entity and part (again only
+  if the part comes back and goes missing anew); the clip's other tracks play. An `attach` to a
+  missing part stays an error: there is nowhere to put the carried thing. Unknown fields are
+  errors — `events`, speed, transitions and layers are not built yet.
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
 

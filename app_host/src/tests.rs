@@ -589,6 +589,26 @@ fn a_controlled_world_takes_keys_and_moves_in_rust() {
 }
 
 #[test]
+fn a_skipped_clip_track_reaches_the_console_once() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local wing = gfx.clip({{ length = 1, tracks = {{ wing = {{ rot = {{ {{0, 1}} }} }} }} }}) \
+         return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, clip = wing }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.view();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let console = app.console(100);
+    assert_eq!(console.len(), 1, "once, not once a view: {console:?}");
+    assert!(console[0].starts_with("world \"room\": entity \"hero\": its clip moves \"wing\""));
+}
+
+#[test]
 fn a_world_hands_its_moments_to_on_action_and_on_move() {
     let src = LoroDoc::new();
     let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
@@ -793,8 +813,11 @@ fn a_clip_is_checked_strictly() {
             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, clip = CLIP }} }})")
     };
     let wing = "gfx.clip({ length = 1, tracks = { wing = { rot = { {0, 1} } } } })";
-    let err = walk_world(&lua, &worlds, &room("").replace("CLIP", wing)).unwrap_err();
-    assert!(err.to_string().contains("unknown part \"wing\""), "{err}");
+    // A part the drawing lacks is no error — a drawing edited live must not stop the world —
+    // but the world says so once, for the console.
+    walk_world(&lua, &worlds, &room("").replace("CLIP", wing)).unwrap();
+    let notes = worlds.borrow_mut().get_mut("room").unwrap().drain_notes();
+    assert!(notes[0].contains("moves \"wing\", which its drawing lacks — skipped"), "{notes:?}");
     let err = walk_world(&lua, &worlds, &room("").replace("CLIP", "hero")).unwrap_err();
     assert!(err.to_string().contains("must be a gfx.clip"), "{err}");
     let ticking = room("on_frame = function() end,").replace("CLIP", "slide");

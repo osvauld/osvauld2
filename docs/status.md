@@ -498,7 +498,10 @@ sensor. The demo's E picks the chest up only within its zone; the smoke checks E
 does nothing and `near` follows through pickup and drop. That completes the chest demo's
 mechanics. **Lift and fall** (Lua and clips only): the chest is attached at its floor spot in
 front of the hero and `lift` raises its drawing into the hands, so let go, `fall` drops it to a
-footprint already on the floor; picking it up shuts the lid. Next: 5d, dynamic bodies beyond the
+footprint already on the floor; picking it up shuts the lid. **Lenient reconcile:** a clip track
+for a part the drawing lacks is skipped and noted once to the console (`World2d::drain_notes`,
+drained after each view) instead of refusing the world — asked for by the assets session, whose
+drawings change live; `attach` to a missing part stays an error. Next: 5d, dynamic bodies beyond the
 drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

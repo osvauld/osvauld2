@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, Entity, World};
-use runtime::drawing::{Drawing, DrawingError};
+use runtime::drawing::{Drawing, DrawingError, Pose};
 use runtime::frame::{Frame, FrameError, Item};
 use runtime::vello::kurbo::{Affine, Point};
 
@@ -164,6 +164,10 @@ pub struct World2d {
     physics: Physics,
     /// `(zone, who)` sensor overlaps as of the last tick, to report only changes.
     inside: HashSet<(Entity, Entity)>,
+    /// `(entity id, part)` clip tracks skipped because the drawing lacks the part — noted once,
+    /// and again only if the part comes back and goes missing anew.
+    skipped: HashSet<(String, String)>,
+    notes: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +192,15 @@ impl World2d {
     /// All-or-nothing: every check and every pose runs before the world is touched, so a bad
     /// description leaves the last good world in place.
     pub fn reconcile(&mut self, specs: Vec<EntitySpec>) -> Result<(), WorldError> {
+        // A clip track for a part the drawing lacks is skipped, not refused: a drawing edited
+        // live must not stop the world. Said once, after the description is accepted.
+        let specs_missing: Vec<(String, String)> = (specs.iter())
+            .filter_map(|s| Some((s, s.clip.as_ref()?)))
+            .flat_map(|(s, clip)| {
+                let missing = clip.parts().filter(|p| !s.drawing.has_part(p));
+                missing.map(|p| (s.id.clone(), p.to_string()))
+            })
+            .collect();
         let mut seen = HashSet::with_capacity(specs.len());
         let mut all_rests = Vec::with_capacity(specs.len());
         for spec in &specs {
@@ -205,12 +218,6 @@ impl World2d {
             for c in spec.collider.iter().chain(&spec.sensor) {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
-            }
-            // A clip may move only parts its drawing has.
-            if let Some(clip) = &spec.clip
-                && let Some(part) = clip.parts().find(|p| !spec.drawing.has_part(p))
-            {
-                return Err(DrawingError::UnknownPart(part.to_string()).into());
             }
             let current = self
                 .by_id
@@ -330,6 +337,7 @@ impl World2d {
             self.ecs.despawn(gone);
         }
         (self.by_id, self.order) = (next, order);
+        self.note_skipped(&specs_missing);
         self.follow();
         Ok(())
     }
@@ -371,6 +379,20 @@ impl World2d {
         self.inside = now;
     }
 
+    fn note_skipped(&mut self, missing: &[(String, String)]) {
+        let now: HashSet<_> = missing.iter().cloned().collect();
+        for (id, part) in missing.iter().filter(|k| !self.skipped.contains(*k)) {
+            let why = format!("its clip moves {part:?}, which its drawing lacks — skipped");
+            self.notes.push(format!("entity {id:?}: {why}"));
+        }
+        self.skipped = now;
+    }
+
+    /// Notes for the app's console since the last drain: not errors, the world kept going.
+    pub fn drain_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
+
     /// Carried entities take their place from their carrier's part, as posed now.
     fn follow(&mut self) {
         for &entity in &self.order {
@@ -381,7 +403,7 @@ impl World2d {
                 let e = self.ecs.entity(a.to);
                 let look = e.get::<Appearance>().expect("every entity has an Appearance");
                 let poses = match e.get::<Animator>() {
-                    Some(anim) => anim.clip.sample(self.clock - anim.started),
+                    Some(anim) => present(anim.clip.sample(self.clock - anim.started), look),
                     None => HashMap::new(),
                 };
                 let part = look.drawing.part_at(&a.part, &poses).expect("checked at reconcile");
@@ -432,7 +454,7 @@ impl World2d {
                 };
                 let posed = match e.get::<Animator>() {
                     Some(a) => {
-                        let poses = a.clip.sample(self.clock - a.started);
+                        let poses = present(a.clip.sample(self.clock - a.started), look);
                         Arc::new(look.drawing.pose(&poses)?)
                     }
                     None => look.rest.clone(),
@@ -583,6 +605,12 @@ impl World2d {
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
     }
+}
+
+/// A clip's poses for only the parts this drawing has; the rest were noted at reconcile.
+fn present<'a>(mut poses: HashMap<&'a str, Pose>, look: &Appearance) -> HashMap<&'a str, Pose> {
+    poses.retain(|part, _| look.drawing.has_part(part));
+    poses
 }
 
 #[cfg(test)]
