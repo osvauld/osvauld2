@@ -484,7 +484,10 @@ top-down (no gravity, no ground snap, no slope limits): it stops at walls and sl
 the same in every direction. The world's frame is clipped to its box (`Frame::clipped()`,
 opt-in; other frames still spill). The demo has thin side walls and a tall back wall, and the
 hero collides by a circle at its feet; the smoke checks it stops at the east and back walls.
-Next: 5b, a solid chest that cannot be carried into a wall or dropped inside one; 5c, a sensor
+**5b chunk 1 landed:** a carried entity has no body (it is off the floor) and gets one again
+where it is let go; the demo chest is solid by its footprint, and the smoke's draw-order route now
+walks round it. Next: 5b chunk 2, a dynamic drop — the let-go entity keeps its carrier's
+momentum, slides, bounces off walls and settles; 5c, a sensor
 (`on_enter`/`on_exit`) so E works only near the chest; 5d, dynamic bodies. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

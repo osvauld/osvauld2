@@ -122,8 +122,11 @@ return function()
 			wall("wall:w", 0, 0, down, T, C.height),
 			wall("wall:e", C.width - T, 0, down, T, C.height),
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
+			-- On the floor it is solid by its footprint, the bottom of its base; carried, the world
+			-- takes it off the floor.
 			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
-				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil },
+				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil,
+				collider = { rect = { 80, 24 }, at = { 8, 56 } } },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
 		ui.row({ gap = 10,

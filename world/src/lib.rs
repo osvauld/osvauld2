@@ -249,14 +249,16 @@ impl World2d {
             };
             let mut e = self.ecs.entity_mut(entity);
             let moves = spec.controller.is_some();
+            // Carried is off the floor: no body until it is put down, then one where it was let go.
+            let collider = spec.collider.filter(|_| spec.attach.is_none());
             let kept = e.get::<Solid>().is_some_and(|s| {
-                spec.collider.as_ref() == Some(&s.collider) && s.moves == moves
+                collider.as_ref() == Some(&s.collider) && s.moves == moves
             });
             if !kept {
                 if let Some(old) = e.take::<Solid>() {
                     self.physics.remove(old.body);
                 }
-                if let Some(collider) = spec.collider {
+                if let Some(collider) = collider {
                     let t = e.get::<Transform>().expect("every entity has a Transform");
                     let body = self.physics.add(&collider, (t.x, t.y), moves);
                     e.insert(Solid { collider, moves, body });

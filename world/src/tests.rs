@@ -604,6 +604,40 @@ fn walls_stop_the_hero_the_same_way_in_every_direction() {
 }
 
 #[test]
+fn a_carried_solid_is_off_the_floor_until_put_down() {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let chest = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (10.0, 0.0),
+        }),
+        ..solid("chest", (50.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 4.0), (54.0, 4.0)], "on the floor, solid");
+
+    world.reconcile(vec![hero(), chest(true)]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 4.0)], "carried, it has no body");
+    world.key("KeyD", true);
+    for i in 1..=3 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    world.key("KeyD", false);
+    let x = world.transform("hero").unwrap().x;
+    assert!(x > 29.0, "the hero carried it to {x}");
+
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    let (cx, _) = world.physics.centres()[1];
+    assert_eq!(cx as f64, x + 10.0 + 4.0, "put down, solid again where it was let go");
+}
+
+#[test]
 fn a_solid_hero_slides_along_a_wall() {
     let mut world = walled();
     world.key("KeyD", true);

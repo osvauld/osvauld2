@@ -146,38 +146,44 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     lopsided, top = outline()
     assert abs(lopsided) < 10 and top < 47, ("facing down: front view", lopsided, top)
 
-    # Draw order by feet (`order = "y"`): walk the hero onto the chest so their feet are level,
-    # with a leg crossing (541, 275). A step up puts the hero behind the chest, a step down in front.
-    s.rpc.keyboard("KeyD", "d", True)
-    s.rpc.frame(102)
-    s.rpc.keyboard("KeyD", "d", False)
-    s.rpc.frame(2)
-    tap("KeyW", "w")
-    assert entity_at(541, 275) == "chest", "feet above the chest's: the hero is behind it"
-    s.rpc.keyboard("KeyS", "s", True)
-    s.rpc.frame(3)
-    s.rpc.keyboard("KeyS", "s", False)
-    s.rpc.frame(2)
-    assert entity_at(541, 275) == "hero", "feet below the chest's: the hero is in front"
+    def hold(code, key, frames):
+        s.rpc.keyboard(code, key, True)
+        s.rpc.frame(frames)
+        s.rpc.keyboard(code, key, False)
+        s.rpc.frame(2)
+
+    # The chest is solid by its footprint: walking straight at it, the hero's feet stop short.
+    hold("KeyD", "d", 102)
+    assert (entity_at(510, 280), entity_at(520, 280)) == ("hero", "—"), "stopped by the chest"
+
+    # Draw order by feet (`order = "y"`): a little higher and further right, the hero's feet are
+    # above the chest's, so the chest covers its legs; coming round below, the hero covers it.
+    hold("KeyW", "w", 6)
+    hold("KeyD", "d", 22)
+    assert (entity_at(570, 240), entity_at(570, 250)) == ("hero", "chest"), "behind the chest"
+    hold("KeyD", "d", 60)
+    hold("KeyS", "s", 30)
+    hold("KeyA", "a", 50)
+    assert entity_at(550, 280) == "hero", "come round below: in front of the chest"
+    tap("KeyS", "s")  # face down again, as the carry checks expect
 
     # Carrying: E is an action; Lua attaches the chest to the hero's body, and Rust keeps it there.
     # Held in front, the chest covers the hero's body; walking left (a flipped view) carries it
     # ~80 left, and after E again it stays where it was dropped while the hero walks off.
-    assert entity_at(560, 250) == "hero", "standing next to the chest"
+    assert entity_at(560, 300) == "hero", "standing in front of the chest"
     tap("KeyE", "e")
-    assert entity_at(560, 250) == "chest", "picked up, held in front of the hero"
-    s.rpc.keyboard("KeyA", "a", True)
-    s.rpc.frame(30)
-    s.rpc.keyboard("KeyA", "a", False)
-    s.rpc.frame(2)
-    assert (entity_at(480, 250), entity_at(560, 250)) == ("chest", "—"), "carried left"
+    assert entity_at(560, 300) == "chest", "picked up, held in front of the hero"
+    # Carried, the chest is off the floor: it neither blocks the hero nor stops at its own
+    # footprint's old place.
+    hold("KeyA", "a", 30)
+    assert (entity_at(480, 300), entity_at(560, 300)) == ("chest", "—"), "carried left"
     tap("KeyE", "e")
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(60)
     s.rpc.keyboard("KeyD", "d", False)
     s.rpc.frame(2)
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
-    assert (entity_at(480, 250), entity_at(635, 250)) == ("chest", "hero"), "dropped, left behind"
+    assert (entity_at(480, 300), entity_at(635, 250)) == ("chest", "hero"), "dropped, left behind"
 
     # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
     # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
@@ -198,4 +204,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest")
