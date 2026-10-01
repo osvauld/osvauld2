@@ -7,6 +7,7 @@
 //! change of direction — queue as `WorldEvent`s for Lua to decide on.
 
 pub mod clip;
+mod physics;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use runtime::frame::{Frame, FrameError, Item};
 use runtime::vello::kurbo::{Affine, Point};
 
 use crate::clip::Clip;
+use crate::physics::{Body, Physics};
+pub use crate::physics::{Collider, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -28,6 +31,9 @@ pub struct EntitySpec {
     /// Mirrored within the drawing's box: a side view drawn facing right, shown facing left.
     pub flip: bool,
     pub attach: Option<Attach>,
+    pub collider: Option<Collider>,
+    /// A zone that blocks nothing; what moves into or out of it is reported.
+    pub sensor: Option<Collider>,
 }
 
 /// Carried: the entity's origin rides at `at` — a point in the carrier's drawing at rest — as the
@@ -63,6 +69,11 @@ pub enum WorldEvent {
     Action(String),
     /// A once clip on this entity reached its end and now holds; reported once per play.
     ClipEnd(String),
+    /// Something solid or moving came into this entity's sensor: `who` is its id. Lua gets both
+    /// this and `Exit` as `on_zone`, with a phase.
+    Enter { id: String, who: String },
+    /// It left the sensor — or one of the two stopped being there, carried or despawned.
+    Exit { id: String, who: String },
 }
 
 /// How entities stack when drawn.
@@ -104,6 +115,21 @@ struct Appearance {
     rest: Arc<Frame>,
 }
 
+/// The entity's body in `Physics`, rebuilt only when its collider or kind of body changes.
+#[derive(Component)]
+struct Solid {
+    collider: Option<Collider>,
+    sensor: Option<Collider>,
+    moves: bool,
+    body: rapier2d::prelude::RigidBodyHandle,
+    /// Let go and still sliding: Rapier moves it until it settles.
+    sliding: bool,
+}
+
+/// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
+#[derive(Component, Default)]
+struct Velocity(f64, f64);
+
 #[derive(Component)]
 struct Attached {
     to: Entity,
@@ -135,6 +161,9 @@ pub struct World2d {
     by_id: HashMap<String, Entity>,
     order: Vec<Entity>,
     stacking: Order,
+    physics: Physics,
+    /// `(zone, who)` sensor overlaps as of the last tick, to report only changes.
+    inside: HashSet<(Entity, Entity)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,6 +176,8 @@ pub enum WorldError {
     Speed(String),
     #[error("entity {0:?}: {1}")]
     Attach(String, String),
+    #[error("entity {0:?}: {1}")]
+    Collider(String, String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -170,6 +201,10 @@ impl World2d {
                 && !(c.speed.is_finite() && c.speed >= 0.0)
             {
                 return Err(WorldError::Speed(spec.id.clone()));
+            }
+            for c in spec.collider.iter().chain(&spec.sensor) {
+                c.check()
+                    .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             }
             // A clip may move only parts its drawing has.
             if let Some(clip) = &spec.clip
@@ -228,7 +263,44 @@ impl World2d {
                     self.ecs.spawn((transform, name)).id()
                 }
             };
+            // Let go this frame: it leaves with its carrier's velocity.
+            let thrown = self.ecs.get::<Attached>(entity).map(|a| {
+                let v = self.ecs.get::<Velocity>(a.to);
+                v.map_or((0.0, 0.0), |v| (v.0, v.1))
+            });
             let mut e = self.ecs.entity_mut(entity);
+            let moves = spec.controller.is_some();
+            // Carried is off the floor: no body until it is put down, then one where it was let go.
+            let aloft = spec.attach.is_some();
+            let collider = spec.collider.filter(|_| !aloft);
+            let sensor = spec.sensor.filter(|_| !aloft);
+            let kept = e.get::<Solid>().is_some_and(|s| {
+                s.collider == collider && s.sensor == sensor && s.moves == moves
+            });
+            if !kept {
+                if let Some(old) = e.take::<Solid>() {
+                    self.physics.remove(old.body);
+                }
+                if collider.is_some() || sensor.is_some() {
+                    let t = e.get::<Transform>().expect("every entity has a Transform");
+                    let kind = match (moves, thrown, &collider) {
+                        (true, _, _) => Body::Moved,
+                        (false, Some((vx, vy)), Some(_)) => Body::Thrown(vx, vy),
+                        _ => Body::Fixed,
+                    };
+                    let sliding = matches!(kind, Body::Thrown(..));
+                    let (solid, zone) = (collider.as_ref(), sensor.as_ref());
+                    let owner = entity.to_bits();
+                    let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner);
+                    e.insert(Solid {
+                        collider,
+                        sensor,
+                        moves,
+                        body,
+                        sliding,
+                    });
+                }
+            }
             e.insert(Appearance {
                 drawing: spec.drawing,
                 flip: spec.flip,
@@ -252,11 +324,51 @@ impl World2d {
             self.ecs.entity_mut(entity).insert(attached);
         }
         for (_, gone) in self.by_id.drain() {
+            if let Some(s) = self.ecs.get::<Solid>(gone) {
+                self.physics.remove(s.body);
+            }
             self.ecs.despawn(gone);
         }
         (self.by_id, self.order) = (next, order);
         self.follow();
         Ok(())
+    }
+
+    /// Let-go entities go where Rapier slid them, until they settle.
+    fn slide_thrown(&mut self) {
+        for &entity in &self.order {
+            let Some(s) = self.ecs.get::<Solid>(entity).filter(|s| s.sliding) else {
+                continue;
+            };
+            let (cx, cy) = s.collider.as_ref().expect("only a solid slides").centre();
+            let ((x, y), body) = (self.physics.centre_of(s.body), s.body);
+            let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
+            (t.x, t.y) = (x - cx, y - cy);
+            if self.physics.settle(body) {
+                self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = false;
+            }
+        }
+    }
+
+    /// Reports what came into or left a sensor since the last tick. A pair whose entity is gone
+    /// goes quietly: Lua removed it, so Lua knows.
+    fn sense(&mut self) {
+        let now: HashSet<(Entity, Entity)> = (self.physics.overlaps().into_iter())
+            .map(|(zone, who)| (Entity::from_bits(zone), Entity::from_bits(who)))
+            .collect();
+        let name = |e: Entity| self.ecs.get::<Name>(e).map(|n| n.0.clone());
+        let mut changes: Vec<_> = (now.difference(&self.inside).map(|&p| (p, true)))
+            .chain(self.inside.difference(&now).map(|&p| (p, false)))
+            .filter_map(|((zone, who), entered)| Some((name(zone)?, name(who)?, entered)))
+            .collect();
+        changes.sort(); // a set has no order; Lua should see the same one every run
+        for (id, who, entered) in changes {
+            self.events.push(match entered {
+                true => WorldEvent::Enter { id, who },
+                false => WorldEvent::Exit { id, who },
+            });
+        }
+        self.inside = now;
     }
 
     /// Carried entities take their place from their carrier's part, as posed now.
@@ -334,13 +446,17 @@ impl World2d {
             items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         }
         let items = items.into_iter().map(|(_, item)| item).collect();
-        Ok(Frame::new(width, height, None, items)?)
+        // Clipped: a head or hand spilling past the room's edge is not drawn outside it.
+        Ok(Frame::new(width, height, None, items)?.clipped())
     }
 
     /// One frame: `elapsed` is the runtime's frame clock, which clips play against; `dt` is the
     /// step controllers move by (the runtime caps it after a stall).
     pub fn tick(&mut self, elapsed: f64, dt: f64) {
         self.clock = elapsed;
+        self.physics.step(dt);
+        self.slide_thrown();
+        self.sense();
         for entity in self.order.clone() {
             let Some(c) = self.ecs.get::<Controller>(entity) else {
                 continue;
@@ -356,10 +472,26 @@ impl World2d {
             }
             e.insert(heading);
             if length > 0.0 {
+                // A solid entity goes only as far as the others let it.
+                let wanted = (dx / length * step, dy / length * step);
+                let (mx, my) = match e.get::<Solid>() {
+                    Some(s) if s.collider.is_some() => self.physics.slide(s.body, wanted, dt),
+                    Some(s) => {
+                        self.physics.shift(s.body, wanted);
+                        wanted
+                    }
+                    None => wanted,
+                };
                 let mut t = e
                     .get_mut::<Transform>()
                     .expect("every entity has a Transform");
-                (t.x, t.y) = (t.x + dx / length * step, t.y + dy / length * step);
+                (t.x, t.y) = (t.x + mx, t.y + my);
+                e.insert(match dt > 0.0 {
+                    true => Velocity(mx / dt, my / dt),
+                    false => Velocity::default(),
+                });
+            } else {
+                e.insert(Velocity::default());
             }
         }
         self.follow();
@@ -413,7 +545,8 @@ impl World2d {
 
     /// Whether anything plays or moves — only then does the world need the frame clock.
     pub fn needs_ticks(&self) -> bool {
-        self.ticking
+        let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
+        self.ticking || self.order.iter().any(sliding)
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take

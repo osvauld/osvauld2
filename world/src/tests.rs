@@ -41,6 +41,8 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         controller: None,
         flip: false,
         attach: None,
+        collider: None,
+        sensor: None,
     }
 }
 
@@ -485,4 +487,331 @@ fn a_bad_attach_is_refused() {
     let chain = vec![hero(), carried("rider", "body", &d), rider];
     let err = world.reconcile(chain).unwrap_err().to_string();
     assert!(err.contains("which is itself attached"), "{err}");
+}
+
+fn solid(id: &str, pos: (f64, f64), shape: Shape, at: (f64, f64), d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        collider: Some(Collider { shape, at }),
+        ..spec(id, pos, d)
+    }
+}
+
+#[test]
+fn a_collider_becomes_a_body_placed_by_its_centre() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = solid("wall", (10.0, 20.0), Shape::Rect(100.0, 12.0), (0.0, 0.0), &d);
+    let hero = solid("hero", (0.0, 0.0), Shape::Circle(3.0), (4.0, 8.0), &d);
+    world.reconcile(vec![wall, hero, spec("ghost", (0.0, 0.0), &d)]).unwrap();
+    // A rect's `at` is its corner, a circle's its centre; an entity without a collider has none.
+    assert_eq!(world.physics.centres(), [(4.0, 8.0), (60.0, 26.0)]);
+}
+
+#[test]
+fn a_body_is_kept_while_its_collider_is_and_goes_with_it() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = || solid("wall", (0.0, 0.0), Shape::Rect(4.0, 4.0), (0.0, 0.0), &d);
+    let body = |w: &World2d| w.ecs.get::<Solid>(w.by_id["wall"]).map(|s| s.body);
+    world.reconcile(vec![wall()]).unwrap();
+    let first = body(&world);
+    world.reconcile(vec![wall()]).unwrap();
+    assert_eq!(body(&world), first, "the same collider keeps its body");
+    let wider = solid("wall", (0.0, 0.0), Shape::Rect(8.0, 4.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wider]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 2.0)], "a changed collider replaces its body");
+    world.reconcile(vec![spec("wall", (0.0, 0.0), &d)]).unwrap();
+    assert_eq!(world.physics.centres(), [], "dropping the collider drops the body");
+    world.reconcile(vec![wall()]).unwrap();
+    world.reconcile(vec![]).unwrap();
+    assert_eq!(world.physics.centres(), [], "despawning drops the body");
+}
+
+#[test]
+fn a_bad_collider_is_refused() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let cases = [
+        (Shape::Circle(0.0), (0.0, 0.0), "above zero"),
+        (Shape::Rect(4.0, f64::NAN), (0.0, 0.0), "above zero"),
+        (Shape::Circle(2.0), (f64::INFINITY, 0.0), "at must be finite"),
+    ];
+    for (shape, at, wanted) in cases {
+        let err = world
+            .reconcile(vec![solid("wall", (0.0, 0.0), shape, at, &d)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    assert_eq!(world.physics.centres(), [], "nothing was applied");
+}
+
+/// A hero whose feet are a circle of radius 4 at (4, 4), and a wall whose left face is x = 20.
+fn walled() -> World2d {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let wall = solid("wall", (20.0, -50.0), Shape::Rect(10.0, 400.0), (0.0, 0.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, wall]).unwrap();
+    world
+}
+
+#[test]
+fn a_solid_hero_stops_at_a_wall() {
+    let mut world = walled();
+    world.key("KeyD", true);
+    for i in 1..=20 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    // The circle's right edge (x + 8) rests against the wall, a hair short of touching.
+    let x = world.transform("hero").unwrap().x;
+    assert!((11.8..=12.0).contains(&x), "stopped at {x}");
+}
+
+/// Rapier's controller knows an "up"; top-down, no direction may be special.
+#[test]
+fn walls_stop_the_hero_the_same_way_in_every_direction() {
+    let d = drawing();
+    // A room 100 across, inside walls 10 thick; the hero's circle (radius 4) starts in the middle.
+    let wall = |id: &str, pos, size: (f64, f64)| {
+        solid(id, pos, Shape::Rect(size.0, size.1), (0.0, 0.0), &d)
+    };
+    for (key, axis, wanted) in [("KeyD", 0, 96.0), ("KeyA", 0, 4.0), ("KeyS", 1, 96.0), ("KeyW", 1, 4.0)] {
+        let hero = EntitySpec {
+            controller: Some(wasd(100.0)),
+            ..solid("hero", (50.0, 50.0), Shape::Circle(4.0), (0.0, 0.0), &d)
+        };
+        let mut world = World2d::default();
+        world
+            .reconcile(vec![
+                hero,
+                wall("n", (-10.0, -10.0), (120.0, 10.0)),
+                wall("s", (-10.0, 100.0), (120.0, 10.0)),
+                wall("w", (-10.0, 0.0), (10.0, 100.0)),
+                wall("e", (100.0, 0.0), (10.0, 100.0)),
+            ])
+            .unwrap();
+        world.key(key, true);
+        for i in 1..=20 {
+            world.tick(i as f64 * 0.1, 0.1);
+        }
+        let t = world.transform("hero").unwrap();
+        let at = [t.x, t.y][axis];
+        assert!((at - wanted).abs() < 0.2, "{key}: stopped at {at}, wanted {wanted}");
+    }
+}
+
+#[test]
+fn a_carried_solid_is_off_the_floor_until_put_down() {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let chest = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (10.0, 0.0),
+        }),
+        ..solid("chest", (50.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 4.0), (54.0, 4.0)], "on the floor, solid");
+
+    world.reconcile(vec![hero(), chest(true)]).unwrap();
+    assert_eq!(world.physics.centres(), [(4.0, 4.0)], "carried, it has no body");
+    world.key("KeyD", true);
+    for i in 1..=3 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    world.key("KeyD", false);
+    let x = world.transform("hero").unwrap().x;
+    assert!(x > 29.0, "the hero carried it to {x}");
+
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    let (cx, _) = world.physics.centres()[1];
+    assert_eq!(cx as f64, x + 10.0 + 4.0, "put down, solid again where it was let go");
+}
+
+/// A hero walking right at 100 with a solid 8×8 box held 20 ahead of it, let go after `walk`
+/// ticks; then `after` ticks with no key held. `wall_x` adds a wall whose left face is there.
+/// Says the box's x each tick after the drop, and whether it is still sliding.
+fn drop_box(walk: usize, wall_x: Option<f64>, after: usize) -> (Vec<f64>, bool) {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+        }),
+        ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let wall = || wall_x.map(|x| solid("wall", (x, -50.0), Shape::Rect(10.0, 100.0), (0.0, 0.0), &d));
+    let mut world = World2d::default();
+    world.reconcile([hero(), held(true)].into_iter().chain(wall()).collect()).unwrap();
+    let mut clock = 0.0;
+    let mut tick = |world: &mut World2d| {
+        clock += 0.05;
+        world.tick(clock, 0.05);
+    };
+    world.key("KeyD", walk > 0);
+    for _ in 0..walk {
+        tick(&mut world);
+    }
+    world.reconcile([hero(), held(false)].into_iter().chain(wall()).collect()).unwrap();
+    world.key("KeyD", false);
+    let xs = (0..after)
+        .map(|_| {
+            tick(&mut world);
+            world.transform("box").unwrap().x
+        })
+        .collect();
+    (xs, world.needs_ticks() && world.ecs.get::<Solid>(world.by_id["box"]).unwrap().sliding)
+}
+
+#[test]
+fn a_let_go_body_keeps_its_carriers_momentum_then_settles() {
+    let (xs, sliding) = drop_box(4, None, 40);
+    // Let go at x 40 (the hero walked 20), moving at 100: it slides on, slowing to a stop.
+    let (first, last) = (xs[0], *xs.last().unwrap());
+    assert!(first > 40.0 && first < xs[3], "it keeps moving: {xs:?}");
+    assert!((50.0..70.0).contains(&last), "slid to {last}");
+    assert!(xs.windows(2).all(|w| w[1] >= w[0]), "forward only, slowing: {xs:?}");
+    assert!(!sliding, "come to rest, it is fixed again");
+}
+
+#[test]
+fn a_let_go_body_bounces_off_a_wall() {
+    // Let go at x 40 heading right, with a wall at 52 — the box's right edge is 4 short of it.
+    let (xs, _) = drop_box(4, Some(52.0), 40);
+    let furthest = xs.iter().cloned().fold(f64::MIN, f64::max);
+    assert!(furthest <= 44.1, "stopped by the wall, not through it: {furthest}");
+    assert!(*xs.last().unwrap() < furthest - 1.0, "and came back off it: {xs:?}");
+}
+
+#[test]
+fn a_body_let_go_inside_a_wall_is_pushed_out() {
+    // Standing still, let go at x 20 to 28, with a wall from 25: three units deep in it.
+    let (xs, sliding) = drop_box(0, Some(25.0), 60);
+    let last = *xs.last().unwrap();
+    assert!(last + 8.0 <= 25.1, "pushed out to {last}: {xs:?}");
+    assert!(!sliding, "and at rest");
+}
+
+fn zone(id: &str, pos: (f64, f64), collider: Option<Shape>, d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        collider: collider.map(|shape| Collider { shape, at: (0.0, 0.0) }),
+        sensor: Some(Collider {
+            shape: Shape::Circle(10.0),
+            at: (4.0, 4.0),
+        }),
+        ..spec(id, pos, d)
+    }
+}
+
+fn walker(d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), d)
+    }
+}
+
+/// Only the sensor moments, as `(entered, zone, who)`.
+fn sensed(world: &mut World2d) -> Vec<(bool, String, String)> {
+    let events = world.drain_events().into_iter();
+    let sensed = events.filter_map(|e| match e {
+        WorldEvent::Enter { id, who } => Some((true, id, who)),
+        WorldEvent::Exit { id, who } => Some((false, id, who)),
+        _ => None,
+    });
+    sensed.collect()
+}
+
+#[test]
+fn a_sensor_reports_who_comes_in_and_goes_out_once_each() {
+    let d = drawing();
+    let mut world = World2d::default();
+    // The zone's circle spans x 34..54; the hero's feet are a circle of radius 4 walking right.
+    world.reconcile(vec![walker(&d), zone("chest", (40.0, 0.0), None, &d)]).unwrap();
+    world.key("KeyD", true);
+    let mut log = Vec::new();
+    for i in 1..=10 {
+        world.tick(i as f64 * 0.1, 0.1);
+        log.extend(sensed(&mut world).into_iter().map(|e| (i, e)));
+    }
+    let (chest, hero) = ("chest".to_string(), "hero".to_string());
+    assert_eq!(
+        log,
+        [(4, (true, chest.clone(), hero.clone())), (7, (false, chest, hero))],
+        "in as its feet reach the zone, out as they leave it, a tick after each (Rapier steps first)"
+    );
+}
+
+#[test]
+fn walls_in_a_sensor_are_not_news() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = solid("wall", (40.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wall, zone("chest", (40.0, 0.0), None, &d)]).unwrap();
+    for i in 1..=3 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    assert_eq!(sensed(&mut world), [], "fixed in fixed: nothing moved, nothing to say");
+}
+
+#[test]
+fn carrying_takes_a_sensor_away_and_dropping_brings_it_back() {
+    let d = drawing();
+    let chest = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (0.0, 0.0),
+        }),
+        ..zone("chest", (0.0, 0.0), Some(Shape::Rect(2.0, 2.0)), &d)
+    };
+    let mut world = World2d::default();
+    // The hero's feet (x 10..18) overlap the zone (x -6..14), clear of the chest's own box.
+    let hero = || EntitySpec {
+        pos: (10.0, 0.0),
+        ..walker(&d)
+    };
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    let mut tick = {
+        let mut clock = 0.0;
+        move |world: &mut World2d| {
+            clock += 0.1;
+            world.tick(clock, 0.1);
+            sensed(world)
+        }
+    };
+    let (c, h) = ("chest".to_string(), "hero".to_string());
+    assert_eq!(tick(&mut world), [(true, c.clone(), h.clone())], "standing beside it");
+    world.reconcile(vec![hero(), chest(true)]).unwrap();
+    assert_eq!(tick(&mut world), [(false, c.clone(), h.clone())], "picked up: no zone");
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    assert_eq!(tick(&mut world), [(true, c, h)], "put down beside it again");
+}
+
+#[test]
+fn a_solid_hero_slides_along_a_wall() {
+    let mut world = walled();
+    world.key("KeyD", true);
+    world.key("KeyS", true);
+    for i in 1..=10 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    // Blocked across, it keeps the diagonal's downward share: about 70 a second.
+    let t = world.transform("hero").unwrap();
+    assert!((11.8..=12.0).contains(&t.x), "stopped at x {}", t.x);
+    assert!(t.y > 60.0, "slid only to y {}", t.y);
 }

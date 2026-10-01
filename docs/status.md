@@ -473,9 +473,34 @@ part's posed transform), draws it just in front of the carrier, and leaves it wh
 detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
 until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
 Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-view carry point,
-and skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
-frame, so Lua re-describes the world each frame while it animates). Not built: walls/physics, key-code validation, and a
-world-level `DumpTree`.
+skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
+frame, so Lua re-describes the world each frame while it animates), and letting a world stop
+ticking once every clip is a finished once clip (a held pose still asks for frames).
+**Slice 5 (Rapier) started — 5a, walls, landed:** `world` depends on `rapier2d`. An entity's
+`collider` (`{ circle | rect, at }`, plain data, strict in Lua) becomes a Rapier body — fixed, or
+kinematic under a controller — kept while unchanged and dropped with the collider or the entity.
+`tick` moves a solid controlled entity through Rapier's character controller, set up for
+top-down (no gravity, no ground snap, no slope limits): it stops at walls and slides along them,
+the same in every direction. The world's frame is clipped to its box (`Frame::clipped()`,
+opt-in; other frames still spill). The demo has thin side walls and a tall back wall, and the
+hero collides by a circle at its feet; the smoke checks it stops at the east and back walls.
+**5b chunk 1 landed:** a carried entity has no body (it is off the floor) and gets one again
+where it is let go; the demo chest is solid by its footprint, and the smoke's draw-order route now
+walks round it. **5b chunk 2 landed:** a let-go entity becomes a dynamic body
+with its carrier's last `Velocity`, slides (friction 6, bounce 0.5, no spin) with Rapier copying
+it back to `Transform` each tick, and settles to fixed once slow and not pressed into anything —
+so one let go inside a wall is pushed out first (Rapier does that slowly, and keeps ~0.012 of
+resting overlap on purpose). **5c landed:** `sensor` on any entity (the
+`collider` shape words, on the same body); each tick the world diffs Rapier's sensor overlaps
+against the last tick's and queues only changes, which Lua gets as `on_zone(e)` with `e.id`,
+`e.who`, `e.phase`. Fixed-on-fixed never counts (walls); moved-on-fixed does, switched on per
+sensor. The demo's E picks the chest up only within its zone; the smoke checks E out of reach
+does nothing and `near` follows through pickup and drop. That completes the chest demo's
+mechanics. **Lift and fall** (Lua and clips only): the chest is attached at its floor spot in
+front of the hero and `lift` raises its drawing into the hands, so let go, `fall` drops it to a
+footprint already on the floor; picking it up shuts the lid. Next: 5d, dynamic bodies beyond the
+drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
+cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Assets — shared drawings, an asset editor, stages
 

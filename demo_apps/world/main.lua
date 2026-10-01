@@ -16,6 +16,29 @@ local views = {
 	left = { drawing = hero_side, walk = walk_side, flip = true },
 }
 local open, close = gfx.clip(clips.open), gfx.clip(clips.close)
+local lift, fall = gfx.clip(clips.lift), gfx.clip(clips.fall)
+
+-- The room's walls: a plain bar each, solid all along. Only the collider stops anyone; the
+-- drawing is just so you can see it.
+local function bar(w, h)
+	return gfx.drawing({ size = { w, h }, parts = { { id = "bar", pivot = { 0, 0 }, shapes = {
+		{ path = { {"move",0,0}, {"line",w,0}, {"line",w,h}, {"line",0,h}, {"close"} }, fill = C.border },
+	} } } })
+end
+local T = 12 -- wall thickness
+local across, down = bar(C.width, T), bar(T, C.height)
+-- The back wall stands tall, as in a room seen from above and in front: the hero walks along its
+-- foot with the whole body inside the room. Its collider is the whole wall.
+local BACK = 190
+local back = gfx.drawing({ size = { C.width, BACK }, parts = { { id = "wall", pivot = { 0, 0 }, shapes = {
+	{ path = { {"move",0,0}, {"line",C.width,0}, {"line",C.width,BACK}, {"line",0,BACK}, {"close"} },
+		fill = C.wall },
+	{ path = { {"move",0,BACK-T}, {"line",C.width,BACK-T}, {"line",C.width,BACK}, {"line",0,BACK},
+		{"close"} }, fill = C.border },
+} } } })
+local function wall(id, x, y, drawing, w, h)
+	return { id = id, pos = { x, y }, drawing = drawing, collider = { rect = { w, h } } }
+end
 
 -- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
 local wasd = {
@@ -42,9 +65,26 @@ local heading = "still" -- the hero's held direction, as the world last reported
 local face, walking = "down", false -- the hero's facing and gait, decided on each on_move
 local jumping = false -- set by the jump action, cleared when the jump clip ends
 local carrying = false -- whether the chest rides on the hero; E picks it up and puts it down
+local near = false -- whether the hero stands in the chest's zone, as the world last reported
+local falling = false -- let go and still dropping to the floor; cleared when `fall` ends
 
 local function toggle_lid()
 	lid = lid == open and close or open
+end
+
+-- The chest's clip: one plays at a time, so lifting and falling stand in for the lid's.
+local function chest_clip()
+	if carrying then return lift end
+	if falling then return fall end
+	return lid
+end
+
+local function interact()
+	if carrying then
+		carrying, falling = false, true
+	elseif near then
+		carrying, lid = true, nil -- picked up, it shuts
+	end
 end
 
 -- The hero's clip for the moment: this is the app's state machine, not the world's.
@@ -66,7 +106,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks · Space jumps · E carries the chest · a click opens it", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks, walls stop you · Space jumps · E near the chest carries it · a click opens it", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -80,22 +120,38 @@ return function()
 			-- Moments come to Lua; the per-frame work (walking, playing clips) stays in the world.
 			actions = { interact = "KeyE", jump = "Space" },
 			on_action = function(e)
-				if e.action == "interact" then carrying = not carrying end -- anywhere, until slice 5
+				-- Carrying, E puts it down anywhere; otherwise only within reach of the chest.
+				if e.action == "interact" then interact() end
 				if e.action == "jump" then jumping = true end -- already in the air: no double jump
 			end,
 			on_clip_end = function(e)
 				if e.id == "hero" then jumping = false end
+				if e.id == "chest" then falling = false end -- `lift` ending is harmless here
+			end,
+			-- The chest's zone goes while it is carried and comes back where it is put down, so
+			-- `near` follows without Lua keeping it in step.
+			on_zone = function(e)
+				if e.id == "chest" and e.who == "hero" then near = e.phase == "enter" end
 			end,
 			on_move = function(e)
 				walking = e.dx ~= 0 or e.dy ~= 0
 				heading = walking and (e.dx .. "," .. e.dy) or "still"
 				face = face_for(e.dx, e.dy, face)
 			end,
+			-- The hero collides by its feet: the drawing is a body standing up out of the floor, so
+			-- the head may pass in front of the top wall.
 			{ id = "hero", pos = { 120, 80 }, drawing = views[face].drawing, flip = views[face].flip,
-				clip = hero_clip(), controller = wasd },
+				clip = hero_clip(), controller = wasd, collider = { circle = 16, at = { 80, 222 } } },
+			wall("wall:n", 0, 0, back, C.width, BACK),
+			wall("wall:s", 0, C.height - T, across, C.width, T),
+			wall("wall:w", 0, 0, down, T, C.height),
+			wall("wall:e", C.width - T, 0, down, T, C.height),
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
-			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = lid,
-				attach = carrying and { to = "hero", part = "body", at = { 32, 120 } } or nil },
+			-- On the floor it is solid by its footprint, the bottom of its base; carried, the world
+			-- takes it off the floor.
+			{ id = "chest", pos = { 520, 240 }, drawing = chest, clip = chest_clip(),
+				attach = carrying and { to = "hero", part = "body", at = { 32, 186 } } or nil,
+				collider = { rect = { 80, 24 }, at = { 8, 56 } }, sensor = { circle = 72, at = { 48, 68 } } },
 			friend and { id = "friend", pos = { 320, 100 }, drawing = hero, clip = idle } or false,
 		}),
 		ui.row({ gap = 10,
@@ -104,5 +160,7 @@ return function()
 		}),
 		ui.text({ "entity: " .. (hot or "—"), color = C.muted, font_size = 13, no_wrap = true }),
 		ui.text({ "heading: " .. heading, color = C.muted, font_size = 13, no_wrap = true }),
+		ui.text({ "near the chest: " .. (near and "yes" or "no"), color = C.muted, font_size = 13,
+			no_wrap = true }),
 	})
 end

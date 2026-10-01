@@ -10,4 +10,6 @@ license.workspace = true
 [dependencies]
 bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
 runtime = { path = "../runtime" }
+# Collision only: static and kinematic bodies, the character controller, sensors.
+rapier2d = "0.35"
 thiserror = { workspace = true }

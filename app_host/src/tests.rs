@@ -886,6 +886,45 @@ fn an_attach_is_checked_strictly() {
 }
 
 #[test]
+fn a_collider_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |collider: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, collider = {collider} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ circle = 4, at = { 1, 2 } }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ rect = { 4, 2 } }")).unwrap();
+    let cases = [
+        ("4", "world entity 1.collider must be a table, got integer"),
+        ("{ at = { 1, 2 } }", "world entity 1.collider needs circle or rect"),
+        ("{ circle = 4, rect = { 4, 2 } }", "a circle or a rect, not both"),
+        ("{ circle = 'big' }", "world entity 1.collider.circle"),
+        ("{ rect = { 4 } }", "world entity 1.collider.rect needs x and y"),
+        ("{ circle = 4, layer = 'walls' }", "unknown field layer"),
+        ("{ circle = -1 }", "collider size must be a finite number above zero"),
+    ];
+    for (collider, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(collider)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn a_sensor_is_checked_like_a_collider() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |sensor: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, sensor = {sensor} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ circle = 40, at = { 4, 4 } }")).unwrap();
+    let err = walk_world(&lua, &worlds, &room("{ circle = 40, rect = { 1, 1 } }"));
+    let err = err.unwrap_err().to_string();
+    assert!(err.contains("world entity 1.sensor is a circle or a rect, not both"), "{err}");
+}
+
+#[test]
 fn flip_is_a_boolean() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

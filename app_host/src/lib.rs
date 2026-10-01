@@ -782,7 +782,8 @@ impl<M: 'static> LuaApp<M> {
         Ok(event)
     }
 
-    /// Hands the world's queued moments to its `on_action` / `on_move` / `on_clip_end`; one
+    /// Hands the world's queued moments to its `on_action` / `on_move` / `on_clip_end` /
+    /// `on_zone`; one
     /// without a handler is dropped.
     fn world_events(&self, id: &str) {
         let events = match self.worlds.borrow_mut().get_mut(id) {
@@ -806,6 +807,17 @@ impl<M: 'static> LuaApp<M> {
                     world::WorldEvent::ClipEnd(entity) => {
                         table.set("id", entity)?;
                         "on_clip_end"
+                    }
+                    // One handler, phased like `on_hover`: `on_enter` is already the Enter key.
+                    world::WorldEvent::Enter { id: zone, who } => {
+                        (table.set("id", zone)?, table.set("who", who)?);
+                        table.set("phase", "enter")?;
+                        "on_zone"
+                    }
+                    world::WorldEvent::Exit { id: zone, who } => {
+                        (table.set("id", zone)?, table.set("who", who)?);
+                        table.set("phase", "leave")?;
+                        "on_zone"
                     }
                 };
                 let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
@@ -1374,7 +1386,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move", "on_clip_end"] {
+    for handler in ["on_action", "on_move", "on_clip_end", "on_zone"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
@@ -1533,9 +1545,10 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
-        "world" => {
-            &["width", "height", "order", "actions", "on_action", "on_move", "on_clip_end"]
-        }
+        "world" => &[
+            "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
+            "on_zone",
+        ],
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;
