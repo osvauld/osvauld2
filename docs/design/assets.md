@@ -171,7 +171,7 @@ switch that seeds default points from the shape's bounds. Their geometry — lin
 centre and radius, sweep centre and start angle — is handles on the canvas, sharing the point-drag
 machinery of E2b.
 
-**Slices:** P1 `gfx.drawing` resolves `vars` (built) → P2 variants → P3 palette in the inspector,
+**Slices:** P1 `gfx.drawing` resolves `vars` (built) → P2 variants (built) → P3 palette in the inspector,
 colour fields take tokens → seeds move to tokens → C1a picker (square, hue, hex) → C1b alpha and
 palette swatches → Ga gradient stops, kind, extend → Gb gradient handles with E2b point handles.
 

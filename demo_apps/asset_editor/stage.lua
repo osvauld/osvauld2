@@ -22,6 +22,29 @@ local function rest(name)
 	return rests[name]
 end
 
+local variants = {} -- entity id → its look when it sets `vars`, rebuilt when they change
+
+-- An entity's look: its asset's rest, or — when the entity sets `vars` — a variant of it.
+local function look(e)
+	local r = rest(e.asset)
+	if not r or not e.vars then
+		return r
+	end
+	local said = {}
+	for name, v in pairs(e.vars) do
+		table.insert(said, name .. "=" .. tostring(v))
+	end
+	table.sort(said)
+	local key = e.asset .. ":" .. table.concat(said, ",")
+	if not variants[e.id] or variants[e.id].key ~= key then
+		local a = r.asset
+		local module = { size = a.size, vars = a.vars, parts = M.parts(a) }
+		local drawing = gfx.drawing(module, { vars = e.vars })
+		variants[e.id] = { key = key, drawing = drawing, frame = drawing:pose({}), asset = a }
+	end
+	return variants[e.id]
+end
+
 local SNAP = 24 -- how near a plug must come to a matching socket to equip there
 local last = {} -- last view's placements: where a grab starts, where sockets are while dragging
 
@@ -167,7 +190,7 @@ end
 -- One world entity. A mounted one rides its socket's part with `turn`, pivoting on its own plug,
 -- so a hat nods with the head; the world carries only by an entity that is not itself carried.
 local function world_entity(e, by_id, at)
-	local r = rest(e.asset)
+	local r = look(e)
 	if not r or not at[e.id] then
 		return false
 	end
@@ -226,7 +249,7 @@ function S.view()
 	last = placements(scene.entities)
 	local items = { backdrop(w, h) }
 	for _, e in ipairs(scene.entities) do
-		local r, p = rest(e.asset), last[e.id]
+		local r, p = look(e), last[e.id]
 		if r and p then
 			local place = { 1, 0, 0, 1, p[1], p[2] }
 			table.insert(items, gfx.instance({ id = e.id, visual = r.frame, transform = place }))

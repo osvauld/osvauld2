@@ -10,6 +10,7 @@ M.seeds = {
 		local hero = require("seed/hero")
 		return {
 			size = hero.size,
+			vars = hero.vars,
 			parts = hero.parts,
 			clips = require("seed/clips"),
 			sockets = { head_top = { kind = "hat", part = "head", at = { 80, 34 }, width = 60 } },

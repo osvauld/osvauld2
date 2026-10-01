@@ -79,8 +79,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     gfx.set(
         "drawing",
-        lua.create_function(|lua, spec: Table| {
-            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec)?)))
+        lua.create_function(|lua, (spec, options): (Table, Option<Table>)| {
+            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec, options.as_ref())?)))
         })?,
     )?;
     gfx.set(
@@ -286,12 +286,19 @@ fn path(commands: &Table, owner: &str) -> mlua::Result<Path> {
 
 /// A drawing module is pure data — paths are command lists, not `gfx.path` handles — so the same
 /// table can be rewritten by an editor or moved into a document without changing shape.
-fn drawing(spec: &Table) -> mlua::Result<Drawing> {
+/// `options.vars` makes a variant: values for some of the drawing's own vars, by name.
+fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
     named_fields(spec, "drawing", &["size", "parts", "vars"])?;
-    let vars = match spec.get::<Option<Table>>("vars")? {
-        Some(t) => Vars::read(&t)?,
+    let mut vars = match spec.get::<Option<Table>>("vars")? {
+        Some(t) => Vars::read(&t, "drawing.vars")?,
         None => Vars::default(),
     };
+    if let Some(options) = options {
+        named_fields(options, "drawing options", &["vars"])?;
+        if let Some(t) = options.get::<Option<Table>>("vars")? {
+            vars.overridden_by(Vars::read(&t, "drawing options.vars")?, "drawing options.vars")?;
+        }
+    }
     let size = point(need(spec, "drawing", "size")?, "drawing.size")?;
     let parts: Table = need(spec, "drawing", "parts")?;
     let mut specs = Vec::new();
@@ -330,11 +337,11 @@ enum Var {
 }
 
 impl Vars {
-    fn read(t: &Table) -> mlua::Result<Self> {
+    fn read(t: &Table, at: &str) -> mlua::Result<Self> {
         let mut vars = HashMap::new();
         for pair in t.pairs::<String, Value>() {
             let (name, value) = pair?;
-            let owner = format!("drawing.vars.{name}");
+            let owner = format!("{at}.{name}");
             let var = match value {
                 Value::String(c) => Var::Colour(
                     crate::parse_color(&c.to_str()?)
@@ -352,6 +359,28 @@ impl Vars {
             vars.insert(name, var);
         }
         Ok(Self(vars))
+    }
+
+    /// A variant's values over the drawing's own. A variant may only change what the drawing
+    /// declares, and keep its kind: a misspelt name or a colour for a width is an error.
+    fn overridden_by(&mut self, over: Vars, at: &str) -> mlua::Result<()> {
+        for (name, var) in over.0 {
+            match (self.0.get(&name), &var) {
+                (None, _) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing has no var {name}")));
+                }
+                (Some(Var::Colour(_)), Var::Number(_)) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing's is a colour")));
+                }
+                (Some(Var::Number(_)), Var::Colour(_)) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing's is a number")));
+                }
+                _ => {
+                    self.0.insert(name, var);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The var `"@name"` names, or `None` for a literal.

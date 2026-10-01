@@ -176,6 +176,9 @@ ui.frame({ id = "hero", visual = waving })
   colour string or a number; an unknown name or the wrong kind is an error naming the shape.
   Path points stay literal. Outside a drawing (`gfx.linear_gradient`, `gfx.shadow`) there are no
   vars.
+- A **variant** is `gfx.drawing(module, { vars = { shirt = "#2ec4b6" } })`: the module's vars with
+  those few replaced — another team's shirt, a dark toggle — compiled once like any drawing. It
+  may only replace vars the module declares, with the same kind (a colour for a colour).
 - `pose` builds a new frame: pose once at module scope, not in `view`. Clips and `use` are not
   built yet — `clips = …` and `use = …` are errors.
 

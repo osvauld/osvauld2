@@ -596,6 +596,43 @@ fn drawing_vars_draw_as_their_values() {
     assert_eq!(debug(&frames.0), debug(&frames.1));
 }
 
+/// A variant overrides some of a drawing's vars by name and draws exactly as the drawing would
+/// with those values in its own `vars`; the rest keep the drawing's values.
+#[test]
+fn a_variant_draws_with_its_vars_over_the_drawings() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let frames: (Value, Value) = lua
+        .load(
+            r##"
+            local function hero(vars)
+                return { size = { 40, 40 }, vars = vars, parts = { { id = "a", pivot = { 20, 20 },
+                    shapes = { { path = { {"move",4,4}, {"line",36,4}, {"line",36,36}, {"close"} },
+                        fill = "@shirt", stroke = { "@line", "@ink" } } } } } }
+            end
+            local base = hero({ shirt = "#f84aa7", ink = "#1b1b3a", line = 2 })
+            local teal = gfx.drawing(base, { vars = { shirt = "#2ec4b6", line = 3 } })
+            local written = gfx.drawing(hero({ shirt = "#2ec4b6", ink = "#1b1b3a", line = 3 }))
+            return teal:pose({}), written:pose({})
+            "##,
+        )
+        .eval()
+        .unwrap();
+    let debug = |v: &Value| format!("{:?}", v.as_userdata().unwrap().borrow::<crate::gfx::LuaFrame>().unwrap().0);
+    assert_eq!(debug(&frames.0), debug(&frames.1));
+
+    let base = "local d = { size = { 1, 1 }, parts = {}, vars = { shirt = '#fff', line = 2 } }";
+    let cases = [
+        ("{ vars = { shrit = '#000' } }", "drawing options.vars.shrit: the drawing has no var shrit"),
+        ("{ vars = { line = '#000' } }", "drawing options.vars.line: the drawing's is a number"),
+        ("{ palette = {} }", "drawing options: unknown field palette"),
+    ];
+    for (options, wanted) in cases {
+        let source = format!("{base} return gfx.drawing(d, {options})");
+        let err = lua.load(&source).eval::<Value>().expect_err(&source).to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
 #[test]
 fn a_drawing_module_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -3854,16 +3891,16 @@ fn asset_editor_stage_moves_and_equips() {
     };
 
     drag(&mut app, "chest", (500.0, 280.0), (40.0, 20.0));
-    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=320,300");
+    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=320,300 rival=560,100");
 
     // The hat's plug (its pos + {32, 44}) to the socket (the hero's pos + {80, 34}).
     drag(&mut app, "hat", (330.0, 320.0), (-132.0, -200.0));
-    let equipped = "chest=500,270 hero=140,110 hat=on hero.head_top";
+    let equipped = "chest=500,270 hero=140,110 hat=on hero.head_top rival=560,100";
     assert_eq!(stage(&app), equipped);
 
     // Pulled off from where it sits on the head, (188, 100), it lands by its travel.
     drag(&mut app, "hat", (200.0, 110.0), (150.0, 150.0));
-    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=338,250");
+    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=338,250 rival=560,100");
     let console = app.console(100);
     assert!(console.is_empty(), "{console:?}");
 }

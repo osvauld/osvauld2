@@ -537,10 +537,13 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   nothing, the canvas redraws from the edit. **Vars:** a drawing's `vars = { skin = "#…", line = 2 }`
   stand in as `"@skin"` for any colour and `"@line"` for a lone number (stroke width, shadow radius
   and blur), resolved once by `gfx.drawing`; the editor and stage pass the asset's `vars` through.
+  A **variant** is `gfx.drawing(module, { vars = { shirt = … } })` — only declared vars, same
+  kind. The hero seed's colours and stroke width are vars, and a stage entity's own `vars` make a
+  variant: the room's `rival` is the hero in teal.
   **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
   its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
   pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.
-  Not built: variants (overriding vars per use), vars in the inspector, editing gradients, stage entity fields,
+  Not built: vars in the inspector, editing gradients, stage entity fields,
   dragging points (E2b), adding parts, the clip timeline, colliders in stage play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
 
 ### Environment — composable 3D interfaces and worlds
