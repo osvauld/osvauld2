@@ -531,6 +531,33 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
     })
 }
 
+fn world_json(entities: &[world::EntityInspection]) -> serde_json::Value {
+    let entities = entities.iter().map(|e| {
+        let clip = e.clip.as_ref().map(|c| {
+            serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped })
+        });
+        let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
+        serde_json::json!({
+            "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
+            "velocity": [e.velocity.0, e.velocity.1],
+            "attached": attached, "zones": e.zones, "clip": clip,
+        })
+    });
+    serde_json::json!({ "entities": entities.collect::<Vec<_>>() })
+}
+
+/// A world draws as one frame element; its entities go on that element, found by the world's id.
+fn add_worlds(tree: &mut serde_json::Value, worlds: &HashMap<&str, serde_json::Value>) {
+    let Some(node) = tree.as_object_mut() else { return };
+    let id = node.get("id").and_then(|id| id.as_str());
+    if let Some(world) = id.and_then(|id| worlds.get(id)) {
+        node.insert("world".into(), world.clone());
+    }
+    if let Some(children) = node.get_mut("children").and_then(|c| c.as_array_mut()) {
+        children.iter_mut().for_each(|child| add_worlds(child, worlds));
+    }
+}
+
 fn info_json(i: &ElInfo) -> serde_json::Value {
     let mut o = serde_json::Map::new();
     o.insert("kind".into(), i.kind.into());
@@ -880,7 +907,11 @@ impl Shell {
                     // Same freshness rule as `fire_on_app`: a dump after a WriteFile must
                     // show the source the next frame would run.
                     let _ = o.app.reload_if_stale();
-                    Response::ok(info_json(&o.app.view().info()))
+                    let mut tree = info_json(&o.app.view().info());
+                    let worlds = o.app.inspect_worlds();
+                    let worlds = worlds.iter().map(|(id, w)| (id.as_str(), world_json(w))).collect();
+                    add_worlds(&mut tree, &worlds);
+                    Response::ok(tree)
                 }
             },
             Request::Click { item_id, el_id } => self.fire_on_app(&item_id, &el_id, Action::Click),

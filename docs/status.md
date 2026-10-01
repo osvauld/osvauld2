@@ -472,7 +472,7 @@ the world places a carried entity at its carrier's part each tick (`Drawing::par
 part's posed transform), draws it just in front of the carrier, and leaves it where it was on
 detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
 until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
-Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-view carry point,
+Not built: walls/physics, key-code validation, a world-level `DumpTree` (built in slice 5), a per-view carry point,
 skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
 frame, so Lua re-describes the world each frame while it animates), and letting a world stop
 ticking once every clip is a finished once clip (a held pose still asks for frames).
@@ -504,8 +504,14 @@ drained after each view) instead of refusing the world — asked for by the asse
 drawings change live; `attach` to a missing part stays an error. **Turning mounts:** `attach` takes
 `pivot` (the carried drawing's own point placed on `at`) and `turn = true` (it takes on the part's
 rotation, scale and mirror about that pivot) — asked for by the assets session so a hat stays on a
-nodding head; without `turn` a carried thing stays upright as before. Next: world inspection in
-`dump_tree` (positions, bodies, velocities, zones, then hints) and test pushes over the bridge, then 5d, dynamic bodies beyond the
+nodding head; without `turn` a carried thing stays upright as before. **The world in the dump:**
+`World2d::inspect` gives each entity's place, body kind, velocity, carrier, zones and clip; the
+shell's `DumpTree` puts it on the world's element (`world.entities`), and the world smoke now
+reads the chest from it. Its first run caught a bug pixels never showed: a chest let go near the
+south wall landed half through it, Rapier put it to sleep pressed in, and it never settled — the
+world ticked forever. **Fix:** let go, a body comes from its carrier's body to its spot and stops
+against what is in the way (`Physics::bring_in`). Next: hints in the dump (what stopped a walker,
+what is settling), test pushes over the bridge, then 5d, dynamic bodies beyond the
 drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 

@@ -49,6 +49,32 @@ pub struct Attach {
     pub turn: bool,
 }
 
+/// One entity as the world holds it now, for an agent or a test to read instead of probing pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityInspection {
+    pub id: String,
+    /// The drawing box's top-left, in world units.
+    pub pos: (f64, f64),
+    /// `"fixed"`, `"moved"` (a controller drives it), `"thrown"` (Rapier slides it until it
+    /// settles) or `"none"` (no collider or sensor, or carried).
+    pub body: &'static str,
+    /// Per second: Rapier's for a thrown body, the last tick's step for a controlled one.
+    pub velocity: (f64, f64),
+    /// `(carrier, part)`.
+    pub attached: Option<(String, String)>,
+    /// Ids of the zones it is inside, sorted.
+    pub zones: Vec<String>,
+    pub clip: Option<ClipInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipInspection {
+    /// Seconds since this clip started playing on the entity.
+    pub time: f64,
+    pub length: f64,
+    pub looped: bool,
+}
+
 /// Two key codes driving one axis: `neg` held is -1, `pos` held is +1, both or neither is 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Axis {
@@ -280,11 +306,14 @@ impl World2d {
                     self.ecs.spawn((transform, name)).id()
                 }
             };
-            // Let go this frame: it leaves with its carrier's velocity.
+            // Let go this frame: it leaves with its carrier's velocity, from its carrier's body.
             let thrown = self.ecs.get::<Attached>(entity).map(|a| {
                 let v = self.ecs.get::<Velocity>(a.to);
                 v.map_or((0.0, 0.0), |v| (v.0, v.1))
             });
+            let carrier = (self.ecs.get::<Attached>(entity))
+                .and_then(|a| self.ecs.get::<Solid>(a.to))
+                .map(|s| s.body);
             let mut e = self.ecs.entity_mut(entity);
             let moves = spec.controller.is_some();
             // Carried is off the floor: no body until it is put down, then one where it was let go.
@@ -309,6 +338,12 @@ impl World2d {
                     let (solid, zone) = (collider.as_ref(), sensor.as_ref());
                     let owner = entity.to_bits();
                     let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner);
+                    if let (true, Some(from), Some(c)) = (sliding, carrier, solid) {
+                        self.physics.bring_in(body, from);
+                        let ((x, y), (cx, cy)) = (self.physics.centre_of(body), c.centre());
+                        let mut t = e.get_mut::<Transform>().expect("every entity has one");
+                        (t.x, t.y) = (x - cx, y - cy);
+                    }
                     e.insert(Solid {
                         collider,
                         sensor,
@@ -633,6 +668,49 @@ impl World2d {
 
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
+    }
+}
+
+impl World2d {
+    /// Every entity, in description order.
+    pub fn inspect(&self) -> Vec<EntityInspection> {
+        let name = |entity| self.ecs.get::<Name>(entity).expect("every entity has one").0.clone();
+        (self.order.iter())
+            .map(|&entity| {
+                let e = self.ecs.entity(entity);
+                let t = e.get::<Transform>().expect("every entity has a Transform");
+                let solid = e.get::<Solid>();
+                let body = match solid {
+                    None => "none",
+                    Some(s) if s.sliding => "thrown",
+                    Some(s) if s.moves => "moved",
+                    Some(_) => "fixed",
+                };
+                let velocity = match (solid, e.get::<Velocity>()) {
+                    (Some(s), _) if s.sliding => self.physics.velocity(s.body),
+                    (_, Some(v)) => (v.0, v.1),
+                    _ => (0.0, 0.0),
+                };
+                let mut zones: Vec<String> = (self.inside.iter())
+                    .filter(|(_, who)| *who == entity)
+                    .map(|&(zone, _)| name(zone))
+                    .collect();
+                zones.sort();
+                EntityInspection {
+                    id: name(entity),
+                    pos: (t.x, t.y),
+                    body,
+                    velocity,
+                    attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
+                    zones,
+                    clip: e.get::<Animator>().map(|a| ClipInspection {
+                        time: self.clock - a.started,
+                        length: a.clip.length(),
+                        looped: a.clip.looped(),
+                    }),
+                }
+            })
+            .collect()
     }
 }
 

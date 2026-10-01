@@ -169,6 +169,11 @@ impl Physics {
         (at.x as f64, at.y as f64)
     }
 
+    pub(crate) fn velocity(&self, body: RigidBodyHandle) -> (f64, f64) {
+        let v = self.world.bodies[body].linvel();
+        (v.x as f64, v.y as f64)
+    }
+
     /// A thrown body that has slowed to rest becomes fixed — an obstacle again, and no more work.
     /// Not while it is still pressed into something: Rapier pushes it out slowly, so it would
     /// otherwise settle inside a wall. Resting contact keeps about 0.012 of overlap on purpose.
@@ -225,6 +230,21 @@ impl Physics {
         let to = pose.translation + moved.translation;
         self.world.bodies[body].set_translation(to, true);
         (moved.translation.x as f64, moved.translation.y as f64)
+    }
+
+    /// A let-go body's spot may be in a wall: carried, it had no body to stop it. So it comes from
+    /// its carrier's body to that spot, stopping at what is in the way — against the wall, never
+    /// inside it or past it.
+    pub(crate) fn bring_in(&mut self, body: RigidBodyHandle, from: RigidBodyHandle) {
+        let rb = &self.world.bodies[body];
+        let (mut pose, spot) = (*rb.position(), rb.translation());
+        let shape = self.world.colliders[rb.colliders()[0]].shared_shape().clone();
+        pose.translation = self.world.bodies[from].translation();
+        let neither = |_, c: &rapier2d::geometry::Collider| ![Some(body), Some(from)].contains(&c.parent());
+        let filter = QueryFilter::default().exclude_sensors().predicate(&neither);
+        let queries = self.world.query_pipeline_with_filter(filter);
+        let moved = WALKER.move_shape(1.0, &queries, &*shape, &pose, spot - pose.translation, |_| {});
+        self.world.bodies[body].set_translation(pose.translation + moved.translation, true);
     }
 
     /// Every collider's centre, for tests.

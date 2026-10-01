@@ -906,3 +906,78 @@ fn a_solid_hero_slides_along_a_wall() {
     assert!((11.8..=12.0).contains(&t.x), "stopped at x {}", t.x);
     assert!(t.y > 60.0, "slid only to y {}", t.y);
 }
+
+#[test]
+fn inspection_says_where_each_entity_is_how_it_moves_and_what_it_is_in() {
+    let d = drawing();
+    let glide = slide();
+    let pad = || EntitySpec {
+        clip: Some(glide.clone()),
+        ..zone("pad", (0.0, 0.0), None, &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
+        }),
+        ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![walker(&d), pad(), held(true)]).unwrap();
+    world.key("KeyD", true);
+    world.tick(0.05, 0.05);
+    world.tick(0.1, 0.05);
+    let seen = world.inspect();
+    let [hero, pad_seen, carried] = &seen[..] else { panic!("{seen:?}") };
+    assert_eq!((hero.id.as_str(), hero.body, hero.pos), ("hero", "moved", (10.0, 0.0)));
+    assert_eq!(hero.velocity, (100.0, 0.0));
+    assert_eq!(hero.zones, ["pad"], "its feet are inside the pad's zone");
+    assert_eq!(pad_seen.body, "fixed");
+    let clip = pad_seen.clip.as_ref().unwrap();
+    assert_eq!((clip.length, clip.looped), (1.0, false));
+    assert!((clip.time - 0.1).abs() < 1e-9, "{clip:?}");
+    assert_eq!(carried.body, "none", "carried, it has no body");
+    assert_eq!(carried.attached, Some(("hero".into(), "body".into())));
+
+    world.reconcile(vec![walker(&d), pad(), held(false)]).unwrap();
+    world.tick(0.15, 0.05);
+    let thrown = &world.inspect()[2];
+    assert_eq!((thrown.body, thrown.attached.clone()), ("thrown", None));
+    assert!(thrown.velocity.0 > 50.0, "it left with the hero's speed: {thrown:?}");
+}
+
+#[test]
+fn a_body_let_go_across_a_wall_lands_on_its_carriers_side_and_settles() {
+    // Held 20 ahead, the box spans x 20..28; a thin wall at 21..23 runs through it, nearer its
+    // left edge. Pushed out the short way, it would land beyond the wall — out of the room.
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
+        }),
+        ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let wall = || solid("wall", (21.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero(), held(true), wall()]).unwrap();
+    world.tick(0.05, 0.05);
+    world.reconcile(vec![hero(), held(false), wall()]).unwrap();
+    let x = world.transform("box").unwrap().x;
+    assert!(x + 8.0 <= 21.0 && x > 8.0, "against the wall, the hero's side, at once: {x}");
+    for i in 1..=40 {
+        world.tick(0.05 + 0.05 * i as f64, 0.05);
+    }
+    let seen = &world.inspect()[1];
+    assert_eq!(seen.body, "fixed", "and settled: {seen:?}");
+}

@@ -585,6 +585,12 @@ impl<M: 'static> LuaApp<M> {
         }
     }
 
+    /// Each live world's entities, by world id.
+    pub fn inspect_worlds(&self) -> HashMap<String, Vec<world::EntityInspection>> {
+        let worlds = self.worlds.borrow();
+        worlds.iter().map(|(id, w)| (id.clone(), w.inspect())).collect()
+    }
+
     /// The last `last` console lines, newest last.
     pub fn console(&self, last: usize) -> Vec<String> {
         self.console

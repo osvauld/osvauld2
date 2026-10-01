@@ -4153,6 +4153,7 @@ dependencies = [
  "tempfile",
  "vault",
  "vello",
+ "world",
 ]
 
 [[package]]

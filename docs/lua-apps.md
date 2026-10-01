@@ -213,9 +213,14 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+- The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
+  one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown` or `none`), `velocity`
+  per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
+  `length`, `looped`). Check a world by reading it, not by probing pixels.
 - A carried entity is off the floor: its collider and sensor go while `attach` is set. Let go,
   it keeps its carrier's momentum, slides, bounces off walls and settles where it stops — never
-  inside a wall. Top-down, height is a pose, not a place: attach the thing where it would stand
+  inside a wall: carried, nothing stopped its footprint going into one, so let go it comes from
+  its carrier's body to its spot and stops against whatever is in the way. Top-down, height is a pose, not a place: attach the thing where it would stand
   on the floor and let a clip lift its drawing into the hands; let go, a `fall` clip drops the
   drawing back to a footprint that never left the floor (the demo's `lift` / `fall`).
 - `sensor = { circle = 72, at = { 48, 68 } }` is a zone in the same shape words: it blocks

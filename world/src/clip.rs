@@ -99,6 +99,14 @@ impl Clip {
 
     /// The part names this clip moves — checked against a drawing when the two meet.
     /// Whether a once clip has reached its end `time` seconds in; a looped clip never does.
+    pub fn length(&self) -> f64 {
+        self.length
+    }
+
+    pub fn looped(&self) -> bool {
+        self.looped
+    }
+
     pub fn done(&self, time: f64) -> bool {
         !self.looped && time >= self.length
     }

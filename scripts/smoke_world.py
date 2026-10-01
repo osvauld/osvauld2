@@ -36,6 +36,21 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.move_to(room["x"] + x, room["y"] + y)
         return readout(s.rpc.dump_tree(item), "entity: ")
 
+    # The dump carries the world itself: each entity's place, body, velocity, carrier and zones.
+    def entities(tree=None):
+        tree = s.rpc.dump_tree(item) if tree is None else tree
+        if tree.get("id") == "room":
+            return {e["id"]: e for e in tree["world"]["entities"]}
+        for child in tree.get("children", []):
+            found = entities(child)
+            if found:
+                return found
+        return None
+
+    seen = entities()
+    assert (seen["hero"]["body"], seen["chest"]["body"], seen["wall:n"]["body"]) == ("moved", "fixed", "fixed"), seen
+    assert seen["hero"]["zones"] == [] and seen["hero"]["clip"]["looped"], seen["hero"]
+
     # Hero spawned at (120, 80); its body is ~(80, 130) into the drawing.
     assert entity_at(200, 210) == "hero"
     assert entity_at(570, 300) == "chest"
@@ -183,16 +198,21 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # ~80 left, and after E again it stays where it was dropped while the hero walks off.
     assert entity_at(560, 300) == "hero", "standing in front of the chest"
     assert near() == "yes", "on_zone: the hero walked into the chest's zone"
+    assert entities()["hero"]["zones"] == ["chest"], "the dump agrees"
     tap("KeyE", "e")
     s.rpc.frame(15)  # `lift` raises it from the floor into the hands
     assert entity_at(560, 300) == "chest", "picked up, held in front of the hero"
     assert near() == "no", "carried, the chest has no zone"
+    chest = entities()["chest"]
+    assert chest["attached"] == {"to": "hero", "part": "body"} and chest["body"] == "none", chest
     # Carried, the chest is off the floor: it neither blocks the hero nor stops at its own
     # footprint's old place.
     hold("KeyA", "a", 30)
     assert (entity_at(480, 300), entity_at(560, 300)) == ("chest", "—"), "carried left"
     tap("KeyE", "e")
     assert near() == "yes", "put down beside the hero, its zone is back"
+    chest = entities()["chest"]
+    assert chest["attached"] is None and chest["body"] in ("thrown", "fixed"), chest
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(60)
     s.rpc.keyboard("KeyD", "d", False)
@@ -201,6 +221,11 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # Let go, `fall` drops the drawing from the hands to where its footprint already was.
     assert (entity_at(480, 300), entity_at(480, 370)) == ("—", "chest"), "fell to the floor"
     assert entity_at(635, 250) == "hero", "and the hero walked off"
+    chest = entities()["chest"]
+    assert chest["body"] == "fixed" and chest["velocity"] == [0, 0], ("settled", chest)
+    # Let go near the bottom, its footprint (y 56..80 in its drawing) came to rest against the
+    # south wall (y 388), not in it — before, it settled half through and ticked forever.
+    assert chest["pos"][1] + 80 <= 388.5, ("above the south wall", chest)
 
     # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
     # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
@@ -221,4 +246,4 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall, the world in the dump")
