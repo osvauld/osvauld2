@@ -84,11 +84,29 @@ impl Default for Physics {
     }
 }
 
+/// A shape placed relative to its body, which sits at `anchor`.
+fn shape(c: &Collider, anchor: (f64, f64)) -> ColliderBuilder {
+    let shape = match c.shape {
+        Shape::Circle(r) => ColliderBuilder::ball(r as f32),
+        Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
+    };
+    let (cx, cy) = c.centre();
+    shape.translation(Vector::new((cx - anchor.0) as f32, (cy - anchor.1) as f32))
+}
+
 impl Physics {
-    /// A body for an entity whose origin is at `origin`. The entity's scale is not applied.
-    pub(crate) fn add(&mut self, c: &Collider, origin: (f64, f64), kind: Body) -> RigidBodyHandle {
-        let (cx, cy) = c.centre();
-        let at = Vector::new((origin.0 + cx) as f32, (origin.1 + cy) as f32);
+    /// A body for an entity whose origin is at `origin`, sitting at its solid shape's centre (or
+    /// its sensor's, with none). `owner` comes back with every overlap. Scale is not applied.
+    pub(crate) fn add(
+        &mut self,
+        solid: Option<&Collider>,
+        sensor: Option<&Collider>,
+        origin: (f64, f64),
+        kind: Body,
+        owner: u64,
+    ) -> RigidBodyHandle {
+        let anchor = solid.or(sensor).expect("a body has a shape").centre();
+        let at = Vector::new((origin.0 + anchor.0) as f32, (origin.1 + anchor.1) as f32);
         let body = match kind {
             Body::Fixed => RigidBodyBuilder::fixed(),
             Body::Moved => RigidBodyBuilder::kinematic_position_based(),
@@ -97,15 +115,52 @@ impl Physics {
                 .linear_damping(FRICTION)
                 .lock_rotations(),
         };
-        let shape = match c.shape {
-            Shape::Circle(r) => ColliderBuilder::ball(r as f32),
-            Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
-        };
-        let shape = shape
-            .restitution(BOUNCE)
-            .restitution_combine_rule(CoefficientCombineRule::Max)
-            .friction(0.0);
-        self.world.insert(body.translation(at), shape).0
+        let body = self.world.insert_body(body.translation(at));
+        let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
+        if let Some(c) = solid {
+            let solid = shape(c, anchor)
+                .restitution(BOUNCE)
+                .restitution_combine_rule(CoefficientCombineRule::Max)
+                .friction(0.0)
+                .user_data(owner as u128);
+            colliders.insert_with_parent(solid, body, bodies);
+        }
+        if let Some(c) = sensor {
+            // Rapier skips a moved body meeting a fixed one by default: neither can push the
+            // other. A zone wants to hear of it all the same — but not of walls, fixed on fixed.
+            let kinds = ActiveCollisionTypes::default()
+                | ActiveCollisionTypes::KINEMATIC_FIXED
+                | ActiveCollisionTypes::KINEMATIC_KINEMATIC;
+            let zone = shape(c, anchor).sensor(true).active_collision_types(kinds);
+            colliders.insert_with_parent(zone.user_data(owner as u128), body, bodies);
+        }
+        body
+    }
+
+    /// Moves a body that does not collide — one with only a sensor — by `by`.
+    pub(crate) fn shift(&mut self, body: RigidBodyHandle, by: (f64, f64)) {
+        let rb = &mut self.world.bodies[body];
+        let to = rb.translation() + Vector::new(by.0 as f32, by.1 as f32);
+        rb.set_translation(to, true);
+    }
+
+    /// Every `(zone owner, owner of what is in it)`, as of the last step. Sensors do not sense
+    /// each other.
+    pub(crate) fn overlaps(&self) -> Vec<(u64, u64)> {
+        let colliders = &self.world.colliders;
+        let pairs = self.world.narrow_phase.intersection_pairs();
+        let pairs = pairs
+            .filter(|&(_, _, touching)| touching)
+            .filter_map(|(a, b, _)| {
+                let (a, b) = (&colliders[a], &colliders[b]);
+                let (zone, other) = match (a.is_sensor(), b.is_sensor()) {
+                    (true, false) => (a, b),
+                    (false, true) => (b, a),
+                    _ => return None,
+                };
+                Some((zone.user_data as u64, other.user_data as u64))
+            });
+        pairs.collect()
     }
 
     /// Where Rapier has a body now: its shape's centre.
@@ -160,9 +215,11 @@ impl Physics {
             *rb.position(),
             self.world.colliders[rb.colliders()[0]].shared_shape(),
         );
-        let queries = self
-            .world
-            .query_pipeline_with_filter(QueryFilter::default().exclude_rigid_body(body));
+        let queries = self.world.query_pipeline_with_filter(
+            QueryFilter::default()
+                .exclude_rigid_body(body)
+                .exclude_sensors(),
+        );
         let wanted = Vector::new(wanted.0 as f32, wanted.1 as f32);
         let moved = WALKER.move_shape(dt as f32, &queries, &**shape, &pose, wanted, |_| {});
         let to = pose.translation + moved.translation;

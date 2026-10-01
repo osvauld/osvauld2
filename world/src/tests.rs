@@ -42,6 +42,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         flip: false,
         attach: None,
         collider: None,
+        sensor: None,
     }
 }
 
@@ -704,6 +705,101 @@ fn a_body_let_go_inside_a_wall_is_pushed_out() {
     let last = *xs.last().unwrap();
     assert!(last + 8.0 <= 25.1, "pushed out to {last}: {xs:?}");
     assert!(!sliding, "and at rest");
+}
+
+fn zone(id: &str, pos: (f64, f64), collider: Option<Shape>, d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        collider: collider.map(|shape| Collider { shape, at: (0.0, 0.0) }),
+        sensor: Some(Collider {
+            shape: Shape::Circle(10.0),
+            at: (4.0, 4.0),
+        }),
+        ..spec(id, pos, d)
+    }
+}
+
+fn walker(d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), d)
+    }
+}
+
+/// Only the sensor moments, as `(entered, zone, who)`.
+fn sensed(world: &mut World2d) -> Vec<(bool, String, String)> {
+    let events = world.drain_events().into_iter();
+    let sensed = events.filter_map(|e| match e {
+        WorldEvent::Enter { id, who } => Some((true, id, who)),
+        WorldEvent::Exit { id, who } => Some((false, id, who)),
+        _ => None,
+    });
+    sensed.collect()
+}
+
+#[test]
+fn a_sensor_reports_who_comes_in_and_goes_out_once_each() {
+    let d = drawing();
+    let mut world = World2d::default();
+    // The zone's circle spans x 34..54; the hero's feet are a circle of radius 4 walking right.
+    world.reconcile(vec![walker(&d), zone("chest", (40.0, 0.0), None, &d)]).unwrap();
+    world.key("KeyD", true);
+    let mut log = Vec::new();
+    for i in 1..=10 {
+        world.tick(i as f64 * 0.1, 0.1);
+        log.extend(sensed(&mut world).into_iter().map(|e| (i, e)));
+    }
+    let (chest, hero) = ("chest".to_string(), "hero".to_string());
+    assert_eq!(
+        log,
+        [(4, (true, chest.clone(), hero.clone())), (7, (false, chest, hero))],
+        "in as its feet reach the zone, out as they leave it, a tick after each (Rapier steps first)"
+    );
+}
+
+#[test]
+fn walls_in_a_sensor_are_not_news() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let wall = solid("wall", (40.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wall, zone("chest", (40.0, 0.0), None, &d)]).unwrap();
+    for i in 1..=3 {
+        world.tick(i as f64 * 0.1, 0.1);
+    }
+    assert_eq!(sensed(&mut world), [], "fixed in fixed: nothing moved, nothing to say");
+}
+
+#[test]
+fn carrying_takes_a_sensor_away_and_dropping_brings_it_back() {
+    let d = drawing();
+    let chest = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (0.0, 0.0),
+        }),
+        ..zone("chest", (0.0, 0.0), Some(Shape::Rect(2.0, 2.0)), &d)
+    };
+    let mut world = World2d::default();
+    // The hero's feet (x 10..18) overlap the zone (x -6..14), clear of the chest's own box.
+    let hero = || EntitySpec {
+        pos: (10.0, 0.0),
+        ..walker(&d)
+    };
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    let mut tick = {
+        let mut clock = 0.0;
+        move |world: &mut World2d| {
+            clock += 0.1;
+            world.tick(clock, 0.1);
+            sensed(world)
+        }
+    };
+    let (c, h) = ("chest".to_string(), "hero".to_string());
+    assert_eq!(tick(&mut world), [(true, c.clone(), h.clone())], "standing beside it");
+    world.reconcile(vec![hero(), chest(true)]).unwrap();
+    assert_eq!(tick(&mut world), [(false, c.clone(), h.clone())], "picked up: no zone");
+    world.reconcile(vec![hero(), chest(false)]).unwrap();
+    assert_eq!(tick(&mut world), [(true, c, h)], "put down beside it again");
 }
 
 #[test]

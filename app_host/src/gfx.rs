@@ -375,6 +375,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Some(c) => Some(collider(&c, &format!("{owner}.collider"))?),
             None => None,
         },
+        sensor: None,
     })
 }
 
