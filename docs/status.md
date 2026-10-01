@@ -61,6 +61,22 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
+### Voice POC (`voice/`, 2026-10-01)
+- standalone binary, not wired into the shell: mic (`cpal`) → capture cleaning → Opus 20 ms
+  mono 48 kHz → iroh QUIC datagram `[seq u32][level u8][opus]` → Opus → playout buffer
+  (≤100 ms, PLC for ≤3 lost frames) → speaker. `voice listen` / `voice dial <id> <addrs>`;
+  `scripts/voice_pair.sh` runs two peers in tmux on one machine. Connection verified locally;
+  audio judged by ear only.
+- `--clean none|apm|rnn|rnn-gate` (default `apm` = WebRTC's audio processing module, bundled
+  build): echo reference fed from the speaker callback. `rnn` (RNNoise) removes most noise but
+  scores worst on speech damage; the VAD gate barely closes on room noise or key clicks.
+- `voice process in.wav out.wav` runs cleaning + Opus round-trip offline;
+  `scripts/voice_eval.py` scores modes with PESQ/STOI/DNSMOS. Its reference must be studio-clean
+  speech — a laptop-mic take skews PESQ/STOI against denoisers.
+- not built: tickets, clean hangup, node relay (forward by `level` without decoding),
+  DeepFilterNet, courier auth on the connection. `iroh-roq` was dropped: abandoned upstream,
+  pinned to iroh 0.35.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline
