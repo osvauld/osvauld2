@@ -1090,3 +1090,37 @@ fn a_bad_loose_is_refused() {
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
 }
+
+#[test]
+fn a_walker_pushes_a_loose_thing_and_is_stopped_by_a_fixed_one() {
+    let d = drawing();
+    let walk = |loose| {
+        let hero = EntitySpec {
+            controller: Some(wasd(100.0)),
+            ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+        };
+        let thing = EntitySpec {
+            loose,
+            ..solid("box", (20.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+        };
+        let mut world = World2d::default();
+        world.reconcile(vec![hero, thing]).unwrap();
+        world.key("KeyD", true);
+        let mut clock = 0.0;
+        for _ in 0..10 {
+            clock += 0.05;
+            world.tick(clock, 0.05);
+        }
+        let seen = world.inspect();
+        (seen[0].pos.0, seen[1].pos.0, seen[1].body)
+    };
+    // Half a second at 100/s: 50 units if nothing were in the way. The crate's friction drags,
+    // so the hero pushes it at about half pace, against it the whole way (its edge is at 8).
+    let (hero_x, box_x, body) = walk(Some(Material::default()));
+    assert_eq!(body, "loose");
+    assert!(box_x > 30.0, "the crate was pushed along: {box_x}");
+    assert!(hero_x > 25.0 && box_x - hero_x < 10.0, "the hero kept walking, behind it: {hero_x}");
+    let (hero_x, box_x, _) = walk(None);
+    assert_eq!(box_x, 20.0, "a fixed box does not move");
+    assert!(hero_x < 13.0, "the hero stopped at it: {hero_x}");
+}

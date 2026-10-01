@@ -87,6 +87,10 @@ impl Material {
     }
 }
 
+/// A walker's mass in a push: far heavier than anything loose, so what it walks into moves at
+/// its pace rather than stopping it.
+const PUSHER: f32 = 1.0e6;
+
 /// Slower than this, in drawing units a second, a sliding body has come to rest.
 const AT_REST: f32 = 4.0;
 
@@ -248,7 +252,7 @@ impl Physics {
     }
 
     /// Moves `body` as far along `wanted` as the other colliders allow, sliding along what it
-    /// meets, and says how far that was.
+    /// meets, and says how far that was. What it walks into that Rapier moves, it pushes.
     pub(crate) fn slide(
         &mut self,
         body: RigidBodyHandle,
@@ -258,15 +262,21 @@ impl Physics {
         let rb = &self.world.bodies[body];
         let (pose, shape) = (
             *rb.position(),
-            self.world.colliders[rb.colliders()[0]].shared_shape(),
+            self.world.colliders[rb.colliders()[0]].shared_shape().clone(),
         );
-        let queries = self.world.query_pipeline_with_filter(
-            QueryFilter::default()
-                .exclude_rigid_body(body)
-                .exclude_sensors(),
-        );
+        let filter = || QueryFilter::default().exclude_rigid_body(body).exclude_sensors();
+        let queries = self.world.query_pipeline_with_filter(filter());
         let wanted = Vector::new(wanted.0 as f32, wanted.1 as f32);
-        let moved = WALKER.move_shape(dt as f32, &queries, &**shape, &pose, wanted, |_| {});
+        let mut hits = vec![];
+        let moved = WALKER.move_shape(dt as f32, &queries, &*shape, &pose, wanted, |c| hits.push(c));
+        let w = &mut self.world;
+        let mut queries = w.broad_phase.as_query_pipeline_mut(
+            w.narrow_phase.query_dispatcher(),
+            &mut w.bodies,
+            &mut w.colliders,
+            filter(),
+        );
+        WALKER.solve_character_collision_impulses(dt as f32, &mut queries, &*shape, PUSHER, &hits);
         let to = pose.translation + moved.translation;
         self.world.bodies[body].set_translation(to, true);
         (moved.translation.x as f64, moved.translation.y as f64)

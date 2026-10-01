@@ -513,8 +513,10 @@ world ticked forever. **Fix:** let go, a body comes from its carrier's body to i
 against what is in the way (`Physics::bring_in`). **5d chunk 1, loose bodies (world only):**
 `EntitySpec::loose` with a `Material` (`bounce` 0..1, `friction` as speed lost per second) makes a
 Rapier body that physics alone moves; it rests asleep, never fixed, so it can be pushed again, and
-spawned at rest it starts asleep. A bounce is now the moving thing's own (walls keep none). Next:
-the hero pushing loose things, then the Lua `loose` field and a ball and a crate in the demo. Soft bodies (rope,
+spawned at rest it starts asleep. A bounce is now the moving thing's own (walls keep none).
+**Chunk 2, pushing:** what a walker's move bumps into that Rapier moves gets Rapier's character
+impulses, the walker counting as far heavier; a crate's friction drags, so the hero pushes it at
+about half pace. Next: the Lua `loose` field and a ball and a crate in the demo. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
