@@ -519,7 +519,11 @@ impulses, the walker counting as far heavier; a crate's friction drags, so the h
 about half pace. **Lua `loose`:** `loose = true` or `{ bounce, friction }`, strict. **The demo
 grew:** a 1080×600 room split by an inner wall with a doorway, two pillars, three crates and a ball;
 the world smoke pushes a crate and reads from the dump that it moved and came to rest still loose.
-Next: a crate pushed onto a plate opens a gate. Soft bodies (rope,
+**Table hockey** (`demo_apps/hockey`): two walking paddles, a loose puck, goals as zones Lua
+scores. **Collision groups:** `group` and `blocks` — the centre line stops paddles, not the puck.
+**Rapier's unit:** it was in metres, capping loose bodies at 400 units a second; now
+`length_unit = 100`, and settling measures overlap afresh. Next: faceoff and first to 5 (Lua),
+then controller acceleration, then a `follow` controller for a computer opponent. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds

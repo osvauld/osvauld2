@@ -45,7 +45,7 @@ local PADDLE, PUCK = 28, 16
 local function paddle(id, x, color, keys)
 	return { id = id, pos = { x - PADDLE, H / 2 - PADDLE },
 		drawing = drawing(2 * PADDLE, 2 * PADDLE, { disc(PADDLE, color, { 3, C.puck }) }),
-		collider = { circle = PADDLE, at = { PADDLE, PADDLE } },
+		collider = { circle = PADDLE, at = { PADDLE, PADDLE } }, group = "paddle",
 		controller = { speed = 420, axis_x = { neg = keys[1], pos = keys[2] },
 			axis_y = { neg = keys[3], pos = keys[4] } } }
 end
@@ -82,6 +82,9 @@ return function()
 			end,
 			{ id = "markings", pos = { 0, 0 }, drawing = markings },
 			{ id = "spot", pos = { W / 2 - 60, H / 2 - 60 }, drawing = spot },
+			-- Each paddle keeps to its own half: the centre line stops paddles, and only paddles.
+			{ id = "centre", pos = { W / 2 - 2, 0 }, drawing = drawing(4, H, {}),
+				collider = { rect = { 4, H } }, blocks = { "paddle" } },
 			goal("goal:left", 8), goal("goal:right", W - L),
 			block("wall:top", L, 0, W - 2 * L, T),
 			block("wall:bottom", L, H - T, W - 2 * L, T),

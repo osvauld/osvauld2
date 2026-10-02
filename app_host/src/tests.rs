@@ -745,6 +745,29 @@ fn a_loose_thing_is_checked_strictly() {
 }
 
 #[test]
+fn groups_are_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |fields: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'line', pos = {{ 0, 0 }}, drawing = hero, collider = {{ rect = {{ 2, 2 }} }}, {fields} }} }})")
+    };
+    for fine in ["group = 'paddle'", "blocks = { 'paddle' }", "group = 'a', blocks = { 'b', 'c' }"] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("group = 3", "world entity 1.group must be a group name (a string), got integer"),
+        ("blocks = 'paddle'", "world entity 1.blocks must be a table, got string"),
+        ("blocks = { 'a', true }", "world entity 1.blocks[2] must be a group name"),
+        ("blocks = {}", "blocks is empty"),
+    ];
+    for (fields, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(fields)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_collider_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

@@ -344,7 +344,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
-        "loose",
+        "loose", "group", "blocks",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -383,9 +383,28 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             None => None,
         },
         loose: loose(&spec, &owner)?,
-        group: None,
-        blocks: None,
+        group: match spec.get::<Value>("group")? {
+            Value::Nil => None,
+            other => Some(name(other, &format!("{owner}.group"))?),
+        },
+        blocks: match maybe_table(&spec, &owner, "blocks")? {
+            Some(list) => Some(list.sequence_values::<Value>().enumerate().map(|(i, v)| {
+                name(v?, &format!("{owner}.blocks[{}]", i + 1))
+            }).collect::<mlua::Result<_>>()?),
+            None => None,
+        },
     })
+}
+
+/// A collision group's name: a string, nothing else.
+fn name(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!(
+            "{owner} must be a group name (a string), got {}",
+            other.type_name()
+        ))),
+    }
 }
 
 /// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n }` with either left

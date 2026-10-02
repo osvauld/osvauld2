@@ -180,7 +180,7 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider`, `sensor` and `loose` — nothing else.
+  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -231,6 +231,10 @@ ui.world({
   speed kept off a wall, 0 to 1 (default 0.5); `friction` is speed lost per second, 0 or more
   (default 6, a heavy crate; a ball wants under 1). It needs a `collider`, and cannot have a
   `controller`. At rest it sleeps, still loose, and the next push wakes it.
+- `group = "paddle"` puts an entity's collider in a named group; `blocks = { "paddle" }` makes a
+  collider stop only those groups. Without either, a collider is in the common group and stops
+  everything. A hockey centre line is `blocks = { "paddle" }`: the paddles stop at it, the puck
+  crosses. Both need a `collider`; a world has at most 31 group names.
 
 ### Clips
 
