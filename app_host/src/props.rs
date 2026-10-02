@@ -193,6 +193,11 @@ impl<M: 'static> Registry<M> {
                 to_msg(LuaMsg::CallWheel(key.clone(), event.delta.0, event.delta.1))
             }))
         }),
+        ("on_zoom", |el, v, cx| {
+            let key = cx.register("on_zoom", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_zoom(move |scale| to_msg(LuaMsg::CallZoom(key.clone(), scale))))
+        }),
         ("on_key", |el, v, cx| {
             let key = cx.register("on_key", v)?;
             let to_msg = cx.to_msg.clone();
@@ -381,6 +386,10 @@ pub(crate) fn apply<M: 'static>(
             .register(name, &v)?;
             el = build(el, (context.to_msg)(LuaMsg::Call(key)));
         } else if let Some((_, bind)) = Registry::<M>::BINDS.iter().find(|(b, _v)| *b == &*k) {
+            // Without a camera there is no scale to tell, and the handler would wait forever.
+            if k == "on_zoom" && !(node.contains_key("zoomable")? || node.contains_key("zoom_x")?) {
+                return Err(mlua::Error::runtime("on_zoom needs zoomable or zoom_x"));
+            }
             el = bind(
                 el,
                 &v,

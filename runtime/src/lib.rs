@@ -712,7 +712,14 @@ impl<A: App> Runner<A> {
             if let Some(axes) = p.behaviour.zoom
                 && let Some(id) = &p.id
             {
-                store.get_or::<Zoom>(id, Slot::Zoom).range = p.behaviour.zoom_range;
+                let zoom = store.get_or::<Zoom>(id, Slot::Zoom);
+                zoom.range = p.behaviour.zoom_range;
+                if let Some(map) = &p.behaviour.on_zoom
+                    && zoom.told != Some(zoom.scale)
+                {
+                    zoom.told = Some(zoom.scale);
+                    done_msgs.push(map(zoom.scale));
+                }
                 if let Some(hit_rect) = visible {
                     hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
                 }

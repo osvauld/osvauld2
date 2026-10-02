@@ -1257,8 +1257,10 @@ fn zoom_limits_are_checked() {
     };
     assert_eq!(run("id = 'v', zoomable = true, zoom_max = 40"), None);
     assert_eq!(run("id = 'v', zoom_x = true, zoom_min = 0.1, zoom_max = 8"), None);
+    assert_eq!(run("id = 'v', zoomable = true, on_zoom = function() end"), None);
     let cases = [
         ("id = 'v', zoom_max = 40", "zoom_max needs zoomable or zoom_x"),
+        ("id = 'v', on_zoom = function() end", "on_zoom needs zoomable or zoom_x"),
         ("id = 'v', zoomable = true, zoom_max = 0", "zoom_max must be a positive scale"),
         ("id = 'v', zoomable = true, zoom_min = 5", "zoom_min must be below zoom_max"),
         ("id = 'v', zoomable = true, zoom_min = 2, zoom_max = 1", "zoom_min must be below zoom_max"),
@@ -3777,6 +3779,7 @@ fn asset_editor() -> LuaApp<LuaMsg> {
         "model.lua",
         "stage.lua",
         "inspector.lua",
+        "handles.lua",
         "theme.lua",
         "seed/hero.lua",
         "seed/clips.lua",
@@ -4948,6 +4951,106 @@ fn pie_demo_reads_the_shape_the_runtime_names() {
     click(&mut app, "slice:search");
     let _ = app.view();
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+}
+
+/// A selected part shows its path points as dots: one part per point, named by shape, command
+/// and point, at canvas scale; a click on one keeps the selection.
+#[test]
+fn asset_editor_shows_a_parts_points() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "part:leg_l");
+    let _ = app.view();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let dots: String = app
+        .vm
+        .load(
+            r#"
+            local leg
+            for _, p in ipairs(asset:open("hero").views.front.parts) do
+                if p.id == "leg_l" then leg = p end
+            end
+            local out = {}
+            for _, h in ipairs(require("handles").parts(leg, 2.5, 1)) do
+                table.insert(out, h.id .. "@" .. h.pivot[1] .. "," .. h.pivot[2])
+            end
+            return table.concat(out, " ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    // Shape 1 is a box; shape 2's third command is a quad: its control, then its end.
+    assert!(
+        dots.starts_with(
+            "pt:guides@0,0 pt:1:1:1@152.5,410 pt:1:2:1@187.5,410 pt:1:3:1@187.5,530 \
+             pt:1:4:1@152.5,530 pt:2:1:1@145,525 pt:2:2:1@190,525 pt:2:3:1@205,525 pt:2:3:2@205,540"
+        ),
+        "{dots}"
+    );
+    assert_eq!(dots.split(' ').count(), 1 + 4 + 9);
+
+    // Zoomed in 10×, a dot is drawn a tenth the size, so on screen it stays the same.
+    let radius: f64 = app
+        .vm
+        .load(
+            r#"
+            local h = require("handles").parts({ shapes = { { path = { { "move", 0, 0 } } } } }, 1, 10)
+            return h[1].shapes[1].path[1][2]
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(radius, 0.4);
+    app.update(LuaMsg::CallZoom(Key::new("viewport", "on_zoom"), 10.0));
+    let _ = app.view();
+    assert!(app.error.is_none(), "{:?}", app.error);
+
+    app.update(LuaMsg::CallAt(
+        Key::new("canvas", "on_click"),
+        0.0,
+        0.0,
+        Shape(Some(("pt:1:1:1".into(), 0.0, 0.0))),
+        None,
+    ));
+    fn has(info: &runtime::ElInfo, id: &str) -> bool {
+        info.id.as_deref() == Some(id) || info.children.iter().any(|c| has(c, id))
+    }
+    assert!(has(&app.view().info(), "field:leg_l:pivot:x"), "the leg is still selected");
+
+    // Dragging a dot moves that one point: canvas units back to drawing units, one write at the end.
+    let point = |app: &LuaApp<LuaMsg>| -> String {
+        let at = r#"
+            for _, p in ipairs(asset:open("hero").views.front.parts) do
+                if p.id == "leg_l" then
+                    local c = p.shapes[2].path[3]
+                    return table.concat(c, " ")
+                end
+            end
+        "#;
+        app.vm.load(at).eval().unwrap()
+    };
+    for (phase, x) in [("start", 205.0), ("move", 215.0), ("end", 230.0)] {
+        let args = DragArgs {
+            phase,
+            at: (x, 525.0),
+            delta: (0.0, 0.0),
+            scale: 1.0,
+            origin: (0.0, 0.0),
+            shape: Shape(Some(("pt:2:3:2".into(), 0.0, 0.0))),
+            t: 0.0,
+        };
+        app.update(LuaMsg::CallDrag(Key::new("canvas", "on_drag"), args));
+        let _ = app.view();
+        if phase == "move" {
+            assert_eq!(point(&app), "quad 82 210 82 216", "nothing is written mid-drag");
+        }
+    }
+    assert_eq!(point(&app), "quad 82 210 92 216");
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert!(app.console(100).is_empty(), "{:?}", app.console(100));
+
+    click(&mut app, "canvas");
+    assert!(!has(&app.view().info(), "field:leg_l:pivot:x"), "a click on nothing clears it");
 }
 
 /// The inspector edits the selected part: Enter writes a field that parses, a bad colour turns

@@ -783,3 +783,36 @@ fn a_press_scales_the_hit_rect_with_the_paint() {
         280.0 * 0.97
     );
 }
+
+/// Records the scales a camera's `on_zoom` was told.
+struct Zoomed {
+    told: Vec<f32>,
+}
+
+impl App for Zoomed {
+    type Msg = f32;
+    fn view(&self) -> El<f32> {
+        let content = crate::col().w(100.0).h(100.0);
+        crate::col().id("cam").full().zoomable().zoom_max(20.0).on_zoom(|s| s).child(content)
+    }
+    fn update(&mut self, scale: f32) {
+        self.told.push(scale);
+    }
+}
+
+/// `on_zoom` hears the scale once on the first frame and once per change, never per frame: a
+/// handler that rebuilds a drawing must not rebuild it sixty times a second.
+#[test]
+fn on_zoom_is_told_the_scale_once_per_change() {
+    let mut h = Headless::new(Zoomed { told: Vec::new() }, (400.0, 400.0));
+    h.frame();
+    h.frame();
+    assert_eq!(h.app().told, vec![1.0], "the first frame tells the starting scale");
+
+    h.ctrl_wheel(50.0, 50.0, LINE_STEP); // one line in
+    h.frame();
+    h.frame();
+    let told = &h.app().told;
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!((told[1] - 1.1).abs() < 1e-5, "{told:?}");
+}

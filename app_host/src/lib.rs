@@ -119,6 +119,7 @@ pub enum LuaMsg {
     CallPhase(Key, &'static str, f32, f32, Shape),
     CallDrag(Key, DragArgs),
     CallWheel(Key, f32, f32),
+    CallZoom(Key, f32),
     CallFrame(Key, f32, f64),
     CallKey(Key, runtime::KeyInput),
     /// A `ui.world`'s frame tick, `(world id, dt, elapsed)`: runs that world in Rust, no Lua.
@@ -762,6 +763,7 @@ impl<M: 'static> LuaApp<M> {
                 event.set("dx", dx)?;
                 event.set("dy", dy)?;
             }
+            LuaMsg::CallZoom(_, scale) => event.set("scale", scale)?,
             LuaMsg::CallFrame(_, dt, elapsed) => {
                 event.set("dt", dt)?;
                 event.set("elapsed", elapsed)?;
@@ -863,6 +865,7 @@ impl<M: 'static> LuaApp<M> {
             LuaMsg::CallPhase(k, _, _, _, _)
             | LuaMsg::CallDrag(k, _)
             | LuaMsg::CallWheel(k, _, _)
+            | LuaMsg::CallZoom(k, _)
             | LuaMsg::CallFrame(k, _, _)
             | LuaMsg::CallKey(k, _) => k,
             LuaMsg::TickWorld(..) | LuaMsg::KeyWorld(..) => unreachable!("handled above"),

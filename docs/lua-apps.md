@@ -494,6 +494,7 @@ before `fade`.
 | | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
 | | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
+| | `on_zoom` | `function(e)` — `e.scale` is the camera's zoom, told on the first frame and on each change. Divide by it to keep a mark (a selection outline, a handle) its size on screen. Only beside `zoomable`/`zoom_x`. |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
 | input | `value` · `autofocus` | string · bool |
 

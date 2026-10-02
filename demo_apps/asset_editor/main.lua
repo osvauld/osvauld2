@@ -2,10 +2,13 @@ local C = require("theme")
 local M = require("model")
 local Stage = require("stage")
 local Inspector = require("inspector")
+local Handles = require("handles")
 
 local selected = nil -- the selected part's id
 local built = { key = nil, frame = nil } -- the canvas visual; rebuilt on a new selection or edit
 local play = nil -- { name, drawing, clip } while a clip plays on the canvas; nil is edit mode
+local seen_at = 1 -- the viewport's zoom, so selection marks keep their screen size
+local drag = nil -- { i, j, k, from, at, x0, y0 } while a point dot is held; `from`/`at` in drawing units
 
 -- The canvas draws the asset scaled up by building a scaled copy, rather than scaling the
 -- element: hits keep reporting part ids, and canvas units are drawing units times the zoom.
@@ -59,9 +62,10 @@ local function scaled_shape(s, z)
 	return { path = scaled_path(s.path, z), fill = scaled_fill(s.fill, z), stroke = stroke }
 end
 
--- The asset at canvas scale, with the `outline` part's outlines drawn again in the accent colour.
+-- The asset at canvas scale, with the `outline` part's outlines drawn again in the accent colour
+-- and its path points on top as dots.
 local function canvas_drawing(parts, z, outline)
-	local out = {}
+	local out, held = {}, nil
 	for i, p in ipairs(parts) do
 		local shapes = {}
 		for _, s in ipairs(p.shapes or {}) do
@@ -70,7 +74,7 @@ local function canvas_drawing(parts, z, outline)
 		if p.id == outline then
 			for _, s in ipairs(p.shapes or {}) do
 				if s.path then -- a shadow has no outline to trace
-					table.insert(shapes, { path = scaled_path(s.path, z), stroke = { 3, C.accent } })
+					table.insert(shapes, { path = scaled_path(s.path, z), stroke = { 3 / seen_at, C.accent } })
 				end
 			end
 		end
@@ -80,6 +84,12 @@ local function canvas_drawing(parts, z, outline)
 			pivot = { p.pivot[1] * z, p.pivot[2] * z },
 			shapes = #shapes > 0 and shapes or nil,
 		}
+		if p.id == outline then
+			held = p
+		end
+	end
+	for _, h in ipairs(held and Handles.parts(held, z, seen_at) or {}) do
+		table.insert(out, h)
 	end
 	local size = M.asset.size
 	local vars = {} -- a number var is always a length
@@ -89,11 +99,30 @@ local function canvas_drawing(parts, z, outline)
 	return gfx.drawing({ size = { size[1] * z, size[2] * z }, vars = vars, parts = out })
 end
 
+-- `parts` with the held point where the drag has it, copying only what that changes.
+local function dragged(parts)
+	local out = table.clone(parts)
+	for n, p in ipairs(parts) do
+		if p.id == selected then
+			local part, shape = table.clone(p), table.clone(p.shapes[drag.i])
+			local cmd = table.clone(shape.path[drag.j])
+			cmd[2 * drag.k], cmd[2 * drag.k + 1] = drag.at[1], drag.at[2]
+			shape.path = table.clone(shape.path)
+			shape.path[drag.j] = cmd
+			part.shapes = table.clone(p.shapes)
+			part.shapes[drag.i] = shape
+			out[n] = part
+		end
+	end
+	return out
+end
+
 local function visual(parts)
-	local key = M.name .. ":" .. (selected or "") .. ":" .. Inspector.rev
+	local live = drag and drag.at[1] .. "," .. drag.at[2] or ""
+	local key = table.concat({ M.name, selected or "", Inspector.rev, seen_at, live }, ":")
 	if built.key ~= key then
 		built.key = key
-		built.frame = canvas_drawing(parts, C.zoom, selected):pose({})
+		built.frame = canvas_drawing(drag and dragged(parts) or parts, C.zoom, selected):pose({})
 	end
 	return built.frame
 end
@@ -178,9 +207,39 @@ local function canvas(parts)
 	return ui.frame({
 		id = "canvas",
 		visual = visual(parts),
-		-- A click on no part clears the selection.
+		-- A click on no part clears the selection; one on a point dot keeps it.
 		on_click = function(e)
-			selected = e.shape
+			if not (e.shape and e.shape:sub(1, 3) == "pt:") then
+				selected = e.shape
+			end
+		end,
+		-- A held dot follows the pointer on the canvas alone; letting go writes its one point.
+		-- A drag from anywhere else moves nothing, and doesn't pan either: pan from the margin.
+		on_drag = function(e)
+			if e.phase == "start" then
+				local i, j, k = (e.shape or ""):match("^pt:(%d+):(%d+):(%d+)$")
+				for _, p in ipairs(i and parts or {}) do
+					if p.id == selected then
+						i, j, k = tonumber(i), tonumber(j), tonumber(k)
+						local cmd = p.shapes[i].path[j]
+						local from = { cmd[2 * k], cmd[2 * k + 1] }
+						drag = { i = i, j = j, k = k, from = from, at = from, x0 = e.x, y0 = e.y }
+					end
+				end
+			elseif drag then
+				local dx, dy = (e.x - drag.x0) / C.zoom, (e.y - drag.y0) / C.zoom
+				drag.at = { drag.from[1] + dx, drag.from[2] + dy }
+				if e.phase == "end" then
+					local cmd = { "views", M.view, "parts", selected, "shapes", drag.i, "path", drag.j }
+					local x, y = table.clone(cmd), table.clone(cmd)
+					table.insert(x, 2 * drag.k)
+					table.insert(y, 2 * drag.k + 1)
+					M.asset:set(x, drag.at[1])
+					M.asset:set(y, drag.at[2])
+					drag = nil
+					Inspector.rev += 1 -- the canvas rebuilds from the mirror, which has it by then
+				end
+			end
 		end,
 	})
 end
@@ -257,6 +316,9 @@ return function()
 				center = true,
 				zoomable = true,
 				zoom_max = 20, -- on top of the canvas's own 2.5×: 50× the asset, for fingers and eyelashes
+				on_zoom = function(e)
+					seen_at = e.scale
+				end,
 				body,
 			}),
 		}),

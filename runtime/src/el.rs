@@ -321,6 +321,8 @@ pub(crate) struct Behaviour<M> {
     pub zoom: Option<(bool, bool)>,
     /// A zoomable's `(min, max)` scale.
     pub zoom_range: (f32, f32),
+    /// Told a zoomable's scale whenever it differs from the last one told, first frame included.
+    pub on_zoom: Option<Box<dyn Fn(f32) -> M>>,
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
@@ -360,6 +362,7 @@ impl<M> Default for Behaviour<M> {
             scale: 1.0,
             zoom: None,
             zoom_range: crate::zoom::DEFAULT_RANGE,
+            on_zoom: None,
             slide: None,
             fade: None,
             tint: None,
@@ -749,6 +752,12 @@ impl<M> El<M> {
         self.behaviour.zoom_range.1 = scale;
         self
     }
+    /// What a zoomable's content needs to know to draw at a fixed screen size: its scale, told
+    /// on the first frame and on every change after. Needs the zoomable's id, as zoom does.
+    pub fn on_zoom(mut self, map: impl Fn(f32) -> M + 'static) -> Self {
+        self.behaviour.on_zoom = Some(Box::new(map));
+        self
+    }
 
     pub fn slide_in(mut self, (dx, dy): (f32, f32), ms: f32) -> Self {
         self.behaviour.slide = Some((
@@ -979,6 +988,9 @@ impl<M> El<M> {
         }
         if self.behaviour.on_wheel.is_some() {
             handlers.push("on_wheel");
+        }
+        if self.behaviour.on_zoom.is_some() {
+            handlers.push("on_zoom");
         }
         if self.behaviour.on_key.is_some() {
             handlers.push("on_key");

@@ -11,6 +11,8 @@ pub(crate) struct Zoom {
     pub pan: (f32, f32),
     /// The element's `(min, max)` scale, refreshed every layout.
     pub range: (f32, f32),
+    /// The scale `on_zoom` was last told, so it hears each change once.
+    pub told: Option<f32>,
 }
 
 impl Default for Zoom {
@@ -19,6 +21,7 @@ impl Default for Zoom {
             scale: 1.0,
             pan: (0.0, 0.0),
             range: DEFAULT_RANGE,
+            told: None,
         }
     }
 }

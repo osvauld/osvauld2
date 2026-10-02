@@ -71,6 +71,13 @@ impl<A: App> Headless<A> {
             )));
     }
 
+    /// The same wheel with Ctrl held: what zooms a camera.
+    pub fn ctrl_wheel(&mut self, x: f32, y: f32, dy: f32) {
+        self.runner.modifiers = winit::keyboard::ModifiersState::CONTROL;
+        self.wheel(x, y, 0.0, dy);
+        self.runner.modifiers = winit::keyboard::ModifiersState::empty();
+    }
+
     pub fn press(&mut self) {
         self.frame();
         self.runner.clock += POINTER;
