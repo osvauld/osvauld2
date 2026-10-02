@@ -7,11 +7,11 @@ local H = {}
 
 -- Sizes are on screen: `s`, the viewport's zoom, divides them out so they never grow with it.
 local R = 4 -- a dot's radius
+local GRAB = 10 -- how near a press must land to take it: a hand is not as exact as the dot
 
-local function dot(id, x, y, control, s)
-	local r = R / s
+local function circle(x, y, r)
 	local k = r * 0.5523 -- a circle's cubic handle length
-	local path = {
+	return {
 		{ "move", x + r, y },
 		{ "cubic", x + r, y + k, x + k, y + r, x, y + r },
 		{ "cubic", x - k, y + r, x - r, y + k, x - r, y },
@@ -19,9 +19,16 @@ local function dot(id, x, y, control, s)
 		{ "cubic", x + k, y - r, x + r, y - k, x + r, y },
 		{ "close" },
 	}
+end
+
+local function dot(id, x, y, control, s)
 	local fill = control and C.canvas or C.accent
 	local ring = control and C.accent or C.canvas
-	return { id = id, pivot = { x, y }, shapes = { { path = path, fill = fill, stroke = { 1.5 / s, ring } } } }
+	local shapes = {
+		{ path = circle(x, y, GRAB / s), fill = "#00000000" }, -- unseen, but the part's to hit
+		{ path = circle(x, y, R / s), fill = fill, stroke = { 1.5 / s, ring } },
+	}
+	return { id = id, pivot = { x, y }, shapes = shapes }
 end
 
 -- A curve's first control leans on where the curve starts; every later one, on where it ends.
@@ -54,6 +61,23 @@ function H.parts(part, z, s)
 	local out = #lines > 0 and { { id = "pt:guides", pivot = { 0, 0 }, shapes = lines } } or {}
 	for _, d in ipairs(dots) do
 		table.insert(out, d)
+	end
+	return out
+end
+
+-- The controls that ride with point `k` of command `j`, so a curve keeps its shape as its end
+-- moves: the cubic's control into it and the next cubic's out of it. A quad's one control
+-- belongs to both its ends, so it stays; a control moves alone.
+function H.riders(path, j, k)
+	local cmd, after, out = path[j], path[j + 1], {}
+	if k < (#cmd - 1) / 2 then
+		return out
+	end
+	if cmd[1] == "cubic" then
+		table.insert(out, { j = j, k = 2 })
+	end
+	if after and after[1] == "cubic" then
+		table.insert(out, { j = j + 1, k = 1 })
 	end
 	return out
 end

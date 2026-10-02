@@ -4953,6 +4953,59 @@ fn pie_demo_reads_the_shape_the_runtime_names() {
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }
 
+/// A dragged end point snaps to the finest step the zoom shows — whole units at 1× — and the cubic
+/// controls either side of it ride along by the same amount, so the curve keeps its shape.
+#[test]
+fn asset_editor_drags_a_point_with_its_handles() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "part:arm_far");
+    app.update(LuaMsg::CallZoom(Key::new("viewport", "on_zoom"), 1.0));
+    let _ = app.view();
+    // The hand's second command ends at (56, 162): canvas (140, 405). Drag it 10 by 3 canvas
+    // units: 4 by 1.2 in the drawing, which snaps to 4 by 1.
+    for (phase, f) in [("start", 0.0), ("move", 0.5), ("end", 1.0)] {
+        let args = DragArgs {
+            phase,
+            at: (140.0 + 10.0 * f, 405.0 + 3.0 * f),
+            delta: (0.0, 0.0),
+            scale: 1.0,
+            origin: (0.0, 0.0),
+            shape: Shape(Some(("pt:2:2:3".into(), 0.0, 0.0))),
+            t: 0.0,
+        };
+        app.update(LuaMsg::CallDrag(Key::new("canvas", "on_drag"), args));
+        let _ = app.view();
+    }
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let hand: String = app
+        .vm
+        .load(
+            r#"
+            for _, p in ipairs(asset:open("hero").views.front.parts) do
+                if p.id == "arm_far" then
+                    local out = {}
+                    for j = 1, 3 do
+                        local c = {}
+                        for n = 2, #p.shapes[2].path[j] do
+                            c[#c + 1] = string.format("%g", p.shapes[2].path[j][n])
+                        end
+                        out[j] = table.concat(c, " ")
+                    end
+                    return table.concat(out, " | ")
+                end
+            end
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(
+        hand,
+        "62 156 | 62 159.31 63.31 163 60 163 | 56.69 163 50 159.31 50 156",
+        "the end and both its controls moved by (4, 1); the rest stayed"
+    );
+}
+
 /// A selected part shows its path points as dots: one part per point, named by shape, command
 /// and point, at canvas scale; a click on one keeps the selection.
 #[test]
@@ -4989,18 +5042,19 @@ fn asset_editor_shows_a_parts_points() {
     );
     assert_eq!(dots.split(' ').count(), 1 + 4 + 9);
 
-    // Zoomed in 10×, a dot is drawn a tenth the size, so on screen it stays the same.
-    let radius: f64 = app
+    // Zoomed in 10×, a dot is drawn a tenth the size, so on screen it stays the same — and so
+    // does the wider, unseen circle a press only has to land in to take it.
+    let (grab, radius): (f64, f64) = app
         .vm
         .load(
             r#"
             local h = require("handles").parts({ shapes = { { path = { { "move", 0, 0 } } } } }, 1, 10)
-            return h[1].shapes[1].path[1][2]
+            return h[1].shapes[1].path[1][2], h[1].shapes[2].path[1][2]
             "#,
         )
         .eval()
         .unwrap();
-    assert_eq!(radius, 0.4);
+    assert_eq!((grab, radius), (1.0, 0.4));
     app.update(LuaMsg::CallZoom(Key::new("viewport", "on_zoom"), 10.0));
     let _ = app.view();
     assert!(app.error.is_none(), "{:?}", app.error);

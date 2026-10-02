@@ -8,7 +8,9 @@ local selected = nil -- the selected part's id
 local built = { key = nil, frame = nil } -- the canvas visual; rebuilt on a new selection or edit
 local play = nil -- { name, drawing, clip } while a clip plays on the canvas; nil is edit mode
 local seen_at = 1 -- the viewport's zoom, so selection marks keep their screen size
-local drag = nil -- { i, j, k, from, at, x0, y0 } while a point dot is held; `from`/`at` in drawing units
+-- While a point dot is held: its shape `i`, the points moving (`{ j, k, from }`, the held one
+-- first), and `d`, how far they have moved, in drawing units.
+local drag = nil
 
 -- The canvas draws the asset scaled up by building a scaled copy, rather than scaling the
 -- element: hits keep reporting part ids, and canvas units are drawing units times the zoom.
@@ -99,16 +101,34 @@ local function canvas_drawing(parts, z, outline)
 	return gfx.drawing({ size = { size[1] * z, size[2] * z }, vars = vars, parts = out })
 end
 
--- `parts` with the held point where the drag has it, copying only what that changes.
+local DIVS = { 1, 2, 4, 10, 20 } -- snap steps as divisions of a unit: 1/20 stays exact, 0.05 not
+
+-- `v` on the finest step still a few pixels apart on screen: whole units at a glance, twentieths
+-- up close.
+local function snap(v)
+	local div = 1
+	for _, d in ipairs(DIVS) do
+		if C.zoom * seen_at / d >= 4 then
+			div = d
+		end
+	end
+	return math.floor(v * div + 0.5) / div
+end
+
+-- `parts` with the held points where the drag has them, copying only what that changes.
 local function dragged(parts)
 	local out = table.clone(parts)
 	for n, p in ipairs(parts) do
 		if p.id == selected then
 			local part, shape = table.clone(p), table.clone(p.shapes[drag.i])
-			local cmd = table.clone(shape.path[drag.j])
-			cmd[2 * drag.k], cmd[2 * drag.k + 1] = drag.at[1], drag.at[2]
 			shape.path = table.clone(shape.path)
-			shape.path[drag.j] = cmd
+			for _, m in ipairs(drag.moves) do -- an end and its control can share a command
+				shape.path[m.j] = table.clone(shape.path[m.j])
+			end
+			for _, m in ipairs(drag.moves) do
+				shape.path[m.j][2 * m.k] = m.from[1] + drag.d[1]
+				shape.path[m.j][2 * m.k + 1] = m.from[2] + drag.d[2]
+			end
 			part.shapes = table.clone(p.shapes)
 			part.shapes[drag.i] = shape
 			out[n] = part
@@ -118,7 +138,7 @@ local function dragged(parts)
 end
 
 local function visual(parts)
-	local live = drag and drag.at[1] .. "," .. drag.at[2] or ""
+	local live = drag and drag.d[1] .. "," .. drag.d[2] or ""
 	local key = table.concat({ M.name, selected or "", Inspector.rev, seen_at, live }, ":")
 	if built.key ~= key then
 		built.key = key
@@ -221,21 +241,32 @@ local function canvas(parts)
 				for _, p in ipairs(i and parts or {}) do
 					if p.id == selected then
 						i, j, k = tonumber(i), tonumber(j), tonumber(k)
-						local cmd = p.shapes[i].path[j]
-						local from = { cmd[2 * k], cmd[2 * k + 1] }
-						drag = { i = i, j = j, k = k, from = from, at = from, x0 = e.x, y0 = e.y }
+						local path = p.shapes[i].path
+						local moves = { { j = j, k = k } }
+						for _, r in ipairs(Handles.riders(path, j, k)) do
+							table.insert(moves, r)
+						end
+						for _, m in ipairs(moves) do
+							m.from = { path[m.j][2 * m.k], path[m.j][2 * m.k + 1] }
+						end
+						drag = { i = i, moves = moves, d = { 0, 0 }, x0 = e.x, y0 = e.y }
 					end
 				end
 			elseif drag then
-				local dx, dy = (e.x - drag.x0) / C.zoom, (e.y - drag.y0) / C.zoom
-				drag.at = { drag.from[1] + dx, drag.from[2] + dy }
+				-- The held point snaps, and the rest move by what it moved.
+				local from = drag.moves[1].from
+				local x = snap(from[1] + (e.x - drag.x0) / C.zoom)
+				local y = snap(from[2] + (e.y - drag.y0) / C.zoom)
+				drag.d = { x - from[1], y - from[2] }
 				if e.phase == "end" then
-					local cmd = { "views", M.view, "parts", selected, "shapes", drag.i, "path", drag.j }
-					local x, y = table.clone(cmd), table.clone(cmd)
-					table.insert(x, 2 * drag.k)
-					table.insert(y, 2 * drag.k + 1)
-					M.asset:set(x, drag.at[1])
-					M.asset:set(y, drag.at[2])
+					for _, m in ipairs(drag.moves) do
+						local cmd = { "views", M.view, "parts", selected, "shapes", drag.i, "path", m.j }
+						local px, py = table.clone(cmd), table.clone(cmd)
+						table.insert(px, 2 * m.k)
+						table.insert(py, 2 * m.k + 1)
+						M.asset:set(px, m.from[1] + drag.d[1])
+						M.asset:set(py, m.from[2] + drag.d[2])
+					end
 					drag = nil
 					Inspector.rev += 1 -- the canvas rebuilds from the mirror, which has it by then
 				end
