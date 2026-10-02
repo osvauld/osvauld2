@@ -39,6 +39,13 @@ local back = gfx.drawing({ size = { C.width, BACK }, parts = { { id = "wall", pi
 local function wall(id, x, y, drawing, w, h)
 	return { id = id, pos = { x, y }, drawing = drawing, collider = { rect = { w, h } } }
 end
+-- A solid block of its own size: the inner wall's two halves and the pillars.
+local function block(id, x, y, w, h)
+	return wall(id, x, y, bar(w, h), w, h)
+end
+-- The inner wall splits the room east and west; the doorway is the gap between its halves.
+local MID, MID_T = 760, 24
+local DOOR_TOP, DOOR_BOTTOM = 420, 520
 
 -- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
 local wasd = {
@@ -146,6 +153,11 @@ return function()
 			wall("wall:s", 0, C.height - T, across, C.width, T),
 			wall("wall:w", 0, 0, down, T, C.height),
 			wall("wall:e", C.width - T, 0, down, T, C.height),
+			block("wall:mid", MID, BACK, MID_T, DOOR_TOP - BACK),
+			block("wall:mid_s", MID, DOOR_BOTTOM, MID_T, C.height - T - DOOR_BOTTOM),
+			-- Pillars low in the west room, clear of where the hero first walks.
+			block("pillar:1", 200, 470, 40, 40),
+			block("pillar:2", 440, 500, 40, 40),
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
 			-- On the floor it is solid by its footprint, the bottom of its base; carried, the world
 			-- takes it off the floor.

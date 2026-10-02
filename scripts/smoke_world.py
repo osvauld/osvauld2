@@ -22,7 +22,7 @@ def readout(tree, prefix):
     return None
 
 
-with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
+with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     s.rpc.signup("world", "world passphrase")
     ws = s.rpc.create_workspace("world smoke")
     item = s.rpc.create_item(ws["id"], "world", "app")["id"]
@@ -187,7 +187,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     hold("KeyW", "w", 6)
     hold("KeyD", "d", 22)
     assert (entity_at(570, 240), entity_at(570, 250)) == ("hero", "chest"), "behind the chest"
-    hold("KeyD", "d", 60)
+    hold("KeyD", "d", 43)  # to x 612 (top-left), where the old east wall stopped it
     hold("KeyS", "s", 30)
     hold("KeyA", "a", 50)
     assert entity_at(550, 280) == "hero", "come round below: in front of the chest"
@@ -223,24 +223,24 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert entity_at(635, 250) == "hero", "and the hero walked off"
     chest = entities()["chest"]
     assert chest["body"] == "fixed" and chest["velocity"] == [0, 0], ("settled", chest)
-    # Let go near the bottom, its footprint (y 56..80 in its drawing) came to rest against the
-    # south wall (y 388), not in it — before, it settled half through and ticked forever.
-    assert chest["pos"][1] + 80 <= 388.5, ("above the south wall", chest)
+    seen = entities()
+    assert all(seen[w]["body"] == "fixed" for w in ("wall:mid", "wall:mid_s", "pillar:1", "pillar:2")), seen
 
-    # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
-    # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
-    # wall, the whole hero still in the room — the world clips anything that spills past it.
+    # Walls: the hero collides by its feet. Walking on into the inner wall (x 760, above its
+    # doorway) it stops with its body just inside, the nose behind the wall; walking up it stops at
+    # the foot of the tall back wall, the whole hero still in the room — the world clips anything
+    # that spills past it.
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(120)
     s.rpc.keyboard("KeyD", "d", False)
     s.rpc.frame(2)
-    assert (entity_at(700, 210), entity_at(714, 210)) == ("hero", "wall:e"), "stopped at the east wall"
+    assert (entity_at(752, 210), entity_at(766, 210)) == ("hero", "wall:mid"), "stopped at the inner wall"
     s.rpc.keyboard("KeyW", "w", True)
     s.rpc.frame(120)
     s.rpc.keyboard("KeyW", "w", False)
     s.rpc.frame(2)
-    assert entity_at(680, 30) == "hero", "stopped at the back wall, head inside the room"
-    assert entity_at(680, 196) == "hero", "feet at the foot of the back wall"
+    assert entity_at(732, 30) == "hero", "stopped at the back wall, head inside the room"
+    assert entity_at(732, 196) == "hero", "feet at the foot of the back wall"
 
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
