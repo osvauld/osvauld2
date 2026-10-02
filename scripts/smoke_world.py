@@ -50,6 +50,8 @@ with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     seen = entities()
     assert (seen["hero"]["body"], seen["chest"]["body"], seen["wall:n"]["body"]) == ("moved", "fixed", "fixed"), seen
     assert seen["hero"]["zones"] == [] and seen["hero"]["clip"]["looped"], seen["hero"]
+    loose = ("crate:door", "crate:2", "crate:3", "ball")
+    assert all((seen[i]["body"], seen[i]["velocity"]) == ("loose", [0, 0]) for i in loose), seen
 
     # Hero spawned at (120, 80); its body is ~(80, 130) into the drawing.
     assert entity_at(200, 210) == "hero"
@@ -242,8 +244,24 @@ with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     assert entity_at(732, 30) == "hero", "stopped at the back wall, head inside the room"
     assert entity_at(732, 196) == "hero", "feet at the foot of the back wall"
 
+    # Pushing: the hero's feet are at ~(736, 206). Step west, walk down level with crate:3 (x 560
+    # to 608, y 440 to 488), then walk west into it: the crate moves, and comes to rest still loose.
+    def go(code, key, dist):
+        hold(code, key, round(dist / (160 / 60)))
+
+    go("KeyA", "a", 80)
+    go("KeyS", "s", 258)
+    before = entities()["crate:3"]["pos"]
+    go("KeyA", "a", 120)
+    pushed = entities()["crate:3"]
+    assert pushed["body"] == "loose" and pushed["pos"][0] < before[0] - 20, (before, pushed)
+    s.rpc.frame(120)
+    rested = entities()["crate:3"]
+    assert (rested["body"], rested["velocity"]) == ("loose", [0, 0]), ("at rest, still loose", rested)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall, the world in the dump")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall, the world in the dump, pushing crates")

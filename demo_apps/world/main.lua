@@ -47,6 +47,25 @@ end
 local MID, MID_T = 760, 24
 local DOOR_TOP, DOOR_BOTTOM = 420, 520
 
+-- Loose things: physics moves them, the hero pushes them. A crate drags on the floor; the ball
+-- keeps its speed and most of its bounce.
+local S = 48
+local crate = gfx.drawing({ size = { S, S }, parts = { { id = "box", pivot = { 0, 0 }, shapes = {
+	{ path = { {"move",1,1}, {"line",S-1,1}, {"line",S-1,S-1}, {"line",1,S-1}, {"close"} },
+		fill = "#a8743f", stroke = { 2.5, "#2b1a10" } },
+	{ path = { {"move",4,4}, {"line",S-4,S-4} }, stroke = { 3, "#6b4423" } },
+	{ path = { {"move",S-4,4}, {"line",4,S-4} }, stroke = { 3, "#6b4423" } },
+} } } })
+local R, K = 14, 14 * 0.5523 -- a circle as four cubics
+local ball = gfx.drawing({ size = { 2 * R, 2 * R }, parts = { { id = "ball", pivot = { R, R }, shapes = {
+	{ path = { {"move",0,R}, {"cubic",0,R-K,R-K,0,R,0}, {"cubic",R+K,0,2*R,R-K,2*R,R},
+		{"cubic",2*R,R+K,R+K,2*R,R,2*R}, {"cubic",R-K,2*R,0,R+K,0,R}, {"close"} },
+		fill = "#e04a5a", stroke = { 2, "#3a1016" } },
+} } } })
+local function box(id, x, y)
+	return { id = id, pos = { x, y }, drawing = crate, collider = { rect = { S, S } }, loose = true }
+end
+
 -- The keys are content, so they live here: Rust only knows "an axis driven by two key codes".
 local wasd = {
 	speed = 160,
@@ -113,7 +132,7 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ "A retained world", color = C.text, font_size = 22, no_wrap = true }),
-		ui.text({ "WASD walks, walls stop you · Space jumps · E near the chest carries it · a click opens it", color = C.muted, font_size = 13,
+		ui.text({ "WASD walks and pushes crates · Space jumps · E near the chest carries it · a click opens it", color = C.muted, font_size = 13,
 			no_wrap = true }),
 		-- `pos` is where an entity spawns; after that the world owns where it is. `order = "y"`
 		-- stacks by feet: whoever stands lower draws in front.
@@ -158,6 +177,11 @@ return function()
 			-- Pillars low in the west room, clear of where the hero first walks.
 			block("pillar:1", 200, 470, 40, 40),
 			block("pillar:2", 440, 500, 40, 40),
+			box("crate:door", MID - 12, 446), -- in the doorway: shove it through
+			box("crate:2", 290, 480),
+			box("crate:3", 560, 440),
+			{ id = "ball", pos = { 900, 300 }, drawing = ball, collider = { circle = R, at = { R, R } },
+				loose = { bounce = 0.9, friction = 0.4 } },
 			-- Carried, the chest rides the hero's body — through walks and jumps — held in front.
 			-- On the floor it is solid by its footprint, the bottom of its base; carried, the world
 			-- takes it off the floor.

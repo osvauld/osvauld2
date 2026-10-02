@@ -516,9 +516,10 @@ Rapier body that physics alone moves; it rests asleep, never fixed, so it can be
 spawned at rest it starts asleep. A bounce is now the moving thing's own (walls keep none).
 **Chunk 2, pushing:** what a walker's move bumps into that Rapier moves gets Rapier's character
 impulses, the walker counting as far heavier; a crate's friction drags, so the hero pushes it at
-about half pace. **Lua `loose`:** `loose = true` or `{ bounce, friction }`, strict. Next: a
-bigger room with an inner wall and a doorway, a ball and crates, then a crate on a plate opening a
-gate. Soft bodies (rope,
+about half pace. **Lua `loose`:** `loose = true` or `{ bounce, friction }`, strict. **The demo
+grew:** a 1080×600 room split by an inner wall with a doorway, two pillars, three crates and a ball;
+the world smoke pushes a crate and reads from the dump that it moved and came to rest still loose.
+Next: a crate pushed onto a plate opens a gate. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
