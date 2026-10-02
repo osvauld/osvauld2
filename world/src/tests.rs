@@ -44,6 +44,8 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         collider: None,
         sensor: None,
         loose: None,
+        group: None,
+        blocks: None,
     }
 }
 
@@ -793,7 +795,8 @@ fn a_body_let_go_inside_a_wall_is_pushed_out() {
     // Standing still, let go at x 20 to 28, with a wall from 25: three units deep in it.
     let (xs, sliding) = drop_box(0, Some(25.0), 60);
     let last = *xs.last().unwrap();
-    assert!(last + 8.0 <= 25.1, "pushed out to {last}: {xs:?}");
+    // Out but for Rapier's resting overlap: settling waits until it is under twice that, 0.2.
+    assert!(last + 8.0 <= 25.2, "pushed out to {last}: {xs:?}");
     assert!(!sliding, "and at rest");
 }
 
@@ -1123,4 +1126,92 @@ fn a_walker_pushes_a_loose_thing_and_is_stopped_by_a_fixed_one() {
     let (hero_x, box_x, _) = walk(None);
     assert_eq!(box_x, 20.0, "a fixed box does not move");
     assert!(hero_x < 13.0, "the hero stopped at it: {hero_x}");
+}
+
+#[test]
+fn a_line_stops_only_the_group_it_blocks() {
+    let d = drawing();
+    // A walker from x 0 heading right for half a second at 100/s, a line across x 30, and maybe a
+    // loose box at x 12 in its path; says where the walker and the box ended.
+    let run = |group: Option<&str>, with_box: bool| {
+        let hero = EntitySpec {
+            controller: Some(wasd(100.0)),
+            group: group.map(String::from),
+            ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+        };
+        let line = EntitySpec {
+            blocks: Some(vec!["paddle".into()]),
+            ..solid("line", (30.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d)
+        };
+        let thing = EntitySpec {
+            loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+            ..solid("box", (12.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+        };
+        let mut world = World2d::default();
+        world.reconcile([hero, line].into_iter().chain(with_box.then_some(thing)).collect()).unwrap();
+        world.key("KeyD", true);
+        let mut clock = 0.0;
+        for _ in 0..10 {
+            clock += 0.05;
+            world.tick(clock, 0.05);
+        }
+        let seen = world.inspect();
+        (seen[0].pos.0, seen.get(2).map(|b| b.pos.0))
+    };
+    let (paddle, _) = run(Some("paddle"), false);
+    assert!(paddle < 22.0 && paddle > 20.0, "a paddle stops at the line: {paddle}");
+    let (other, _) = run(None, false);
+    assert!(other > 40.0, "anything else walks through it: {other}");
+    let (_, pushed) = run(Some("paddle"), true);
+    assert!(pushed.unwrap() > 32.0, "a puck it pushes crosses it: {pushed:?}");
+}
+
+#[test]
+fn a_fast_loose_thing_does_not_pass_through_a_thin_wall() {
+    let d = drawing();
+    // Carried at 4000/s and let go 100 short of a wall 2 thick: one step would jump it clean over.
+    let hero = || EntitySpec {
+        controller: Some(wasd(4000.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let held = |carried: bool| EntitySpec {
+        attach: carried.then(|| Attach {
+            to: "hero".into(),
+            part: "body".into(),
+            at: (20.0, 0.0),
+            pivot: (0.0, 0.0),
+            turn: false,
+        }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        ..solid("puck", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let wall = || solid("wall", (320.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero(), held(true), wall()]).unwrap();
+    world.key("KeyD", true);
+    world.tick(0.05, 0.05);
+    world.key("KeyD", false);
+    world.reconcile(vec![hero(), held(false), wall()]).unwrap();
+    for i in 2..12 {
+        world.tick(i as f64 * 0.05, 0.05);
+        }
+    let x = world.inspect()[1].pos.0;
+    assert!(x + 8.0 <= 320.5, "stopped at the wall, not past it: {x}");
+}
+
+#[test]
+fn groups_are_checked() {
+    let d = drawing();
+    let line = |group: Option<&str>, blocks: Option<Vec<String>>, collider: bool| EntitySpec {
+        group: group.map(String::from),
+        blocks,
+        collider: collider.then(|| Collider { shape: Shape::Rect(2.0, 2.0), at: (0.0, 0.0) }),
+        ..solid("line", (0.0, 0.0), Shape::Rect(2.0, 2.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    let err = |world: &mut World2d, spec| world.reconcile(vec![spec]).unwrap_err().to_string();
+    assert!(err(&mut world, line(Some("paddle"), None, false)).contains("need a collider"));
+    assert!(err(&mut world, line(None, Some(vec![]), true)).contains("blocks is empty"));
+    let many = (0..32).map(|i| format!("g{i}")).collect();
+    assert!(err(&mut world, line(None, Some(many), true)).contains("\"g31\" would be the 32nd"));
 }

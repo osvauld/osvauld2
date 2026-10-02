@@ -383,6 +383,8 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             None => None,
         },
         loose: loose(&spec, &owner)?,
+        group: None,
+        blocks: None,
     })
 }
 

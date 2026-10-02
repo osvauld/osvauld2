@@ -37,7 +37,14 @@ pub struct EntitySpec {
     /// Moved by physics alone — pushed, bounced, slowed by the floor — by its collider's shape.
     /// It rests asleep, never fixed, so it can be pushed again.
     pub loose: Option<Material>,
+    /// The collision group its collider is in, by name; without one, the common group.
+    pub group: Option<String>,
+    /// The groups its collider stops, by name — a line only paddles meet; without, it stops all.
+    pub blocks: Option<Vec<String>>,
 }
+
+/// Bit 0 is the common group, everything not named into another.
+const COMMON: u32 = 1;
 
 /// Carried: the entity's `pivot` — a point in its own drawing — rides at `at`, a point in the
 /// carrier's drawing at rest, as the carrier's `part` moves and animates. With `turn` it also
@@ -159,6 +166,8 @@ struct Solid {
     /// Moving under Rapier: let go and not yet settled, or loose and awake.
     sliding: bool,
     loose: Option<Material>,
+    /// `(memberships, filter)` as Rapier bits.
+    groups: (u32, u32),
 }
 
 /// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
@@ -206,6 +215,9 @@ pub struct World2d {
     /// and again only if the part comes back and goes missing anew.
     skipped: HashSet<(String, String)>,
     notes: Vec<String>,
+    /// Collision group names in the order first seen: name `i` is bit `i + 1`. Only grows, so a
+    /// name keeps its bit for the world's life.
+    groups: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -227,6 +239,33 @@ pub enum WorldError {
 }
 
 impl World2d {
+    /// The `(memberships, filter)` bits of `spec`'s collider, naming any new group.
+    fn groups_of(&mut self, spec: &EntitySpec) -> Result<(u32, u32), String> {
+        if (spec.group.is_some() || spec.blocks.is_some()) && spec.collider.is_none() {
+            return Err("group and blocks need a collider: they say what it meets".into());
+        }
+        if spec.blocks.as_ref().is_some_and(|b| b.is_empty()) {
+            return Err("blocks is empty: a collider that stops nothing is no collider".into());
+        }
+        let mut bit = |name: &String| {
+            let i = match self.groups.iter().position(|g| g == name) {
+                Some(i) => i,
+                None if self.groups.len() < 31 => {
+                    self.groups.push(name.clone());
+                    self.groups.len() - 1
+                }
+                None => return Err(format!("too many collision groups: {name:?} would be the 32nd")),
+            };
+            Ok(2u32 << i)
+        };
+        let member = spec.group.as_ref().map_or(Ok(COMMON), &mut bit)?;
+        let filter = match &spec.blocks {
+            Some(names) => names.iter().map(&mut bit).try_fold(0, |all, b| Ok::<_, String>(all | b?))?,
+            None => u32::MAX,
+        };
+        Ok((member, filter))
+    }
+
     /// All-or-nothing: every check and every pose runs before the world is touched, so a bad
     /// description leaves the last good world in place.
     pub fn reconcile(&mut self, specs: Vec<EntitySpec>) -> Result<(), WorldError> {
@@ -267,6 +306,8 @@ impl World2d {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             }
+            self.groups_of(spec)
+                .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             let current = self
                 .by_id
                 .get(&spec.id)
@@ -329,6 +370,7 @@ impl World2d {
             let carrier = (self.ecs.get::<Attached>(entity))
                 .and_then(|a| self.ecs.get::<Solid>(a.to))
                 .map(|s| s.body);
+            let groups = self.groups_of(&spec).expect("checked above");
             let mut e = self.ecs.entity_mut(entity);
             let moves = spec.controller.is_some();
             // Carried is off the floor: no body until it is put down, then one where it was let go.
@@ -337,7 +379,8 @@ impl World2d {
             let sensor = spec.sensor.filter(|_| !aloft);
             let loose = spec.loose;
             let kept = e.get::<Solid>().is_some_and(|s| {
-                s.collider == collider && s.sensor == sensor && s.moves == moves && s.loose == loose
+                (s.collider == collider && s.sensor == sensor && s.moves == moves)
+                    && (s.loose == loose && s.groups == groups)
             });
             if !kept {
                 if let Some(old) = e.take::<Solid>() {
@@ -355,7 +398,7 @@ impl World2d {
                     let dropped = thrown.is_some();
                     let (solid, zone) = (collider.as_ref(), sensor.as_ref());
                     let owner = entity.to_bits();
-                    let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner);
+                    let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
                     // Loose from the start, it waits asleep; let go, it is on the move.
                     if dynamic && !dropped {
                         self.physics.sleep(body);
@@ -373,6 +416,7 @@ impl World2d {
                         body,
                         sliding: dynamic && !self.physics.asleep(body),
                         loose,
+                        groups,
                     });
                 }
             }

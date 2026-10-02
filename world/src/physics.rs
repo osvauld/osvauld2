@@ -110,6 +110,11 @@ impl Default for Physics {
     fn default() -> Self {
         let mut world = PhysicsWorld::new();
         world.gravity = Vector::ZERO;
+        // Rapier's tolerances are in metres; ours are drawing units, about a hundred to the metre.
+        // Left at 1, a body could go no faster than 400 units a second, and an overlap was pushed
+        // apart at 3. Resting overlap stays a tenth of a unit, not half: less than a pixel shows.
+        world.integration_parameters.length_unit = 100.0;
+        world.integration_parameters.normalized_allowed_linear_error = 0.001;
         Self { world }
     }
 }
@@ -127,6 +132,8 @@ fn shape(c: &Collider, anchor: (f64, f64)) -> ColliderBuilder {
 impl Physics {
     /// A body for an entity whose origin is at `origin`, sitting at its solid shape's centre (or
     /// its sensor's, with none). `owner` comes back with every overlap. Scale is not applied.
+    /// `groups` is the solid shape's `(memberships, filter)` bits: two solids meet only when each
+    /// is in a group the other blocks.
     pub(crate) fn add(
         &mut self,
         solid: Option<&Collider>,
@@ -134,6 +141,7 @@ impl Physics {
         origin: (f64, f64),
         kind: Body,
         owner: u64,
+        groups: (u32, u32),
     ) -> RigidBodyHandle {
         let anchor = solid.or(sensor).expect("a body has a shape").centre();
         let at = Vector::new((origin.0 + anchor.0) as f32, (origin.1 + anchor.1) as f32);
@@ -157,6 +165,11 @@ impl Physics {
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(0.0)
+                .collision_groups(InteractionGroups::new(
+                    Group::from_bits_retain(groups.0),
+                    Group::from_bits_retain(groups.1),
+                    InteractionTestMode::And,
+                ))
                 .user_data(owner as u128);
             colliders.insert_with_parent(solid, body, bodies);
         }
@@ -220,17 +233,20 @@ impl Physics {
 
     /// A thrown body that has slowed to rest becomes fixed — an obstacle again, and no more work.
     /// Not while it is still pressed into something: Rapier pushes it out slowly, so it would
-    /// otherwise settle inside a wall. Resting contact keeps about 0.012 of overlap on purpose.
+    /// otherwise settle inside a wall. Resting contact keeps some overlap on purpose — Rapier's
+    /// allowed error — so pressed is deeper than twice that. Measured afresh: Rapier keeps a
+    /// contact's old depth until the pair moves past its tolerance, so a body pushed out after it
+    /// first touched can look pressed in for good.
     pub(crate) fn settle(&mut self, body: RigidBodyHandle) -> bool {
-        let collider = self.world.bodies[body].colliders()[0];
-        let pressed = self
-            .world
-            .narrow_phase
-            .contact_pairs_with(collider)
-            .any(|pair| {
-                let mut points = pair.manifolds.iter().flat_map(|m| m.points.iter());
-                points.any(|p| p.dist < -0.05)
-            });
+        let colliders = &self.world.colliders;
+        let me = self.world.bodies[body].colliders()[0];
+        let deep = -2.0 * self.world.integration_parameters.allowed_linear_error();
+        let pressed = self.world.narrow_phase.contact_pairs_with(me).any(|pair| {
+            let other = if pair.collider1 == me { pair.collider2 } else { pair.collider1 };
+            let (a, b) = (&colliders[me], &colliders[other]);
+            let now = rapier2d::parry::query::contact(a.position(), a.shape(), b.position(), b.shape(), 0.0);
+            now.ok().flatten().is_some_and(|c| c.dist < deep)
+        });
         let rb = &mut self.world.bodies[body];
         let resting = !pressed && rb.linvel().length() < AT_REST;
         if resting {
@@ -260,11 +276,12 @@ impl Physics {
         dt: f64,
     ) -> (f64, f64) {
         let rb = &self.world.bodies[body];
-        let (pose, shape) = (
-            *rb.position(),
-            self.world.colliders[rb.colliders()[0]].shared_shape().clone(),
-        );
-        let filter = || QueryFilter::default().exclude_rigid_body(body).exclude_sensors();
+        let solid = &self.world.colliders[rb.colliders()[0]];
+        let (pose, shape, groups) = (*rb.position(), solid.shared_shape().clone(), solid.collision_groups());
+        let filter = || {
+            let filter = QueryFilter::default().exclude_rigid_body(body).exclude_sensors();
+            filter.groups(groups)
+        };
         let queries = self.world.query_pipeline_with_filter(filter());
         let wanted = Vector::new(wanted.0 as f32, wanted.1 as f32);
         let mut hits = vec![];
@@ -288,10 +305,11 @@ impl Physics {
     pub(crate) fn bring_in(&mut self, body: RigidBodyHandle, from: RigidBodyHandle) {
         let rb = &self.world.bodies[body];
         let (mut pose, spot) = (*rb.position(), rb.translation());
-        let shape = self.world.colliders[rb.colliders()[0]].shared_shape().clone();
+        let solid = &self.world.colliders[rb.colliders()[0]];
+        let (shape, groups) = (solid.shared_shape().clone(), solid.collision_groups());
         pose.translation = self.world.bodies[from].translation();
         let neither = |_, c: &rapier2d::geometry::Collider| ![Some(body), Some(from)].contains(&c.parent());
-        let filter = QueryFilter::default().exclude_sensors().predicate(&neither);
+        let filter = QueryFilter::default().exclude_sensors().predicate(&neither).groups(groups);
         let queries = self.world.query_pipeline_with_filter(filter);
         let moved = WALKER.move_shape(1.0, &queries, &*shape, &pose, spot - pose.translation, |_| {});
         self.world.bodies[body].set_translation(pose.translation + moved.translation, true);
