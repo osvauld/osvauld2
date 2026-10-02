@@ -548,7 +548,8 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   writes that one point on release. It snaps to the finest step the zoom shows (whole units at
   1×, twentieths up close), and an end point carries the cubic controls either side of it. The
   camera's `on_zoom` tells Lua its scale, so the dots and the selection outline keep their screen
-  size. A drag on the asset no longer pans.
+  size. The canvas sets `drag_on_shapes`, so a drag from a part or a dot is the editor's and one
+  from empty canvas pans.
   **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
   its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
   pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.

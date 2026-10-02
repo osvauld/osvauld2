@@ -234,7 +234,8 @@ local function canvas(parts)
 			end
 		end,
 		-- A held dot follows the pointer on the canvas alone; letting go writes its one point.
-		-- A drag from anywhere else moves nothing, and doesn't pan either: pan from the margin.
+		-- A drag from a part moves nothing yet; one from empty canvas pans.
+		drag_on_shapes = true,
 		on_drag = function(e)
 			if e.phase == "start" then
 				local i, j, k = (e.shape or ""):match("^pt:(%d+):(%d+):(%d+)$")

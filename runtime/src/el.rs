@@ -311,6 +311,9 @@ pub(crate) struct Behaviour<M> {
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
+    /// `on_drag` takes only a press on one of the element's named shapes; any other falls
+    /// through, so a camera around it can still pan.
+    pub drag_on_shapes: bool,
     pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
     pub on_hover: Option<(Id, Box<dyn Fn(HoverEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
@@ -355,6 +358,7 @@ impl<M> Default for Behaviour<M> {
             input: None,
             scroll: None,
             on_drag: None,
+            drag_on_shapes: false,
             overlay: None,
             on_right_click: None,
             offset: (0.0, 0.0),
@@ -871,6 +875,12 @@ impl<M> El<M> {
 
     pub fn on_drag(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
         self.behaviour.on_drag = Some((id.into(), Box::new(map)));
+        self
+    }
+
+    /// See [`Behaviour::drag_on_shapes`].
+    pub fn drag_on_shapes(mut self) -> Self {
+        self.behaviour.drag_on_shapes = true;
         self
     }
 

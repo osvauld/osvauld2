@@ -329,6 +329,7 @@ impl<M: 'static> Registry<M> {
         // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
         prop!(scroll_x),
         prop!(scroll_y),
+        prop!(drag_on_shapes),
         // input
         prop!(autofocus),
     ];
@@ -367,6 +368,9 @@ pub(crate) fn apply<M: 'static>(
             }
             if k == "zoom_min" || k == "zoom_max" {
                 zoom_limit(node, &k, &v)?;
+            }
+            if k == "drag_on_shapes" && !node.contains_key("on_drag")? {
+                return Err(mlua::Error::runtime("drag_on_shapes needs on_drag"));
             }
             if k == "press_scale" {
                 missing_id(id, "press_scale")?;

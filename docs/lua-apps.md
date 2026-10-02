@@ -496,6 +496,7 @@ before `fade`.
 | | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
 | | `on_zoom` | `function(e)` — `e.scale` is the camera's zoom, told on the first frame and on each change. Divide by it to keep a mark (a selection outline, a handle) its size on screen. Only beside `zoomable`/`zoom_x`. |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
+| drag | `drag_on_shapes` | bool — `on_drag` takes only a press on one of the frame's named shapes; a press beside them falls through, so a camera around it still pans. Only beside `on_drag`. |
 | input | `value` · `autofocus` | string · bool |
 
 Four props need an `id` because the shell keys state by it: `scroll_*` (offset), `zoomable` /

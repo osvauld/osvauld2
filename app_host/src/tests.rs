@@ -1271,6 +1271,21 @@ fn zoom_limits_are_checked() {
     }
 }
 
+/// `drag_on_shapes` narrows an `on_drag`; alone it narrows nothing, so it is an error.
+#[test]
+fn drag_on_shapes_needs_on_drag() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let run = |props: &str| {
+        let node: Table = lua.load(format!("return ui.col({{ {props} }})")).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut cx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut cx).err().map(|e| e.to_string())
+    };
+    assert_eq!(run("id = 'c', drag_on_shapes = true, on_drag = function() end"), None);
+    let err = run("id = 'c', drag_on_shapes = true").unwrap_or_default();
+    assert!(err.contains("drag_on_shapes needs on_drag"), "{err}");
+}
+
 #[test]
 fn on_key_needs_a_stable_id() {
     let (lua, _) = sandboxed_vm().unwrap();
