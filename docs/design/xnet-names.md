@@ -82,6 +82,26 @@ a squatted name pointing at a real node, never a forged ticket.
   who is in and later raise a visitor's role; the cost — anyone can mint rows — is the rate
   limit's job.
 
-## 7. Open
+## 7. Next — registering from Sthalam (discussed 2026-10-03, not decided)
+
+Registration is needed for two things: publishing a site and claiming a username.
+
+- **Model:** writes are rare and sponsored; reads are free from a fixed endpoint. Users never see
+  an account or APT: their Aptos address is `sha3(pubkey ‖ 0x00)` of the identity key, and
+  `identity::Signer::sign` already signs raw bytes. One sponsor account (hosted gas station
+  later, devnet faucet now) pays every write; the contract itself cannot pay gas.
+- **Proposed: two namespaces** in one module — sites (name → ticket) and usernames
+  (name → identity). A username can be proven on-chain: the contract hashes the submitted
+  public key and requires it to equal the signer's address.
+- **To research:** hand-rolled BCS transactions (`bcs` crate, ~100–150 lines) vs an Aptos Rust
+  SDK; whether a sponsored transaction can create a not-yet-existing account.
+- **Lookup trust:** the view endpoint returns no proof. A lying endpoint can't forge a node (the
+  ticket is node-signed) but can redirect a name to another real node. Mitigations later:
+  compare two endpoints, or the deferred node-owner check. Resolutions are cacheable — a ticket
+  changes only on `update`. Public endpoints rate-limit anonymous callers.
+- **Threat-model note:** the identity key now also signs Aptos transactions. Safe by distinct
+  signing prefixes, but `expert-secure-core` should review it.
+
+## 8. Open
 
 - Record size: a ticket is a few hundred bytes of base64 JSON; storage deposit scales with it.

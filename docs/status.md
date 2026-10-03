@@ -340,6 +340,20 @@ could still write into the wrong account; `join_item` retried after local edits 
 overwrite them (always starts from an empty doc); the bridge still has no per-connection
 frame-size cap or write deadline.
 
+**2026-10-03: Xnet names land** ([`design/xnet-names.md`](design/xnet-names.md)). A bare name
+typed where a ticket goes resolves on Aptos to a public invite and is redeemed like a pasted
+one. `courier::invite` gains a signed `public` flag: a public invite is reusable and revoked by
+putting its nonce in the same spent set single-use invites use; pre-flag tickets decode as
+single-use. `xnet_names/` is the Move registry (`register`/`update`/`transfer`, free `resolve`
+view), 8 Move tests, live on devnet — measured `register` 0.0064 APT, `update` 0.000085 APT.
+`shell2::names::resolve` is one `POST /v1/view`; `node::join` is now the single
+ticket/invite/name dispatch for the claim box and `ClaimNode`. Verified by `cargo test` plus an
+`--ignored` test against live devnet; the UI path and `smoke.py` were **not** run. Limits: a
+join reaches only a node on the same machine (shell2 talks to kunki over its local socket;
+nothing dials iroh), and names can only be registered with the `aptos` CLI today. Next:
+registration from Sthalam with the identity key, a username namespace, a kunki rate limit on
+public redemptions.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax
