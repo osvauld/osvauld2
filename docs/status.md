@@ -79,6 +79,9 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: node relay (forward by `level` without decoding),
   DeepFilterNet, courier auth on the connection. `iroh-roq` was dropped: abandoned upstream,
   pinned to iroh 0.35.
+- next: split `voice` into a lib + thin test CLI; shell2 owns the device's one iroh endpoint
+  (courier + voice ALPNs) and exposes calls to Lua behind a mic capability; the relay lives in
+  `kunki`, as its first iroh transport.
 
 ## Not built
 
