@@ -60,14 +60,23 @@ local drop = gfx.clip({ length = 1, tracks = {
 
 local WIN = 5
 local score = { left = 0, right = 0 }
-local pucks = 1 -- a goal puts down a fresh puck: a new id spawns at the centre spot
+local SPOT = { W / 2 - PUCK, H / 2 - PUCK } -- the puck's place at a faceoff
 local live = false -- the puck on the spot is in play; false while it drops
 local banner = "Faceoff" -- what just happened, until the puck is live again
 local winner = nil -- "Blue" or "Red" at WIN goals; no puck is put down after that
+local scored = false -- the puck sits in the net until the "faceoff" timer
+local PAUSE = 1.5 -- seconds a goal is shown before the faceoff
+
+-- Back on the spot for a faceoff. After a win there is no puck: the description puts it there.
+local function faceoff()
+	if not winner then world("rink"):set("puck", { pos = SPOT }) end
+	live, scored = false, false
+end
 
 local function new_game()
-	score.left, score.right, winner = 0, 0, nil
-	pucks, live, banner = pucks + 1, false, "Faceoff"
+	world("rink"):cancel("faceoff")
+	faceoff()
+	score.left, score.right, winner, banner = 0, 0, nil, "Faceoff"
 end
 
 local function button(id, label, on_click)
@@ -88,17 +97,22 @@ return function()
 			id = "rink", width = W, height = H, fill = C.ice, radius = 12, stroke = { 3, C.rim },
 			-- A puck in a goal: score for the other side and face off again, or end the game.
 			on_zone = function(e)
-				if e.phase ~= "enter" or e.who ~= "puck:" .. pucks then return end
+				if e.phase ~= "enter" or e.who ~= "puck" or scored then return end
 				local side = e.id == "goal:left" and "right" or "left"
 				score[side] = score[side] + 1
 				local who = side == "left" and "Blue" or "Red"
 				banner = "GOAL! " .. who .. " scores"
 				if score[side] >= WIN then winner = who end
-				pucks, live = pucks + 1, false
+				scored = true
+				world("rink"):set("puck", { velocity = { 0, 0 } }) -- the net catches it
+				world("rink"):after(PAUSE, "faceoff")
+			end,
+			on_timer = function(e)
+				if e.name == "faceoff" then faceoff() end
 			end,
 			-- The drop played out: the puck gets its body and play is on.
 			on_clip_end = function(e)
-				if e.id == "puck:" .. pucks then live, banner = true, nil end
+				if e.id == "puck" then live, banner = true, nil end
 			end,
 			{ id = "markings", pos = { 0, 0 }, drawing = markings },
 			{ id = "spot", pos = { W / 2 - 60, H / 2 - 60 }, drawing = spot },
@@ -117,7 +131,7 @@ return function()
 			block("net:right", W - 8, MOUTH_TOP, 8, MOUTH_BOTTOM - MOUTH_TOP),
 			paddle("blue", 150, C.left, { "KeyA", "KeyD", "KeyW", "KeyS" }),
 			paddle("red", W - 150, C.right, { "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown" }),
-			not winner and { id = "puck:" .. pucks, pos = { W / 2 - PUCK, H / 2 - PUCK },
+			not winner and { id = "puck", pos = SPOT,
 				drawing = puck_drawing, clip = not live and drop or nil,
 				collider = live and { circle = PUCK, at = { PUCK, PUCK } } or nil,
 				loose = live and { bounce = 0.95, friction = 0.2 } or nil },

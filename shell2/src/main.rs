@@ -531,8 +531,8 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
     })
 }
 
-fn world_json(entities: &[world::EntityInspection]) -> serde_json::Value {
-    let entities = entities.iter().map(|e| {
+fn world_json(world: &world::WorldInspection) -> serde_json::Value {
+    let entities = world.entities.iter().map(|e| {
         let clip = e.clip.as_ref().map(|c| {
             serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped })
         });
@@ -543,7 +543,8 @@ fn world_json(entities: &[world::EntityInspection]) -> serde_json::Value {
             "attached": attached, "zones": e.zones, "clip": clip,
         })
     });
-    serde_json::json!({ "entities": entities.collect::<Vec<_>>() })
+    let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
+    serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>() })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.

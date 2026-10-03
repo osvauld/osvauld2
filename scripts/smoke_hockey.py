@@ -1,5 +1,5 @@
 """Table hockey: the faceoff holds the puck bodiless for its drop, the centre line stops a paddle
-but not the puck, a goal scores and puts a fresh puck on the spot. Read from the dump, not pixels."""
+but not the puck, a goal scores and puts the puck back on the spot. Read from the dump, not pixels."""
 
 import sys
 from pathlib import Path
@@ -16,14 +16,18 @@ def texts(tree):
     return found
 
 
-def world(tree):
+def rink(tree):
     if tree.get("id") == "rink":
-        return {e["id"]: e for e in tree["world"]["entities"]}
+        return tree
     for child in tree.get("children", []):
-        found = world(child)
+        found = rink(child)
         if found:
             return found
     return None
+
+
+def world(tree):
+    return {e["id"]: e for e in rink(tree)["world"]["entities"]}
 
 
 with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
@@ -47,11 +51,11 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
 
     # The faceoff: the puck drops for a second with no body, then is in play.
     seen, said = look()
-    assert seen["puck:1"]["body"] == "none" and "Faceoff" in said and "0  :  0" in said, (seen, said)
+    assert seen["puck"]["body"] == "none" and "Faceoff" in said and "0  :  0" in said, (seen, said)
     s.rpc.advance(1.1)
     s.rpc.frame(2)
     seen, said = look()
-    assert seen["puck:1"]["body"] == "loose" and "Faceoff" not in said, (seen["puck:1"], said)
+    assert seen["puck"]["body"] == "loose" and "Faceoff" not in said, (seen["puck"], said)
 
     # Red steps out of the way; blue runs at the puck. Blue stops at the centre line (its right
     # edge at 447, the line at 448); the puck crosses and goes on into the right goal.
@@ -59,22 +63,29 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     hold("KeyD", 40)
     seen, _ = look()
     assert abs(seen["blue"]["pos"][0] + 56 - 448) < 2, ("blue stopped at the line", seen["blue"])
-    assert seen["puck:1"]["pos"][0] > 450, ("the puck crossed it", seen["puck:1"])
+    assert seen["puck"]["pos"][0] > 450, ("the puck crossed it", seen["puck"])
     s.rpc.frame(90)
     seen, said = look()
     assert "1  :  0" in said and "GOAL! Blue scores" in said, said
-    assert "puck:1" not in seen and seen["puck:2"]["body"] == "none", ("a fresh puck drops", seen)
+    # The puck sits in the net while the goal shows; Rust holds the faceoff timer.
+    timers = s.rpc.dump_tree(item)
+    timers = [t["name"] for t in rink(timers)["world"]["timers"]]
+    assert timers == ["faceoff"] and seen["puck"]["pos"][0] > 800, (timers, seen["puck"])
+    s.rpc.advance(1.6)
+    s.rpc.frame(2)
+    seen, said = look()
+    assert seen["puck"]["body"] == "none" and seen["puck"]["pos"] == [434, 234], ("back on the spot", seen)
     s.rpc.advance(1.1)
     s.rpc.frame(2)
     seen, said = look()
-    assert seen["puck:2"]["body"] == "loose" and not any(t.startswith("GOAL") for t in said), said
+    assert seen["puck"]["body"] == "loose" and not any(t.startswith("GOAL") for t in said), said
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
 
-    # Blue still stands at the line, over the spot's edge: the new puck came down in it and is
+    # Blue still stands at the line, over the spot's edge: the puck came down in it and is
     # pushed clear, not left asleep inside the paddle.
     s.rpc.frame(60)
     seen, _ = look()
-    assert seen["puck:2"]["pos"][0] >= seen["blue"]["pos"][0] + 56 - 1, ("pushed out of blue", seen)
+    assert seen["puck"]["pos"][0] >= seen["blue"]["pos"][0] + 56 - 1, ("pushed out of blue", seen)
     if len(sys.argv) > 1:
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a goal scored and a fresh puck")
+    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a goal scored and the puck back on the spot")

@@ -1,7 +1,9 @@
 //! Lua declarations for immutable runtime Frame resources. This module validates and compiles
 //! aggregate values; it never renders or retains VM callbacks.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use glam::{Quat, Vec3};
@@ -340,6 +342,82 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
 }
 
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
+/// What `world(id)` returns: commands to a world at a moment, looked up by id at each call.
+struct WorldHandle {
+    id: String,
+    worlds: crate::Worlds,
+    viewing: Rc<Cell<bool>>,
+}
+
+impl WorldHandle {
+    /// Runs a command on the world, refusing while `view` describes.
+    fn command<R>(
+        &self,
+        owner: &str,
+        f: impl FnOnce(&mut world::World2d) -> Result<R, world::WorldError>,
+    ) -> mlua::Result<R> {
+        if self.viewing.get() {
+            return Err(Error::runtime(format!("{owner}: only in a handler; view describes")));
+        }
+        let mut worlds = self.worlds.borrow_mut();
+        let world = (worlds.get_mut(&self.id))
+            .ok_or_else(|| Error::runtime(format!("{owner}: there is no such world")))?;
+        f(world).map_err(|e| Error::runtime(format!("world {:?}: {e}", self.id)))
+    }
+}
+
+impl UserData for WorldHandle {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy } })`; either may be left out.
+        methods.add_method("set", |_, this, (entity, fields): (String, Table)| {
+            let owner = format!("world {:?}:set {entity:?}", this.id);
+            named_fields(&fields, &owner, &["pos", "velocity"])?;
+            let pair = |field| match maybe_table(&fields, &owner, field)? {
+                Some(t) => point(t, &format!("{owner}.{field}")).map(|p| Some((p.x, p.y))),
+                None => Ok(None),
+            };
+            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")? };
+            this.command(&owner, |w| w.set(&entity, to))
+        });
+        // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
+        methods.add_method("after", |_, this, (secs, name): (Value, Value)| {
+            let owner = format!("world {:?}:after", this.id);
+            let secs = match secs {
+                Value::Number(n) => n,
+                Value::Integer(i) => i as f64,
+                other => {
+                    let what = other.type_name();
+                    return Err(Error::runtime(format!("{owner}: seconds must be a number, got {what}")));
+                }
+            };
+            let name = timer_name(name, &owner)?;
+            this.command(&owner, |w| w.after(&name, secs))
+        });
+        methods.add_method("cancel", |_, this, name: Value| {
+            let owner = format!("world {:?}:cancel", this.id);
+            let name = timer_name(name, &owner)?;
+            this.command(&owner, |w| Ok(w.cancel(&name)))
+        });
+    }
+}
+
+fn timer_name(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!(
+            "{owner}: the timer's name must be a string, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+pub(crate) fn install_world(lua: &Lua, worlds: crate::Worlds, viewing: Rc<Cell<bool>>) -> mlua::Result<()> {
+    let world = lua.create_function(move |_, id: String| {
+        Ok(WorldHandle { id, worlds: worlds.clone(), viewing: viewing.clone() })
+    })?;
+    lua.globals().set("world", world)
+}
+
 pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
     let owner = format!("world entity {index}");
     let fields = [

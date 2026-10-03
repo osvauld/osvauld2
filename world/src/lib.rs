@@ -43,6 +43,16 @@ pub struct EntitySpec {
     pub blocks: Option<Vec<String>>,
 }
 
+/// A change Lua makes at a moment, not by describing: an existing entity's description never
+/// moves it. Unset fields are kept.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Set {
+    /// The drawing box's top-left, as the description's `pos`.
+    pub pos: Option<(f64, f64)>,
+    /// Per second; only a loose thing's, since Rapier moves only those.
+    pub velocity: Option<(f64, f64)>,
+}
+
 /// Bit 0 is the common group, everything not named into another.
 const COMMON: u32 = 1;
 
@@ -76,6 +86,20 @@ pub struct EntityInspection {
     /// Ids of the zones it is inside, sorted.
     pub zones: Vec<String>,
     pub clip: Option<ClipInspection>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimerInspection {
+    pub name: String,
+    /// Seconds until it fires.
+    pub left: f64,
+}
+
+/// A world as an agent reads it: its entities and the timers still to fire.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldInspection {
+    pub entities: Vec<EntityInspection>,
+    pub timers: Vec<TimerInspection>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,6 +139,17 @@ pub enum WorldEvent {
     Enter { id: String, who: String },
     /// It left the sensor — or one of the two stopped being there, carried or despawned.
     Exit { id: String, who: String },
+    /// A timer Lua set with `after` came due.
+    Timer(String),
+}
+
+/// A moment Lua asked for. Counted from the world's next frame: a handler has no clock of its
+/// own, and the world's is its last frame's — stale if it was idle.
+struct Timer {
+    name: String,
+    secs: f64,
+    /// On the frame clock, once that next frame has come.
+    due: Option<f64>,
 }
 
 /// How entities stack when drawn.
@@ -218,6 +253,7 @@ pub struct World2d {
     /// Collision group names in the order first seen: name `i` is bit `i + 1`. Only grows, so a
     /// name keeps its bit for the world's life.
     groups: Vec<String>,
+    timers: Vec<Timer>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -232,6 +268,10 @@ pub enum WorldError {
     Attach(String, String),
     #[error("entity {0:?}: {1}")]
     Collider(String, String),
+    #[error("entity {0:?}: {1}")]
+    Set(String, String),
+    #[error("timer {0:?}: seconds must be a finite number, zero or more")]
+    Timer(String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -613,6 +653,9 @@ impl World2d {
     /// step controllers move by (the runtime caps it after a stall).
     pub fn tick(&mut self, elapsed: f64, dt: f64) {
         self.clock = elapsed;
+        for t in self.timers.iter_mut().filter(|t| t.due.is_none()) {
+            t.due = Some(elapsed + t.secs);
+        }
         self.physics.step(dt);
         self.slide_thrown();
         self.sense();
@@ -665,6 +708,39 @@ impl World2d {
                 self.events.push(WorldEvent::ClipEnd(id));
             }
         }
+        let (mut due, left) = (std::mem::take(&mut self.timers).into_iter())
+            .partition::<Vec<_>, _>(|t| t.due.is_some_and(|d| d <= elapsed));
+        self.timers = left;
+        due.sort_by(|a, b| a.due.partial_cmp(&b.due).expect("finite").then(a.name.cmp(&b.name)));
+        self.events.extend(due.into_iter().map(|t| WorldEvent::Timer(t.name)));
+    }
+
+    /// Fires `Timer(name)` once `secs` have passed; the same name again starts it over.
+    pub fn after(&mut self, name: &str, secs: f64) -> Result<(), WorldError> {
+        if !(secs.is_finite() && secs >= 0.0) {
+            return Err(WorldError::Timer(name.to_string()));
+        }
+        self.cancel(name);
+        let name = name.to_string();
+        self.timers.push(Timer { name, secs, due: None });
+        Ok(())
+    }
+
+    /// Drops the timer `name`, if there is one.
+    pub fn cancel(&mut self, name: &str) {
+        self.timers.retain(|t| t.name != name);
+    }
+
+    /// The timers still to fire, by name.
+    pub fn timers(&self) -> Vec<TimerInspection> {
+        let mut timers: Vec<_> = (self.timers.iter())
+            .map(|t| TimerInspection {
+                name: t.name.clone(),
+                left: t.due.map_or(t.secs, |d| d - self.clock),
+            })
+            .collect();
+        timers.sort_by(|a, b| a.name.cmp(&b.name));
+        timers
     }
 
     /// A key went down or up; `code` is the physical key name, as axes and actions name it.
@@ -705,7 +781,7 @@ impl World2d {
     /// Whether anything plays or moves — only then does the world need the frame clock.
     pub fn needs_ticks(&self) -> bool {
         let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
-        self.ticking || self.order.iter().any(sliding)
+        self.ticking || !self.timers.is_empty() || self.order.iter().any(sliding)
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take
@@ -737,6 +813,39 @@ impl World2d {
             }
             Some(_) => {}
         }
+    }
+
+    /// Lua's command between ticks: puts an entity at `to.pos` and sets its velocity. A body
+    /// moved into something is pushed out awake, like one spawned there.
+    pub fn set(&mut self, id: &str, to: Set) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
+        let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
+        let finite = |p: Option<(f64, f64)>| p.is_none_or(|(x, y)| x.is_finite() && y.is_finite());
+        if !finite(to.pos) || !finite(to.velocity) {
+            return Err(err("pos and velocity must be finite numbers"));
+        }
+        let e = self.ecs.entity(entity);
+        if e.contains::<Attached>() {
+            return Err(err("it is carried: it goes where its carrier puts it"));
+        }
+        let solid = e.get::<Solid>().map(|s| {
+            let anchor = s.collider.as_ref().or(s.sensor.as_ref()).expect("a body has a shape");
+            (s.body, anchor.centre(), s.loose.is_some())
+        });
+        if to.velocity.is_some() && !solid.is_some_and(|(.., loose)| loose) {
+            return Err(err("velocity needs a loose thing: Rapier moves only those"));
+        }
+        if let Some((x, y)) = to.pos {
+            let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
+            (t.x, t.y) = (x, y);
+        }
+        if let Some((body, (cx, cy), loose)) = solid {
+            let at = to.pos.map(|(x, y)| (x + cx, y + cy));
+            self.physics.set(body, at, to.velocity);
+            // Awake now, so followed until it rests again.
+            self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding |= loose;
+        }
+        Ok(())
     }
 
     pub fn transform(&self, id: &str) -> Option<Transform> {

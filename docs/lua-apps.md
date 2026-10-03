@@ -293,7 +293,7 @@ local wasd = {
   leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
 
-### Moments — `on_action`, `on_move`, `on_clip_end` and `on_zone`
+### Moments — `on_action`, `on_move`, `on_clip_end`, `on_zone` and `on_timer`
 
 The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
 a second at most, never once a frame.
@@ -321,6 +321,37 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
 - A jump is all three together, with no jump in Rust: `on_action` sets `jumping`, the hero
   describes `clip = jumping and jump or …` (a once clip lifting `body`, which the other parts hang
   off — the feet stay put, so draw order ignores it), and `on_clip_end` clears `jumping`.
+
+### Commands — `world(id):set`
+
+A description never moves an entity that already exists: its `pos` is where it spawns. To change
+one at a moment — a puck back on the spot, a striker launched — a handler commands the world:
+
+```lua
+world("rink"):set("puck", { pos = { 434, 234 } })             -- put it there
+world("rink"):set("puck", { velocity = { 600, 0 } })          -- send it off; { 0, 0 } stops it
+```
+
+- `pos` is the drawing box's top-left, as in the description; `velocity` is per second, and only
+  a `loose` thing has one to set. Either may be left out; any other field is an error.
+- It applies at once — the dump shows it before the next frame. Something put inside a solid is
+  pushed out, as when it spawns there.
+- Only in handlers: `set` inside `view` is an error, since a description only describes. A
+  carried entity goes where its carrier puts it, so it cannot be set.
+- The names are the dump's: what `set` writes is what an agent reads back.
+
+A moment later is a timer, kept by Rust on the world's frame clock — Lua runs once, when it fires:
+
+```lua
+world("rink"):after(1.5, "faceoff")      -- on_timer gets e.name == "faceoff" then
+world("rink"):cancel("faceoff")          -- never mind
+on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   -- on ui.world
+```
+
+- It counts from the world's next frame, since a handler has no clock of its own. The same name
+  again starts it over — a cooldown is `after` on every press.
+- A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
+  lists them as `timers = { { name, left } }` beside `entities`.
 
 ### Facing and gait — decided in Lua
 

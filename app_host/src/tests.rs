@@ -4479,3 +4479,99 @@ fn pie_demo_reads_the_shape_the_runtime_names() {
     let _ = app.view();
     assert!(app.console(100).is_empty(), "{:?}", app.console(100));
 }
+
+#[test]
+fn a_handler_sets_an_entity_through_world_and_is_checked_strictly() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(fields, id) \
+           local ok, e = pcall(function() world('room'):set(id or 'hero', fields) end) \
+           if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               try({{ pos = {{ 30, 5 }} }}) \
+               try({{ velocity = {{ 1, 0 }} }}) \
+               try({{ speed = 1 }}) \
+               try({{ pos = {{ 1 }} }}) \
+               try({{ pos = {{ 0, 0 }} }}, 'ghost') end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    assert_eq!(app.inspect_worlds()["room"].entities[0].pos, (30.0, 5.0));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "velocity needs a loose thing",
+        "world \"room\":set \"hero\": unknown field speed",
+        "world \"room\":set \"hero\".pos needs x and y",
+        "entity \"ghost\": there is no such entity",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}
+
+#[test]
+fn world_set_is_refused_while_view_describes() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = "return function() world('room'):set('hero', { pos = { 1, 1 } }) \
+        return ui.text({ 'x' }) end";
+    main.insert(0, view).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let console = app.console(10).join("\n");
+    assert!(console.contains("only in a handler; view describes"), "{console}");
+}
+
+#[test]
+fn a_handler_sets_a_timer_and_on_timer_hears_it() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               local room = world('room') \
+               room:after(0.5, 'ping') \
+               room:after(0.2, 'never') room:cancel('never') \
+               try(function() room:after('soon', 'x') end) \
+               try(function() room:after(1, 7) end) \
+               try(function() room:after(-1, 'x') end) end, \
+             on_timer = function(e) table.insert(heard, 'timer ' .. e.name) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 1.0));
+    let timers = &app.inspect_worlds()["room"].timers;
+    assert_eq!((timers.len(), timers[0].name.as_str(), timers[0].left), (1, "ping", 0.5));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 1.5));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "world \"room\":after: seconds must be a number, got string",
+        "world \"room\":after: the timer's name must be a string, got integer",
+        "timer \"x\": seconds must be a finite number, zero or more",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+    assert!(heard.ends_with("timer ping"), "{heard}");
+    assert!(app.inspect_worlds()["room"].timers.is_empty());
+}

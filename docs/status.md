@@ -525,8 +525,15 @@ scores. **Collision groups:** `group` and `blocks` — the centre line stops pad
 `length_unit = 100`, and settling measures overlap afresh. **Hockey rules (Lua):** a faceoff
 puck drops for a second with no body (a clip; `on_clip_end` makes it live), first to 5 wins.
 `smoke_hockey.py` reads it all from the dump — and caught a puck put down inside a paddle asleep
-for good: a loose body spawned in something now starts awake and is pushed out. Next: controller
-acceleration, then a `follow` controller for a computer opponent. Soft bodies (rope,
+for good: a loose body spawned in something now starts awake and is pushed out. **Commands:** a
+handler changes an entity at a moment with `world(id):set(entity, { pos, velocity })` — refused
+in `view`; hockey's puck keeps one id and is put back on the spot. **Timers:**
+`world(id):after(secs, name)` → `on_timer`, a deadline Rust holds on the world's frame clock (the
+dump lists them); a goal now shows for 1.5 s with the puck caught in the net. It shook out a
+panic: a body removed inside a sensor, then a frame with no time in it, left Rapier a stale pair.
+The Lua ↔ world contract is three kinds of call: describe (`view`), command (`set`, `after`),
+and next, `on_hit` and questions (`ray`); then moving things give Rapier their velocity, so a paddle hits rather than
+shoves. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds

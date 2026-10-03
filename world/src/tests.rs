@@ -1242,3 +1242,106 @@ fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() 
     let x = world.inspect()[1].pos.0;
     assert!(x >= 7.8, "pushed clear of the hero: {x}");
 }
+
+#[test]
+fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
+    let d = drawing();
+    let specs = || {
+        let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
+        let puck = EntitySpec {
+            loose: Some(Material { bounce: 0.5, friction: 0.0 }),
+            ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+        };
+        vec![wall, puck]
+    };
+    let mut world = World2d::default();
+    world.reconcile(specs()).unwrap();
+    world.tick(0.0, 0.0);
+    // Asleep at rest: set wakes it, and it goes on until the wall stops it.
+    let to = Set { pos: Some((50.0, 0.0)), velocity: Some((200.0, 0.0)) };
+    world.set("puck", to).unwrap();
+    assert_eq!(world.inspect()[1].pos, (50.0, 0.0), "moved at once, before a tick");
+    assert!(world.needs_ticks(), "a woken puck needs the clock");
+    for i in 1..=10 {
+        world.tick(i as f64 * 0.02, 0.02);
+    }
+    let x = world.inspect()[1].pos.0;
+    assert!(x > 80.0 && x < 100.0, "moved on, stopped short of the wall: {x}");
+    // A description never moves an entity that exists: the puck stays where set put it.
+    world.reconcile(specs()).unwrap();
+    assert_eq!(world.inspect()[1].pos.0, x);
+    // The wall is fixed: it can be put somewhere, not given a velocity.
+    world.set("wall", Set { pos: Some((200.0, -50.0)), velocity: None }).unwrap();
+    assert_eq!(world.inspect()[0].pos, (200.0, -50.0));
+}
+
+#[test]
+fn set_is_checked() {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero]).unwrap();
+    let velocity = |v| Set { pos: None, velocity: Some(v) };
+    let cases = [
+        ("ghost", velocity((1.0, 0.0)), "there is no such entity"),
+        ("hero", velocity((1.0, 0.0)), "velocity needs a loose thing"),
+        ("hero", Set { pos: Some((f64::NAN, 0.0)), velocity: None }, "must be finite"),
+    ];
+    for (id, to, wanted) in cases {
+        let err = world.set(id, to).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn a_timer_fires_once_its_seconds_have_passed_from_the_next_frame() {
+    let mut world = World2d::default();
+    world.tick(5.0, 0.1);
+    // Set while idle: the world's clock is its last frame's, so counting starts at the next one.
+    world.after("faceoff", 1.5).unwrap();
+    world.after("blink", 0.5).unwrap();
+    assert!(world.needs_ticks(), "a timer keeps the world ticking");
+    world.tick(60.0, 0.1);
+    assert_eq!(world.timers()[0], TimerInspection { name: "blink".into(), left: 0.5 });
+    world.tick(60.5, 0.1);
+    assert_eq!(world.drain_events(), [WorldEvent::Timer("blink".into())]);
+    // The same name again starts it over; cancel drops it.
+    world.after("faceoff", 1.0).unwrap();
+    world.tick(61.6, 0.1);
+    assert!(world.drain_events().is_empty(), "the first faceoff, due at 61.5, is gone");
+    world.tick(62.5, 0.1);
+    assert!(world.drain_events().is_empty(), "the new one counts from 61.6");
+    world.tick(62.6, 0.1);
+    assert_eq!(world.drain_events(), [WorldEvent::Timer("faceoff".into())]);
+    world.after("never", 0.1).unwrap();
+    world.cancel("never");
+    world.tick(70.0, 0.1);
+    assert!(world.drain_events().is_empty() && !world.needs_ticks());
+    let err = world.after("bad", -1.0).unwrap_err().to_string();
+    assert!(err.contains("finite number, zero or more"), "{err}");
+}
+
+#[test]
+fn a_thing_taken_out_of_a_zone_on_a_frame_with_no_time_leaves_it() {
+    let d = drawing();
+    let goal = || EntitySpec {
+        sensor: Some(Collider { shape: Shape::Rect(40.0, 40.0), at: (0.0, 0.0) }),
+        ..spec("goal", (0.0, 0.0), &d)
+    };
+    let puck = |live: bool| EntitySpec {
+        loose: live.then_some(Material::default()),
+        collider: live.then_some(Collider { shape: Shape::Circle(4.0), at: (4.0, 4.0) }),
+        ..spec("puck", (10.0, 10.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![goal(), puck(true)]).unwrap();
+    world.tick(0.05, 0.05);
+    assert_eq!(world.drain_events(), [WorldEvent::Enter { id: "goal".into(), who: "puck".into() }]);
+    // Its body goes; the next frame has no time in it, so Rapier does not step.
+    world.reconcile(vec![goal(), puck(false)]).unwrap();
+    world.tick(0.05, 0.0);
+    assert_eq!(world.drain_events(), [WorldEvent::Exit { id: "goal".into(), who: "puck".into() }]);
+}

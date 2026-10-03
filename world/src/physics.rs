@@ -193,14 +193,15 @@ impl Physics {
     }
 
     /// Every `(zone owner, owner of what is in it)`, as of the last step. Sensors do not sense
-    /// each other.
+    /// each other. A pair whose collider was removed since goes: Rapier drops it only at a step,
+    /// and a frame with no time passing has none.
     pub(crate) fn overlaps(&self) -> Vec<(u64, u64)> {
         let colliders = &self.world.colliders;
         let pairs = self.world.narrow_phase.intersection_pairs();
         let pairs = pairs
             .filter(|&(_, _, touching)| touching)
             .filter_map(|(a, b, _)| {
-                let (a, b) = (&colliders[a], &colliders[b]);
+                let (a, b) = (colliders.get(a)?, colliders.get(b)?);
                 let (zone, other) = match (a.is_sensor(), b.is_sensor()) {
                     (true, false) => (a, b),
                     (false, true) => (b, a),
@@ -227,6 +228,18 @@ impl Physics {
         if queries.intersect_shape(*me.position(), me.shape()).next().is_none() {
             self.world.bodies[body].sleep();
         }
+    }
+
+    /// Puts a body's centre at `at` and sets its velocity, each if given, and wakes it.
+    pub(crate) fn set(&mut self, body: RigidBodyHandle, at: Option<(f64, f64)>, v: Option<(f64, f64)>) {
+        let rb = &mut self.world.bodies[body];
+        if let Some((x, y)) = at {
+            rb.set_translation(Vector::new(x as f32, y as f32), true);
+        }
+        if let Some((vx, vy)) = v {
+            rb.set_linvel(Vector::new(vx as f32, vy as f32), true);
+        }
+        rb.wake_up(true);
     }
 
     pub(crate) fn asleep(&self, body: RigidBodyHandle) -> bool {

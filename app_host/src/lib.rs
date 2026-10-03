@@ -20,7 +20,7 @@ use runtime::{
     scene3d as scene3d_el, text, text_area, text_input,
 };
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -241,6 +241,8 @@ pub struct LuaApp<M> {
     /// the log: the console, like the cores, outlives the VM it reports on.
     console: Rc<RefCell<VecDeque<String>>>,
     worlds: Worlds,
+    /// While `view` runs: `world(id):set` refuses then, since a description only describes.
+    viewing: Rc<Cell<bool>>,
     resolve: Resolve,
     wake: Wake,
 }
@@ -364,7 +366,7 @@ impl<M: 'static> LuaApp<M> {
     ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
-        let app = Self::build(src, cores, resolve, wake, to_msg)?;
+        let app = Self::build(src, cores, resolve, wake, to_msg, Worlds::default())?;
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -383,6 +385,7 @@ impl<M: 'static> LuaApp<M> {
         resolve: Resolve,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+        worlds: Worlds,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -401,6 +404,8 @@ impl<M: 'static> LuaApp<M> {
             resolve.clone(),
             wake.clone(),
         )?;
+        let viewing = Rc::new(Cell::new(false));
+        gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
@@ -424,7 +429,8 @@ impl<M: 'static> LuaApp<M> {
             resolve,
             wake,
             console: Rc::new(RefCell::new(VecDeque::new())),
-            worlds: Worlds::default(),
+            worlds,
+            viewing,
         })
     }
 
@@ -449,6 +455,7 @@ impl<M: 'static> LuaApp<M> {
             self.resolve.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
+            self.worlds.clone(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -473,7 +480,7 @@ impl<M: 'static> LuaApp<M> {
             self.log("reload error: no view loaded".to_string());
             "no view loaded".to_string()
         })?;
-        if let Err(e) = view_fn.call::<Table>(()) {
+        if let Err(e) = staged.describe(view_fn) {
             let e = e.to_string();
             self.log(format!("reload error: {e}"));
             return Err(e);
@@ -493,7 +500,6 @@ impl<M: 'static> LuaApp<M> {
         staged.handlers.borrow_mut().clear();
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
-        staged.worlds = self.worlds.clone();
         *self = staged;
         for name in dropped {
             let note =
@@ -586,9 +592,10 @@ impl<M: 'static> LuaApp<M> {
     }
 
     /// Each live world's entities, by world id.
-    pub fn inspect_worlds(&self) -> HashMap<String, Vec<world::EntityInspection>> {
+    pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
         let worlds = self.worlds.borrow();
-        worlds.iter().map(|(id, w)| (id.clone(), w.inspect())).collect()
+        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers() };
+        worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
     }
 
     /// The last `last` console lines, newest last.
@@ -656,6 +663,13 @@ impl<M: 'static> LuaApp<M> {
             .child(body)
     }
 
+    fn describe(&self, view_fn: &Function) -> mlua::Result<Table> {
+        self.viewing.set(true);
+        let tree = view_fn.call::<Table>(());
+        self.viewing.set(false);
+        tree
+    }
+
     fn body(&self) -> El<M> {
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
@@ -676,7 +690,7 @@ impl<M: 'static> LuaApp<M> {
                 }
             }
         }
-        let tree = match view_fn.call::<Table>(()) {
+        let tree = match self.describe(view_fn) {
             Ok(t) => t,
             Err(e) => {
                 self.log(format!("View error: {e}"));
@@ -819,6 +833,10 @@ impl<M: 'static> LuaApp<M> {
                         (table.set("id", zone)?, table.set("who", who)?);
                         table.set("phase", "leave")?;
                         "on_zone"
+                    }
+                    world::WorldEvent::Timer(name) => {
+                        table.set("name", name)?;
+                        "on_timer"
                     }
                 };
                 let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
@@ -1387,7 +1405,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move", "on_clip_end", "on_zone"] {
+    for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
@@ -1548,7 +1566,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
         "scene3d" => &["scene"],
         "world" => &[
             "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
-            "on_zone",
+            "on_zone", "on_timer",
         ],
         _ => &[],
     };
