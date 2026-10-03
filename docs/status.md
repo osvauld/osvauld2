@@ -83,6 +83,21 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   (courier + voice ALPNs) and exposes calls to Lua behind a mic capability; the relay lives in
   `kunki`, as its first iroh transport.
 
+### Search (`search/`, 2026-10-03) — design: `design/search.md`
+- `search` crate: one tantivy index per item, every file a sealed vault entry under
+  `entry/search/<ws>/<item>/` (`VaultDirectory`); facets (`author:anu`), title boost,
+  `rank = "recent"`, plain-text snippets. Held unsealed in memory while open.
+- `app_host::index`: an app's `index.lua` (`doc`, `each`, `key`, `fields`, `rank`) runs in its own
+  sandboxed VM over frozen copies; changes found by per-record fingerprint, so only changed
+  records re-run `fields`, and a restart re-runs none.
+- shell2 (`indexer.rs`) indexes after every flush and catches up on open, including docs the app
+  never opened (`Vault::doc_names`); test tabs get an in-memory index. `search.query(text,
+  {limit})` in Lua, bridge `Search`, `t.type` in app tests. `demo_apps/chat` is the reference.
+- verified: `cargo test -p search`, `-p app_host index::`, `-p shell2 indexer::`,
+  `scripts/smoke_search.py` (S1–S6). `cargo test --workspace` and the other smokes not re-run.
+- not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
+  search, indexing off the UI thread, a `lua-apps.md` section.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline

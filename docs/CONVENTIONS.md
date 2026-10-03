@@ -6,11 +6,9 @@ reference-only; this file says how we write.
 
 ## Code
 
-- Work lands in reviewable slices: **one write lands at most ~100 new or changed lines of
-  code** (tests ride along free). A task that needs more is broken down first — thought
-  through, explained, then written chunk by chunk — so every landed piece can be judged in
-  one sitting. The process half of this rule (who judges, when to pause) lives in
-  `AGENTS.md`.
+- Work is test-first: a plan doc names the end-to-end tests, they are written and fail
+  first, then the code makes them pass, step by step. *(Revised 2026-10-03: the old ~100-line
+  slice cap is gone.)* The process half (plan doc, who judges) lives in `AGENTS.md`.
 - Keep it minimal. No boilerplate doc-blocks (no Context / Peer-sends / We-verify headers).
 - Comments only where the *why* is non-obvious — and the bar is high: the best comments here
   record a decision someone will be tempted to reverse (see `props.rs` on `grow`, or
