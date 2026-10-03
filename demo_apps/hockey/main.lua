@@ -49,10 +49,26 @@ local function paddle(id, x, color, keys)
 		controller = { speed = 420, axis_x = { neg = keys[1], pos = keys[2] },
 			axis_y = { neg = keys[3], pos = keys[4] } } }
 end
-local puck_drawing = drawing(2 * PUCK, 2 * PUCK, { disc(PUCK, C.puck) })
+-- The puck scales about its centre as it drops onto the spot.
+local puck_drawing = gfx.drawing({ size = { 2 * PUCK, 2 * PUCK }, parts = {
+	{ id = "it", pivot = { PUCK, PUCK }, shapes = { disc(PUCK, C.puck) } },
+} })
+-- The faceoff: a second of the puck landing, during which it has no body and nothing can hit it.
+local drop = gfx.clip({ length = 1, tracks = {
+	it = { scale = { {0, 0.2}, {0.6, 1.4, "in_out"}, {1, 1, "in_out"} } },
+} })
 
+local WIN = 5
 local score = { left = 0, right = 0 }
 local pucks = 1 -- a goal puts down a fresh puck: a new id spawns at the centre spot
+local live = false -- the puck on the spot is in play; false while it drops
+local banner = "Faceoff" -- what just happened, until the puck is live again
+local winner = nil -- "Blue" or "Red" at WIN goals; no puck is put down after that
+
+local function new_game()
+	score.left, score.right, winner = 0, 0, nil
+	pucks, live, banner = pucks + 1, false, "Faceoff"
+end
 
 local function button(id, label, on_click)
 	return ui.button({
@@ -66,19 +82,23 @@ return function()
 	return ui.col({
 		full = true, center = true, gap = 14, fill = C.bg,
 		ui.text({ score.left .. "  :  " .. score.right, color = C.text, font_size = 28, no_wrap = true }),
-		ui.text({ "Blue: WASD · Red: arrow keys · hit the puck into the other goal", color = C.muted,
+		ui.text({ "Blue: WASD · Red: arrow keys · first to " .. WIN .. " goals", color = C.muted,
 			font_size = 13, no_wrap = true }),
 		ui.world({
 			id = "rink", width = W, height = H, fill = C.ice, radius = 12, stroke = { 3, C.rim },
-			-- A puck in a goal: score for the other side and face off again.
+			-- A puck in a goal: score for the other side and face off again, or end the game.
 			on_zone = function(e)
 				if e.phase ~= "enter" or e.who ~= "puck:" .. pucks then return end
-				if e.id == "goal:left" then
-					score.right = score.right + 1
-				else
-					score.left = score.left + 1
-				end
-				pucks = pucks + 1
+				local side = e.id == "goal:left" and "right" or "left"
+				score[side] = score[side] + 1
+				local who = side == "left" and "Blue" or "Red"
+				banner = "GOAL! " .. who .. " scores"
+				if score[side] >= WIN then winner = who end
+				pucks, live = pucks + 1, false
+			end,
+			-- The drop played out: the puck gets its body and play is on.
+			on_clip_end = function(e)
+				if e.id == "puck:" .. pucks then live, banner = true, nil end
 			end,
 			{ id = "markings", pos = { 0, 0 }, drawing = markings },
 			{ id = "spot", pos = { W / 2 - 60, H / 2 - 60 }, drawing = spot },
@@ -97,11 +117,13 @@ return function()
 			block("net:right", W - 8, MOUTH_TOP, 8, MOUTH_BOTTOM - MOUTH_TOP),
 			paddle("blue", 150, C.left, { "KeyA", "KeyD", "KeyW", "KeyS" }),
 			paddle("red", W - 150, C.right, { "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown" }),
-			{ id = "puck:" .. pucks, pos = { W / 2 - PUCK, H / 2 - PUCK }, drawing = puck_drawing,
-				collider = { circle = PUCK, at = { PUCK, PUCK } }, loose = { bounce = 0.95, friction = 0.2 } },
+			not winner and { id = "puck:" .. pucks, pos = { W / 2 - PUCK, H / 2 - PUCK },
+				drawing = puck_drawing, clip = not live and drop or nil,
+				collider = live and { circle = PUCK, at = { PUCK, PUCK } } or nil,
+				loose = live and { bounce = 0.95, friction = 0.2 } or nil },
 		}),
-		button("reset", "new game", function()
-			score.left, score.right, pucks = 0, 0, pucks + 1 -- and a fresh puck on the spot
-		end),
+		ui.text({ winner and (winner .. " wins! First to " .. WIN) or banner or " ", color = C.text,
+			font_size = 16, no_wrap = true }),
+		button("reset", winner and "play again" or "new game", new_game),
 	})
 end

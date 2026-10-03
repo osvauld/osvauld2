@@ -522,8 +522,11 @@ the world smoke pushes a crate and reads from the dump that it moved and came to
 **Table hockey** (`demo_apps/hockey`): two walking paddles, a loose puck, goals as zones Lua
 scores. **Collision groups:** `group` and `blocks` — the centre line stops paddles, not the puck.
 **Rapier's unit:** it was in metres, capping loose bodies at 400 units a second; now
-`length_unit = 100`, and settling measures overlap afresh. Next: faceoff and first to 5 (Lua),
-then controller acceleration, then a `follow` controller for a computer opponent. Soft bodies (rope,
+`length_unit = 100`, and settling measures overlap afresh. **Hockey rules (Lua):** a faceoff
+puck drops for a second with no body (a clip; `on_clip_end` makes it live), first to 5 wins.
+`smoke_hockey.py` reads it all from the dump — and caught a puck put down inside a paddle asleep
+for good: a loose body spawned in something now starts awake and is pushed out. Next: controller
+acceleration, then a `follow` controller for a computer opponent. Soft bodies (rope,
 cape) are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds

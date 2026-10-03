@@ -217,9 +217,16 @@ impl Physics {
         (at.x as f64, at.y as f64)
     }
 
-    /// At rest until something touches it: nothing to step meanwhile.
-    pub(crate) fn sleep(&mut self, body: RigidBodyHandle) {
-        self.world.bodies[body].sleep();
+    /// At rest until something touches it: nothing to step meanwhile. Not if it is already in
+    /// something — a puck put down under a paddle — or it would sleep there for good; awake,
+    /// Rapier pushes it out, and it sleeps by itself once at rest.
+    pub(crate) fn sleep_if_clear(&mut self, body: RigidBodyHandle) {
+        let me = &self.world.colliders[self.world.bodies[body].colliders()[0]];
+        let filter = QueryFilter::default().exclude_rigid_body(body).exclude_sensors();
+        let queries = self.world.query_pipeline_with_filter(filter);
+        if queries.intersect_shape(*me.position(), me.shape()).next().is_none() {
+            self.world.bodies[body].sleep();
+        }
     }
 
     pub(crate) fn asleep(&self, body: RigidBodyHandle) -> bool {

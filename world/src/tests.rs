@@ -1215,3 +1215,30 @@ fn groups_are_checked() {
     let many = (0..32).map(|i| format!("g{i}")).collect();
     assert!(err(&mut world, line(None, Some(many), true)).contains("\"g31\" would be the 32nd"));
 }
+
+#[test]
+fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero]).unwrap();
+    world.tick(0.05, 0.05);
+    // The hero's circle is x 0 to 8; the puck spawns at x 5, three deep in it.
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 0.5, friction: 6.0 }),
+        ..solid("puck", (5.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![hero, puck]).unwrap();
+    for i in 2..40 {
+        world.tick(i as f64 * 0.05, 0.05);
+    }
+    let x = world.inspect()[1].pos.0;
+    assert!(x >= 7.8, "pushed clear of the hero: {x}");
+}

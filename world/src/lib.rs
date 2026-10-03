@@ -401,7 +401,7 @@ impl World2d {
                     let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
                     // Loose from the start, it waits asleep; let go, it is on the move.
                     if dynamic && !dropped {
-                        self.physics.sleep(body);
+                        self.physics.sleep_if_clear(body);
                     }
                     if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
                         self.physics.bring_in(body, from);
