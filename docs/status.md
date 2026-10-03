@@ -96,7 +96,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - verified: `cargo test -p search`, `-p app_host index::`, `-p shell2 indexer::`,
   `scripts/smoke_search.py` (S1–S6). `cargo test --workspace` and the other smokes not re-run.
 - not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
-  search, indexing off the UI thread, a `lua-apps.md` section.
+  search, indexing off the UI thread.
 
 ## Not built
 
