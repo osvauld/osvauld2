@@ -838,6 +838,11 @@ impl<M: 'static> LuaApp<M> {
                         table.set("name", name)?;
                         "on_timer"
                     }
+                    world::WorldEvent::Hit { id: entity, who, speed } => {
+                        (table.set("id", entity)?, table.set("who", who)?);
+                        table.set("speed", speed)?;
+                        "on_hit"
+                    }
                 };
                 let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
                 handler.map_or(Ok(()), |h| h.call::<()>(table))
@@ -1405,7 +1410,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer"] {
+    for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
@@ -1566,7 +1571,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
         "scene3d" => &["scene"],
         "world" => &[
             "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
-            "on_zone", "on_timer",
+            "on_zone", "on_timer", "on_hit",
         ],
         _ => &[],
     };

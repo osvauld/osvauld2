@@ -56,6 +56,9 @@ pub struct Set {
 /// Bit 0 is the common group, everything not named into another.
 const COMMON: u32 = 1;
 
+/// Units a second two things must meet at to be a hit: slower is settling, not striking.
+const HIT: f64 = 1.0;
+
 /// Carried: the entity's `pivot` — a point in its own drawing — rides at `at`, a point in the
 /// carrier's drawing at rest, as the carrier's `part` moves and animates. With `turn` it also
 /// takes on the part's rotation, scale and mirror (a hat on a nodding head); without, it stays
@@ -141,6 +144,9 @@ pub enum WorldEvent {
     Exit { id: String, who: String },
     /// A timer Lua set with `after` came due.
     Timer(String),
+    /// Something Rapier moves (loose or thrown) came into contact with `who`, closing at `speed`
+    /// units a second along the contact normal. Each of two such things gets its own.
+    Hit { id: String, who: String, speed: f64 },
 }
 
 /// A moment Lua asked for. Counted from the world's next frame: a handler has no clock of its
@@ -246,6 +252,8 @@ pub struct World2d {
     physics: Physics,
     /// `(zone, who)` sensor overlaps as of the last tick, to report only changes.
     inside: HashSet<(Entity, Entity)>,
+    /// Solid pairs in contact as of the last tick, to report only new ones.
+    touching: HashSet<(Entity, Entity)>,
     /// `(entity id, part)` clip tracks skipped because the drawing lacks the part — noted once,
     /// and again only if the part comes back and goes missing anew.
     skipped: HashSet<(String, String)>,
@@ -518,6 +526,45 @@ impl World2d {
         }
     }
 
+    /// Each solid entity's velocity now: Rapier's, or a controller's last step.
+    fn velocities(&self) -> HashMap<Entity, (f64, f64)> {
+        let velocity = |&entity: &Entity| {
+            let e = self.ecs.entity(entity);
+            let s = e.get::<Solid>().filter(|s| s.collider.is_some())?;
+            Some((entity, match e.get::<Velocity>() {
+                _ if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
+                Some(v) => (v.0, v.1),
+                None => (0.0, 0.0),
+            }))
+        };
+        self.order.iter().filter_map(velocity).collect()
+    }
+
+    /// Reports the solid pairs that came into contact this tick, at the speed they closed at
+    /// before it.
+    fn hits(&mut self, before: &HashMap<Entity, (f64, f64)>) {
+        let pair = |a: u64, b: u64| (Entity::from_bits(a.min(b)), Entity::from_bits(a.max(b)));
+        let now: HashMap<_, _> = (self.physics.contacts().into_iter())
+            .map(|(a, b, normal)| (pair(a, b), normal))
+            .collect();
+        let at = |e| before.get(&e).copied().unwrap_or_default();
+        let moving = |e| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding || s.loose.is_some());
+        let name = |e: Entity| self.ecs.get::<Name>(e).map(|n| n.0.clone());
+        let mut hits = vec![];
+        for (&(a, b), &(nx, ny)) in now.iter().filter(|(p, _)| !self.touching.contains(p)) {
+            let ((ax, ay), (bx, by)) = (at(a), at(b));
+            let speed = ((ax - bx) * nx + (ay - by) * ny).abs();
+            for (me, other) in [(a, b), (b, a)].into_iter().filter(|&(me, _)| moving(me)) {
+                if let (true, Some(id), Some(who)) = (speed >= HIT, name(me), name(other)) {
+                    hits.push((id, who, speed));
+                }
+            }
+        }
+        hits.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1))); // a map has no order either
+        self.events.extend(hits.into_iter().map(|(id, who, speed)| WorldEvent::Hit { id, who, speed }));
+        self.touching = now.into_keys().collect();
+    }
+
     /// Reports what came into or left a sensor since the last tick. A pair whose entity is gone
     /// goes quietly: Lua removed it, so Lua knows.
     fn sense(&mut self) {
@@ -656,9 +703,11 @@ impl World2d {
         for t in self.timers.iter_mut().filter(|t| t.due.is_none()) {
             t.due = Some(elapsed + t.secs);
         }
+        let before = self.velocities();
         self.physics.step(dt);
         self.slide_thrown();
         self.sense();
+        self.hits(&before);
         for entity in self.order.clone() {
             let Some(c) = self.ecs.get::<Controller>(entity) else {
                 continue;

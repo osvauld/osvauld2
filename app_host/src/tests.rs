@@ -4575,3 +4575,34 @@ fn a_handler_sets_a_timer_and_on_timer_hears_it() {
     assert!(heard.ends_with("timer ping"), "{heard}");
     assert!(app.inspect_worlds()["room"].timers.is_empty());
 }
+
+#[test]
+fn on_hit_hears_a_loose_thing_strike_a_wall() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() world('room'):set('ball', {{ velocity = {{ 300, 0 }} }}) end, \
+             on_hit = function(e) table.insert(heard, e.id .. '>' .. e.who .. '@' .. math.floor(e.speed + 0.5)) end, \
+             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+               loose = {{ bounce = 0, friction = 0 }} }}, \
+             {{ id = 'wall', pos = {{ 100, -50 }}, drawing = hero, collider = {{ rect = {{ 4, 100 }} }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let heard = app.view().info().children[0].text.clone();
+    assert_eq!(heard.as_deref(), Some("ball>wall@300"));
+}

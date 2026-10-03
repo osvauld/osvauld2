@@ -531,10 +531,15 @@ in `view`; hockey's puck keeps one id and is put back on the spot. **Timers:**
 `world(id):after(secs, name)` → `on_timer`, a deadline Rust holds on the world's frame clock (the
 dump lists them); a goal now shows for 1.5 s with the puck caught in the net. It shook out a
 panic: a body removed inside a sensor, then a frame with no time in it, left Rapier a stale pair.
-The Lua ↔ world contract is three kinds of call: describe (`view`), command (`set`, `after`),
-and next, `on_hit` and questions (`ray`); then moving things give Rapier their velocity, so a paddle hits rather than
-shoves. Soft bodies (rope,
-cape) are the assets session's own verlet solver, not Rapier joints.
+**Hits:** `on_hit { id, who, speed }` — a loose thing's new contact, at the speed it closed
+along the normal; hockey's puck squashes on each, harder for a harder hit, and the smoke reads
+the squash from the dump. The Lua ↔ world contract is three kinds of call: describe (`view`),
+command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`); moving things give Rapier their
+velocity, so a paddle hits rather than shoves; controller acceleration; a `follow` controller.
+**Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
+(hockey was written with full context). A fresh agent, given only the docs, builds carrom and
+logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. Soft bodies (rope, cape)
+are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
 

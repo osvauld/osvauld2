@@ -60,7 +60,16 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     # Red steps out of the way; blue runs at the puck. Blue stops at the centre line (its right
     # edge at 447, the line at 448); the puck crosses and goes on into the right goal.
     hold("ArrowUp", 60)
-    hold("KeyD", 40)
+    # Frame by frame, to catch the squash the puck plays when blue hits it (on_hit, 0.15 s).
+    s.rpc.keyboard("KeyD", "KeyD", True)
+    squashed = False
+    for _ in range(40):
+        s.rpc.frame(1)
+        clip = look()[0]["puck"]["clip"]
+        squashed = squashed or (clip is not None and abs(clip["length"] - 0.15) < 1e-6)
+    s.rpc.keyboard("KeyD", "KeyD", False)
+    s.rpc.frame(2)
+    assert squashed, "the puck squashed when blue hit it"
     seen, _ = look()
     assert abs(seen["blue"]["pos"][0] + 56 - 448) < 2, ("blue stopped at the line", seen["blue"])
     assert seen["puck"]["pos"][0] > 450, ("the puck crossed it", seen["puck"])
@@ -88,4 +97,4 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     assert seen["puck"]["pos"][0] >= seen["blue"]["pos"][0] + 56 - 1, ("pushed out of blue", seen)
     if len(sys.argv) > 1:
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a goal scored and the puck back on the spot")
+    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a hit squashed it, a goal scored and the puck back on the spot")

@@ -212,6 +212,20 @@ impl Physics {
         pairs.collect()
     }
 
+    /// Every pair of solid colliders in contact as of the last step, as `(owner, owner, normal)`.
+    /// Speculative contacts count: Rapier makes them a step ahead of a fast meeting.
+    pub(crate) fn contacts(&self) -> Vec<(u64, u64, (f64, f64))> {
+        let colliders = &self.world.colliders;
+        (self.world.narrow_phase.contact_pairs())
+            .filter(|p| p.has_any_active_contact())
+            .filter_map(|p| {
+                let (a, b) = (colliders.get(p.collider1)?, colliders.get(p.collider2)?);
+                let n = p.manifolds.first()?.data.normal;
+                Some((a.user_data as u64, b.user_data as u64, (n.x as f64, n.y as f64)))
+            })
+            .collect()
+    }
+
     /// Where Rapier has a body now: its shape's centre.
     pub(crate) fn centre_of(&self, body: RigidBodyHandle) -> (f64, f64) {
         let at = self.world.bodies[body].translation();

@@ -293,7 +293,7 @@ local wasd = {
   leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
 
-### Moments — `on_action`, `on_move`, `on_clip_end`, `on_zone` and `on_timer`
+### Moments — `on_action`, `on_move`, `on_clip_end`, `on_zone`, `on_timer` and `on_hit`
 
 The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
 a second at most, never once a frame.
@@ -318,6 +318,12 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
   despawned `who` leaves quietly. (`on_enter` is the Enter key on an input, so the world's is
   `on_zone`, phased like `on_hover`.) The demo's reach to the chest is one flag:
   `near = e.phase == "enter"`, and E picks up only when `near`.
+- `on_hit(e)` gets `e.id`, `e.who` and `e.speed` when a loose (or thrown) thing comes into
+  contact with something solid: `e.id` is the moving one, `e.who` what it met, and `e.speed` how
+  fast they closed along the contact, in units a second — a tap is slow, a slap fast. Once per
+  meeting: resting against a wall afterwards is not more hits, and under 1 unit a second is
+  settling, not a hit. Two loose things meeting each get one. A walker meeting a wall is not a
+  hit — a walker stops itself — only what Rapier moves hits.
 - A jump is all three together, with no jump in Rust: `on_action` sets `jumping`, the hero
   describes `clip = jumping and jump or …` (a once clip lifting `body`, which the other parts hang
   off — the feet stay put, so draw order ignores it), and `on_clip_end` clears `jumping`.

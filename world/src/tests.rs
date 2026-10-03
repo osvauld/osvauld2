@@ -1345,3 +1345,50 @@ fn a_thing_taken_out_of_a_zone_on_a_frame_with_no_time_leaves_it() {
     world.tick(0.05, 0.0);
     assert_eq!(world.drain_events(), [WorldEvent::Exit { id: "goal".into(), who: "puck".into() }]);
 }
+
+#[test]
+fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
+    let d = drawing();
+    let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![wall, puck]).unwrap();
+    world.tick(0.0, 0.0);
+    world.set("puck", Set { pos: None, velocity: Some((300.0, 0.0)) }).unwrap();
+    let mut hits = vec![];
+    for i in 1..=60 {
+        world.tick(i as f64 / 60.0, 1.0 / 60.0);
+        hits.extend(world.drain_events());
+    }
+    // One hit, though it then rests against the wall for most of a second.
+    let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
+    assert_eq!((id.as_str(), who.as_str()), ("puck", "wall"));
+    assert!((speed - 300.0).abs() < 1.0, "met at its own speed: {speed}");
+}
+
+#[test]
+fn a_walker_running_into_a_loose_thing_is_a_hit_for_the_loose_thing() {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(200.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, puck]).unwrap();
+    world.key("KeyD", true);
+    let mut hits = vec![];
+    for i in 1..=20 {
+        world.tick(i as f64 / 60.0, 1.0 / 60.0);
+        hits.extend(world.drain_events().into_iter().filter(|e| matches!(e, WorldEvent::Hit { .. })));
+    }
+    let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
+    assert_eq!((id.as_str(), who.as_str()), ("puck", "hero"));
+    assert!(*speed > 100.0, "met at about the walker's speed: {speed}");
+}

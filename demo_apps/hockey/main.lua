@@ -58,6 +58,16 @@ local drop = gfx.clip({ length = 1, tracks = {
 	it = { scale = { {0, 0.2}, {0.6, 1.4, "in_out"}, {1, 1, "in_out"} } },
 } })
 
+-- A hit squashes the puck for a moment, more for a harder one.
+local function squash(size)
+	return gfx.clip({ length = 0.15, tracks = {
+		it = { scale = { {0, 1}, {0.05, size, "in_out"}, {0.15, 1, "in_out"} } },
+	} })
+end
+local soft, hard = squash(1.15), squash(1.4)
+local HARD = 400 -- units a second
+local bumped = nil -- the squash playing after a hit
+
 local WIN = 5
 local score = { left = 0, right = 0 }
 local SPOT = { W / 2 - PUCK, H / 2 - PUCK } -- the puck's place at a faceoff
@@ -112,7 +122,11 @@ return function()
 			end,
 			-- The drop played out: the puck gets its body and play is on.
 			on_clip_end = function(e)
-				if e.id == "puck" then live, banner = true, nil end
+				if e.id ~= "puck" then return end
+				if live then bumped = nil else live, banner = true, nil end
+			end,
+			on_hit = function(e)
+				if e.id == "puck" and not bumped then bumped = e.speed >= HARD and hard or soft end
 			end,
 			{ id = "markings", pos = { 0, 0 }, drawing = markings },
 			{ id = "spot", pos = { W / 2 - 60, H / 2 - 60 }, drawing = spot },
@@ -132,7 +146,7 @@ return function()
 			paddle("blue", 150, C.left, { "KeyA", "KeyD", "KeyW", "KeyS" }),
 			paddle("red", W - 150, C.right, { "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown" }),
 			not winner and { id = "puck", pos = SPOT,
-				drawing = puck_drawing, clip = not live and drop or nil,
+				drawing = puck_drawing, clip = not live and drop or bumped,
 				collider = live and { circle = PUCK, at = { PUCK, PUCK } } or nil,
 				loose = live and { bounce = 0.95, friction = 0.2 } or nil },
 		}),
