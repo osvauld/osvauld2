@@ -1,6 +1,7 @@
 # Search — full-text over app docs, described in Lua
 
-Status: **steps 0–5 built, 2026-10-03; step 6 (default layer) and the guide section open.** A
+Status: **steps 0–5 built, 2026-10-03; step 6 (default layer) open; guide: `lua-apps.md`
+§Search.** A
 long-horizon, test-first plan:
 §0 lists the end-to-end tests that prove it done; they are written first, then §7's steps make
 them pass.

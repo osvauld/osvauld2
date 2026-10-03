@@ -88,7 +88,7 @@ implicit clip or scale.
 | `gfx.path(commands)` | positional list of commands | up to 65536; drawing before `move` is an error |
 | `gfx.solid(color)` | a CSS color string | |
 | `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
-| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required |
+| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required; the result reads them back (`f.width`, `f.height`) |
 | `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
 | `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
@@ -521,6 +521,8 @@ before `fade`.
 | animation | `fade_in` | ms |
 | | `fade` | `{target_opacity, ms}` |
 | | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
+| pointer | `system_cursor` | bool — `false` hides the system pointer while over this element, for an app that draws its own (`demo_apps/pointer/cursor.lua`) |
+| | `cursor` | a look name (`"grab"`, `"text"`, any string your cursor knows) or a `gfx.frame` to draw — hover handlers get the topmost declared one as `e.look` |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
 | input | `value` · `autofocus` | string · bool |
@@ -563,7 +565,11 @@ end
   supplies `e.object`, `e.distance`, `e.world_x/y/z` and `e.normal_x/y/z`; these fields are absent
   when the ray hits no object.
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
-  the element on `"leave"`). An element is hovered while the pointer is inside it, like
+  the element on `"leave"`), `e.down` true while the primary button is held — a press or release
+  under a still pointer fires a `"move"`, so a cursor the app draws can show it. `e.look` is the
+  `cursor` declared by the topmost element under the pointer that declares one — a name or the
+  `gfx.frame` it supplied — or `nil`; a change of look is a `"move"` too. Declare looks on the
+  things being pointed at and draw the cursor once at the root: neither has to know the other. An element is hovered while the pointer is inside it, like
   `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
   hide the one below — check your own geometry if that matters. It is sampled every frame as well
   as on every pointer move, so geometry that drifts under a still pointer reports it: an element
@@ -677,6 +683,57 @@ The rules that bite, once each:
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
 
+## Search
+
+Ship an `index.lua` beside `main.lua` and your documents become searchable. It says what a
+searchable **record** is; the shell does the rest — indexes on every save, keeps the index sealed
+in the vault, and catches up on open (including docs written while the app was closed).
+`demo_apps/chat` is the reference.
+
+```lua
+-- index.lua
+return {
+	doc = "channel:*",                       -- a doc name, or a `prefix*` family of docs
+	each = { "messages" },                   -- path to the collection: one record per entry
+	key = function(m) return m.id end,       -- lists only: the stable id, read from the record
+	fields = function(id, m, doc)            -- doc = the whole doc, for joins
+		return {
+			title = m.subject,               -- optional; ranks above body
+			body = m.text,
+			facet = { author = m.author },   -- exact filters: `author:anu`
+			time = m.sent_at,                -- optional; sortable
+		}                                    -- return nil to leave the record out
+	end,
+	rank = "recent",                         -- "relevance" (default) or "recent"
+}
+```
+
+```lua
+-- main.lua, anywhere — even in view
+local hits = search.query("author:anu deploy", { limit = 20 })
+for _, h in ipairs(hits) do
+	print(h.doc, h.id, h.score, h.snippet)   -- open the record by (h.doc, h.id)
+end
+```
+
+The rules:
+
+- **`index.lua` runs in its own VM.** No `ui`, no `doc`, no `gfx`, no `require`; records and
+  `doc` are frozen copies — a write is an error. A broken `index.lua` is reported in the console
+  and the app keeps running on the last good index.
+- **Strict, like the rest.** An unknown key in the spec, in what `fields` returns, or in
+  `search.query`'s options is an error naming it. A list collection without `key` is an error:
+  a position is not an id.
+- **Only what changed is re-indexed.** Each record is fingerprinted; `fields` runs again only for
+  a record whose value changed. A change *outside* `each` re-runs every record of that doc (it
+  may feed a join), and so does editing `index.lua`.
+- **Index ids for anything that changes; resolve names when you display.** Index the author's
+  id, not their display name, and a rename re-indexes nothing.
+- **Queries**: words match title and body (all must match); `name:value` words are exact facet
+  filters. `search.query` is cheap to call in `view` — the same query against an unchanged
+  index is answered from memo. Hits are your own app's records only.
+- Snippets are plain text around the match, no markup — draw them however you like.
+
 ## Animation
 
 Presentation animation is declarative:
@@ -786,8 +843,8 @@ The kanban split, worth copying at any size:
 ## The sandbox, and what happens when you err
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
-only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `now()` (unix
-seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
+only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
+(unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
 
 `now()` is for recording *when* something happened — a created-at, a last-edited. It is not for
 measuring how long something took: it follows the system clock, so it can jump, including
@@ -814,9 +871,11 @@ normal edit loop. Keep files small enough that a reported line number means one 
 
 An app may include `tests/*.lua` beside `main.lua`. The first built slice runs those files over the
 bridge in a separate sandboxed test VM with `t.expect(cond, message)`, `t.step(frames)`,
-`t.world()`, `t.rects()`, `t.centre_of(id)`, `t.click_at(x, y)` and `t.text(id)`, after opening a
-temporary non-persisting app tab with empty docs. The planned behavioural runner will add
-keyboard/text-input helpers while still keeping tests outside the app VM; see
+`t.world()`, `t.rects()`, `t.centre_of(id)`, `t.click_at(x, y)`, `t.text(id)` and
+`t.type(id, text)` (sets an input's text, as typing would), after opening a temporary
+non-persisting app tab with empty docs. That tab gets its own in-memory search index, so an app
+can test its search (`demo_apps/chat/tests/search.lua`). The planned behavioural runner will add
+keyboard helpers while still keeping tests outside the app VM; see
 `docs/design/lua-app-tests.md`.
 
 ## Checking it without a window

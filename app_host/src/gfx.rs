@@ -29,7 +29,12 @@ impl UserData for LuaBrush {}
 
 #[derive(Clone)]
 pub(crate) struct LuaFrame(pub Arc<Frame>);
-impl UserData for LuaFrame {}
+impl UserData for LuaFrame {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("width", |_, f| Ok(f.0.size().0));
+        fields.add_field_method_get("height", |_, f| Ok(f.0.size().1));
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LuaDrawing(pub Arc<Drawing>);
