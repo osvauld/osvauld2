@@ -844,8 +844,9 @@ fn a_sensor_reports_who_comes_in_and_goes_out_once_each() {
     let (chest, hero) = ("chest".to_string(), "hero".to_string());
     assert_eq!(
         log,
-        [(4, (true, chest.clone(), hero.clone())), (7, (false, chest, hero))],
-        "in as its feet reach the zone, out as they leave it, a tick after each (Rapier steps first)"
+        [(5, (true, chest.clone(), hero.clone())), (8, (false, chest, hero))],
+        "in as its feet reach the zone, out as they leave it, two ticks after each: a walker's \
+         step lands in Rapier's next one, and Rapier senses before it moves"
     );
 }
 
@@ -1117,8 +1118,8 @@ fn a_walker_pushes_a_loose_thing_and_is_stopped_by_a_fixed_one() {
         let seen = world.inspect();
         (seen[0].pos.0, seen[1].pos.0, seen[1].body)
     };
-    // Half a second at 100/s: 50 units if nothing were in the way. The crate's friction drags,
-    // so the hero pushes it at about half pace, against it the whole way (its edge is at 8).
+    // Half a second at 100/s: 50 units if nothing were in the way. The hero pushes the crate
+    // along, against it the whole way (its edge is at 8).
     let (hero_x, box_x, body) = walk(Some(Material::default()));
     assert_eq!(body, "loose");
     assert!(box_x > 30.0, "the crate was pushed along: {box_x}");
@@ -1391,4 +1392,27 @@ fn a_walker_running_into_a_loose_thing_is_a_hit_for_the_loose_thing() {
     let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
     assert_eq!((id.as_str(), who.as_str()), ("puck", "hero"));
     assert!(*speed > 100.0, "met at about the walker's speed: {speed}");
+}
+
+#[test]
+fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
+    let d = drawing();
+    let paddle = EntitySpec {
+        controller: Some(wasd(400.0)),
+        ..solid("paddle", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 1.0, friction: 0.0 }),
+        ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![paddle, puck]).unwrap();
+    world.key("KeyD", true);
+    let mut fastest: f64 = 0.0;
+    for i in 1..=20 {
+        world.tick(i as f64 / 60.0, 1.0 / 60.0);
+        fastest = fastest.max(world.inspect()[1].velocity.0);
+    }
+    // Struck by something far heavier at 400, it leaves at up to twice that; shoved, at 400.
+    assert!(fastest > 600.0, "the puck was struck, not shoved: {fastest}");
 }

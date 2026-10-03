@@ -600,9 +600,14 @@ dump lists them); a goal now shows for 1.5 s with the puck caught in the net. It
 panic: a body removed inside a sensor, then a frame with no time in it, left Rapier a stale pair.
 **Hits:** `on_hit { id, who, speed }` — a loose thing's new contact, at the speed it closed
 along the normal; hockey's puck squashes on each, harder for a harder hit, and the smoke reads
-the squash from the dump. The Lua ↔ world contract is three kinds of call: describe (`view`),
-command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`); moving things give Rapier their
-velocity, so a paddle hits rather than shoves; controller acceleration; a `follow` controller.
+the squash from the dump. **Strikes (2026-10-03, replaces chunk 2's pushing):** a walker no
+longer stops at loose things and shoves them with character impulses; it is moved with
+`set_next_kinematic_translation`, so Rapier knows its velocity and its contact strikes — a paddle
+at 400 sends a puck off at up to 800, not 230. It wakes a sleeping loose thing in its path (Rapier
+lets a walker through a sleeper). Cost: a walker's zone moments come a tick later, as a loose
+thing's already did. The Lua ↔ world contract is three kinds of call: describe (`view`), command
+(`set`, `after`), and questions. Next, in order: spin (rotation, grip at contacts, the turn
+drawn); questions (`ray`, `at`); controller acceleration; a `follow` controller.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**

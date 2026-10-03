@@ -73,8 +73,12 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     seen, _ = look()
     assert abs(seen["blue"]["pos"][0] + 56 - 448) < 2, ("blue stopped at the line", seen["blue"])
     assert seen["puck"]["pos"][0] > 450, ("the puck crossed it", seen["puck"])
-    s.rpc.frame(90)
-    seen, said = look()
+    # Struck, it is fast: watch for the goal rather than wait a guess at how long it takes.
+    for _ in range(90):
+        s.rpc.frame(1)
+        seen, said = look()
+        if any(t.startswith("GOAL") for t in said):
+            break
     assert "1  :  0" in said and "GOAL! Blue scores" in said, said
     # The puck sits in the net while the goal shows; Rust holds the faceoff timer.
     timers = s.rpc.dump_tree(item)
