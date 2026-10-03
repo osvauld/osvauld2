@@ -510,10 +510,15 @@ shell's `DumpTree` puts it on the world's element (`world.entities`), and the wo
 reads the chest from it. Its first run caught a bug pixels never showed: a chest let go near the
 south wall landed half through it, Rapier put it to sleep pressed in, and it never settled — the
 world ticked forever. **Fix:** let go, a body comes from its carrier's body to its spot and stops
-against what is in the way (`Physics::bring_in`). Next: hints in the dump (what stopped a walker,
-what is settling), test pushes over the bridge, then 5d, dynamic bodies beyond the
-drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
-cape) are the assets session's own verlet solver, not Rapier joints.
+against what is in the way (`Physics::bring_in`). **Lua app tests started:**
+[design/lua-app-tests.md](design/lua-app-tests.md) records app-shipped Lua tests run beside, not
+inside, the app VM; slice 1 is built (`RunTests` discovers `tests/*.lua`, opens a non-persisting
+temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`,
+`t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns pass/fail results). This supersedes the narrower hints-in-dump and
+bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
+and `t.world()` snapshots; then 5d, dynamic bodies beyond the drop (crates to push, balls to kick),
+with friction and bounce as Lua fields. Soft bodies (rope, cape) are the assets session's own
+verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
 
@@ -565,8 +570,8 @@ Roughly in dependency order:
      (`Ping`/`ListAccounts`/`Signup`/`Unlock`/`Lock`, an addition to this list: headless
      login is the automation story's first step), workspaces/items (incl. `CreateWorkspace`
      and `OpenItem`), files (`WriteFile` reloads an open tab; `ReloadItem` forces the staged
-     reload), senses (`DumpTree`/`Click`/`ReadConsole`), and `AppDataGet` (the write half of
-     the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
+     reload), senses (`DumpTree`/`Click`/`ReadConsole`), app-shipped test runner (`RunTests`),
+     and `AppDataGet` (the write half of the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
      alone (ids are 128-bit random). The sthalam families are deleted. Not
      ported from the old repo's control server, on purpose: `eval`, coordinate `ui_mouse_*`,
      p2p, recording. Socket must be created `0600` — passphrases cross it.
@@ -584,10 +589,18 @@ Roughly in dependency order:
      screen), then `Msg::AuthDone` commits the account, replies, and lands the screen
      transition on the UI thread; a script-side signup returns the mnemonic and skips the
      mnemonic screen (the script is its reader), workspaces/items (`CreateWorkspace`,
-     `ListItems`, `CreateItem`, `OpenItem`), and app source files (`ListFiles`, `ReadFile`,
-     `WriteFile`, `ReloadItem`). Everything else answers an honest `not wired yet`. Python harness:
+     `ListItems`, `CreateItem`, `OpenItem`), app source files (`ListFiles`, `ReadFile`,
+     `WriteFile`, `ReloadItem`), and the first `RunTests` slice. Everything else answers an honest `not wired yet`. Python harness:
      `scripts/osvauld/` (`client.py` framing + `session.py` spawn/wait/teardown) and
      `scripts/smoke_bridge.py` — the end-to-end proof over a fresh, locked vault.
+   - **landed 2026-10-01, app-shipped test runner slice 1**: `RunTests { item_id, filter }`
+     discovers `tests/*.lua` in the app source doc, opens a non-persisting temporary app tab with
+     empty docs and a `test:<item>:<run>` retained-id namespace, runs each file in a separate
+     source-only test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`, `t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns `{name, ok, frames, failure}` results. `tally`,
+     `scratch` and `pomodoro` now ship basic `tests/*.lua`, pinned by `scripts/smoke_lua_app_tests.py`.
+     Test VMs run on a worker and step/click through deferred Runner driver ops; the batch remains
+     bounded (32 files / 256 KiB plus the Luau interrupt budget). Pinned by `scripts/smoke_bridge.py`
+     over the real socket. See [Lua app tests](design/lua-app-tests.md).
    - **landed 2026-09-10, senses & actions on running apps**: `DumpTree` (the pre-layout
      `ElInfo` tree as JSON — kinds, ids, text, handler flags; overlays included), and the
      verbs `Click`/`Type`/`Key` (`enter`/`esc`): each resolves the element by id on a fresh

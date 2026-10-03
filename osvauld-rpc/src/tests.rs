@@ -72,6 +72,10 @@ fn every_request_roundtrips() {
         Request::ReloadItem {
             item_id: "i-9".into(),
         },
+        Request::RunTests {
+            item_id: "i-9".into(),
+            filter: Some("smoke".into()),
+        },
         Request::DumpTree {
             item_id: "i-9".into(),
         },
@@ -90,8 +94,14 @@ fn every_request_roundtrips() {
             key: "enter".into(),
         },
         Request::Keyboard {
-            code: Some("KeyW".into()), key: "z".into(), down: true,
-            repeat: false, shift: false, ctrl: false, alt: false, super_: false,
+            code: Some("KeyW".into()),
+            key: "z".into(),
+            down: true,
+            repeat: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            super_: false,
         },
         Request::ReadConsole {
             item_id: "i-9".into(),

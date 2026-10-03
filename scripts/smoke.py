@@ -25,7 +25,7 @@ HERE = Path(__file__).parent
 
 # Order matters: the cheapest and most fundamental first, so a broken socket reports as a broken
 # socket rather than as a confusing failure three minutes into a rendering test.
-SMOKES = ["smoke_bridge.py", "smoke_offscreen.py", "smoke_tank_keyboard.py", "smoke_tank_game.py", "smoke_hero.py", "smoke_world.py"]
+SMOKES = ["smoke_bridge.py", "smoke_lua_app_tests.py", "smoke_offscreen.py", "smoke_tank_keyboard.py", "smoke_tank_game.py", "smoke_hero.py", "smoke_world.py"]
 
 
 def main() -> int:

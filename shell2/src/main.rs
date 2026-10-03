@@ -32,9 +32,10 @@ use crate::{
     space::{SpaceScreen, SpaceScreenMsg},
 };
 use app_host::{
-    LuaApp, Resolve, SourceEdit, Wake, edit_source_file as edit_source_doc_file,
-    read_source_file_versioned as read_source_doc_file_versioned,
-    write_source_file as write_source_doc_file,
+    LuaApp, LuaTest, LuaTestApi, Resolve, SourceEdit, Wake,
+    edit_source_file as edit_source_doc_file,
+    read_source_file_versioned as read_source_doc_file_versioned, run_lua_tests,
+    run_lua_tests_with, write_source_file as write_source_doc_file,
 };
 use base64::Engine as _;
 use courier::invite::InviteTicket;
@@ -44,8 +45,8 @@ use courier::{ConnectionTicket, DesktopNodeRecord};
 use kunki::push::Push;
 use loro::{Container, LoroDoc, ValueOrContainer};
 use osvauld_rpc::{
-    AccountSummary, EditFileResult, ItemSummary, Request, Response, SourceActivation,
-    VersionedFile, WorkspaceSummary,
+    AccountSummary, EditFileResult, ItemSummary, LuaTestResult, Request, Response,
+    SourceActivation, VersionedFile, WorkspaceSummary,
 };
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
@@ -84,9 +85,25 @@ pub enum Msg {
     /// transition, both on the UI thread.
     AuthDone(std::sync::mpsc::Sender<osvauld_rpc::Response>, AuthOutcome),
     /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
-    DriverDone(
+    DriverDone(DriverReply, Result<runtime::DriverReport, String>),
+    TestDriver(
+        DriverOp,
+        std::sync::mpsc::Sender<Result<runtime::DriverReport, String>>,
+    ),
+    TestWorld(
+        Arc<str>,
+        std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+    ),
+    TestText(
+        Arc<str>,
+        String,
+        std::sync::mpsc::Sender<Result<Option<String>, String>>,
+    ),
+    TestRunDone(
         std::sync::mpsc::Sender<osvauld_rpc::Response>,
-        Result<runtime::DriverReport, String>,
+        Vec<osvauld_rpc::LuaTestResult>,
+        Arc<str>,
+        usize,
     ),
     /// Runtime completes this only after the requested frame was painted and read back.
     ScreenshotDone(
@@ -112,6 +129,12 @@ pub enum Msg {
     /// One `Push` arrived on the standing `Listen` connection ([`spawn_push_listener`]) —
     /// the primary delivery path now; `SyncTick` is the backstop.
     PushReceived(Push),
+}
+
+#[derive(Clone)]
+enum DriverReply {
+    Rpc(std::sync::mpsc::Sender<Response>),
+    Test(std::sync::mpsc::Sender<Result<DriverReport, String>>),
 }
 
 /// What a node RPC's worker thread hands back. `Claimed` is its own variant rather than
@@ -154,6 +177,7 @@ enum Tab {
 struct OpenApp {
     ws_id: String,
     app: LuaApp<Msg>,
+    persist: bool,
 }
 
 /// The two halves of doc persistence, as free functions rather than closures built inline.
@@ -475,6 +499,15 @@ fn read_source_file(doc: &LoroDoc, path: &str) -> Result<String, String> {
     }
 }
 
+fn source_tests(doc: &LoroDoc, filter: Option<&str>) -> Result<Vec<LuaTest>, String> {
+    source_files(doc)
+        .into_iter()
+        .filter(|p| p.starts_with("tests/") && p.ends_with(".lua"))
+        .filter(|p| filter.map_or(true, |f| p.contains(f)))
+        .map(|p| read_source_file(doc, &p).map(|source| LuaTest { name: p, source }))
+        .collect()
+}
+
 /// `ElInfo` → wire JSON. The runtime stays serde-free by design; this is the one place that
 /// knows both shapes. Omits empties so a leaf reads `{"kind":"text","id":"lbl","text":"hi"}`.
 fn screenshot_spec(
@@ -531,12 +564,42 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
     })
 }
 
+fn rects_json(report: DriverReport) -> serde_json::Value {
+    serde_json::Value::Array(
+        report
+            .rects
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id, "x": r.x, "y": r.y, "w": r.w, "h": r.h, "hits": r.hits,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn worlds_json(
+    worlds: &std::collections::HashMap<String, Vec<world::EntityInspection>>,
+) -> serde_json::Value {
+    serde_json::Value::Object(
+        worlds
+            .iter()
+            .map(|(id, w)| (id.clone(), world_json(w)))
+            .collect(),
+    )
+}
+
 fn world_json(entities: &[world::EntityInspection]) -> serde_json::Value {
     let entities = entities.iter().map(|e| {
-        let clip = e.clip.as_ref().map(|c| {
-            serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped })
-        });
-        let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
+        let clip = e
+            .clip
+            .as_ref()
+            .map(|c| serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped }));
+        let attached = e
+            .attached
+            .as_ref()
+            .map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
             "velocity": [e.velocity.0, e.velocity.1],
@@ -548,14 +611,25 @@ fn world_json(entities: &[world::EntityInspection]) -> serde_json::Value {
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.
 fn add_worlds(tree: &mut serde_json::Value, worlds: &HashMap<&str, serde_json::Value>) {
-    let Some(node) = tree.as_object_mut() else { return };
+    let Some(node) = tree.as_object_mut() else {
+        return;
+    };
     let id = node.get("id").and_then(|id| id.as_str());
     if let Some(world) = id.and_then(|id| worlds.get(id)) {
         node.insert("world".into(), world.clone());
     }
     if let Some(children) = node.get_mut("children").and_then(|c| c.as_array_mut()) {
-        children.iter_mut().for_each(|child| add_worlds(child, worlds));
+        children
+            .iter_mut()
+            .for_each(|child| add_worlds(child, worlds));
     }
+}
+
+fn text_by_id(i: &ElInfo, id: &str) -> Option<String> {
+    if i.id.as_deref() == Some(id) {
+        return i.text.clone();
+    }
+    i.children.iter().find_map(|c| text_by_id(c, id))
 }
 
 fn info_json(i: &ElInfo) -> serde_json::Value {
@@ -634,7 +708,7 @@ fn answer(vault: &Vault, req: Request) -> Response {
 /// A driver op waiting for the Runner to run it. Same deferral as `PendingScreenshot`: the reply
 /// travels with the op because the answer is not known until the Runner has finished.
 struct PendingDriver {
-    reply: std::sync::mpsc::Sender<Response>,
+    reply: DriverReply,
     op: DriverOp,
 }
 
@@ -898,6 +972,50 @@ impl Shell {
                     .unwrap_or_else(Response::err),
                 None => Response::err("item is not open"),
             },
+            // Slice 1 runs only source-only `t.expect` tests, but it still opens a non-persisting
+            // test tab so the runner path already has a distinct retained-id/doc namespace.
+            Request::RunTests { item_id, filter } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => match self
+                    .vault
+                    .get_src(&wi.ws_id, &wi.id)
+                    .map_err(|e| e.to_string())
+                {
+                    Err(e) => Response::err(e),
+                    Ok(None) => Response::err(format!("{} has no source", wi.name)),
+                    Ok(Some(src)) => {
+                        let old_focus = self.focused;
+                        let response = match self.open_test_tab(&wi, src.clone(), "run") {
+                            Err(e) => Err(e),
+                            Ok(test_id) => {
+                                let doc = LoroDoc::new();
+                                let result = (|| {
+                                    doc.import(&src).map_err(|e| e.to_string())?;
+                                    let tests = source_tests(&doc, filter.as_deref())?;
+                                    let bytes: usize = tests.iter().map(|t| t.source.len()).sum();
+                                    if tests.len() > 32 || bytes > 256 * 1024 {
+                                        return Err("test batch is too large".into());
+                                    }
+                                    Ok(Response::ok(
+                                        run_lua_tests(tests)
+                                            .into_iter()
+                                            .map(|r| LuaTestResult {
+                                                name: r.name,
+                                                ok: r.ok,
+                                                frames: r.frames,
+                                                failure: r.failure,
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    ))
+                                })();
+                                self.close_test_tab(&test_id, old_focus);
+                                result
+                            }
+                        };
+                        response.unwrap_or_else(Response::err)
+                    }
+                },
+            },
             // ── app actions: resolve by element id on a freshly built view, then route the
             // produced message exactly as the `Msg::Tab` arm would — we are already inside
             // `update`, so recursing into it would run the post-update flush twice.
@@ -909,7 +1027,10 @@ impl Shell {
                     let _ = o.app.reload_if_stale();
                     let mut tree = info_json(&o.app.view().info());
                     let worlds = o.app.inspect_worlds();
-                    let worlds = worlds.iter().map(|(id, w)| (id.as_str(), world_json(w))).collect();
+                    let worlds = worlds
+                        .iter()
+                        .map(|(id, w)| (id.as_str(), world_json(w)))
+                        .collect();
                     add_worlds(&mut tree, &worlds);
                     Response::ok(tree)
                 }
@@ -1066,11 +1187,56 @@ impl Shell {
             OpenApp {
                 ws_id: wi.ws_id.clone(),
                 app,
+                persist: true,
             },
         );
         self.focused = self.tabs.len();
         self.tabs.push(Tab::App((id, wi.name)));
         Ok(())
+    }
+
+    fn open_test_tab(
+        &mut self,
+        wi: &WorkspaceItem,
+        src: Vec<u8>,
+        run: &str,
+    ) -> Result<Arc<str>, String> {
+        let id: Arc<str> = format!("test:{}:{run}", wi.id).into();
+        self.close_test_tab(&id, self.focused);
+        let doc = LoroDoc::new();
+        doc.import(&src).map_err(|e| e.to_string())?;
+        let to_msg_id = id.clone();
+        let app = LuaApp::open(
+            doc,
+            Rc::new(|_| Ok(None)),
+            waker(&self.proxy),
+            Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
+        )
+        .map_err(|e| e.to_string())?;
+        self.apps.insert(
+            id.clone(),
+            OpenApp {
+                ws_id: wi.ws_id.clone(),
+                app,
+                persist: false,
+            },
+        );
+        self.focused = self.tabs.len();
+        self.tabs
+            .push(Tab::App((id.clone(), format!("test: {}", wi.name))));
+        Ok(id)
+    }
+
+    fn close_test_tab(&mut self, id: &Arc<str>, restore_focus: usize) {
+        self.apps.remove(id);
+        if let Some(pos) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if tid == id))
+        {
+            self.tabs.remove(pos);
+        }
+        self.focused = restore_focus.min(self.tabs.len().saturating_sub(1));
     }
     /// Tab ids are prefixed (`tab:*`) because the retained store is keyed by `Id` alone — an app
     /// naming an element "Home" would otherwise share this strip's hover/press state.
@@ -1515,6 +1681,95 @@ impl App for Shell {
                 let _ = tx.send(resp);
                 None
             }
+            Msg::Rpc(Request::RunTests { item_id, filter }, reply) => {
+                let result = find_item(&self.vault, &item_id).and_then(|wi| {
+                    let src = self
+                        .vault
+                        .get_src(&wi.ws_id, &wi.id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("{} has no source", wi.name))?;
+                    let doc = LoroDoc::new();
+                    doc.import(&src).map_err(|e| e.to_string())?;
+                    let tests = source_tests(&doc, filter.as_deref())?;
+                    let bytes: usize = tests.iter().map(|t| t.source.len()).sum();
+                    if tests.len() > 32 || bytes > 256 * 1024 {
+                        return Err("test batch is too large".into());
+                    }
+                    let old_focus = self.focused;
+                    let test_id = self.open_test_tab(&wi, src, "run")?;
+                    Ok((tests, test_id, old_focus))
+                });
+                match result {
+                    Err(e) => {
+                        let _ = reply.send(Response::err(e));
+                    }
+                    Ok((tests, test_id, old_focus)) => {
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            let driver_proxy = proxy.clone();
+                            let world_proxy = proxy.clone();
+                            let done_proxy = proxy.clone();
+                            let send_driver = Arc::new(move |op: DriverOp| {
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                driver_proxy
+                                    .send_event(Msg::TestDriver(op, tx))
+                                    .map_err(|e| format!("shell event loop closed: {e}"))?;
+                                rx.recv()
+                                    .map_err(|_| "shell closed before driver reply".to_string())?
+                            });
+                            let for_step = send_driver.clone();
+                            let for_rects = send_driver.clone();
+                            let for_click = send_driver.clone();
+                            let text_proxy = world_proxy.clone();
+                            let world_id = test_id.clone();
+                            let text_id = test_id.clone();
+                            let api = LuaTestApi {
+                                step: Some(Arc::new(move |frames| {
+                                    for_step(DriverOp::Frame(frames)).map(|r| r.frames)
+                                })),
+                                world: Some(Arc::new(move || {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    world_proxy
+                                        .send_event(Msg::TestWorld(world_id.clone(), tx))
+                                        .map_err(|e| format!("shell event loop closed: {e}"))?;
+                                    rx.recv().map_err(|_| {
+                                        "shell closed before world reply".to_string()
+                                    })?
+                                })),
+                                rects: Some(Arc::new(move || {
+                                    for_rects(DriverOp::Rects).map(rects_json)
+                                })),
+                                click_at: Some(Arc::new(move |x, y| {
+                                    for_click(DriverOp::PointerMove((x, y)))?;
+                                    for_click(DriverOp::PointerPress)?;
+                                    for_click(DriverOp::PointerRelease)?;
+                                    Ok(())
+                                })),
+                                text: Some(Arc::new(move |el_id| {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    text_proxy
+                                        .send_event(Msg::TestText(text_id.clone(), el_id, tx))
+                                        .map_err(|e| format!("shell event loop closed: {e}"))?;
+                                    rx.recv()
+                                        .map_err(|_| "shell closed before text reply".to_string())?
+                                })),
+                            };
+                            let out = run_lua_tests_with(tests, api)
+                                .into_iter()
+                                .map(|r| LuaTestResult {
+                                    name: r.name,
+                                    ok: r.ok,
+                                    frames: r.frames,
+                                    failure: r.failure,
+                                })
+                                .collect();
+                            let _ = done_proxy
+                                .send_event(Msg::TestRunDone(reply, out, test_id, old_focus));
+                        });
+                    }
+                }
+                None
+            }
             Msg::Rpc(
                 Request::Screenshot {
                     item_id,
@@ -1569,10 +1824,27 @@ impl App for Shell {
                     Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
                     Request::PointerPress {} => DriverOp::PointerPress,
                     Request::PointerRelease {} => DriverOp::PointerRelease,
-                    Request::Keyboard { code, key, down, repeat,
-                        shift, ctrl, alt, super_ } => DriverOp::Keyboard(KeyInput {
-                        code, key, down, repeat, cancelled: false,
-                        mods: Mods { shift, ctrl, alt, super_ },
+                    Request::Keyboard {
+                        code,
+                        key,
+                        down,
+                        repeat,
+                        shift,
+                        ctrl,
+                        alt,
+                        super_,
+                    } => DriverOp::Keyboard(KeyInput {
+                        code,
+                        key,
+                        down,
+                        repeat,
+                        cancelled: false,
+                        mods: Mods {
+                            shift,
+                            ctrl,
+                            alt,
+                            super_,
+                        },
                     }),
                     Request::Drag { from, to, steps } => DriverOp::Drag { from, to, steps },
                     _ => unreachable!("matched above"),
@@ -1580,33 +1852,71 @@ impl App for Shell {
                 if self.driver.is_some() {
                     let _ = reply.send(Response::err("a driver op is already pending"));
                 } else {
-                    self.driver = Some(PendingDriver { reply, op });
+                    self.driver = Some(PendingDriver {
+                        reply: DriverReply::Rpc(reply),
+                        op,
+                    });
                 }
                 None
             }
+            Msg::TestDriver(op, reply) => {
+                if self.driver.is_some() {
+                    let _ = reply.send(Err("a driver op is already pending".into()));
+                } else {
+                    self.driver = Some(PendingDriver {
+                        reply: DriverReply::Test(reply),
+                        op,
+                    });
+                }
+                None
+            }
+            Msg::TestWorld(id, reply) => {
+                let result = self
+                    .apps
+                    .get(&id)
+                    .map(|o| worlds_json(&o.app.inspect_worlds()))
+                    .ok_or_else(|| "test app is not open".to_string());
+                let _ = reply.send(result);
+                None
+            }
+            Msg::TestText(id, el_id, reply) => {
+                let result = self
+                    .apps
+                    .get_mut(&id)
+                    .map(|o| text_by_id(&o.app.view().info(), &el_id))
+                    .ok_or_else(|| "test app is not open".to_string());
+                let _ = reply.send(result);
+                None
+            }
+            Msg::TestRunDone(reply, results, test_id, old_focus) => {
+                self.close_test_tab(&test_id, old_focus);
+                let _ = reply.send(Response::ok(results));
+                None
+            }
             Msg::DriverDone(reply, result) => {
-                let response = match result {
-                    Ok(DriverReport {
-                        clock,
-                        frames,
-                        rects,
-                    }) => Response::ok(serde_json::json!({
-                        "clock": clock,
-                        "frames": frames,
-                        "rects": rects.map(|rs| {
-                            rs.into_iter()
-                                .map(|r| {
-                                    serde_json::json!({
-                                        "id": r.id, "x": r.x, "y": r.y, "w": r.w, "h": r.h,
-                                        "hits": r.hits,
-                                    })
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    })),
-                    Err(e) => Response::err(e),
-                };
-                let _ = reply.send(response);
+                match reply {
+                    DriverReply::Test(tx) => {
+                        let _ = tx.send(result);
+                    }
+                    DriverReply::Rpc(tx) => {
+                        let response = match result {
+                            Ok(DriverReport {
+                                clock,
+                                frames,
+                                rects,
+                            }) => Response::ok(serde_json::json!({
+                                "clock": clock,
+                                "frames": frames,
+                                "rects": rects.map(|rs| rs.into_iter().map(|r| serde_json::json!({
+                                    "id": r.id, "x": r.x, "y": r.y, "w": r.w, "h": r.h,
+                                    "hits": r.hits,
+                                })).collect::<Vec<_>>()),
+                            })),
+                            Err(e) => Response::err(e),
+                        };
+                        let _ = tx.send(response);
+                    }
+                }
                 None
             }
             Msg::ScreenshotDone(reply, result) => {
@@ -1757,6 +2067,9 @@ impl App for Shell {
             .and_then(|_| self.vault.with_signer(|d| d.did().to_string()));
         let mut failed = None;
         for (item_id, o) in self.apps.iter_mut() {
+            if !o.persist {
+                continue;
+            }
             let ws = o.ws_id.clone();
             let mut dirtied = Vec::new();
             let mut put = persist(&vault, &ws, item_id);

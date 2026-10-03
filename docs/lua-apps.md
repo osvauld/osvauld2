@@ -764,6 +764,15 @@ rendered tree and console after activation, then repair against the new revision
 `WriteFile` is for initial upload, file creation or an explicit wholesale replacement—not the
 normal edit loop. Keep files small enough that a reported line number means one obvious thing.
 
+## App-shipped tests
+
+An app may include `tests/*.lua` beside `main.lua`. The first built slice runs those files over the
+bridge in a separate sandboxed test VM with `t.expect(cond, message)`, `t.step(frames)`,
+`t.world()`, `t.rects()`, `t.centre_of(id)`, `t.click_at(x, y)` and `t.text(id)`, after opening a
+temporary non-persisting app tab with empty docs. The planned behavioural runner will add
+keyboard/text-input helpers while still keeping tests outside the app VM; see
+`docs/design/lua-app-tests.md`.
+
 ## Checking it without a window
 
 The shell runs windowless: `shell2 --offscreen WxH` is the real shell — real layout, real pixels,

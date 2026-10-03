@@ -13,14 +13,14 @@ pub use crdt::{Cores, Docs, Resolve, Wake};
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
 };
-use mlua::{AnyUserData, Error, Function, IntoLua, Lua, Table, Value};
+use mlua::{AnyUserData, ChunkMode, Error, Function, IntoLua, Lua, Table, Value};
 use runtime::vello::peniko::Color;
 use runtime::{
     Anchor, El, Placement, PlacementAlign, PlacementSide, col, frame as frame_el, row,
     scene3d as scene3d_el, text, text_area, text_input,
 };
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -49,6 +49,143 @@ impl Key {
 }
 
 pub type Handlers = HashMap<Key, Function>;
+
+pub struct LuaTest {
+    pub name: String,
+    pub source: String,
+}
+
+pub struct LuaTestResult {
+    pub name: String,
+    pub ok: bool,
+    pub frames: u32,
+    pub failure: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct LuaTestApi {
+    pub step: Option<Arc<dyn Fn(u32) -> Result<u32, String> + Send + Sync>>,
+    pub world: Option<Arc<dyn Fn() -> Result<serde_json::Value, String> + Send + Sync>>,
+    pub rects: Option<Arc<dyn Fn() -> Result<serde_json::Value, String> + Send + Sync>>,
+    pub click_at: Option<Arc<dyn Fn(f32, f32) -> Result<(), String> + Send + Sync>>,
+    pub text: Option<Arc<dyn Fn(String) -> Result<Option<String>, String> + Send + Sync>>,
+}
+
+pub fn run_lua_tests(tests: Vec<LuaTest>) -> Vec<LuaTestResult> {
+    run_lua_tests_with(tests, LuaTestApi::default())
+}
+
+pub fn run_lua_tests_with(tests: Vec<LuaTest>, api: LuaTestApi) -> Vec<LuaTestResult> {
+    tests
+        .into_iter()
+        .map(|t| run_lua_test(t, api.clone()))
+        .collect()
+}
+
+fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
+    let frames = Rc::new(Cell::new(0u32));
+    let failure = (|| -> mlua::Result<()> {
+        let (vm, fires) = test_vm()?;
+        let t = vm.create_table()?;
+        t.set(
+            "expect",
+            vm.create_function(|_, (ok, msg): (bool, Option<String>)| {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(Error::runtime(
+                        msg.unwrap_or_else(|| "expectation failed".into()),
+                    ))
+                }
+            })?,
+        )?;
+        let step = api.step.clone();
+        let frame_count = frames.clone();
+        t.set(
+            "step",
+            vm.create_function(move |_, n: u32| match &step {
+                Some(step) => step(n)
+                    .inspect(|done| frame_count.set(frame_count.get().saturating_add(*done)))
+                    .map_err(Error::runtime),
+                None => Err(Error::runtime("t.step is not available in this runner")),
+            })?,
+        )?;
+        let world = api.world.clone();
+        t.set(
+            "world",
+            vm.create_function(move |lua, ()| match &world {
+                Some(world) => json_to_lua(lua, &world().map_err(Error::runtime)?),
+                None => Err(Error::runtime("t.world is not available in this runner")),
+            })?,
+        )?;
+        let rects = api.rects.clone();
+        t.set(
+            "rects",
+            vm.create_function(move |lua, ()| match &rects {
+                Some(rects) => json_to_lua(lua, &rects().map_err(Error::runtime)?),
+                None => Err(Error::runtime("t.rects is not available in this runner")),
+            })?,
+        )?;
+        let centres = api.rects.clone();
+        t.set(
+            "centre_of",
+            vm.create_function(move |_, id: String| {
+                let Some(rects) = &centres else {
+                    return Err(Error::runtime(
+                        "t.centre_of is not available in this runner",
+                    ));
+                };
+                let serde_json::Value::Array(rs) = rects().map_err(Error::runtime)? else {
+                    return Err(Error::runtime("rects response was not an array"));
+                };
+                for r in rs {
+                    if r.get("id").and_then(|v| v.as_str()) == Some(id.as_str()) {
+                        let x = r.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let y = r.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let w = r.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let h = r.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        return Ok((x + w / 2.0, y + h / 2.0));
+                    }
+                }
+                Err(Error::runtime(format!("no reachable element {id:?}")))
+            })?,
+        )?;
+        let click_at = api.click_at.clone();
+        t.set(
+            "click_at",
+            vm.create_function(move |_, (x, y): (f32, f32)| match &click_at {
+                Some(click_at) => click_at(x, y).map_err(Error::runtime),
+                None => Err(Error::runtime("t.click_at is not available in this runner")),
+            })?,
+        )?;
+        let text = api.text.clone();
+        t.set(
+            "text",
+            vm.create_function(move |lua, id: String| match &text {
+                Some(text) => match text(id).map_err(Error::runtime)? {
+                    Some(s) => Ok(Value::String(lua.create_string(&s)?)),
+                    None => Ok(Value::Nil),
+                },
+                None => Err(Error::runtime("t.text is not available in this runner")),
+            })?,
+        )?;
+        let f = vm
+            .load(&test.source)
+            .set_name(&test.name)
+            .set_mode(ChunkMode::Text)
+            .eval::<Function>()?;
+        fires.store(0, Ordering::Relaxed);
+        f.call::<()>(t)
+    })()
+    .err()
+    .map(|e| e.to_string());
+    LuaTestResult {
+        name: test.name,
+        ok: failure.is_none(),
+        frames: frames.get(),
+        failure,
+    }
+}
 
 /// What a drag hands Lua, in order: where the pointer is in the element's own units, how far it
 /// has travelled from the press, the zoom scale, and the dragged element's screen origin — which
@@ -588,7 +725,10 @@ impl<M: 'static> LuaApp<M> {
     /// Each live world's entities, by world id.
     pub fn inspect_worlds(&self) -> HashMap<String, Vec<world::EntityInspection>> {
         let worlds = self.worlds.borrow();
-        worlds.iter().map(|(id, w)| (id.clone(), w.inspect())).collect()
+        worlds
+            .iter()
+            .map(|(id, w)| (id.clone(), w.inspect()))
+            .collect()
     }
 
     /// The last `last` console lines, newest last.
@@ -697,7 +837,9 @@ impl<M: 'static> LuaApp<M> {
                 worlds.retain(|id, _| seen.contains(id));
                 for (id, world) in worlds.iter_mut() {
                     let notes = world.drain_notes().into_iter();
-                    context.errors.extend(notes.map(|n| format!("world {id:?}: {n}")));
+                    context
+                        .errors
+                        .extend(notes.map(|n| format!("world {id:?}: {n}")));
                 }
                 el
             }
@@ -765,8 +907,12 @@ impl<M: 'static> LuaApp<M> {
             LuaMsg::CallKey(_, input) => {
                 event.set("cancelled", input.cancelled)?;
                 if !input.cancelled {
-                    if let Some(code) = input.code { event.set("code", code)?; }
-                    if !input.key.is_empty() { event.set("key", input.key)?; }
+                    if let Some(code) = input.code {
+                        event.set("code", code)?;
+                    }
+                    if !input.key.is_empty() {
+                        event.set("key", input.key)?;
+                    }
                     event.set("down", input.down)?;
                     event.set("repeated", input.repeat)?;
                     event.set("shift", input.mods.shift)?;
@@ -992,6 +1138,29 @@ fn plain(v: &Value, depth: u32) -> Option<Plain> {
     }
 }
 
+fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
+    Ok(match v {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Value::String(lua.create_string(s)?),
+        serde_json::Value::Array(items) => {
+            let t = lua.create_table()?;
+            for (i, item) in items.iter().enumerate() {
+                t.set(i + 1, json_to_lua(lua, item)?)?;
+            }
+            Value::Table(t)
+        }
+        serde_json::Value::Object(map) => {
+            let t = lua.create_table()?;
+            for (k, v) in map {
+                t.set(k.as_str(), json_to_lua(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
 fn into_lua(lua: &Lua, p: &Plain) -> mlua::Result<Value> {
     Ok(match p {
         Plain::Nil => Value::Nil,
@@ -1103,6 +1272,22 @@ fn shadow_os(vm: &Lua) -> mlua::Result<()> {
     )?;
     // `os.difftime` is arithmetic on numbers the caller supplies and reads no clock — left alone.
     Ok(())
+}
+
+fn test_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
+    let vm = Lua::new();
+    shadow_os(&vm)?;
+    let _ = vm.sandbox(true)?;
+    let fires = Arc::new(AtomicU64::new(0));
+    let f = fires.clone();
+    vm.set_interrupt(move |_lua| {
+        if f.fetch_add(1, Ordering::Relaxed) > 1_000_000 {
+            Err(mlua::Error::runtime("interrupt budget exceeded"))
+        } else {
+            Ok(mlua::VmState::Continue)
+        }
+    });
+    Ok((vm, fires))
 }
 
 pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
@@ -1363,7 +1548,9 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         .get::<Option<String>>("id")?
         .ok_or_else(|| mlua::Error::runtime("world needs an id"))?;
     if !context.worlds_seen.insert(id.clone()) {
-        return Err(mlua::Error::runtime(format!("two worlds share the id {id:?}")));
+        return Err(mlua::Error::runtime(format!(
+            "two worlds share the id {id:?}"
+        )));
     }
     let size = |field: &str| -> mlua::Result<f64> {
         node.get::<Option<f64>>(field)?
@@ -1400,7 +1587,9 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     if actions.is_empty() != node.get::<Value>("on_action")?.is_nil() {
-        return Err(mlua::Error::runtime("a world's actions and on_action come together"));
+        return Err(mlua::Error::runtime(
+            "a world's actions and on_action come together",
+        ));
     }
     let mut specs = Vec::new();
     for index in 1..=max_index(node) {
@@ -1424,7 +1613,9 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     let mut el = frame_el(Arc::new(visual));
     if world.wants_keys() {
         let (to_msg, id) = (context.to_msg.clone(), id.clone());
-        el = el.on_key(id.clone(), move |key| to_msg(LuaMsg::KeyWorld(id.clone(), key)));
+        el = el.on_key(id.clone(), move |key| {
+            to_msg(LuaMsg::KeyWorld(id.clone(), key))
+        });
     }
     if world.needs_ticks() {
         let to_msg = context.to_msg.clone();
@@ -1547,7 +1738,13 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
         "frame" => &["visual"],
         "scene3d" => &["scene"],
         "world" => &[
-            "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
+            "width",
+            "height",
+            "order",
+            "actions",
+            "on_action",
+            "on_move",
+            "on_clip_end",
             "on_zone",
         ],
         _ => &[],
