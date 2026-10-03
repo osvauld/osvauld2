@@ -152,6 +152,12 @@ class Bridge:
     def key(self, item_id: str, el_id: str, key: str) -> str:
         return self.request("Key", item_id=item_id, el_id=el_id, key=key)
 
+    def search(self, item_id: str, query: str, limit: int = 20) -> dict:
+        """The item's search index: {"hits": [{doc, id, score, snippet}], "fields_runs": n}.
+        `fields_runs` counts `index.lua` calls since the shell started — a restart that re-ran
+        them all would show it."""
+        return self.request("Search", item_id=item_id, query=query, limit=limit)
+
     def read_data(self, item_id: str) -> dict:
         """Every open runtime-data doc as {name: deep JSON} — live, pre-flush."""
         return self.request("AppDataGet", item_id=item_id)

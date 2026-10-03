@@ -220,6 +220,30 @@ fn src_is_sealed_at_rest() {
     );
 }
 
+/// What search's catch-up walks: every state doc an item has, opened this session or not.
+#[test]
+fn doc_names_lists_an_items_docs_and_nothing_else() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let (ws_id, item_id) = app_item(&vault);
+    let other = vault.create_item(&ws_id, "other", ItemKind::App).unwrap().id;
+    vault.put_src(&ws_id, &item_id, SRC).unwrap();
+    vault.put_doc(&ws_id, &item_id, STATE, "channel:b").unwrap();
+    vault.put_doc(&ws_id, &item_id, STATE, "channel:a").unwrap();
+    vault.put_doc(&ws_id, &other, STATE, "elsewhere").unwrap();
+
+    assert_eq!(
+        vault.doc_names(&ws_id, &item_id).unwrap(),
+        ["channel:a", "channel:b"]
+    );
+    assert!(vault.doc_names(&ws_id, "not-minted/x").is_err());
+    vault.lock();
+    assert!(matches!(
+        vault.doc_names(&ws_id, &item_id),
+        Err(VaultError::Locked)
+    ));
+}
+
 #[test]
 fn src_and_state_are_separate_docs() {
     // w3.md §2a: two docs per app, never one — code and data don't share a container.

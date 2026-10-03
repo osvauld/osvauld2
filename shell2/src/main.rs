@@ -7,6 +7,7 @@
 
 mod app_src;
 mod bridge;
+mod indexer;
 mod item;
 mod login;
 mod mnemonic;
@@ -99,6 +100,12 @@ pub enum Msg {
         String,
         std::sync::mpsc::Sender<Result<Option<String>, String>>,
     ),
+    TestType(
+        Arc<str>,
+        String,
+        String,
+        std::sync::mpsc::Sender<Result<(), String>>,
+    ),
     TestRunDone(
         std::sync::mpsc::Sender<osvauld_rpc::Response>,
         Vec<osvauld_rpc::LuaTestResult>,
@@ -178,6 +185,8 @@ struct OpenApp {
     ws_id: String,
     app: LuaApp<Msg>,
     persist: bool,
+    /// `None` when the index could not open — the app runs, `search.query` says why.
+    index: Option<indexer::Shared>,
 }
 
 /// The two halves of doc persistence, as free functions rather than closures built inline.
@@ -365,6 +374,36 @@ fn subscribe_if_new(
             eprintln!("subscribe: {id}/{log_name}: {e}");
         }
     });
+}
+
+/// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
+/// `search.query`'s error — never a reason not to open the app.
+fn attach_index(
+    app: &mut LuaApp<Msg>,
+    opened: Result<indexer::ItemIndex, String>,
+) -> Option<indexer::Shared> {
+    let shared = match opened {
+        Ok(ix) => Rc::new(std::cell::RefCell::new(ix)),
+        Err(e) => {
+            app.note(format!("search: the index did not open: {e}"));
+            return None;
+        }
+    };
+    match indexer::attach(&shared, app) {
+        Ok(()) => Some(shared),
+        Err(e) => {
+            app.note(format!("search: {e}"));
+            None
+        }
+    }
+}
+
+fn reindex_open(o: &OpenApp, dirtied: &[String]) {
+    if let Some(ix) = &o.index {
+        if let Err(e) = indexer::index_dirty(ix, &o.app, dirtied) {
+            o.app.note(format!("search: {e}"));
+        }
+    }
 }
 
 fn persist(
@@ -1074,6 +1113,26 @@ impl Shell {
                 None => Response::err("item is not open"),
                 Some(o) => Response::ok(o.app.docs_json()),
             },
+            Request::Search {
+                item_id,
+                query,
+                limit,
+            } => match self.apps.get(item_id.as_str()).map(|o| o.index.as_ref()) {
+                None => Response::err("item is not open"),
+                Some(None) => Response::err("this item has no search index"),
+                Some(Some(ix)) => {
+                    let ix = ix.borrow();
+                    match ix.query(&query, limit.unwrap_or(20).clamp(1, 500)) {
+                        Err(e) => Response::err(e),
+                        Ok(hits) => Response::ok(serde_json::json!({
+                            "hits": hits.iter().map(|h| serde_json::json!({
+                                "doc": h.doc, "id": h.id, "score": h.score, "snippet": h.snippet,
+                            })).collect::<Vec<_>>(),
+                            "fields_runs": ix.fields_runs,
+                        })),
+                    }
+                }
+            },
             // Opening an already-open item focuses its tab — never a second VM for one
             // item. A fresh item with no source yet refuses honestly (WriteFile is its
             // other half).
@@ -1183,12 +1242,15 @@ impl Shell {
             Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
         )
         .map_err(|e| e.to_string())?;
+        let mut app = app;
+        let index = attach_index(&mut app, indexer::ItemIndex::open(&self.vault, &wi.ws_id, &wi.id));
         self.apps.insert(
             id.clone(),
             OpenApp {
                 ws_id: wi.ws_id.clone(),
                 app,
                 persist: true,
+                index,
             },
         );
         self.focused = self.tabs.len();
@@ -1214,12 +1276,16 @@ impl Shell {
             Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
         )
         .map_err(|e| e.to_string())?;
+        let mut app = app;
+        // A tab that persists nothing still searches: its own index, in memory, gone with it.
+        let index = attach_index(&mut app, indexer::ItemIndex::in_memory());
         self.apps.insert(
             id.clone(),
             OpenApp {
                 ws_id: wi.ws_id.clone(),
                 app,
                 persist: false,
+                index,
             },
         );
         self.focused = self.tabs.len();
@@ -1717,6 +1783,8 @@ impl App for Shell {
                             let text_proxy = world_proxy.clone();
                             let world_id = test_id.clone();
                             let text_id = test_id.clone();
+                            let type_id = test_id.clone();
+                            let type_proxy = text_proxy.clone();
                             let api = LuaTestApi {
                                 step: Some(Arc::new(move |frames| {
                                     for_step(DriverOp::Frame(frames)).map(|r| r.frames)
@@ -1746,6 +1814,14 @@ impl App for Shell {
                                         .map_err(|e| format!("shell event loop closed: {e}"))?;
                                     rx.recv()
                                         .map_err(|_| "shell closed before text reply".to_string())?
+                                })),
+                                type_text: Some(Arc::new(move |el_id, text| {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    type_proxy
+                                        .send_event(Msg::TestType(type_id.clone(), el_id, text, tx))
+                                        .map_err(|e| format!("shell event loop closed: {e}"))?;
+                                    rx.recv()
+                                        .map_err(|_| "shell closed before type reply".to_string())?
                                 })),
                             };
                             let out = run_lua_tests_with(tests, api)
@@ -1886,6 +1962,16 @@ impl App for Shell {
                     .map(|o| text_by_id(&o.app.view().info(), &el_id))
                     .ok_or_else(|| "test app is not open".to_string());
                 let _ = reply.send(result);
+                None
+            }
+            Msg::TestType(id, el_id, text, reply) => {
+                let result = match self.fire_on_app(&id, &el_id, Action::Type(&text)) {
+                    Response::Ok { .. } => Ok(()),
+                    Response::Err { message } => Err(message),
+                };
+                let _ = reply.send(result);
+                // The flush after this match saves — and indexes — what the input's handler
+                // wrote, before the test's next step.
                 None
             }
             Msg::TestRunDone(reply, results, test_id, old_focus) => {
@@ -2067,11 +2153,18 @@ impl App for Shell {
             .and_then(|_| self.vault.with_signer(|d| d.did().to_string()));
         let mut failed = None;
         for (item_id, o) in self.apps.iter_mut() {
+            let mut dirtied = Vec::new();
             if !o.persist {
+                // Nothing to save, but the flush still says what changed — the test tab's index
+                // needs it as much as a real one.
+                let _ = o.app.flush(|name, _| {
+                    dirtied.push(name.to_string());
+                    Ok(())
+                });
+                reindex_open(o, &dirtied);
                 continue;
             }
             let ws = o.ws_id.clone();
-            let mut dirtied = Vec::new();
             let mut put = persist(&vault, &ws, item_id);
             let result = o.app.flush(|name, bytes| {
                 dirtied.push(name.to_string());
@@ -2080,6 +2173,8 @@ impl App for Shell {
             if let Err(e) = result {
                 failed = Some(format!("save failed: {e}"));
             }
+            // After the save, so the index never holds a record the vault does not.
+            reindex_open(o, &dirtied);
             if let (Some(record), Some(did)) = (&claimed, &desktop_did) {
                 // Subscribing here, not only in `SyncTick`, is what makes a freshly opened
                 // doc start receiving pushes right away instead of waiting up to

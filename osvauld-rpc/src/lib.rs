@@ -333,6 +333,17 @@ pub enum Request {
     AppDataGet {
         item_id: String,
     },
+
+    // ── search (docs/design/search.md) ──────────────────────────────────────────
+    /// Query an open item's index, exactly as its `search.query` would. Answers
+    /// `{ hits: [{doc, id, score, snippet}], fields_runs }` — `fields_runs` counts `index.lua`
+    /// calls since the item was opened, so a caller can tell indexing that re-ran from indexing
+    /// that did not.
+    Search {
+        item_id: String,
+        query: String,
+        limit: Option<usize>,
+    },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
