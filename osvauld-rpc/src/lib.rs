@@ -70,6 +70,14 @@ pub struct EditFileResult {
     pub activation: SourceActivation,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaTestResult {
+    pub name: String,
+    pub ok: bool,
+    pub frames: u32,
+    pub failure: Option<String>,
+}
+
 /// A passphrase on the wire. Serialises as a plain string (the protocol's shape) but never
 /// prints: `Debug` is redacted, so request logs and test failures cannot leak credentials.
 #[derive(Clone, Serialize, Deserialize)]
@@ -216,6 +224,11 @@ pub enum Request {
     },
 
     // ── app senses ──────────────────────────────────────────────────────────────
+    /// Run app-shipped Lua tests (`tests/*.lua`) from source, in a separate test VM.
+    RunTests {
+        item_id: String,
+        filter: Option<String>,
+    },
     /// The running app's `El` tree as JSON, no rects. The `id`s in it are `Click`'s targets.
     DumpTree {
         item_id: String,

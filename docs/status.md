@@ -445,6 +445,117 @@ both planets and the moon parametrically (`x=rx*cos(t)`, `y=ry*sin(t)`); before/
 painted path. The earlier next step—scaffolding a force graph and Frame-local hits—is superseded pending the
 Environment rendering/lifetime gates below.
 
+### 2D world — drawings, animation, a Rust-run game world
+
+**Design draft 2026-09-28:** [2d-world.md](design/2d-world.md) — Lua describes, Rust runs; drawings
+and clips are pure-data Lua modules; `ui.world` over `bevy_ecs` + `rapier2d` (proposed, not yet
+added); the chest demo is the milestone. **Slice 1 landed:** runtime `drawing::Drawing` validates a
+part tree (unique ids, known parents, no cycles, 256-part cap) whose list order is draw order and
+whose `parent` is the hierarchy; `pose(overrides)` rotates/moves/scales parts about drawing-absolute
+pivots, carries children with their parent, and compiles to an ordinary Frame of part-named groups,
+so hits report the part id. Lua has strict `gfx.drawing(module)` over a pure-data module (paths as
+command lists, solid fill, `{width, color}` round-joined stroke) and `drawing:pose({...})`; `clips`
+and `use` are rejected until their slices. `demo_apps/hero` shows one drawing in four poses with
+part hover; `scripts/smoke_hero.py` (in `SMOKES`) pins reachability and part hits. **Slice 2
+landed:** a new `world` crate — the only `bevy_ecs` dependent, pinned `=0.18.1` because 0.19 needs
+Rust 1.95 and the toolchain is 1.92 — holds `World2d`, whose all-or-nothing `reconcile` spawns,
+keeps and despawns entities by author id (`pos` read only at spawn; a new drawing handle replaces
+the look) and whose `frame` emits one entity-named instance each, in list order. Lua `ui.world`
+reconciles into a per-app registry that outlives reload (carried like the console) and is swept
+only after a successful walk; it paints through the ordinary frame leaf, so runtime is unchanged.
+`demo_apps/world` and `scripts/smoke_world.py` (in `SMOKES`) pin spawn/despawn, entity hits, and
+survival across a hot reload that edits `pos`. **Slice 3 landed:** `world::clip::Clip` validates
+keyframe tracks (`x`/`y`/`rot`/`scale` per part; `linear`/`in_out` easing on the arriving segment;
+loop or play-once-and-hold) and samples to part poses. An entity's `clip` handle becomes an
+`Animator` stamped with the world clock when the handle first appears (same handle keeps playing,
+new handle restarts, none returns to rest; a clip naming an unknown part is refused). A world with a
+clip playing attaches the runtime's `on_frame` and routes it as `LuaMsg::TickWorld`, which sets the
+clock in Rust without calling Lua; `on_frame` on a world is therefore an error. Lua has strict
+`gfx.clip{length, loop, tracks}`. `demo_apps/world` idles the hero and opens the chest lid on
+click; `smoke_world.py` clicks and uses `rpc.advance` to check the lid open and closed. Not built:
+clip events, speed, transitions, layers; a finished once-clip keeps the world ticking. **Slice 4
+landed:** an entity's `controller = { speed, axis_x = {neg, pos}, axis_y, moving }` (strict) becomes
+a `Controller` component; the world holds key state, attaching the runtime's `on_key` only when a
+controller exists and routing it as `LuaMsg::KeyWorld` (a cancel releases all), so `on_key` on a
+world is an error. `tick(elapsed, dt)` moves along held axes at `speed × dt` (diagonals
+normalised) and plays `moving` while moving, the entity's own clip when still; a reconcile does not
+restart a walk. Clips are checked by part name via `Drawing::has_part`. The demo hero walks with
+WASD; `smoke_world.py` holds D through `rpc.keyboard` and checks the hero moved and stopped.
+**Slice 4b landed:** `world::facing` — the controller sets a `Dir` (larger move component wins, an
+exact diagonal keeps the facing, stopping keeps it) and an entity's `facing = { down, up, side,
+left }` views (each `{drawing, clip, moving}`, falling back to the entity's own) pick what shows;
+`left` mirrors `side` within the drawing's box unless given. One `Appearance` component caches the
+rest pose per distinct drawing; every view's drawing is checked against every clip it can play.
+`Drawing::size` was added for the mirror. The demo has back and side hero drawings and a side walk;
+the smoke tells views apart by outline (profile nose asymmetry, back-view bun).
+**Slice 4c, chunk 1 landed:** `ui.world { order = "y" }` sets `world::Order::Feet` — a stable sort
+by the bottom of each entity's box (y + height × scale, rotation ignored), so ties keep list order.
+The smoke walks the hero onto the chest and checks a leg is covered a step above and in front a step
+below. **Slice 4c, chunk A landed:** moments leave the world as `WorldEvent`s — `on_action` for a
+fresh press of a key named in the world's `actions`, `on_move` when a controlled entity's held
+direction changes — queued in `World2d` and handed to Lua by `LuaApp::world_events` after a tick
+or key. The demo opens the chest on E and shows the last heading; the smoke checks both. A jump
+done in Rust was built and dropped the same day: a press is a decision, so it belongs to Lua.
+**Chunk B landed:** facing and clip choice moved to Lua. `world::facing` (`Dir`, `Facings`,
+views) and the controller's `moving` clip are gone; the entity carries `flip` (mirror within the
+box), one rest pose, and a clip changed only by reconcile. The demo's `on_move` picks the view,
+the flip and walk-or-idle; the smoke's facing checks pass unchanged. **Chunk C landed:** no height
+primitive was needed — a jump is a once clip lifting the root part while the entity's feet stay
+put. The one Rust addition is `on_clip_end` (`WorldEvent::ClipEnd`, once per play). The demo
+jumps on Space with no double jump, all in Lua; the smoke checks the head rises, lands, and a
+second jump replays (which only `on_clip_end` makes possible). **Chunk D landed:** `attach = { to, part, at }` —
+the world places a carried entity at its carrier's part each tick (`Drawing::part_at` gives a
+part's posed transform), draws it just in front of the carrier, and leaves it where it was on
+detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
+until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
+Not built: walls/physics, key-code validation, a world-level `DumpTree` (built in slice 5), a per-view carry point,
+skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
+frame, so Lua re-describes the world each frame while it animates), and letting a world stop
+ticking once every clip is a finished once clip (a held pose still asks for frames).
+**Slice 5 (Rapier) started — 5a, walls, landed:** `world` depends on `rapier2d`. An entity's
+`collider` (`{ circle | rect, at }`, plain data, strict in Lua) becomes a Rapier body — fixed, or
+kinematic under a controller — kept while unchanged and dropped with the collider or the entity.
+`tick` moves a solid controlled entity through Rapier's character controller, set up for
+top-down (no gravity, no ground snap, no slope limits): it stops at walls and slides along them,
+the same in every direction. The world's frame is clipped to its box (`Frame::clipped()`,
+opt-in; other frames still spill). The demo has thin side walls and a tall back wall, and the
+hero collides by a circle at its feet; the smoke checks it stops at the east and back walls.
+**5b chunk 1 landed:** a carried entity has no body (it is off the floor) and gets one again
+where it is let go; the demo chest is solid by its footprint, and the smoke's draw-order route now
+walks round it. **5b chunk 2 landed:** a let-go entity becomes a dynamic body
+with its carrier's last `Velocity`, slides (friction 6, bounce 0.5, no spin) with Rapier copying
+it back to `Transform` each tick, and settles to fixed once slow and not pressed into anything —
+so one let go inside a wall is pushed out first (Rapier does that slowly, and keeps ~0.012 of
+resting overlap on purpose). **5c landed:** `sensor` on any entity (the
+`collider` shape words, on the same body); each tick the world diffs Rapier's sensor overlaps
+against the last tick's and queues only changes, which Lua gets as `on_zone(e)` with `e.id`,
+`e.who`, `e.phase`. Fixed-on-fixed never counts (walls); moved-on-fixed does, switched on per
+sensor. The demo's E picks the chest up only within its zone; the smoke checks E out of reach
+does nothing and `near` follows through pickup and drop. That completes the chest demo's
+mechanics. **Lift and fall** (Lua and clips only): the chest is attached at its floor spot in
+front of the hero and `lift` raises its drawing into the hands, so let go, `fall` drops it to a
+footprint already on the floor; picking it up shuts the lid. **Lenient reconcile:** a clip track
+for a part the drawing lacks is skipped and noted once to the console (`World2d::drain_notes`,
+drained after each view) instead of refusing the world — asked for by the assets session, whose
+drawings change live; `attach` to a missing part stays an error. **Turning mounts:** `attach` takes
+`pivot` (the carried drawing's own point placed on `at`) and `turn = true` (it takes on the part's
+rotation, scale and mirror about that pivot) — asked for by the assets session so a hat stays on a
+nodding head; without `turn` a carried thing stays upright as before. **The world in the dump:**
+`World2d::inspect` gives each entity's place, body kind, velocity, carrier, zones and clip; the
+shell's `DumpTree` puts it on the world's element (`world.entities`), and the world smoke now
+reads the chest from it. Its first run caught a bug pixels never showed: a chest let go near the
+south wall landed half through it, Rapier put it to sleep pressed in, and it never settled — the
+world ticked forever. **Fix:** let go, a body comes from its carrier's body to its spot and stops
+against what is in the way (`Physics::bring_in`). **Lua app tests started:**
+[design/lua-app-tests.md](design/lua-app-tests.md) records app-shipped Lua tests run beside, not
+inside, the app VM; slice 1 is built (`RunTests` discovers `tests/*.lua`, opens a non-persisting
+temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`,
+`t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns pass/fail results). This supersedes the narrower hints-in-dump and
+bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
+and `t.world()` snapshots; then 5d, dynamic bodies beyond the drop (crates to push, balls to kick),
+with friction and bounce as Lua fields. Soft bodies (rope, cape) are the assets session's own
+verlet solver, not Rapier joints.
+
 ### Environment — composable 3D interfaces and worlds
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
@@ -495,8 +606,8 @@ Roughly in dependency order:
      (`Ping`/`ListAccounts`/`Signup`/`Unlock`/`Lock`, an addition to this list: headless
      login is the automation story's first step), workspaces/items (incl. `CreateWorkspace`
      and `OpenItem`), files (`WriteFile` reloads an open tab; `ReloadItem` forces the staged
-     reload), senses (`DumpTree`/`Click`/`ReadConsole`), and `AppDataGet` (the write half of
-     the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
+     reload), senses (`DumpTree`/`Click`/`ReadConsole`), app-shipped test runner (`RunTests`),
+     and `AppDataGet` (the write half of the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
      alone (ids are 128-bit random). The sthalam families are deleted. Not
      ported from the old repo's control server, on purpose: `eval`, coordinate `ui_mouse_*`,
      p2p, recording. Socket must be created `0600` — passphrases cross it.
@@ -514,10 +625,18 @@ Roughly in dependency order:
      screen), then `Msg::AuthDone` commits the account, replies, and lands the screen
      transition on the UI thread; a script-side signup returns the mnemonic and skips the
      mnemonic screen (the script is its reader), workspaces/items (`CreateWorkspace`,
-     `ListItems`, `CreateItem`, `OpenItem`), and app source files (`ListFiles`, `ReadFile`,
-     `WriteFile`, `ReloadItem`). Everything else answers an honest `not wired yet`. Python harness:
+     `ListItems`, `CreateItem`, `OpenItem`), app source files (`ListFiles`, `ReadFile`,
+     `WriteFile`, `ReloadItem`), and the first `RunTests` slice. Everything else answers an honest `not wired yet`. Python harness:
      `scripts/osvauld/` (`client.py` framing + `session.py` spawn/wait/teardown) and
      `scripts/smoke_bridge.py` — the end-to-end proof over a fresh, locked vault.
+   - **landed 2026-10-01, app-shipped test runner slice 1**: `RunTests { item_id, filter }`
+     discovers `tests/*.lua` in the app source doc, opens a non-persisting temporary app tab with
+     empty docs and a `test:<item>:<run>` retained-id namespace, runs each file in a separate
+     source-only test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`, `t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns `{name, ok, frames, failure}` results. `tally`,
+     `scratch` and `pomodoro` now ship basic `tests/*.lua`, pinned by `scripts/smoke_lua_app_tests.py`.
+     Test VMs run on a worker and step/click through deferred Runner driver ops; the batch remains
+     bounded (32 files / 256 KiB plus the Luau interrupt budget). Pinned by `scripts/smoke_bridge.py`
+     over the real socket. See [Lua app tests](design/lua-app-tests.md).
    - **landed 2026-09-10, senses & actions on running apps**: `DumpTree` (the pre-layout
      `ElInfo` tree as JSON — kinds, ids, text, handler flags; overlays included), and the
      verbs `Click`/`Type`/`Key` (`enter`/`esc`): each resolves the element by id on a fresh

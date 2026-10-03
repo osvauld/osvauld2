@@ -295,6 +295,16 @@ fn the_topmost_name_wins_and_unnamed_paint_is_transparent() {
 }
 
 #[test]
+fn a_clipped_frame_answers_only_inside_its_box() {
+    let spill = || vec![fill(square(5.0, 5.0, 20.0)).with_id("spill")];
+    let loose = Frame::new(10.0, 10.0, None, spill()).unwrap();
+    assert_eq!(hit(&loose, 15.0, 15.0).unwrap().0, "spill", "unclipped, it spills past the box");
+    let clipped = Frame::new(10.0, 10.0, None, spill()).unwrap().clipped();
+    assert_eq!(hit(&clipped, 7.0, 7.0).unwrap().0, "spill");
+    assert_eq!(hit(&clipped, 15.0, 15.0), None);
+}
+
+#[test]
 fn a_hit_lands_in_the_shapes_own_space() {
     let place = Affine::translate((100.0, 100.0));
     let tick = || fill(square(0.0, 0.0, 10.0)).with_id("tick");

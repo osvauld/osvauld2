@@ -137,6 +137,9 @@ class Bridge:
     def reload_item(self, item_id: str) -> str:
         return self.request("ReloadItem", item_id=item_id)
 
+    def run_tests(self, item_id: str, filter: str | None = None) -> list:
+        return self.request("RunTests", item_id=item_id, filter=filter)
+
     def dump_tree(self, item_id: str) -> dict:
         return self.request("DumpTree", item_id=item_id)
 

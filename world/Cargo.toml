@@ -1,0 +1,15 @@
+[package]
+name = "world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The retained 2D world. The only crate that depends on bevy_ecs: Lua and app_host see our entity
+# description, never ECS types, so the storage stays replaceable. Pinned — bevy breaks often, and
+# 0.19 needs a newer toolchain than the workspace's.
+[dependencies]
+bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
+runtime = { path = "../runtime" }
+# Collision only: static and kinematic bodies, the character controller, sensors.
+rapier2d = "0.35"
+thiserror = { workspace = true }
