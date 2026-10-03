@@ -1,0 +1,13 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tantivy = { version = "0.26", default-features = false }
+vault = { path = "../vault" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

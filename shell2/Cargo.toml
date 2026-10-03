@@ -12,6 +12,7 @@ runtime = { path = "../runtime" }
 app_host = { path = "../app_host" }
 world = { path = "../world" }
 vault = { path = "../vault" }
+search = { path = "../search" }
 identity = { path = "../identity/" }
 vello = "0.9.0"
 loro = "1.13.9"
@@ -22,5 +23,6 @@ courier = { path = "../courier" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
+ureq = { version = "3", features = ["json"] }
 [dev-dependencies]
 tempfile = "3"

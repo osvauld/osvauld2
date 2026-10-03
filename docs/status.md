@@ -61,6 +61,43 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
+### Voice POC (`voice/`, 2026-10-01)
+- standalone binary, not wired into the shell: mic (`cpal`) → capture cleaning → Opus 20 ms
+  mono 48 kHz → iroh QUIC datagram `[seq u32][level u8][opus]` → Opus → playout buffer
+  (≤100 ms, PLC for ≤3 lost frames) → speaker. `voice listen` / `voice dial`;
+  `scripts/voice_pair.sh` runs two peers in tmux on one machine. Connection verified locally;
+  audio judged by ear only.
+- `--clean none|apm|rnn|rnn-gate` (default `apm` = WebRTC's audio processing module, bundled
+  build): echo reference fed from the speaker callback. `rnn` (RNNoise) removes most noise but
+  scores worst on speech damage; the VAD gate barely closes on room noise or key clicks.
+- `voice process in.wav out.wav` runs cleaning + Opus round-trip offline;
+  `scripts/voice_eval.py` scores modes with PESQ/STOI/DNSMOS. Its reference must be studio-clean
+  speech — a laptop-mic take skews PESQ/STOI against denoisers.
+- `voice dial <ticket>` (iroh `EndpointTicket`, carries the relay URL when online); ctrl-c
+  closes the connection so the peer ends at once. `--delay <secs>` holds playback back
+  (headphones-only self-test).
+- not built: node relay (forward by `level` without decoding),
+  DeepFilterNet, courier auth on the connection. `iroh-roq` was dropped: abandoned upstream,
+  pinned to iroh 0.35.
+- next: split `voice` into a lib + thin test CLI; shell2 owns the device's one iroh endpoint
+  (courier + voice ALPNs) and exposes calls to Lua behind a mic capability; the relay lives in
+  `kunki`, as its first iroh transport.
+
+### Search (`search/`, 2026-10-03) — design: `design/search.md`
+- `search` crate: one tantivy index per item, every file a sealed vault entry under
+  `entry/search/<ws>/<item>/` (`VaultDirectory`); facets (`author:anu`), title boost,
+  `rank = "recent"`, plain-text snippets. Held unsealed in memory while open.
+- `app_host::index`: an app's `index.lua` (`doc`, `each`, `key`, `fields`, `rank`) runs in its own
+  sandboxed VM over frozen copies; changes found by per-record fingerprint, so only changed
+  records re-run `fields`, and a restart re-runs none.
+- shell2 (`indexer.rs`) indexes after every flush and catches up on open, including docs the app
+  never opened (`Vault::doc_names`); test tabs get an in-memory index. `search.query(text,
+  {limit})` in Lua, bridge `Search`, `t.type` in app tests. `demo_apps/chat` is the reference.
+- verified: `cargo test -p search`, `-p app_host index::`, `-p shell2 indexer::`,
+  `scripts/smoke_search.py` (S1–S6). `cargo test --workspace` and the other smokes not re-run.
+- not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
+  search, indexing off the UI thread, a `lua-apps.md` section.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline
@@ -340,6 +377,20 @@ could still write into the wrong account; `join_item` retried after local edits 
 overwrite them (always starts from an empty doc); the bridge still has no per-connection
 frame-size cap or write deadline.
 
+**2026-10-03: Xnet names land** ([`design/xnet-names.md`](design/xnet-names.md)). A bare name
+typed where a ticket goes resolves on Aptos to a public invite and is redeemed like a pasted
+one. `courier::invite` gains a signed `public` flag: a public invite is reusable and revoked by
+putting its nonce in the same spent set single-use invites use; pre-flag tickets decode as
+single-use. `xnet_names/` is the Move registry (`register`/`update`/`transfer`, free `resolve`
+view), 8 Move tests, live on devnet — measured `register` 0.0064 APT, `update` 0.000085 APT.
+`shell2::names::resolve` is one `POST /v1/view`; `node::join` is now the single
+ticket/invite/name dispatch for the claim box and `ClaimNode`. Verified by `cargo test` plus an
+`--ignored` test against live devnet; the UI path and `smoke.py` were **not** run. Limits: a
+join reaches only a node on the same machine (shell2 talks to kunki over its local socket;
+nothing dials iroh), and names can only be registered with the `aptos` CLI today. Next:
+registration from Sthalam with the identity key, a username namespace, a kunki rate limit on
+public redemptions.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax
@@ -538,7 +589,13 @@ command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`)
 velocity, so a paddle hits rather than shoves; controller acceleration; a `follow` controller.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
-logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. Soft bodies (rope, cape)
+logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
+[design/lua-app-tests.md](design/lua-app-tests.md) records app-shipped Lua tests run beside, not
+inside, the app VM; slice 1 is built (`RunTests` discovers `tests/*.lua`, opens a non-persisting
+temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`,
+`t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns pass/fail results). This supersedes the narrower hints-in-dump and
+bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
+and `t.world()` snapshots. Soft bodies (rope, cape)
 are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
@@ -591,8 +648,8 @@ Roughly in dependency order:
      (`Ping`/`ListAccounts`/`Signup`/`Unlock`/`Lock`, an addition to this list: headless
      login is the automation story's first step), workspaces/items (incl. `CreateWorkspace`
      and `OpenItem`), files (`WriteFile` reloads an open tab; `ReloadItem` forces the staged
-     reload), senses (`DumpTree`/`Click`/`ReadConsole`), and `AppDataGet` (the write half of
-     the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
+     reload), senses (`DumpTree`/`Click`/`ReadConsole`), app-shipped test runner (`RunTests`),
+     and `AppDataGet` (the write half of the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
      alone (ids are 128-bit random). The sthalam families are deleted. Not
      ported from the old repo's control server, on purpose: `eval`, coordinate `ui_mouse_*`,
      p2p, recording. Socket must be created `0600` — passphrases cross it.
@@ -610,10 +667,18 @@ Roughly in dependency order:
      screen), then `Msg::AuthDone` commits the account, replies, and lands the screen
      transition on the UI thread; a script-side signup returns the mnemonic and skips the
      mnemonic screen (the script is its reader), workspaces/items (`CreateWorkspace`,
-     `ListItems`, `CreateItem`, `OpenItem`), and app source files (`ListFiles`, `ReadFile`,
-     `WriteFile`, `ReloadItem`). Everything else answers an honest `not wired yet`. Python harness:
+     `ListItems`, `CreateItem`, `OpenItem`), app source files (`ListFiles`, `ReadFile`,
+     `WriteFile`, `ReloadItem`), and the first `RunTests` slice. Everything else answers an honest `not wired yet`. Python harness:
      `scripts/osvauld/` (`client.py` framing + `session.py` spawn/wait/teardown) and
      `scripts/smoke_bridge.py` — the end-to-end proof over a fresh, locked vault.
+   - **landed 2026-10-01, app-shipped test runner slice 1**: `RunTests { item_id, filter }`
+     discovers `tests/*.lua` in the app source doc, opens a non-persisting temporary app tab with
+     empty docs and a `test:<item>:<run>` retained-id namespace, runs each file in a separate
+     source-only test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`, `t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns `{name, ok, frames, failure}` results. `tally`,
+     `scratch` and `pomodoro` now ship basic `tests/*.lua`, pinned by `scripts/smoke_lua_app_tests.py`.
+     Test VMs run on a worker and step/click through deferred Runner driver ops; the batch remains
+     bounded (32 files / 256 KiB plus the Luau interrupt budget). Pinned by `scripts/smoke_bridge.py`
+     over the real socket. See [Lua app tests](design/lua-app-tests.md).
    - **landed 2026-09-10, senses & actions on running apps**: `DumpTree` (the pre-layout
      `ElInfo` tree as JSON — kinds, ids, text, handler flags; overlays included), and the
      verbs `Click`/`Type`/`Key` (`enter`/`esc`): each resolves the element by id on a fresh

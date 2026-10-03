@@ -32,6 +32,7 @@ fn an_owner_invites_a_member_into_a_workspace() {
         token: node_token(&node, &desktop, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
 
     let ticket = issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap();
@@ -63,6 +64,7 @@ fn an_owner_already_narrowed_to_a_workspace_can_still_invite_into_it() {
         token: narrowed,
         role: "guest".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
 
     assert!(issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).is_ok());
@@ -78,6 +80,7 @@ fn an_invite_cannot_grant_a_role_that_carries_capability() {
         // be self-service role.assign with no rank check behind it.
         role: "maintainer".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
 
     assert_eq!(
@@ -98,6 +101,7 @@ fn an_invite_cannot_grant_a_node_scope_role_that_carries_capability_once_narrowe
         // to catch.
         role: "maintainer".to_string(),
         scope: Scope::Node,
+        public: false,
     };
 
     assert_eq!(
@@ -115,6 +119,7 @@ fn a_revoked_inviter_cannot_invite() {
         token: token.clone(),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
 
     let mut revoked = HashSet::new();
@@ -134,6 +139,7 @@ fn a_desktop_redeems_an_invite_and_gets_the_role_it_named() {
         token: node_token(&node, &inviter, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
     let ticket = issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap();
 
@@ -162,18 +168,65 @@ fn a_redeemed_invite_cannot_be_redeemed_again() {
         token: node_token(&node, &inviter, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
     let ticket = issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap();
     let hello = desktop_start_invite_claim(ticket, &invitee, 3).unwrap();
 
     let welcome = node_accept_invite(hello.clone(), &node, 4, &HashSet::new()).unwrap();
     let mut redeemed = HashSet::new();
-    redeemed.insert(welcome.redeemed_nonce);
+    redeemed.insert(welcome.redeemed_nonce.unwrap());
 
     assert_eq!(
         node_accept_invite(hello, &node, 4, &redeemed).unwrap_err(),
         CourierError::InviteAlreadyRedeemed
     );
+}
+
+fn public_ticket(node: &Identity, inviter: &Identity) -> InviteTicket {
+    let request = InviteRequest {
+        desktop_did: inviter.did().to_string(),
+        token: node_token(node, inviter, "owner", 1),
+        role: "member".to_string(),
+        scope: Scope::Workspace("ws1".to_string()),
+        public: true,
+    };
+    issue_invite_ticket(node, &request, "kunki", 2, &HashSet::new()).unwrap()
+}
+
+#[test]
+fn a_public_invite_is_redeemed_by_everyone_and_never_spent() {
+    let (node, inviter) = ids();
+    let ticket = public_ticket(&node, &inviter);
+
+    for _ in 0..2 {
+        let (visitor, _) = identity::generate();
+        let hello = desktop_start_invite_claim(ticket.clone(), &visitor, 3).unwrap();
+        let welcome = node_accept_invite(hello, &node, 4, &HashSet::new()).unwrap();
+        assert_eq!(welcome.redeemed_nonce, None);
+    }
+}
+
+#[test]
+fn a_public_invite_is_revoked_by_its_nonce() {
+    let (node, inviter) = ids();
+    let (visitor, _) = identity::generate();
+    let ticket = public_ticket(&node, &inviter);
+    let revoked = HashSet::from([verify_invite_ticket(&ticket).unwrap().nonce]);
+
+    let hello = desktop_start_invite_claim(ticket, &visitor, 3).unwrap();
+    assert_eq!(
+        node_accept_invite(hello, &node, 4, &revoked).unwrap_err(),
+        CourierError::InviteAlreadyRedeemed
+    );
+}
+
+#[test]
+fn a_claim_minted_before_the_public_field_decodes_as_single_use() {
+    let json = r#"{"version":1,"iss":"n","role":"member","scope":"Node","nonce":"x","iat":0,
+        "node_encryption_key":"","device_public_key":"","node_id":"","name":"","relay":null}"#;
+    let claim: InviteClaim = serde_json::from_str(json).unwrap();
+    assert!(!claim.public);
 }
 
 #[test]
@@ -186,6 +239,7 @@ fn a_ticket_minted_by_a_different_node_is_refused() {
         token: node_token(&node, &inviter, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
     let ticket = issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap();
     let hello = desktop_start_invite_claim(ticket, &invitee, 3).unwrap();
@@ -205,6 +259,7 @@ fn a_tampered_invite_ticket_is_rejected() {
         token: node_token(&node, &inviter, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
     let mut ticket = issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap();
     ticket.node_id.push('x');
@@ -224,6 +279,7 @@ fn an_invite_request_that_lies_about_its_holder_is_refused() {
         token: node_token(&node, &desktop, "owner", 1),
         role: "member".to_string(),
         scope: Scope::Workspace("ws1".to_string()),
+        public: false,
     };
 
     assert_eq!(

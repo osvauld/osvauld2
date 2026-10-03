@@ -80,7 +80,13 @@ end
 """
     assert s.rpc.list_files(item["id"]) == []
     assert s.rpc.write_file(item["id"], "main.lua", app) == "written"
-    assert s.rpc.list_files(item["id"]) == ["main.lua"]
+    assert s.rpc.write_file(item["id"], "tests/pass.lua", "return function(t) t.step(1); local rs=t.rects(); t.expect(#rs > 0, 'rects'); local x,y=t.centre_of('inc'); t.click_at(x,y); t.step(1); t.expect(t.text('count') == 'count: 1', 'click changed text'); t.expect(t.world() ~= nil, 'world snapshot exists') end") == "written"
+    assert s.rpc.write_file(item["id"], "tests/fail.lua", "return function(t) t.expect(false, 'fail seen') end") == "written"
+    assert s.rpc.list_files(item["id"]) == ["main.lua", "tests/fail.lua", "tests/pass.lua"]
+    test_out = s.rpc.run_tests(item["id"])
+    assert [r["ok"] for r in test_out] == [False, True]
+    assert test_out[1]["frames"] == 2
+    assert "fail seen" in test_out[0]["failure"]
     assert s.rpc.read_file(item["id"], "main.lua") == app
     closed = s.rpc.read_file_versioned(item["id"], "main.lua")
     outcome = s.rpc.edit_file(
