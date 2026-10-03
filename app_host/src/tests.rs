@@ -3,6 +3,7 @@ use mlua::{FromLua, Table};
 use runtime::HoverPhase;
 use std::rc::Rc;
 
+mod index;
 mod reload;
 mod require;
 mod round_trip;

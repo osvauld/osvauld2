@@ -6,9 +6,11 @@
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
 mod gfx;
+pub mod index;
 mod modules;
 mod props;
 pub use crdt::{Cores, Docs, Resolve, Wake};
+pub use index::{SearchFn, SearchHit};
 
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
@@ -69,6 +71,8 @@ pub struct LuaTestApi {
     pub rects: Option<Arc<dyn Fn() -> Result<serde_json::Value, String> + Send + Sync>>,
     pub click_at: Option<Arc<dyn Fn(f32, f32) -> Result<(), String> + Send + Sync>>,
     pub text: Option<Arc<dyn Fn(String) -> Result<Option<String>, String> + Send + Sync>>,
+    /// Replace an input's text by id, as typing would: its `on_input` runs with the new value.
+    pub type_text: Option<Arc<dyn Fn(String, String) -> Result<(), String> + Send + Sync>>,
 }
 
 pub fn run_lua_tests(tests: Vec<LuaTest>) -> Vec<LuaTestResult> {
@@ -167,6 +171,14 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
                     None => Ok(Value::Nil),
                 },
                 None => Err(Error::runtime("t.text is not available in this runner")),
+            })?,
+        )?;
+        let type_text = api.type_text.clone();
+        t.set(
+            "type",
+            vm.create_function(move |_, (id, text): (String, String)| match &type_text {
+                Some(type_text) => type_text(id, text).map_err(Error::runtime),
+                None => Err(Error::runtime("t.type is not available in this runner")),
             })?,
         )?;
         let f = vm
@@ -380,6 +392,8 @@ pub struct LuaApp<M> {
     worlds: Worlds,
     resolve: Resolve,
     wake: Wake,
+    /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
+    search: index::SearchHook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -501,7 +515,8 @@ impl<M: 'static> LuaApp<M> {
     ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
-        let app = Self::build(src, cores, resolve, wake, to_msg)?;
+        let search: index::SearchHook = Rc::new(RefCell::new(None));
+        let app = Self::build(src, cores, resolve, wake, to_msg, search)?;
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -520,6 +535,7 @@ impl<M: 'static> LuaApp<M> {
         resolve: Resolve,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+        search: index::SearchHook,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -538,6 +554,7 @@ impl<M: 'static> LuaApp<M> {
             resolve.clone(),
             wake.clone(),
         )?;
+        index::install_query(&vm, search.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
@@ -560,6 +577,7 @@ impl<M: 'static> LuaApp<M> {
             cores,
             resolve,
             wake,
+            search,
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds: Worlds::default(),
         })
@@ -586,6 +604,7 @@ impl<M: 'static> LuaApp<M> {
             self.resolve.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
+            self.search.clone(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -639,6 +658,21 @@ impl<M: 'static> LuaApp<M> {
             self.log(note);
         }
         Ok(())
+    }
+
+    /// Give `search.query` an index to ask, or take it away. Survives reloads.
+    pub fn set_search(&mut self, f: Option<SearchFn>) {
+        *self.search.borrow_mut() = f;
+    }
+
+    pub fn search_fn(&self) -> Option<SearchFn> {
+        self.search.borrow().clone()
+    }
+
+    /// A line in the app's console from the host — what the host did *for* the app (indexing)
+    /// belongs beside what the app did itself.
+    pub fn note(&self, line: String) {
+        self.log(line);
     }
 
     /// Reload if the source has moved since this VM was built; `None` if it had not.

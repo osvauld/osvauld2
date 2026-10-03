@@ -140,5 +140,6 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 | [`design/app-discovery-and-invocation.md`](design/app-discovery-and-invocation.md) | untrusted app documentation, callable live UI actions, explicit commands, and the future thin MCP boundary |
 | [`design/environment-runtime.md`](design/environment-runtime.md) | planning baseline for the unbuilt retained 3D Environment, world lifetime, physics composition, projected UI and rendering decision spikes |
 | [`design/lua-app-tests.md`](design/lua-app-tests.md) | app-shipped Lua tests in a separate test VM; only the `t.expect` runner is built so far |
+| [`design/search.md`](design/search.md) | full-text search over app docs: `index.lua` contract, sealed tantivy index in the vault |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | code/test/doc conventions |
 | [`archive/README.md`](archive/README.md) | everything historical, and why |

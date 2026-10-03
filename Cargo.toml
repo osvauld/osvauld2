@@ -15,6 +15,7 @@ members = [
   "kunki",
   "courier",
   "voice",
+  "search",
 ]
 
 [workspace.package]

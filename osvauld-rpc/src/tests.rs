@@ -116,6 +116,11 @@ fn every_request_roundtrips() {
         Request::AppDataGet {
             item_id: "i-9".into(),
         },
+        Request::Search {
+            item_id: "i-9".into(),
+            query: "author:anu deploy".into(),
+            limit: Some(5),
+        },
     ];
     for req in &all {
         let back: Request = roundtrip(req);
