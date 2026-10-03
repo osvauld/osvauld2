@@ -319,6 +319,9 @@ pub(crate) struct Behaviour<M> {
     pub opacity: f32,
     pub scale: f32,
     pub zoom: Option<(bool, bool)>,
+    /// The app draws its own pointer here, so the system one is hidden while over this element.
+    pub hide_cursor: bool,
+    pub cursor: Option<crate::hover::CursorLook>,
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
@@ -357,6 +360,8 @@ impl<M> Default for Behaviour<M> {
             opacity: 1.0,
             scale: 1.0,
             zoom: None,
+            hide_cursor: false,
+            cursor: None,
             slide: None,
             fade: None,
             tint: None,
@@ -732,6 +737,15 @@ impl<M> El<M> {
         self.behaviour.zoom = Some((true, true));
         self
     }
+    /// How the pointer should look over this element; reported to hover handlers as `look`.
+    pub fn cursor(mut self, look: crate::hover::CursorLook) -> Self {
+        self.behaviour.cursor = Some(look);
+        self
+    }
+    pub fn hide_system_cursor(mut self) -> Self {
+        self.behaviour.hide_cursor = true;
+        self
+    }
     pub fn zoom_x(mut self) -> Self {
         self.behaviour.zoom = Some((true, false));
         self
@@ -1065,6 +1079,8 @@ impl<M> El<M> {
                     phase,
                     pos,
                     shape: None,
+                    down: false,
+                    look: None,
                 })),
                 None => Walk::Fired(format!("'{id}' has no on_hover")),
             },

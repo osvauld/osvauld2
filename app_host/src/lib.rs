@@ -254,6 +254,8 @@ pub enum LuaMsg {
     CallAt(Key, f32, f32, Shape, Option<ObjectHit>),
     CallStr(Key, String),
     CallPhase(Key, &'static str, f32, f32, Shape),
+    /// `on_hover`: a phase, whether the primary button is held, and the look under the pointer.
+    CallHover(Key, &'static str, f32, f32, Shape, bool, Option<runtime::CursorLook>),
     CallDrag(Key, DragArgs),
     CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
@@ -884,6 +886,20 @@ impl<M: 'static> LuaApp<M> {
                 event.set("y", y)?;
                 shape.write(&event)?;
             }
+            LuaMsg::CallHover(_, phase, x, y, shape, down, look) => {
+                event.set("phase", phase)?;
+                event.set("x", x)?;
+                event.set("y", y)?;
+                event.set("down", down)?;
+                match look {
+                    Some(runtime::CursorLook::Named(name)) => event.set("look", &*name)?,
+                    Some(runtime::CursorLook::Visual(frame)) => {
+                        event.set("look", self.vm.create_userdata(gfx::LuaFrame(frame))?)?
+                    }
+                    None => {}
+                }
+                shape.write(&event)?;
+            }
             LuaMsg::CallDrag(_, a) => {
                 event.set("phase", a.phase)?;
                 event.set("x", a.at.0)?;
@@ -1003,6 +1019,7 @@ impl<M: 'static> LuaApp<M> {
         let key = match &msg {
             LuaMsg::Call(k) | LuaMsg::CallAt(k, _, _, _, _) | LuaMsg::CallStr(k, _) => k,
             LuaMsg::CallPhase(k, _, _, _, _)
+            | LuaMsg::CallHover(k, _, _, _, _, _, _)
             | LuaMsg::CallDrag(k, _)
             | LuaMsg::CallWheel(k, _, _)
             | LuaMsg::CallFrame(k, _, _)

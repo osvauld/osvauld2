@@ -300,6 +300,17 @@ pub enum Request {
         to: (f32, f32),
         steps: usize,
     },
+    /// Move to `(x, y)`, then one wheel event of logical `(dx, dy)`. With `ctrl` it is a
+    /// `zoomable`'s zoom, `1.1^(dy/30)` around the pointer; without, a scroll (or a pan once no
+    /// scroller is left to take it). Answers like `PointerMove`. Offscreen only.
+    Wheel {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+        #[serde(default)]
+        ctrl: bool,
+    },
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,

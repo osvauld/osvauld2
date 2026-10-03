@@ -109,6 +109,43 @@ fn gesture(run: impl FnOnce(&mut Headless<Recorder>)) -> Vec<String> {
     out
 }
 
+/// Hover listens to the button: a press and a release under a parked pointer each report a
+/// `move` carrying it, and the click still lands — an app-drawn cursor observes, never intercepts.
+struct Pressing {
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl App for Pressing {
+    type Msg = String;
+    fn view(&self) -> El<String> {
+        crate::col()
+            .id("root")
+            .full()
+            .on_hover("root", |h| format!("{} {}", h.phase.as_str(), h.down))
+            .child(
+                crate::col()
+                    .id("pad")
+                    .w(200.0)
+                    .h(200.0)
+                    .on_click_at(|_| "click".into()),
+            )
+    }
+    fn update(&mut self, msg: String) {
+        self.log.borrow_mut().push(msg);
+    }
+}
+
+#[test]
+fn a_press_under_a_still_pointer_reaches_hover_as_down() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Headless::new(Pressing { log: log.clone() }, (400.0, 400.0));
+    h.move_to(50.0, 50.0);
+    h.press();
+    h.frame(); // a still pointer over still geometry, held: nothing new to say
+    h.release();
+    assert_eq!(*log.borrow(), ["enter false", "move true", "click", "move false"]);
+}
+
 /// A press that travels past the slop is a drag and *only* a drag: the armed click is dropped the
 /// moment the gesture becomes one. Reading the release path alone suggests otherwise, which is
 /// exactly the mistake this test exists to keep from being made twice.
@@ -783,3 +820,155 @@ fn a_press_scales_the_hit_rect_with_the_paint() {
         280.0 * 0.97
     );
 }
+
+/// A board to zoom: `card` is the one addressable thing inside it.
+struct Board;
+
+impl App for Board {
+    type Msg = ();
+    fn view(&self) -> El<()> {
+        crate::col().full().child(
+            crate::col()
+                .id("board")
+                .w(300.0)
+                .h(300.0)
+                .zoomable()
+                .child(crate::col().id("card").w(100.0).h(50.0).on_click_at(|_| ())),
+        )
+    }
+    fn update(&mut self, _: ()) {}
+}
+
+fn card(r: &mut Runner<Board>) -> ElRect {
+    let rects = r.run_driver(DriverOp::Rects).unwrap().rects.unwrap();
+    rects.into_iter().find(|e| e.id == "card").expect("card is reachable")
+}
+
+/// Scripted zoom is the user's zoom: Ctrl+wheel through the window's own path, `1.1^(dy/30)`
+/// around the pointer, so a point under the pointer stays put. Without ctrl it pans.
+#[test]
+fn a_ctrl_wheel_driver_op_zooms_around_the_pointer() {
+    let mut r = Runner::new(Board, Some((400.0, 400.0)));
+    let before = card(&mut r);
+    let wheel = |at: &ElRect, ctrl| DriverOp::Wheel {
+        at: (at.x, at.y),
+        delta: (0.0, 60.0),
+        ctrl,
+    };
+
+    r.run_driver(wheel(&before, false)).unwrap();
+    let panned = card(&mut r);
+    assert_eq!(panned.w, before.w, "a plain wheel does not zoom");
+    assert_ne!(panned.y, before.y, "it pans the camera instead");
+
+    r.run_driver(wheel(&panned, true)).unwrap();
+    let after = card(&mut r);
+    assert!((after.w - before.w * 1.21).abs() < 0.01, "{after:?}");
+    assert!((after.h - before.h * 1.21).abs() < 0.01, "{after:?}");
+    assert!((after.x - panned.x).abs() < 0.01 && (after.y - panned.y).abs() < 0.01);
+    assert!(!r.modifiers.control_key(), "ctrl is held for the op only");
+}
+
+/// Two kinds of message: one the driver sent, one that arrived on its own (a sync timer, a doc
+/// subscriber). Only the first is time passing.
+struct Ambient {
+    seen: Vec<bool>,
+}
+
+impl App for Ambient {
+    type Msg = bool; // true = ambient
+    fn view(&self) -> El<bool> {
+        crate::col()
+    }
+    fn update(&mut self, ambient: bool) {
+        self.seen.push(ambient);
+    }
+    fn is_ambient(&self, ambient: &bool) -> bool {
+        *ambient
+    }
+}
+
+/// Offscreen time is what the driver asked for and nothing else: a wake from a wall-clock timer
+/// still paints, so the app notices it, but it does not move the clock — or a recording would
+/// shift by a frame whenever a sync timer happened to fire mid-take.
+#[test]
+fn an_ambient_message_paints_but_does_not_move_offscreen_time() {
+    let mut r = Runner::new(Ambient { seen: Vec::new() }, Some((100.0, 100.0)));
+    r.deliver(true);
+    assert_eq!(r.clock, 0.0);
+    r.deliver(false);
+    assert_eq!(r.clock, FRAME);
+    assert_eq!(r.app.seen, [true, false]);
+}
+
+/// An app that draws its own pointer hides the system one over that element — and only there.
+struct OwnCursor;
+
+impl App for OwnCursor {
+    type Msg = ();
+    fn view(&self) -> El<()> {
+        crate::col().full().child(
+            crate::col()
+                .id("canvas")
+                .w(200.0)
+                .h(200.0)
+                .hide_system_cursor(),
+        )
+    }
+    fn update(&mut self, _: ()) {}
+}
+
+#[test]
+fn the_system_cursor_hides_over_an_element_that_draws_its_own() {
+    let mut r = Runner::new(OwnCursor, Some((400.0, 400.0)));
+    r.run_driver(DriverOp::Rects).unwrap(); // paint: the regions are built by painting
+    assert_eq!(r.cursor_icon(Point::new(100.0, 100.0)), None);
+    assert_eq!(r.cursor_icon(Point::new(300.0, 300.0)), Some(CursorIcon::Default));
+}
+
+/// The thing under the pointer says how the pointer should look; whoever draws the cursor is told.
+struct Looks {
+    log: Rc<RefCell<Vec<String>>>,
+}
+
+impl App for Looks {
+    type Msg = String;
+    fn view(&self) -> El<String> {
+        crate::col()
+            .id("root")
+            .full()
+            .on_hover("root", |h| {
+                let look = match &h.look {
+                    Some(CursorLook::Named(n)) => n.to_string(),
+                    Some(CursorLook::Visual(_)) => "visual".into(),
+                    None => "-".into(),
+                };
+                format!("{} {look}", h.phase.as_str())
+            })
+            .child(
+                crate::col()
+                    .id("card")
+                    .w(100.0)
+                    .h(100.0)
+                    .cursor(CursorLook::Named("grab".into()))
+                    // A plain element painted over part of the card: it declares nothing, so the
+                    // card's look still shows through — the topmost *declared* look wins.
+                    .child(crate::col().id("label").w(50.0).h(20.0)),
+            )
+            .child(crate::col().id("plain").w(100.0).h(100.0))
+    }
+    fn update(&mut self, msg: String) {
+        self.log.borrow_mut().push(msg);
+    }
+}
+
+#[test]
+fn hover_reports_the_topmost_declared_cursor_look() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut h = Headless::new(Looks { log: log.clone() }, (400.0, 400.0));
+    h.move_to(80.0, 80.0); // card
+    h.move_to(10.0, 10.0); // the label, inside the card
+    h.move_to(50.0, 150.0); // plain
+    assert_eq!(*log.borrow(), ["enter grab", "move grab", "move -"]);
+}
+

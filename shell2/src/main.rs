@@ -1068,7 +1068,8 @@ impl Shell {
             | Request::PointerMove { .. }
             | Request::PointerPress { .. }
             | Request::PointerRelease { .. }
-            | Request::Drag { .. } => Response::err("driver op was not deferred"),
+            | Request::Drag { .. }
+            | Request::Wheel { .. } => Response::err("driver op was not deferred"),
             Request::AppDataGet { item_id } => match self.apps.get(item_id.as_str()) {
                 None => Response::err("item is not open"),
                 Some(o) => Response::ok(o.app.docs_json()),
@@ -1807,7 +1808,8 @@ impl App for Shell {
                 | Request::PointerPress { .. }
                 | Request::PointerRelease { .. }
                 | Request::Keyboard { .. }
-                | Request::Drag { .. }),
+                | Request::Drag { .. }
+                | Request::Wheel { .. }),
                 reply,
             ) => {
                 let op = match req {
@@ -1840,6 +1842,11 @@ impl App for Shell {
                         },
                     }),
                     Request::Drag { from, to, steps } => DriverOp::Drag { from, to, steps },
+                    Request::Wheel { x, y, dx, dy, ctrl } => DriverOp::Wheel {
+                        at: (x, y),
+                        delta: (dx, dy),
+                        ctrl,
+                    },
                     _ => unreachable!("matched above"),
                 };
                 if self.driver.is_some() {
@@ -2107,6 +2114,15 @@ impl App for Shell {
         if let Some(next) = next {
             self.screen = next;
         }
+    }
+
+    /// Wakes on wall-clock time or from a subscriber, never a request: offscreen they must not move
+    /// the clock, or a 20s sync timer shifts whatever the driver is timing by a frame.
+    fn is_ambient(&self, msg: &Msg) -> bool {
+        matches!(
+            msg,
+            Msg::DocChanged | Msg::SyncTick | Msg::SyncDone(..) | Msg::PushReceived(_)
+        )
     }
 
     fn take_driver(&mut self) -> Option<DriverRequest<Msg>> {

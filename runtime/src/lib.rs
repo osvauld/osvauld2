@@ -58,7 +58,7 @@ pub use el::{
     PlacementSide, WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
 };
 pub use headless::Headless;
-pub use hover::{HoverEvent, HoverPhase};
+pub use hover::{CursorLook, HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
@@ -110,6 +110,13 @@ pub enum DriverOp {
         from: (f32, f32),
         to: (f32, f32),
         steps: usize,
+    },
+    /// Move to `at`, then one wheel event of logical `delta` — with `ctrl` held for this event
+    /// only, which is a `zoomable`'s zoom: `1.1^(dy/30)` around the pointer.
+    Wheel {
+        at: (f32, f32),
+        delta: (f32, f32),
+        ctrl: bool,
     },
 }
 
@@ -186,6 +193,13 @@ pub trait App {
     /// keeps non-automation apps unaware of it, and an implementation must remove what it returns.
     fn take_driver(&mut self) -> Option<DriverRequest<Self::Msg>> {
         None
+    }
+
+    /// A message that arrived on its own — a wall-clock timer, a doc subscriber, the network —
+    /// rather than from input or the driver. Offscreen it paints but does not move the virtual
+    /// clock, so time stays exactly what the driver asked for.
+    fn is_ambient(&self, _msg: &Self::Msg) -> bool {
+        false
     }
 }
 
@@ -270,6 +284,8 @@ struct Runner<A: App> {
     held_owner: Option<Id>,
     pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, PickContent)>,
     hovered: Hovered,
+    /// The primary button is held, wherever it was pressed. `pressed` is only a click target.
+    button_down: bool,
 }
 
 /// A frame an element draws, and the element-local origin it is drawn at — everything a pointer
@@ -360,6 +376,8 @@ struct Hits<M> {
     esc: Vec<(Id, M)>,
     bar: Vec<Thumb>,
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
+    no_cursor: Vec<Geometry>,
+    looks: Vec<(Geometry, CursorLook)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -379,6 +397,8 @@ impl<M> Default for Hits<M> {
             esc: Vec::new(),
             bar: Vec::new(),
             zoom: Vec::new(),
+            no_cursor: Vec::new(),
+            looks: Vec::new(),
         }
     }
 }
@@ -400,6 +420,8 @@ impl<M> Hits<M> {
             esc,
             bar,
             zoom,
+            no_cursor,
+            looks,
         } = self;
         click.clear();
         input.clear();
@@ -415,6 +437,8 @@ impl<M> Hits<M> {
         esc.clear();
         bar.clear();
         zoom.clear();
+        no_cursor.clear();
+        looks.clear();
     }
 }
 
@@ -442,7 +466,8 @@ impl<A: App> Runner<A> {
             );
         }
         let pointer_op = matches!(&op, DriverOp::PointerMove(_)
-            | DriverOp::PointerPress | DriverOp::PointerRelease | DriverOp::Drag { .. });
+            | DriverOp::PointerPress | DriverOp::PointerRelease | DriverOp::Drag { .. }
+            | DriverOp::Wheel { .. });
         let mut rects = None;
         let frames = match op {
             DriverOp::Rects => {
@@ -478,16 +503,36 @@ impl<A: App> Runner<A> {
                 self.pointer_move(to);
                 1
             }
+            DriverOp::Wheel { at, delta, ctrl } => {
+                if !(delta.0.is_finite() && delta.1.is_finite()) {
+                    return Err("wheel wants a finite delta".into());
+                }
+                // The move painted, so the zoom regions are current: one op, one pointer step —
+                // the same price as a move, which is what lets a recorder spread a zoom per frame.
+                self.pointer_move(at);
+                let held = self.modifiers;
+                if ctrl {
+                    self.modifiers = held | ModifiersState::CONTROL;
+                }
+                // Lines, not pixels: a pixel delta is divided by the render scale, and the caller
+                // speaks logical points.
+                self.on_wheel_moved(MouseScrollDelta::LineDelta(
+                    delta.0 / LINE_STEP,
+                    delta.1 / LINE_STEP,
+                ));
+                self.modifiers = held;
+                1
+            }
             DriverOp::PointerPress => {
                 self.tick();
                 self.clock += POINTER;
-                self.click();
+                self.button(true);
                 1
             }
             DriverOp::PointerRelease => {
                 self.tick();
                 self.clock += POINTER;
-                self.on_cursor_release();
+                self.button(false);
                 1
             }
             DriverOp::Keyboard(event) => {
@@ -511,14 +556,14 @@ impl<A: App> Runner<A> {
                 self.pointer_move(from);
                 self.tick();
                 self.clock += POINTER;
-                self.click();
+                self.button(true);
                 for i in 1..=steps {
                     let f = i as f32 / steps as f32;
                     self.pointer_move((from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f));
                 }
                 self.tick();
                 self.clock += POINTER;
-                self.on_cursor_release();
+                self.button(false);
                 (steps + 3) as u32
             }
         };
@@ -715,6 +760,13 @@ impl<A: App> Runner<A> {
                 if let Some(hit_rect) = visible {
                     hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
                 }
+            }
+
+            if p.behaviour.hide_cursor {
+                hits.no_cursor.push(geometry);
+            }
+            if let Some(look) = &p.behaviour.cursor {
+                hits.looks.push((geometry, look.clone()));
             }
 
             if p.behaviour.press_scale.is_some()
@@ -1023,6 +1075,21 @@ impl<A: App> Runner<A> {
             render.request_redraw();
         }
     }
+    /// Press or release, then tell hover listeners: the button state is part of what they see.
+    fn button(&mut self, down: bool) {
+        self.button_down = down;
+        if down {
+            self.click();
+        } else {
+            self.on_cursor_release();
+        }
+        if let Some(at) = self.pointer
+            && self.hover(at, true)
+        {
+            self.redraw();
+        }
+    }
+
     /// Hit-test a press against the last frame's regions; topmost (last-painted) wins.
     fn click(&mut self) {
         self.event_at = self.now();
@@ -1158,8 +1225,16 @@ impl<A: App> Runner<A> {
                 (local, shape_at(shapes, local))
             })
             .collect();
+        let down = self.button_down;
+        // Topmost first, the hit-test order: the last painted look containing the pointer.
+        let look = in_window
+            .then(|| self.hits.looks.iter().rev().find(|(g, _)| g.contains(p)))
+            .flatten()
+            .map(|(_, l)| l.clone());
         let phases = self.hovered.step(
             (px, py),
+            down,
+            look.as_ref(),
             hover
                 .iter()
                 .zip(&at)
@@ -1174,6 +1249,8 @@ impl<A: App> Runner<A> {
                     phase: phase?,
                     pos: (local.x as f32, local.y as f32),
                     shape: hit,
+                    down,
+                    look: look.clone(),
                 }))
             })
             .collect();
@@ -1549,24 +1626,29 @@ impl<A: App> Runner<A> {
         }
         self.hover((lx, ly), true);
 
-        let over_input = self
-            .hits
-            .input
-            .iter()
-            .any(|(geometry, _, _)| geometry.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
+        let icon = self.cursor_icon(p);
         if let Some(r) = &self.render {
-            r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
-                CursorIcon::Grabbing
-            } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
-                CursorIcon::Grab
-            } else if over_input {
-                CursorIcon::Text
-            } else {
-                CursorIcon::Default
-            });
+            r.set_cursor(icon);
             r.request_redraw();
         }
+    }
+
+    /// The system pointer for a point, or `None` where the app draws its own.
+    fn cursor_icon(&self, p: Point) -> Option<CursorIcon> {
+        if self.hits.no_cursor.iter().any(|g| g.contains(p)) {
+            return None;
+        }
+        let over_input = self.hits.input.iter().any(|(g, _, _)| g.contains(p));
+        Some(if self.drag.as_ref().is_some_and(Capture::is_grab) {
+            CursorIcon::Grabbing
+        } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
+            CursorIcon::Grab
+        } else if over_input {
+            CursorIcon::Text
+        } else {
+            CursorIcon::Default
+        })
     }
     fn on_wheel_moved(&mut self, delta: MouseScrollDelta) {
         let Some((px, py)) = self.pointer else { return };
@@ -1867,7 +1949,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.click(),
+            } => self.button(true),
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
                 state: ElementState::Pressed,
@@ -1878,7 +1960,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.on_cursor_release();
+                self.button(false);
             }
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
             WindowEvent::RedrawRequested => self.frame(),
@@ -1916,6 +1998,13 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         }
     }
     fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
+        self.deliver(msg);
+    }
+}
+
+impl<A: App> Runner<A> {
+    fn deliver(&mut self, msg: A::Msg) {
+        let ambient = self.app.is_ambient(&msg);
         self.app.update(msg);
         // A driver op is answered here rather than by the app, because only this side owns the
         // clock and the frame. Draining after `update` is what lets the request that asked for it
@@ -1937,8 +2026,9 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         // A driver op painted its own frames and is not owed another, or `Frame(n)` would be n+1.
         match self.offscreen {
             None => self.redraw(),
-            Some(_) if !drove => self.tick(),
-            Some(_) => {}
+            Some(_) if drove => {}
+            Some(_) if ambient => self.frame(),
+            Some(_) => self.tick(),
         }
     }
 }
@@ -2007,6 +2097,7 @@ impl<A: App> Runner<A> {
             event_at: 0.0,
             pressed: None,
             hovered: Hovered::default(),
+            button_down: false,
         }
     }
 }
