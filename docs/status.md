@@ -98,6 +98,22 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
   search, indexing off the UI thread.
 
+### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
+- `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a
+  `gfx.frame`) declared by the topmost element under the pointer. A press, release or look
+  change under a still pointer is a `"move"`. `system_cursor = false` hides the OS pointer
+  there. `gfx.frame` values read back `width`/`height`.
+- `demo_apps/pointer/cursor.lua`: the canonical Lua cursor (arrow, grab closing while down,
+  text, crosshair, supplied drawings), mounted on an app root; clicks fall through it.
+- Bridge `Wheel {x, y, dx, dy, ctrl}`: ctrl is the `zoomable`'s real zoom, `1.1^(dy/30)`.
+- `App::is_ambient`: offscreen, wall-clock wakes (`SyncTick`, `DocChanged`, pushes) paint but
+  don't move the virtual clock — only requests move time.
+- `scripts/osvauld/record.py`: scripted mp4/GIF at 24fps, frame-exact and deterministic
+  (`glide_to`, `click`, `drag_to`, `zoom`, `hold`); `scripts/demo_pointer_video.py` is the
+  showcase. Smoke: `smoke_demo_record.py` (S1–S5).
+- not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
+  mounting the cursor once it is a Lua app.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline

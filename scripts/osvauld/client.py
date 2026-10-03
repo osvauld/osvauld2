@@ -213,6 +213,10 @@ class Bridge:
     def drag(self, frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> list[dict]:
         return self.request("Drag", **{"from": list(frm), "to": list(to), "steps": steps})["rects"]
 
+    def wheel(self, x: float, y: float, dx: float, dy: float, ctrl: bool = False) -> list[dict]:
+        """Wheel at a point. `ctrl` zooms a `zoomable` by 1.1^(dy/30) around it."""
+        return self.request("Wheel", x=x, y=y, dx=dx, dy=dy, ctrl=ctrl)["rects"]
+
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)
 

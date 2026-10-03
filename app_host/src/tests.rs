@@ -143,6 +143,50 @@ fn lua_builds_a_nested_gradient_frame_element() {
     assert_eq!(info.id.as_deref(), Some("picture"));
 }
 
+/// `system_cursor` is a bool where only `false` does anything — an app drawing its own pointer
+/// hides the system one. Anything that isn't a bool is a type error, like every other prop.
+#[test]
+fn system_cursor_takes_a_bool() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let walk_src = |src: &str| {
+        let node: Table = lua.load(src).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut ctx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut ctx).map(|_| ())
+    };
+    assert!(walk_src("return ui.col({ system_cursor = false })").is_ok());
+    assert!(walk_src("return ui.col({ system_cursor = true })").is_ok());
+    let err = walk_src(r#"return ui.col({ system_cursor = "none" })"#).unwrap_err();
+    assert!(err.to_string().contains("bool"), "{err}");
+}
+
+/// `cursor` names a look or hands over a drawing; anything else is a type error.
+#[test]
+fn cursor_takes_a_name_or_a_gfx_frame() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let walk_src = |src: &str| {
+        let node: Table = lua.load(src).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut ctx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut ctx).map(|_| ())
+    };
+    assert!(walk_src(r#"return ui.col({ cursor = "grab" })"#).is_ok());
+    assert!(walk_src("return ui.col({ cursor = gfx.frame({ width = 8, height = 8 }) })").is_ok());
+    let err = walk_src("return ui.col({ cursor = 3 })").unwrap_err();
+    assert!(err.to_string().contains("gfx frame"), "{err}");
+}
+
+/// A frame reports its size, so Lua can place a drawing by its centre (a cursor look's hotspot).
+#[test]
+fn a_gfx_frame_reads_back_its_size() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let (w, h): (f64, f64) = lua
+        .load("local f = gfx.frame({ width = 24, height = 16 }) return f.width, f.height")
+        .eval()
+        .unwrap();
+    assert_eq!((w, h), (24.0, 16.0));
+}
+
 #[test]
 fn lua_builds_a_bounded_3d_scene_leaf() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -229,7 +273,7 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
                 id = "plot",
                 visual = gfx.frame({ width = 10, height = 10 }),
                 on_hover = function(e)
-                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy }
+                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy, e.down, e.look }
                 end,
             })
         end"#,
@@ -239,7 +283,7 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
     let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
     let seen = |app: &LuaApp<LuaMsg>| {
         let t: Table = app.vm.globals().get("seen").unwrap();
-        (1..=6)
+        (1..=8)
             .map(|i| match t.get::<Value>(i).unwrap() {
                 Value::Nil => "nil".to_string(),
                 v => v.to_string().unwrap(),
@@ -250,17 +294,19 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
     let key = Key::new("plot", "on_hover");
     let _ = app.view(); // handlers are registered by the walk, not by the source
 
-    app.update(LuaMsg::CallPhase(
+    app.update(LuaMsg::CallHover(
         key.clone(),
         "move",
         40.0,
         12.0,
         Shape(Some(("slice:2".into(), 3.5, 1.0))),
+        false,
+        Some(runtime::CursorLook::Named("grab".into())),
     ));
-    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1");
+    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1 false grab");
 
-    app.update(LuaMsg::CallPhase(key, "move", 40.0, 12.0, Shape::default()));
-    assert_eq!(seen(&app), "move 40 12 nil nil nil");
+    app.update(LuaMsg::CallHover(key, "move", 40.0, 12.0, Shape::default(), true, None));
+    assert_eq!(seen(&app), "move 40 12 nil nil nil true nil");
 }
 
 /// A drag's shape rides at the very end, after the seven arguments it already had.

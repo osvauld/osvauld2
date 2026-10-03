@@ -88,7 +88,7 @@ implicit clip or scale.
 | `gfx.path(commands)` | positional list of commands | up to 65536; drawing before `move` is an error |
 | `gfx.solid(color)` | a CSS color string | |
 | `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
-| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required |
+| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required; the result reads them back (`f.width`, `f.height`) |
 | `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
 | `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
@@ -475,6 +475,8 @@ before `fade`.
 | animation | `fade_in` | ms |
 | | `fade` | `{target_opacity, ms}` |
 | | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
+| pointer | `system_cursor` | bool — `false` hides the system pointer while over this element, for an app that draws its own (`demo_apps/pointer/cursor.lua`) |
+| | `cursor` | a look name (`"grab"`, `"text"`, any string your cursor knows) or a `gfx.frame` to draw — hover handlers get the topmost declared one as `e.look` |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
 | input | `value` · `autofocus` | string · bool |
@@ -517,7 +519,11 @@ end
   supplies `e.object`, `e.distance`, `e.world_x/y/z` and `e.normal_x/y/z`; these fields are absent
   when the ray hits no object.
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
-  the element on `"leave"`). An element is hovered while the pointer is inside it, like
+  the element on `"leave"`), `e.down` true while the primary button is held — a press or release
+  under a still pointer fires a `"move"`, so a cursor the app draws can show it. `e.look` is the
+  `cursor` declared by the topmost element under the pointer that declares one — a name or the
+  `gfx.frame` it supplied — or `nil`; a change of look is a `"move"` too. Declare looks on the
+  things being pointed at and draw the cursor once at the root: neither has to know the other. An element is hovered while the pointer is inside it, like
   `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
   hide the one below — check your own geometry if that matters. It is sampled every frame as well
   as on every pointer move, so geometry that drifts under a still pointer reports it: an element

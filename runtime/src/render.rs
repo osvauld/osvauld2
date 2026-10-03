@@ -373,9 +373,13 @@ impl Render {
         }
     }
 
-    pub fn set_cursor(&self, icon: winit::window::CursorIcon) {
+    /// `None` hides the system pointer: the app is drawing its own.
+    pub fn set_cursor(&self, icon: Option<winit::window::CursorIcon>) {
         if let Some(p) = &self.presenter {
-            p.window.set_cursor(icon);
+            p.window.set_cursor_visible(icon.is_some());
+            if let Some(icon) = icon {
+                p.window.set_cursor(icon);
+            }
         }
     }
 
