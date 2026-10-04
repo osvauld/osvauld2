@@ -157,8 +157,17 @@ pub enum Request {
     OpenItem {
         item_id: String,
     },
+    /// Close the item's tab; its docs were flushed on the previous update. Answers "closed",
+    /// or "not open".
+    CloseItem {
+        item_id: String,
+    },
 
     // ── node (kunki) ────────────────────────────────────────────────────────────
+    /// The unlocked account: `{did, name}`.
+    Whoami,
+    /// Run the reconciliation pass `SyncTick` runs, now — so a test never waits on its timer.
+    SyncNow,
     /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told
     /// apart by their text prefix the same way the shell's own paste box does. Answers with
     /// the joined node's did.

@@ -52,6 +52,13 @@ pub struct SyncAck {
     /// Everything the node's copy has beyond `hello.vv` — importing this converges the
     /// desktop with the node, including whatever a third party had already pushed.
     pub update: Vec<u8>,
+    /// The node's version vector after the merge — what the desktop's next push can be a diff
+    /// against, since the node provably holds everything up to it.
+    pub vv: Vec<u8>,
+    /// The node still lacks part of `hello.vv` after the merge: the desktop's `since` was ahead
+    /// of what the node really holds (a restored node, a causally incomplete diff). The desktop
+    /// answers by pushing full history.
+    pub missing: bool,
 }
 
 /// Build the desktop's half: commit pending edits, then export only what changed since `since`
@@ -118,6 +125,7 @@ pub fn node_accept_sync(
     }
 
     let their_vv = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;
+    let ours = doc.oplog_vv();
     let diff = doc
         .export(ExportMode::updates(&their_vv))
         .map_err(|_| CourierError::Decode)?;
@@ -129,6 +137,8 @@ pub fn node_accept_sync(
         SyncAck {
             request_id: hello.request_id.clone(),
             update: diff,
+            vv: ours.encode(),
+            missing: !ours.includes_vv(&their_vv),
         },
         snapshot,
     ))

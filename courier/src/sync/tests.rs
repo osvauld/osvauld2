@@ -234,3 +234,55 @@ fn a_second_sync_sends_only_what_changed_since_the_first() {
         format!("{}!", "a".repeat(500))
     );
 }
+
+fn member(node: &Identity, desktop: &Identity) -> Token {
+    ws_token(node, desktop, "member", Scope::Workspace("ws1".to_string()), 1)
+}
+
+fn hello_since(desktop: &Identity, token: Token, doc: &LoroDoc, since: &[u8]) -> SyncHello {
+    desktop_start_sync(
+        &desktop.did(),
+        token,
+        "ws1",
+        "item1",
+        SyncLayer::Doc("board".to_string()),
+        doc,
+        Some(since),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_diff_since_the_acked_vv_carries_only_new_edits_and_converges() {
+    let (node, desktop) = ids();
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "one").unwrap();
+    let first = hello(&desktop.did(), member(&node, &desktop), "ws1", &doc);
+    let (ack, snapshot) = node_accept_sync(&first, &node.did(), None, 2, &HashSet::new()).unwrap();
+    assert!(!ack.missing);
+
+    doc.get_text("t").insert(3, " two").unwrap();
+    let full = doc.export(ExportMode::all_updates()).unwrap();
+    let next = hello_since(&desktop, member(&node, &desktop), &doc, &ack.vv);
+    assert!(next.update.len() < full.len(), "since did not shrink the push");
+
+    let (ack, snapshot) =
+        node_accept_sync(&next, &node.did(), Some(&snapshot), 3, &HashSet::new()).unwrap();
+    assert!(!ack.missing);
+    let landed = LoroDoc::new();
+    landed.import(&snapshot).unwrap();
+    assert_eq!(landed.get_text("t").to_string(), "one two");
+}
+
+#[test]
+fn a_since_the_node_never_reached_is_flagged_missing() {
+    let (node, desktop) = ids();
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "one").unwrap();
+    let early = doc.oplog_vv().encode();
+    doc.get_text("t").insert(3, " two").unwrap();
+    // The desktop believes the node holds "one"; this node has never seen anything.
+    let hello = hello_since(&desktop, member(&node, &desktop), &doc, &early);
+    let (ack, _) = node_accept_sync(&hello, &node.did(), None, 2, &HashSet::new()).unwrap();
+    assert!(ack.missing);
+}
