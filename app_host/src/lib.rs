@@ -88,6 +88,13 @@ pub fn run_lua_tests_with(tests: Vec<LuaTest>, api: LuaTestApi) -> Vec<LuaTestRe
         .collect()
 }
 
+/// A `t.*` call that reaches the app: its time is the app's (and the app's own budget's), not
+/// the test's.
+fn driving<T>(budget: &Arc<Budget>, f: impl FnOnce() -> T) -> T {
+    let _paused = budget.pause();
+    f()
+}
+
 fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
     let frames = Rc::new(Cell::new(0u32));
     let failure = (|| -> mlua::Result<()> {
@@ -106,33 +113,37 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let step = api.step.clone();
+        let b = budget.clone();
         let frame_count = frames.clone();
         t.set(
             "step",
             vm.create_function(move |_, n: u32| match &step {
-                Some(step) => step(n)
+                Some(step) => driving(&b, || step(n))
                     .inspect(|done| frame_count.set(frame_count.get().saturating_add(*done)))
                     .map_err(Error::runtime),
                 None => Err(Error::runtime("t.step is not available in this runner")),
             })?,
         )?;
         let world = api.world.clone();
+        let b = budget.clone();
         t.set(
             "world",
             vm.create_function(move |lua, ()| match &world {
-                Some(world) => json_to_lua(lua, &world().map_err(Error::runtime)?),
+                Some(world) => json_to_lua(lua, &driving(&b, || world()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.world is not available in this runner")),
             })?,
         )?;
         let rects = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "rects",
             vm.create_function(move |lua, ()| match &rects {
-                Some(rects) => json_to_lua(lua, &rects().map_err(Error::runtime)?),
+                Some(rects) => json_to_lua(lua, &driving(&b, || rects()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.rects is not available in this runner")),
             })?,
         )?;
         let centres = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "centre_of",
             vm.create_function(move |_, id: String| {
@@ -141,7 +152,8 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
                         "t.centre_of is not available in this runner",
                     ));
                 };
-                let serde_json::Value::Array(rs) = rects().map_err(Error::runtime)? else {
+                let serde_json::Value::Array(rs) = driving(&b, || rects()).map_err(Error::runtime)?
+                else {
                     return Err(Error::runtime("rects response was not an array"));
                 };
                 for r in rs {
@@ -157,18 +169,20 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let click_at = api.click_at.clone();
+        let b = budget.clone();
         t.set(
             "click_at",
             vm.create_function(move |_, (x, y): (f32, f32)| match &click_at {
-                Some(click_at) => click_at(x, y).map_err(Error::runtime),
+                Some(click_at) => driving(&b, || click_at(x, y)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.click_at is not available in this runner")),
             })?,
         )?;
         let text = api.text.clone();
+        let b = budget.clone();
         t.set(
             "text",
             vm.create_function(move |lua, id: String| match &text {
-                Some(text) => match text(id).map_err(Error::runtime)? {
+                Some(text) => match driving(&b, || text(id)).map_err(Error::runtime)? {
                     Some(s) => Ok(Value::String(lua.create_string(&s)?)),
                     None => Ok(Value::Nil),
                 },
@@ -176,10 +190,11 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let type_text = api.type_text.clone();
+        let b = budget.clone();
         t.set(
             "type",
             vm.create_function(move |_, (id, text): (String, String)| match &type_text {
-                Some(type_text) => type_text(id, text).map_err(Error::runtime),
+                Some(type_text) => driving(&b, || type_text(id, text)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.type is not available in this runner")),
             })?,
         )?;

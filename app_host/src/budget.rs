@@ -39,6 +39,12 @@ impl Budget {
         Armed(self.clone())
     }
 
+    /// Stop the clock until the guard drops — for a native call whose time is not this VM's,
+    /// such as a test stepping the app it tests. The interrupt count still runs.
+    pub fn pause(self: &Arc<Self>) -> Paused {
+        Paused(self.clone(), self.now())
+    }
+
     fn now(&self) -> u64 {
         self.base.elapsed().as_nanos() as u64 + 1
     }
@@ -66,6 +72,21 @@ pub struct Armed(Arc<Budget>);
 impl Drop for Armed {
     fn drop(&mut self) {
         self.0.armed_at.store(0, Ordering::Relaxed);
+    }
+}
+
+pub struct Paused(Arc<Budget>, u64);
+
+impl Drop for Paused {
+    /// Move the arm forward by the pause, so the clock resumes where it stopped.
+    fn drop(&mut self) {
+        let away = self.0.now() - self.1;
+        let _ = self
+            .0
+            .armed_at
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |at| {
+                (at != 0).then_some(at + away)
+            });
     }
 }
 
@@ -137,6 +158,24 @@ mod tests {
         std::thread::sleep(Duration::from_millis(80));
         // Unarmed: nothing is timing this call, so a short loop well past the old arm finishes.
         vm.load("for _ = 1, 20 do nap() end").exec().unwrap();
+    }
+
+    /// A Lua test drives the app through native calls (`t.step`); those frames are the app's
+    /// time, not the test's, so they must not spend the test's clock.
+    #[test]
+    fn a_paused_call_does_not_spend_the_clock() {
+        let vm = Lua::new();
+        let budget = install_with(&vm, 50, 64).unwrap();
+        let b = budget.clone();
+        let drive = vm
+            .create_function(move |_, ()| {
+                let _paused = b.pause();
+                Ok(std::thread::sleep(Duration::from_millis(30)))
+            })
+            .unwrap();
+        vm.globals().set("drive", drive).unwrap();
+        let _armed = budget.arm();
+        vm.load("for _ = 1, 5 do drive() end").exec().unwrap();
     }
 
     #[test]
