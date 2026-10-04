@@ -27,7 +27,11 @@ os.environ["OSVAULD_TEST_BINDINGS"] = "1"
 os.environ.setdefault("OSVAULD_OFFSCREEN", "900x700")
 
 KUNKI = ROOT / "target" / "debug" / "kunki"
-RESPONSIVE = 0.05  # what "the chrome and other tiles stay live" means, per round trip
+# What "the chrome and other tiles stay live" means, per round trip. A debug build answers B in
+# ~30-45 ms with A idle (each request also paints); A's "busy" is 300 ms, so a request that
+# waited on A would take up to that. Half of it separates the two. (Was 0.05, set before any
+# baseline existed; revised 2026-10-04.)
+RESPONSIVE = 0.15
 
 # One app, every behaviour a test needs behind a button. `view` logs a line per run so a
 # test can see an app's Lua run without asking it to (asking would run it).

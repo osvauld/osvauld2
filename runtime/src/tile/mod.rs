@@ -31,12 +31,13 @@ impl Default for TileFrame {
     }
 }
 
-/// A [`TileInput`] and when it happened on the host's clock — which a tile on a virtual clock
-/// adopts, so a driven gesture is timed the same on both sides.
+/// A [`TileInput`], when it happened on the host's clock — which a tile on a virtual clock
+/// adopts, so a driven gesture is timed the same on both sides — and the modifiers held.
 #[derive(Clone, Debug)]
 pub struct TileEvent {
     pub input: TileInput,
     pub at: f64,
+    pub mods: ModifiersState,
 }
 
 /// What the host routes to a tile. Coordinates are logical points from the tile's top-left.
@@ -53,7 +54,6 @@ pub enum TileInput {
     /// A driver's synthetic key (`DriverOp::Keyboard`).
     GameKey(KeyInput),
     Ime(Ime),
-    Modifiers(ModifiersState),
     /// The tile lost the keyboard: held keys are cancelled.
     Blur,
 }
@@ -91,9 +91,10 @@ impl<A: App> Tile<A> {
         }
     }
 
-    pub fn input(&mut self, TileEvent { input, at }: TileEvent) {
+    pub fn input(&mut self, TileEvent { input, at, mods }: TileEvent) {
         self.set_clock(at);
         let r = &mut self.runner;
+        r.modifiers = mods;
         match input {
             TileInput::Move(x, y) => r.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64)),
             TileInput::Leave => r.on_cursor_left(),
@@ -105,7 +106,6 @@ impl<A: App> Tile<A> {
             TileInput::Key(event) => r.handle_input(event),
             TileInput::GameKey(event) => r.on_game_key(event),
             TileInput::Ime(ime) => r.on_ime(ime),
-            TileInput::Modifiers(m) => r.modifiers = m,
             TileInput::Blur => r.cancel_keys(),
         }
     }
@@ -113,6 +113,11 @@ impl<A: App> Tile<A> {
     /// A message from outside the tile's own input — a wake, a reply.
     pub fn update(&mut self, msg: A::Msg) {
         self.runner.app.update(msg);
+        self.runner.redraw();
+    }
+
+    /// Owe a frame: state changed from outside the tile's own input.
+    pub fn invalidate(&mut self) {
         self.runner.redraw();
     }
 

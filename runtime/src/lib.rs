@@ -2070,7 +2070,11 @@ impl<A: App> Runner<A> {
     fn to_tile(&mut self, id: &Id, input: TileInput) {
         let at = self.now();
         if let Some((_, _, handler, _)) = self.hits.tile.iter().find(|(_, i, _, _)| i == id) {
-            let msg = handler(TileEvent { input, at });
+            let msg = handler(TileEvent {
+                input,
+                at,
+                mods: self.modifiers,
+            });
             self.app.update(msg);
         }
     }
@@ -2195,13 +2199,6 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
-                for id in [self.tile_keys.clone(), self.tile_over.clone()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<HashSet<_>>()
-                {
-                    self.to_tile(&id, TileInput::Modifiers(m.state()));
-                }
             }
             WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel_moved(delta),

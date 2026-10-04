@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–2 built 2026-10-04 (T3, T6, T8 green; T2 half); steps 3–11 open.** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–3 built 2026-10-04 (T1, T2, T3, T6, T8 green; T9 placeholder); steps 4–11 open, partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -152,6 +152,24 @@ Each leaves `cargo test` and the smokes green.
    virtual clock for tiles (step 4), and the slot in the Lua vocabulary (the Lua chrome).
 3. **App thread, focused app only.** `OpenApp` becomes a handle (`TileIn` sender, latest
    frame, ids); `LuaApp` + `Tile` live on the thread. T1, T2 green.
+   *Built 2026-10-04, revised — every open app, not only the focused one* (the user: other
+   apps "need not run, but need to be responsive to commands coming from other places").
+   Once the `LuaApp` lives on a thread the shell cannot call into it, so most of steps 4–7
+   came along: `shell2/src/app_thread.rs` holds an `AppThread` per open app; bridge senses
+   and actions, source edit/write/reload, test helpers, sync hello/import and push import,
+   saving, and the search index all run on the app's thread. Hidden apps sleep on their
+   channel and still answer, import and save; only the focused one paints. Also pulled in:
+   the bridge serves connections concurrently (step 4) and the offscreen barrier (§2),
+   built as two `App` hooks — `before_frame` (wait for shown tiles at the shell's clock) and
+   `tiles_sized` (resize, wait, lay out again). Departures from §3: requests cross as
+   `Send` closures (`Call`) rather than one enum variant each — `Send` still keeps `Rc`s,
+   docs and the VM from crossing; saving runs on the app thread rather than a worker. Each
+   app's root sits in a full column in its tile, as it sat in the shell's page, so `grow`
+   roots fill. T1's threshold went 50 → 150 ms: a debug build answers B in 30–45 ms with A
+   idle, and A's busy is 300 ms. Open: T5 asks a background app to run its *view* on a
+   push, but hidden apps do not paint — whether a push should refresh a hidden app's Lua
+   mirror (run `view` unpainted) is the step 8 decision. T4 (stuck badge, `ListTabs`), T7,
+   T10 wait for steps 8–10.
 4. **Bridge through the boundary.** Senses and actions become `TileIn` requests with reply
    channels; the bridge serves connections concurrently; offscreen barrier. All smokes still green unchanged.
 5. **Source edit and reload** on the app thread. T8 green.

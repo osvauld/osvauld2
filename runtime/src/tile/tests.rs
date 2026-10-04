@@ -78,7 +78,7 @@ fn a_click_in_the_slot_reaches_the_tile_app() {
         "{got:?}"
     );
     for input in got {
-        guest.input(TileEvent { input, at: 0.0 });
+        guest.input(TileEvent { input, at: 0.0, mods: Default::default() });
     }
     assert_eq!(guest.app().clicks, 1);
 }
@@ -250,14 +250,17 @@ fn a_vanished_tile_lets_go_of_the_keyboard() {
     host.input(TileEvent {
         input: TileInput::Move(50.0, 50.0),
         at: 0.0,
+        mods: Default::default(),
     });
     host.input(TileEvent {
         input: TileInput::Button(true),
         at: 0.0,
+        mods: Default::default(),
     });
     host.input(TileEvent {
         input: TileInput::Button(false),
         at: 0.0,
+        mods: Default::default(),
     });
     assert!(host.runner.keyboard_tile().is_some());
     host.app_mut().0 = false;
@@ -374,6 +377,7 @@ fn keys_reach_a_tile_without_a_press() {
     host.input(TileEvent {
         input: TileInput::GameKey(key),
         at: 0.0,
+        mods: Default::default(),
     });
     assert!(
         matches!(host.app().got.as_slice(), [TileInput::GameKey(k)] if k.key == "w"),
