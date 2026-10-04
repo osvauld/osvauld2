@@ -4687,3 +4687,52 @@ fn a_loose_thing_with_grip_is_set_spinning() {
     assert!((ball.spin - 90.0).abs() < 1.0 && (ball.rot - 90.0).abs() < 2.0, "{} {}", ball.spin, ball.rot);
     assert_eq!(ball.pos, (0.0, 0.0), "it turns in place");
 }
+
+#[test]
+fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function ask() \
+           local room = world('room') \
+           local hit = room:ray({{ 4, 4 }}, {{ 190, 4 }}, {{ skip = 'hero' }}) \
+           local miss = room:ray({{ 4, 70 }}, {{ 190, 70 }}, {{ skip = 'hero' }}) \
+           local here = room:at({{ 4, 4 }}) \
+           return string.format('%s@%d,%d n%d d%d t%d miss=%s at=%s t%d', hit.id, hit.at[1], hit.at[2], \
+             hit.normal[1], math.floor(hit.dist + 0.5), hit.tick, tostring(miss), table.concat(here, ','), here.tick) end \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() \
+           local seen = pcall(ask) and ask() or 'not yet' \
+           return ui.col({{ ui.text({{ seen }}), ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               table.insert(heard, ask()) \
+               try(function() world('room'):ray({{ 0, 0 }}, {{ 0, 0 }}) end) \
+               try(function() world('room'):ray({{ 0, 0 }}, {{ 9, 0 }}, {{ through = true }}) end) \
+               try(function() world('room'):at({{ 1 }}) end) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }} }}, \
+             {{ id = 'wall', pos = {{ 100, -50 }}, drawing = hero, collider = {{ rect = {{ 4, 100 }} }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, 1.0 / 60.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    let info = app.view().info();
+    let said = |i: usize| info.children[i].text.clone().unwrap();
+    assert_eq!(said(0), "wall@100,4 n-1 d96 t1 miss=nil at=hero t1", "asked in view");
+    let heard = said(1);
+    assert!(heard.starts_with("wall@100,4 n-1 d96 t1 miss=nil at=hero t1"), "asked in a handler: {heard}");
+    for wanted in [
+        "ray: from and to are the same point",
+        "world \"room\":ray: unknown field through",
+        "world \"room\":at needs x and y",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}

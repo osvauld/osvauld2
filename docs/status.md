@@ -612,8 +612,13 @@ collider's centre (`Transform::pivot`), so `pos` holds still; a new body starts 
 `set { spin }` in degrees a second; the dump has `rot` and `spin`. Hockey's puck has a mark to see
 it turn, and the smoke has red strike it glancing and reads the spin. No curve from spin yet (that
 would be our own per-frame force). The Lua ↔ world contract is three kinds of call: describe
-(`view`), command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`);
-controller acceleration; a `follow` controller.
+(`view`), command (`set`, `after`), and questions. **Questions:** `world(id):ray(from, to,
+{ skip })` → nil or `{ id, at, normal, dist, tick }` (zones do not stop it), and `:at(point)` →
+the sorted ids of colliders and zones there, with `tick`; allowed in `view` as well as handlers;
+as of the last step, which the world now counts (`tick` in the dump). The answer envelope is
+agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. Next, in order:
+a fixed step (1/120 s, at most 8 catch-up steps, as 3D); the camera (`camera = { follow, ease,
+bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**

@@ -112,6 +112,20 @@ pub struct TimerInspection {
 pub struct WorldInspection {
     pub entities: Vec<EntityInspection>,
     pub timers: Vec<TimerInspection>,
+    /// Steps taken: the frame the dump and every question's answer are as of.
+    pub tick: u64,
+}
+
+/// What a ray met first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RayHit {
+    pub id: String,
+    /// Where the line met its collider, in world units.
+    pub at: (f64, f64),
+    /// The surface's direction there, a unit vector pointing out of it.
+    pub normal: (f64, f64),
+    /// From the ray's start to `at`.
+    pub dist: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -252,6 +266,8 @@ struct Animator {
 pub struct World2d {
     ecs: World,
     clock: f64,
+    /// Ticks that moved time: Rapier stepped on each.
+    steps: u64,
     ticking: bool,
     controlled: bool,
     held: HashSet<String>,
@@ -292,6 +308,9 @@ pub enum WorldError {
     Set(String, String),
     #[error("timer {0:?}: seconds must be a finite number, zero or more")]
     Timer(String),
+    /// A question asked wrongly, as `"ray: why"`.
+    #[error("{0}")]
+    Ask(String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -721,6 +740,7 @@ impl World2d {
         }
         let before = self.velocities();
         self.physics.step(dt);
+        self.steps += (dt > 0.0) as u64;
         self.slide_thrown();
         self.sense();
         self.hits(&before);
@@ -914,6 +934,43 @@ impl World2d {
             self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding |= loose;
         }
         Ok(())
+    }
+
+    /// Lua's question: the first solid thing on the line from `from` to `to`, leaving out
+    /// `skip` — a looker's own body. As of the last step: a `set` since shows at the next.
+    pub fn ray(&self, from: (f64, f64), to: (f64, f64), skip: Option<&str>) -> Result<Option<RayHit>, WorldError> {
+        let err = |why: &str| WorldError::Ask(format!("ray: {why}"));
+        if ![from.0, from.1, to.0, to.1].iter().all(|v| v.is_finite()) {
+            return Err(err("from and to must be finite numbers"));
+        }
+        if from == to {
+            return Err(err("from and to are the same point: a ray needs a direction"));
+        }
+        let skip = match skip {
+            Some(id) => Some(*self.by_id.get(id).ok_or_else(|| err("skip: there is no such entity"))?),
+            None => None,
+        };
+        let skip = skip.and_then(|e| self.ecs.get::<Solid>(e)).map(|s| s.body);
+        let name = |owner| self.ecs.get::<Name>(Entity::from_bits(owner)).map(|n| n.0.clone());
+        Ok(self.physics.ray(from, to, skip).and_then(|(owner, at, normal, dist)| {
+            Some(RayHit { id: name(owner)?, at, normal, dist })
+        }))
+    }
+
+    /// Lua's question: the ids of everything whose collider or zone covers `point`, sorted.
+    pub fn at(&self, point: (f64, f64)) -> Result<Vec<String>, WorldError> {
+        if !(point.0.is_finite() && point.1.is_finite()) {
+            return Err(WorldError::Ask("at: the point must be finite numbers".into()));
+        }
+        let name = |owner| self.ecs.get::<Name>(Entity::from_bits(owner)).map(|n| n.0.clone());
+        let mut ids: Vec<String> = self.physics.at(point).into_iter().filter_map(name).collect();
+        ids.sort();
+        ids.dedup(); // a collider and a zone of one entity
+        Ok(ids)
+    }
+
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     pub fn transform(&self, id: &str) -> Option<Transform> {

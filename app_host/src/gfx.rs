@@ -367,6 +367,19 @@ impl WorldHandle {
             .ok_or_else(|| Error::runtime(format!("{owner}: there is no such world")))?;
         f(world).map_err(|e| Error::runtime(format!("world {:?}: {e}", self.id)))
     }
+
+    /// Asks the world a question. Allowed in `view` too: asking changes nothing.
+    fn ask<R>(
+        &self,
+        owner: &str,
+        f: impl FnOnce(&world::World2d) -> Result<R, world::WorldError>,
+    ) -> mlua::Result<(R, u64)> {
+        let worlds = self.worlds.borrow();
+        let world = (worlds.get(&self.id))
+            .ok_or_else(|| Error::runtime(format!("{owner}: there is no such world")))?;
+        let answer = f(world).map_err(|e| Error::runtime(format!("world {:?}: {e}", self.id)))?;
+        Ok((answer, world.steps()))
+    }
 }
 
 impl UserData for WorldHandle {
@@ -402,6 +415,38 @@ impl UserData for WorldHandle {
             let owner = format!("world {:?}:cancel", this.id);
             let name = timer_name(name, &owner)?;
             this.command(&owner, |w| Ok(w.cancel(&name)))
+        });
+        // `rink:ray({ x, y }, { x, y }, { skip = "guard" })`: nil, or
+        // `{ id, at = { x, y }, normal = { x, y }, dist, tick }`.
+        methods.add_method("ray", |lua, this, (from, to, opts): (Table, Table, Option<Table>)| {
+            let owner = format!("world {:?}:ray", this.id);
+            let (from, to) = (point(from, &format!("{owner} from"))?, point(to, &format!("{owner} to"))?);
+            let skip = match &opts {
+                Some(opts) => {
+                    named_fields(opts, &owner, &["skip"])?;
+                    opts.get::<Option<String>>("skip")?
+                }
+                None => None,
+            };
+            let (hit, tick) = this.ask(&owner, |w| w.ray((from.x, from.y), (to.x, to.y), skip.as_deref()))?;
+            let Some(hit) = hit else { return Ok(Value::Nil) };
+            let pair = |(x, y): (f64, f64)| lua.create_sequence_from([x, y]);
+            let answer = lua.create_table()?;
+            answer.set("id", hit.id)?;
+            answer.set("at", pair(hit.at)?)?;
+            answer.set("normal", pair(hit.normal)?)?;
+            answer.set("dist", hit.dist)?;
+            answer.set("tick", tick)?;
+            Ok(Value::Table(answer))
+        });
+        // `rink:at({ x, y })`: the ids there, sorted, as a list that also has `tick`.
+        methods.add_method("at", |lua, this, at: Table| {
+            let owner = format!("world {:?}:at", this.id);
+            let at = point(at, &owner)?;
+            let (ids, tick) = this.ask(&owner, |w| w.at((at.x, at.y)))?;
+            let answer = lua.create_sequence_from(ids)?;
+            answer.set("tick", tick)?;
+            Ok(answer)
         });
     }
 }

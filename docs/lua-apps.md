@@ -366,6 +366,30 @@ on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   --
 - A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
   lists them as `timers = { { name, left } }` beside `entities`.
 
+### Questions — `world(id):ray` and `:at`
+
+Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
+is in front of the player when they press E, what did the click land on:
+
+```lua
+local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
+-- nil, or { id = "wall", at = { x, y }, normal = { nx, ny }, dist = 280, tick = 1042 }
+if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
+
+local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+```
+
+- `ray` answers the first solid thing on the line from one point to the other: `at` where the line
+  met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop
+  it. A line starting inside something meets it at once — `skip` leaves out one entity, a
+  looker's own body. Only `skip` may be given; `from` and `to` must differ.
+- `at` answers the ids of everything whose collider or zone covers the point, sorted, each once.
+- Answers are plain tables of ids and numbers: look your own data up by id, as handlers do.
+- Both are as of the last frame — the world's `tick`, also in the dump. A `set` or a spawn shows
+  in answers from the next frame on.
+- Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
+  five hundred things take a few milliseconds; a ray per guard per frame is fine.
+
 ### Facing and gait — decided in Lua
 
 The world reports a change of direction; Lua picks what the entity shows. A top-down character is

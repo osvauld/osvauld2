@@ -1517,3 +1517,83 @@ fn spin_and_grip_are_checked() {
     let err = world.set("puck", spin(f64::INFINITY)).unwrap_err().to_string();
     assert!(err.contains("must be finite"), "{err}");
 }
+
+/// Two walls across a corridor at x 50 and x 100, a zone between them at x 70, a hero at the
+/// start; stepped once, so Rapier has them all where it answers from.
+fn corridor() -> World2d {
+    let d = drawing();
+    let wall = |id, x| solid(id, (x, -50.0), Shape::Rect(4.0, 100.0), (0.0, 0.0), &d);
+    let hero = solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, wall("near", 50.0), zone("lamp", (66.0, 0.0), None, &d), wall("far", 100.0)]).unwrap();
+    world.tick(1.0 / 60.0, 1.0 / 60.0);
+    world
+}
+
+#[test]
+fn a_ray_answers_the_first_solid_thing_on_it_and_where_it_met_it() {
+    let world = corridor();
+    // From the hero's centre, skipping the hero; the zone does not stop a ray.
+    let hit = world.ray((4.0, 4.0), (200.0, 4.0), Some("hero")).unwrap().unwrap();
+    assert_eq!(hit.id, "near");
+    assert!((hit.at.0 - 50.0).abs() < 1e-3 && (hit.at.1 - 4.0).abs() < 1e-3, "{hit:?}");
+    assert!((hit.normal.0 + 1.0).abs() < 1e-3 && hit.normal.1.abs() < 1e-3, "{hit:?}");
+    assert!((hit.dist - 46.0).abs() < 1e-3, "{hit:?}");
+    // Not skipped, the hero it starts inside is the first thing on it.
+    assert_eq!(world.ray((4.0, 4.0), (200.0, 4.0), None).unwrap().unwrap().id, "hero");
+    // Short of the wall, or along the corridor, nothing.
+    assert_eq!(world.ray((10.0, 4.0), (40.0, 4.0), None).unwrap(), None);
+    assert_eq!(world.ray((10.0, 4.0), (10.0, 200.0), None).unwrap(), None);
+}
+
+#[test]
+fn at_answers_everything_whose_collider_or_zone_covers_a_point() {
+    let world = corridor();
+    assert_eq!(world.at((70.0, 4.0)).unwrap(), ["lamp"]);
+    assert_eq!(world.at((52.0, 0.0)).unwrap(), ["near"]);
+    assert_eq!(world.at((4.0, 4.0)).unwrap(), ["hero"]);
+    assert!(world.at((30.0, 30.0)).unwrap().is_empty());
+}
+
+#[test]
+fn questions_are_checked() {
+    let world = corridor();
+    let err = |r: Result<_, WorldError>| r.map(|_: Option<RayHit>| ()).unwrap_err().to_string();
+    assert!(err(world.ray((0.0, 0.0), (f64::NAN, 0.0), None)).contains("must be finite"));
+    assert!(err(world.ray((1.0, 1.0), (1.0, 1.0), None)).contains("from and to are the same point"));
+    assert!(err(world.ray((0.0, 0.0), (9.0, 0.0), Some("ghost"))).contains("skip: there is no such entity"));
+    assert!(world.at((f64::INFINITY, 0.0)).unwrap_err().to_string().contains("must be finite"));
+}
+
+#[test]
+fn the_world_counts_its_steps_and_a_frame_with_no_time_is_not_one() {
+    let mut world = corridor();
+    assert_eq!(world.steps(), 1);
+    world.tick(1.0 / 60.0, 0.0);
+    assert_eq!(world.steps(), 1);
+    world.tick(2.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(world.steps(), 2);
+}
+
+#[test]
+fn a_thousand_rays_over_five_hundred_things_are_cheap() {
+    let d = drawing();
+    let crates = (0..500).map(|i| {
+        let (x, y) = ((i % 25) as f64 * 40.0, (i / 25) as f64 * 40.0);
+        solid(&format!("crate{i}"), (x, y), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    });
+    let mut world = World2d::default();
+    world.reconcile(crates.collect()).unwrap();
+    world.tick(1.0 / 60.0, 1.0 / 60.0);
+    let started = std::time::Instant::now();
+    let mut hits = 0;
+    for i in 0..1000 {
+        let y = (i % 800) as f64 + 0.5;
+        hits += world.ray((-10.0, y), (1100.0, y + 37.0), None).unwrap().is_some() as usize;
+    }
+    let took = started.elapsed();
+    eprintln!("1000 rays over 500 things: {took:?} ({hits} hit)");
+    assert!(hits > 100, "most rays meet a crate: {hits}");
+    // Generous for a debug build; the printed number is the measurement.
+    assert!(took.as_millis() < 500, "{took:?}");
+}
