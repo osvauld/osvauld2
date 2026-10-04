@@ -206,10 +206,12 @@ fn render_vello(
         .map_err(|e| format!("vello render: {e}"))
 }
 
-pub(crate) struct SceneView3d {
-    pub scene: Arc<Scene3d>,
-    pub rect: Rect,
-    pub clip: Rect,
+/// A frame's one 3D viewport: what to draw, where (logical points), and what of it shows.
+#[derive(Clone)]
+pub struct SceneView3d {
+    pub(crate) scene: Arc<Scene3d>,
+    pub(crate) rect: Rect,
+    pub(crate) clip: Rect,
 }
 
 fn physical_rect(rect: Rect, scale: f32) -> [f32; 4] {

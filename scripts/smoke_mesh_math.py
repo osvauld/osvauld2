@@ -1,8 +1,10 @@
 """Lua-authored shared meshes: raw inspection, triangle picking, regeneration and captures."""
 
+import base64
 import math
 from pathlib import Path
 
+from osvauld.png import Image
 from osvauld.session import Session, shell_binary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,6 +73,14 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     shots = ROOT / "shots"
     shots.mkdir(exist_ok=True)
     rpc.save_screenshot(item, shots / "mesh-math.png")
+    # The mesh is drawn, not only inspectable: where the coral wave projects differs from the
+    # viewport's empty corner. Picking alone passes without a single 3D pixel on screen.
+    shot = Image(base64.b64decode(rpc.screenshot(item)["png_base64"]))
+    scale = shot.width / 900
+    wave_x, wave_y = project(before["camera"], left["position"], viewport)
+    wave = shot.at(wave_x * scale, wave_y * scale)
+    empty = shot.at((viewport["x"] + 4) * scale, (viewport["y"] + 4) * scale)
+    assert sum(abs(a - b) for a, b in zip(wave, empty)) > 30, f"no 3D drawn: {wave} vs {empty}"
     size = rpc.save_screenshot(item, shots / "mesh-math-custom.png", width=1000, height=700, scale=1)
     assert size == {"width_px": 1000, "height_px": 700}, size
     # An empty scene must clear old 3D pixels, exactly as omitting the viewport would.

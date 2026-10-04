@@ -913,11 +913,12 @@ fn a_controlled_world_takes_keys_and_moves_in_rust() {
     };
     let x = |app: &LuaApp<LuaMsg>| app.worlds.borrow()["room"].transform("hero").unwrap().x;
     app.update(key(Some("KeyD"), true, false));
-    app.update(LuaMsg::TickWorld("room".into(), 0.25, 0.25));
-    assert_eq!(x(&app), 25.0);
+    app.update(LuaMsg::TickWorld("room".into(), 0.05, 0.05));
+    let walked = x(&app);
+    assert!((walked - 5.0).abs() < 1e-9, "six steps at 100 per second: {walked}");
     app.update(key(None, false, true));
-    app.update(LuaMsg::TickWorld("room".into(), 0.25, 0.5));
-    assert_eq!(x(&app), 25.0, "a cancel releases every held key");
+    app.update(LuaMsg::TickWorld("room".into(), 0.05, 0.1));
+    assert_eq!(x(&app), walked, "a cancel releases every held key");
 }
 
 #[test]
@@ -2434,7 +2435,7 @@ end
 fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
     const REPS: usize = 9;
 
-    let (lua, fires) = sandboxed_vm().unwrap();
+    let (lua, budget) = sandboxed_vm().unwrap();
     let view: Function = match lua.load(format!("{header}\n{app}")).eval() {
         Ok(f) => f,
         Err(e) => return eprintln!("{label:<14} {els:>7}  setup failed: {e}"),
@@ -2450,14 +2451,14 @@ fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
     let (mut spent, mut ok) = (0u64, true);
 
     for _ in 0..REPS {
-        fires.store(0, Ordering::Relaxed); // also refills the budget, exactly as view() does
+        let _armed = budget.arm(); // refills the budget, exactly as view() does
         let t0 = Instant::now();
         let node: Table = match view.call(()) {
             Ok(n) => n,
             Err(e) => return eprintln!("{label:<14} {els:>7}  {e}"),
         };
         lua_t = lua_t.min(t0.elapsed());
-        spent = fires.load(Ordering::Relaxed);
+        spent = budget.spent();
 
         // Fresh handlers per rep — the vec grows as callbacks are collected.
         let mut handlers = Handlers::new();
@@ -5582,9 +5583,9 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
     }));
     let info = app.view().info();
     let said = |i: usize| info.children[i].text.clone().unwrap();
-    assert_eq!(said(0), "wall@100,4 n-1 d96 t1 miss=nil at=hero t1", "asked in view");
+    assert_eq!(said(0), "wall@100,4 n-1 d96 t2 miss=nil at=hero t2", "asked in view");
     let heard = said(1);
-    assert!(heard.starts_with("wall@100,4 n-1 d96 t1 miss=nil at=hero t1"), "asked in a handler: {heard}");
+    assert!(heard.starts_with("wall@100,4 n-1 d96 t2 miss=nil at=hero t2"), "asked in a handler: {heard}");
     for wanted in [
         "ray: from and to are the same point",
         "world \"room\":ray: unknown field through",
