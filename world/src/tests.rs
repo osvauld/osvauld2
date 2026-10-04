@@ -1670,3 +1670,78 @@ fn time_short_of_a_step_carries_to_the_next_frame() {
     assert!((world.transform("hero").unwrap().x - 1.0).abs() < 1e-9);
     assert_eq!(world.dropped(), 0.0);
 }
+
+/// 5000 small things on a 4000×4000 map: 4000 drawings alone (grass, coins), 800 fixed solids
+/// (rocks), 200 loose balls thrown about inside four walls.
+fn crowd(d: &Arc<Drawing>) -> Vec<EntitySpec> {
+    let d = d.clone();
+    let mut specs = vec![];
+    let wall = |id: &str, pos, w, h| solid(id, pos, Shape::Rect(w, h), (0.0, 0.0), &d);
+    specs.push(wall("north", (0.0, -10.0), 4000.0, 10.0));
+    specs.push(wall("south", (0.0, 4000.0), 4000.0, 10.0));
+    specs.push(wall("west", (-10.0, 0.0), 10.0, 4000.0));
+    specs.push(wall("east", (4000.0, 0.0), 10.0, 4000.0));
+    for i in 0..4000 {
+        let at = ((i % 64) as f64 * 62.0 + 3.0, (i / 64) as f64 * 62.0 + 3.0);
+        specs.push(spec(&format!("grass{i}"), at, &d));
+    }
+    for i in 0..800 {
+        let at = ((i % 40) as f64 * 100.0 + 50.0, (i / 40) as f64 * 200.0 + 20.0);
+        specs.push(solid(&format!("rock{i}"), at, Shape::Rect(8.0, 8.0), (0.0, 0.0), &d));
+    }
+    for i in 0..200 {
+        let at = ((i % 20) as f64 * 200.0 + 100.0, (i / 20) as f64 * 400.0 + 120.0);
+        specs.push(EntitySpec {
+            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None }),
+            ..solid(&format!("ball{i}"), at, Shape::Circle(4.0), (4.0, 4.0), &d)
+        });
+    }
+    specs
+}
+
+/// Average time of `f` over `n` runs.
+fn timed(n: u32, mut f: impl FnMut()) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        f();
+    }
+    started.elapsed() / n
+}
+
+/// The measurement before a camera and culling: what 5000 things cost the world each frame.
+/// `cargo test --release -p world --lib -- --ignored five_thousand --nocapture`
+#[test]
+#[ignore = "a measurement: run in release with --ignored --nocapture"]
+fn five_thousand_small_things_cost_this_much() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let spawn = timed(1, || world.reconcile(crowd(&d)).unwrap());
+    world.tick(0.0, 0.0);
+    for i in 0..200 {
+        let v = ((i * 37 % 400) as f64 - 200.0, (i * 91 % 400) as f64 - 200.0);
+        world.set(&format!("ball{i}"), Set { pos: None, velocity: Some(v), spin: None }).unwrap();
+    }
+    // As a `view` does: the same handles, described afresh.
+    let describe = timed(20, || {
+        world.reconcile(crowd(&d)).unwrap();
+    });
+    let mut t = 0.0;
+    let frame_of_steps = timed(60, || {
+        t += 1.0 / 60.0;
+        world.tick(t, 1.0 / 60.0);
+        world.drain_events();
+    });
+    // Every entity goes into the frame until there is a camera to cull by: past the frame's
+    // item cap, it is refused — after the work of posing them all.
+    let mut painted = Ok(());
+    let paint = timed(20, || {
+        painted = world.frame(1280.0, 720.0).map(|_| ());
+    });
+    let inspect = timed(20, || {
+        world.inspect();
+    });
+    eprintln!(
+        "5000 things: spawn {spawn:?}, describe again {describe:?}, a 60 fps frame of steps \
+         {frame_of_steps:?}, paint {paint:?} ({painted:?}), inspect {inspect:?}"
+    );
+}
