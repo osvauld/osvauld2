@@ -324,7 +324,7 @@ def t15(net):
     i = item["id"]
     alice = _did(a, i)
     patch_local(b, i, "main.lua", "return function()",
-                f'doc:open("profile/{alice}"):set({{"me"}}, doc.map({{ name = "mallory" }}))\nreturn function()')
+                f'doc:open("user/{alice}"):set({{"me"}}, doc.map({{ name = "mallory" }}))\nreturn function()')
     time.sleep(1.5)
     assert "mallory" not in json.dumps(data(a, i)), "bob renamed alice"
     assert any("rejected" in line for line in b.rpc.read_console(i)), "no rejection reported"
@@ -342,7 +342,191 @@ def _ws_item(p, item_id):
     raise AssertionError(f"{item_id} not found on {p.name}")
 
 
-TESTS = {f"t{n}": globals()[f"t{n}"] for n in range(1, 16)}
+def run_once(p, item, lua):
+    """Run `lua` once in this peer's app, at load, with `M` (the model) in scope — a modified
+    client for hostile tests, a scripted user for the rest."""
+    patch_local(p, item, "main.lua", "return function()", f"do\n{lua}\nend\nreturn function()")
+
+
+def msg_id(p, item, text, channel="general"):
+    wait_until(lambda: text in texts(p, item, channel), PUSH, f"{p.name} to have {text!r}")
+    return next(m["id"] for m in messages(p, item, channel) if m["text"] == text)
+
+
+def msg(p, item, mid, channel="general"):
+    return next((m for m in messages(p, item, channel) if m["id"] == mid), None)
+
+
+def rejected(p, item):
+    wait_until(lambda: any("rejected" in l for l in p.rpc.read_console(item)), PUSH,
+               f"{p.name} to report a rejection")
+
+
+def t17(net):
+    """B edits A's message: rejected and rolled back; A's text unchanged everywhere."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    send(a, i, "alice wrote this")
+    mid = msg_id(b, i, "alice wrote this")
+    run_once(b, i, f'M.channel("general"):set({{"messages", "{mid}", "text"}}, "hijacked")')
+    rejected(b, i)
+    wait_until(lambda: msg(b, i, mid)["text"] == "alice wrote this", PUSH, "bob to roll back")
+    never_sees(a, i, "hijacked")
+    shots("T17", i, a, b)
+
+
+def t18(net):
+    """Reactions: B's own slot is accepted; removing A's reaction is rejected."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    alice, bob = _did(a, i), _did(b, i)
+    send(a, i, "react to me")
+    mid = msg_id(b, i, "react to me")
+    a.rpc.click(i, f"react:{mid}:👍")
+    b.rpc.click(i, f"react:{mid}:👍")
+    wait_until(lambda: bob in (msg(a, i, mid).get("reactions") or {}), PUSH, "bob's reaction on alice")
+    shots("T18-reacted", i, a, b)
+    run_once(b, i, f'M.channel("general"):delete({{"messages", "{mid}", "reactions", "{alice}"}})')
+    rejected(b, i)
+    time.sleep(1)
+    assert alice in msg(a, i, mid)["reactions"], "alice's reaction was removed by bob"
+
+
+def t19(net):
+    """B can't delete A's message; a moderator can remove B's, text kept, hidden in the UI."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    send(a, i, "keep me")
+    mid = msg_id(b, i, "keep me")
+    run_once(b, i, f'M.channel("general"):delete({{"messages", "{mid}"}})')
+    rejected(b, i)
+    assert msg(a, i, mid) is not None, "bob deleted alice's message"
+    send(b, i, "spam from bob")
+    bmid = msg_id(a, i, "spam from bob")
+    a.rpc.click(i, f"remove:{bmid}")  # alice claimed the node: chat admin
+    wait_until(lambda: (msg(b, i, bmid) or {}).get("removed"), PUSH, "removal on bob")
+    assert msg(b, i, bmid)["text"] == "spam from bob", "removal must keep the text"
+    assert f"text:{bmid}" not in ids_on_screen(b), "removed text still rendered"
+    shots("T19", i, a, b)
+
+
+def t20(net):
+    """A private group of A and B is invisible to C, even asked for by name."""
+    a, b = net.peer("alice"), net.peer("bob")
+    ws, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    c = net.peer("carol")
+    net.join(a, c, ws, item)
+    run_once(a, i, f'M.create_group("secret", {{ "{_did(b, i)}" }})')
+    gid = wait_until(lambda: next((n.split("/")[1] for n in data(a, i) if n.startswith("group/")), None),
+                     PUSH, "alice's group doc")
+    a.rpc.click(i, f"ch:{gid}")
+    send(a, i, "for bob only", )
+    wait_until(lambda: "for bob only" in json.dumps(data(b, i)), PUSH, "bob to get the group message")
+    assert not any(n.startswith("group/") for n in c.rpc.request("DocNames", item_id=i)), \
+        "carol's index lists the group"
+    run_once(c, i, f'doc:open("group/{gid}/meta")')
+    never_sees(c, i, "for bob only")
+    shots("T20", i, a, b, c)
+
+
+def t21(net):
+    """Adding C shows C the group and its history; removing C stops new messages reaching C."""
+    a, b = net.peer("alice"), net.peer("bob")
+    ws, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    c = net.peer("carol")
+    net.join(a, c, ws, item)
+    run_once(a, i, f'M.create_group("team", {{ "{_did(b, i)}" }})')
+    gid = wait_until(lambda: next((n.split("/")[1] for n in data(a, i) if n.startswith("group/")), None),
+                     PUSH, "alice's group doc")
+    a.rpc.click(i, f"ch:{gid}")
+    send(a, i, "before carol joined")
+    a.rpc.click(i, f"add-member:{gid}:{_did(c, i)}")
+    wait_until(lambda: f"ch:{gid}" in ids_on_screen(c), PUSH, "carol to see the group")
+    c.rpc.click(i, f"ch:{gid}")
+    sees(c, i, "before carol joined", channel=gid)
+    shots("T21-added", i, c)
+    a.rpc.click(i, f"remove-member:{gid}:{_did(c, i)}")
+    time.sleep(1)
+    send(a, i, "after carol left")
+    never_sees(c, i, "after carol left", channel=gid)
+
+
+def t22(net):
+    """A message's author, at and id never change after creation."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    send(b, i, "bob's own")
+    mid = msg_id(a, i, "bob's own")
+    run_once(b, i, f'M.channel("general"):set({{"messages", "{mid}", "at"}}, 1)')
+    rejected(b, i)
+    assert msg(a, i, mid)["at"] != 1, "bob rewrote at"
+
+
+def t23(net):
+    """role.assign within the cone; a member can't assign; revoking cascades."""
+    a, b = net.peer("alice"), net.peer("bob")
+    ws, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    c = net.peer("carol")
+    net.join(a, c, ws, item)
+    bob, carol = _did(b, i), _did(c, i)
+    try:
+        c.rpc.request("AssignRole", item_id=i, did=bob, role="moderator")
+        raise AssertionError("a member assigned a role")
+    except Exception as e:  # noqa: BLE001
+        assert "AssertionError" not in type(e).__name__, e
+    a.rpc.request("AssignRole", item_id=i, did=bob, role="admin")
+    b.rpc.request("AssignRole", item_id=i, did=carol, role="moderator")
+    send(a, i, "carol may remove this")
+    mid = msg_id(c, i, "carol may remove this")
+    c.rpc.click(i, f"remove:{mid}")
+    wait_until(lambda: (msg(a, i, mid) or {}).get("removed"), PUSH, "carol's removal")
+    a.rpc.request("RevokeRole", item_id=i, did=bob, role="admin")
+    send(a, i, "carol may not remove this")
+    mid = msg_id(c, i, "carol may not remove this")
+    run_once(c, i, f'M.remove("{mid}")')
+    rejected(c, i)
+
+
+def t24(net):
+    """A ban rejects posts until it expires."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    run_once(a, i, f'M.ban("{_did(b, i)}", 3)')
+    time.sleep(1)
+    send(b, i, "while banned")
+    rejected(b, i)
+    never_sees(a, i, "while banned")
+    time.sleep(3)
+    send(b, i, "after the ban")
+    sees(a, i, "after the ban")
+
+
+def t25(net):
+    """@ autocompletes from the people directory; the message stores the DID; B is notified."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    bob = _did(b, i)
+    a.rpc.type_text(i, "composer", "hey @bo")
+    wait_until(lambda: f"suggest:{bob}" in ids_on_screen(a), PUSH, "bob suggested")
+    shots("T25-suggest", i, a)
+    a.rpc.click(i, f"suggest:{bob}")
+    a.rpc.key(i, "composer", "enter")
+    mid = wait_until(lambda: next((m["id"] for m in messages(b, i) if bob in (m.get("mentions") or {})), None),
+                     PUSH, "a message mentioning bob")
+    wait_until(lambda: "mention-badge" in ids_on_screen(b), PUSH, "bob's mention badge")
+    shots("T25-mention", i, b)
+
+
+TESTS = {f"t{n}": globals()[f"t{n}"] for n in range(1, 26) if n != 16}
 
 
 def main() -> int:
