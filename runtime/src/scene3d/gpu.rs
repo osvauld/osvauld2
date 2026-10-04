@@ -1,53 +1,12 @@
-use std::mem::size_of;
+use std::{collections::HashMap, mem::size_of, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+use super::mesh::{MeshData, Vertex};
 use super::text_mesh::layout_text;
 use super::{MAX_OBJECTS, MAX_TEXT_SURFACES, Scene3d};
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-}
-
-const fn vertex(position: [f32; 3], normal: [f32; 3]) -> Vertex {
-    Vertex { position, normal }
-}
-
-const VERTICES: [Vertex; 24] = [
-    vertex([-0.5, -0.5, 0.5], [0.0, 0.0, 1.0]),
-    vertex([0.5, -0.5, 0.5], [0.0, 0.0, 1.0]),
-    vertex([0.5, 0.5, 0.5], [0.0, 0.0, 1.0]),
-    vertex([-0.5, 0.5, 0.5], [0.0, 0.0, 1.0]),
-    vertex([0.5, -0.5, -0.5], [0.0, 0.0, -1.0]),
-    vertex([-0.5, -0.5, -0.5], [0.0, 0.0, -1.0]),
-    vertex([-0.5, 0.5, -0.5], [0.0, 0.0, -1.0]),
-    vertex([0.5, 0.5, -0.5], [0.0, 0.0, -1.0]),
-    vertex([0.5, -0.5, 0.5], [1.0, 0.0, 0.0]),
-    vertex([0.5, -0.5, -0.5], [1.0, 0.0, 0.0]),
-    vertex([0.5, 0.5, -0.5], [1.0, 0.0, 0.0]),
-    vertex([0.5, 0.5, 0.5], [1.0, 0.0, 0.0]),
-    vertex([-0.5, -0.5, -0.5], [-1.0, 0.0, 0.0]),
-    vertex([-0.5, -0.5, 0.5], [-1.0, 0.0, 0.0]),
-    vertex([-0.5, 0.5, 0.5], [-1.0, 0.0, 0.0]),
-    vertex([-0.5, 0.5, -0.5], [-1.0, 0.0, 0.0]),
-    vertex([-0.5, 0.5, 0.5], [0.0, 1.0, 0.0]),
-    vertex([0.5, 0.5, 0.5], [0.0, 1.0, 0.0]),
-    vertex([0.5, 0.5, -0.5], [0.0, 1.0, 0.0]),
-    vertex([-0.5, 0.5, -0.5], [0.0, 1.0, 0.0]),
-    vertex([-0.5, -0.5, -0.5], [0.0, -1.0, 0.0]),
-    vertex([0.5, -0.5, -0.5], [0.0, -1.0, 0.0]),
-    vertex([0.5, -0.5, 0.5], [0.0, -1.0, 0.0]),
-    vertex([-0.5, -0.5, 0.5], [0.0, -1.0, 0.0]),
-];
-const INDICES: [u16; 36] = [
-    0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17, 18,
-    16, 18, 19, 20, 21, 22, 20, 22, 23,
-];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -80,28 +39,66 @@ const MAX_CURVES_PER_SURFACE: usize = 512;
 /// font-family prop yet.
 const GLYPH_FONT: &[u8] = include_bytes!("../../assets/JetBrainsMono-Regular.ttf");
 
+struct GpuMesh {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    source: Arc<MeshData>,
+}
+
+impl GpuMesh {
+    fn upload(device: &wgpu::Device, mesh: Arc<MeshData>) -> Self {
+        let buffer = |label, bytes, usage| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytes,
+                usage,
+            })
+        };
+        Self {
+            vertices: buffer(
+                "3d mesh vertices",
+                bytemuck::cast_slice(&mesh.vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            indices: buffer(
+                "3d mesh indices",
+                bytemuck::cast_slice(&mesh.indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: (mesh.triangle_count() * 3) as u32,
+            source: mesh,
+        }
+    }
+}
+
+// Remap a full viewport's clip coordinates into its clipped/scissored sub-rectangle without
+// changing camera aspect or the screen ray. This also handles content extending offscreen.
+pub(super) fn viewport_crop(full: [f32; 4], clip: [u32; 4]) -> Mat4 {
+    let [x, y, w, h] = full;
+    let [cx, cy, cw, ch] = clip.map(|v| v as f32);
+    Mat4::from_translation(Vec3::new(
+        (2.0 * (x - cx) + w - cw) / cw,
+        (2.0 * (cy - y) + ch - h) / ch,
+        0.0,
+    )) * Mat4::from_scale(Vec3::new(w / cw, h / ch, 1.0))
+}
+
 pub(crate) struct SceneRenderer {
     pipeline: wgpu::RenderPipeline,
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    meshes: HashMap<usize, GpuMesh>,
     instances: wgpu::Buffer,
     glyph_curves: wgpu::Buffer,
 }
 
 impl SceneRenderer {
+    pub fn clear(&mut self) {
+        self.meshes.clear();
+    }
+
     pub fn new(device: &wgpu::Device) -> Self {
-        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3d cube vertices"),
-            contents: bytemuck::cast_slice(&VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("3d cube indices"),
-            contents: bytemuck::cast_slice(&INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("3d camera"),
             size: size_of::<Mat4>() as u64,
@@ -221,15 +218,14 @@ impl SceneRenderer {
             pipeline,
             camera,
             camera_group,
-            vertices,
-            indices,
+            meshes: HashMap::new(),
             instances,
             glyph_curves,
         }
     }
 
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color: &wgpu::TextureView,
@@ -237,20 +233,34 @@ impl SceneRenderer {
         depth: &wgpu::TextureView,
         scene: &Scene3d,
         viewport: [u32; 4],
+        full_viewport: [f32; 4],
     ) {
+        let geometry: Vec<_> = scene.objects.iter().map(|o| o.mesh_data()).collect();
+        let keys: Vec<_> = geometry.iter().map(|m| Arc::as_ptr(m) as usize).collect();
+        // Only the current snapshot remains cached. Keeping its Arc prevents pointer reuse.
+        self.meshes.retain(|key, _| keys.contains(key));
+        for (key, mesh) in keys.iter().zip(&geometry) {
+            self.meshes
+                .entry(*key)
+                .or_insert_with(|| GpuMesh::upload(device, mesh.clone()));
+        }
         let [x, y, width, height] = viewport;
-        if width == 0 || height == 0 || scene.objects.is_empty() {
+        if width == 0 || height == 0 {
             return;
         }
         let camera = &scene.camera;
         let view = Mat4::look_at_rh(camera.eye, camera.target, camera.up.normalize());
         let projection = Mat4::perspective_rh(
             camera.fov_y_radians,
-            width as f32 / height as f32,
+            full_viewport[2] / full_viewport[3],
             camera.near,
             camera.far,
         );
-        queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&(projection * view)));
+        queue.write_buffer(
+            &self.camera,
+            0,
+            bytemuck::bytes_of(&(viewport_crop(full_viewport, viewport) * projection * view)),
+        );
         let mut surface_slot = 0usize;
         let instances: Vec<_> = scene
             .objects
@@ -269,9 +279,19 @@ impl SceneRenderer {
                             p1: c.p1,
                         })
                         .collect();
-                    let byte_offset = (slot * MAX_CURVES_PER_SURFACE * size_of::<GpuCurve>()) as u64;
-                    queue.write_buffer(&self.glyph_curves, byte_offset, bytemuck::cast_slice(&gpu_curves));
-                    let text_curves = [(slot * MAX_CURVES_PER_SURFACE) as f32, count as f32, 0.0, 0.0];
+                    let byte_offset =
+                        (slot * MAX_CURVES_PER_SURFACE * size_of::<GpuCurve>()) as u64;
+                    queue.write_buffer(
+                        &self.glyph_curves,
+                        byte_offset,
+                        bytemuck::cast_slice(&gpu_curves),
+                    );
+                    let text_curves = [
+                        (slot * MAX_CURVES_PER_SURFACE) as f32,
+                        count as f32,
+                        0.0,
+                        0.0,
+                    ];
                     let text_bounds = [mesh.min[0], mesh.min[1], mesh.max[0], mesh.max[1]];
                     (text_curves, text_bounds)
                 } else {
@@ -321,10 +341,20 @@ impl SceneRenderer {
         pass.set_bind_group(0, &self.camera_group, &[]);
         pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
         pass.set_scissor_rect(x, y, width, height);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_vertex_buffer(1, self.instances.slice(..));
-        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-        pass.draw_indexed(0..INDICES.len() as u32, 0, 0..instances.len() as u32);
+        let mut start = 0;
+        while start < keys.len() {
+            let mut end = start + 1;
+            while end < keys.len() && keys[end] == keys[start] {
+                end += 1;
+            }
+            let mesh = &self.meshes[&keys[start]];
+            debug_assert!(Arc::ptr_eq(&mesh.source, &geometry[start]));
+            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint16);
+            pass.draw_indexed(0..mesh.index_count, 0, start as u32..end as u32);
+            start = end;
+        }
         drop(pass);
         queue.submit([encoder.finish()]);
     }

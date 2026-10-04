@@ -61,6 +61,59 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
+### Voice POC (`voice/`, 2026-10-01)
+- standalone binary, not wired into the shell: mic (`cpal`) → capture cleaning → Opus 20 ms
+  mono 48 kHz → iroh QUIC datagram `[seq u32][level u8][opus]` → Opus → playout buffer
+  (≤100 ms, PLC for ≤3 lost frames) → speaker. `voice listen` / `voice dial`;
+  `scripts/voice_pair.sh` runs two peers in tmux on one machine. Connection verified locally;
+  audio judged by ear only.
+- `--clean none|apm|rnn|rnn-gate` (default `apm` = WebRTC's audio processing module, bundled
+  build): echo reference fed from the speaker callback. `rnn` (RNNoise) removes most noise but
+  scores worst on speech damage; the VAD gate barely closes on room noise or key clicks.
+- `voice process in.wav out.wav` runs cleaning + Opus round-trip offline;
+  `scripts/voice_eval.py` scores modes with PESQ/STOI/DNSMOS. Its reference must be studio-clean
+  speech — a laptop-mic take skews PESQ/STOI against denoisers.
+- `voice dial <ticket>` (iroh `EndpointTicket`, carries the relay URL when online); ctrl-c
+  closes the connection so the peer ends at once. `--delay <secs>` holds playback back
+  (headphones-only self-test).
+- not built: node relay (forward by `level` without decoding),
+  DeepFilterNet, courier auth on the connection. `iroh-roq` was dropped: abandoned upstream,
+  pinned to iroh 0.35.
+- next: split `voice` into a lib + thin test CLI; shell2 owns the device's one iroh endpoint
+  (courier + voice ALPNs) and exposes calls to Lua behind a mic capability; the relay lives in
+  `kunki`, as its first iroh transport.
+
+### Search (`search/`, 2026-10-03) — design: `design/search.md`
+- `search` crate: one tantivy index per item, every file a sealed vault entry under
+  `entry/search/<ws>/<item>/` (`VaultDirectory`); facets (`author:anu`), title boost,
+  `rank = "recent"`, plain-text snippets. Held unsealed in memory while open.
+- `app_host::index`: an app's `index.lua` (`doc`, `each`, `key`, `fields`, `rank`) runs in its own
+  sandboxed VM over frozen copies; changes found by per-record fingerprint, so only changed
+  records re-run `fields`, and a restart re-runs none.
+- shell2 (`indexer.rs`) indexes after every flush and catches up on open, including docs the app
+  never opened (`Vault::doc_names`); test tabs get an in-memory index. `search.query(text,
+  {limit})` in Lua, bridge `Search`, `t.type` in app tests. `demo_apps/chat` is the reference.
+- verified: `cargo test -p search`, `-p app_host index::`, `-p shell2 indexer::`,
+  `scripts/smoke_search.py` (S1–S6). `cargo test --workspace` and the other smokes not re-run.
+- not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
+  search, indexing off the UI thread.
+
+### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
+- `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a
+  `gfx.frame`) declared by the topmost element under the pointer. A press, release or look
+  change under a still pointer is a `"move"`. `system_cursor = false` hides the OS pointer
+  there. `gfx.frame` values read back `width`/`height`.
+- `demo_apps/pointer/cursor.lua`: the canonical Lua cursor (arrow, grab closing while down,
+  text, crosshair, supplied drawings), mounted on an app root; clicks fall through it.
+- Bridge `Wheel {x, y, dx, dy, ctrl}`: ctrl is the `zoomable`'s real zoom, `1.1^(dy/30)`.
+- `App::is_ambient`: offscreen, wall-clock wakes (`SyncTick`, `DocChanged`, pushes) paint but
+  don't move the virtual clock — only requests move time.
+- `scripts/osvauld/record.py`: scripted mp4/GIF at 24fps, frame-exact and deterministic
+  (`glide_to`, `click`, `drag_to`, `zoom`, `hold`); `scripts/demo_pointer_video.py` is the
+  showcase. Smoke: `smoke_demo_record.py` (S1–S5).
+- not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
+  mounting the cursor once it is a Lua app.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline
@@ -340,6 +393,20 @@ could still write into the wrong account; `join_item` retried after local edits 
 overwrite them (always starts from an empty doc); the bridge still has no per-connection
 frame-size cap or write deadline.
 
+**2026-10-03: Xnet names land** ([`design/xnet-names.md`](design/xnet-names.md)). A bare name
+typed where a ticket goes resolves on Aptos to a public invite and is redeemed like a pasted
+one. `courier::invite` gains a signed `public` flag: a public invite is reusable and revoked by
+putting its nonce in the same spent set single-use invites use; pre-flag tickets decode as
+single-use. `xnet_names/` is the Move registry (`register`/`update`/`transfer`, free `resolve`
+view), 8 Move tests, live on devnet — measured `register` 0.0064 APT, `update` 0.000085 APT.
+`shell2::names::resolve` is one `POST /v1/view`; `node::join` is now the single
+ticket/invite/name dispatch for the claim box and `ClaimNode`. Verified by `cargo test` plus an
+`--ignored` test against live devnet; the UI path and `smoke.py` were **not** run. Limits: a
+join reaches only a node on the same machine (shell2 talks to kunki over its local socket;
+nothing dials iroh), and names can only be registered with the `aptos` CLI today. Next:
+registration from Sthalam with the identity key, a username namespace, a kunki rate limit on
+public redemptions.
+
 **2026-09-11:** [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md)
 records the agreed direction and open decisions for a fresh implementation. **First slice
 landed 2026-09-11:** the new `workspace` crate validates bounded workspace-address syntax
@@ -472,7 +539,7 @@ the world places a carried entity at its carrier's part each tick (`Drawing::par
 part's posed transform), draws it just in front of the carrier, and leaves it where it was on
 detach; a flipped carrier mirrors the carried box. The demo picks the chest up with E (anywhere,
 until slice 5's sensor) and plays `carry` / `carry_walk`, chosen by a small `hero_clip()` in Lua.
-Not built: walls/physics, key-code validation, a world-level `DumpTree`, a per-view carry point,
+Not built: walls/physics, key-code validation, a world-level `DumpTree` (built in slice 5), a per-view carry point,
 skipping `view` when only a world ticked (today the runtime re-runs `view` every rendered
 frame, so Lua re-describes the world each frame while it animates), and letting a world stop
 ticking once every clip is a finished once clip (a held pose still asks for frames).
@@ -504,10 +571,64 @@ drained after each view) instead of refusing the world — asked for by the asse
 drawings change live; `attach` to a missing part stays an error. **Turning mounts:** `attach` takes
 `pivot` (the carried drawing's own point placed on `at`) and `turn = true` (it takes on the part's
 rotation, scale and mirror about that pivot) — asked for by the assets session so a hat stays on a
-nodding head; without `turn` a carried thing stays upright as before. Next: world inspection in
-`dump_tree` (positions, bodies, velocities, zones, then hints) and test pushes over the bridge, then 5d, dynamic bodies beyond the
-drop (crates to push, balls to kick), with friction and bounce as Lua fields. Soft bodies (rope,
-cape) are the assets session's own verlet solver, not Rapier joints.
+nodding head; without `turn` a carried thing stays upright as before. **The world in the dump:**
+`World2d::inspect` gives each entity's place, body kind, velocity, carrier, zones and clip; the
+shell's `DumpTree` puts it on the world's element (`world.entities`), and the world smoke now
+reads the chest from it. Its first run caught a bug pixels never showed: a chest let go near the
+south wall landed half through it, Rapier put it to sleep pressed in, and it never settled — the
+world ticked forever. **Fix:** let go, a body comes from its carrier's body to its spot and stops
+against what is in the way (`Physics::bring_in`). **5d chunk 1, loose bodies (world only):**
+`EntitySpec::loose` with a `Material` (`bounce` 0..1, `friction` as speed lost per second) makes a
+Rapier body that physics alone moves; it rests asleep, never fixed, so it can be pushed again, and
+spawned at rest it starts asleep. A bounce is now the moving thing's own (walls keep none).
+**Chunk 2, pushing:** what a walker's move bumps into that Rapier moves gets Rapier's character
+impulses, the walker counting as far heavier; a crate's friction drags, so the hero pushes it at
+about half pace. **Lua `loose`:** `loose = true` or `{ bounce, friction }`, strict. **The demo
+grew:** a 1080×600 room split by an inner wall with a doorway, two pillars, three crates and a ball;
+the world smoke pushes a crate and reads from the dump that it moved and came to rest still loose.
+**Table hockey** (`demo_apps/hockey`): two walking paddles, a loose puck, goals as zones Lua
+scores. **Collision groups:** `group` and `blocks` — the centre line stops paddles, not the puck.
+**Rapier's unit:** it was in metres, capping loose bodies at 400 units a second; now
+`length_unit = 100`, and settling measures overlap afresh. **Hockey rules (Lua):** a faceoff
+puck drops for a second with no body (a clip; `on_clip_end` makes it live), first to 5 wins.
+`smoke_hockey.py` reads it all from the dump — and caught a puck put down inside a paddle asleep
+for good: a loose body spawned in something now starts awake and is pushed out. **Commands:** a
+handler changes an entity at a moment with `world(id):set(entity, { pos, velocity })` — refused
+in `view`; hockey's puck keeps one id and is put back on the spot. **Timers:**
+`world(id):after(secs, name)` → `on_timer`, a deadline Rust holds on the world's frame clock (the
+dump lists them); a goal now shows for 1.5 s with the puck caught in the net. It shook out a
+panic: a body removed inside a sensor, then a frame with no time in it, left Rapier a stale pair.
+**Hits:** `on_hit { id, who, speed }` — a loose thing's new contact, at the speed it closed
+along the normal; hockey's puck squashes on each, harder for a harder hit, and the smoke reads
+the squash from the dump. **Strikes (2026-10-03, replaces chunk 2's pushing):** a walker no
+longer stops at loose things and shoves them with character impulses; it is moved with
+`set_next_kinematic_translation`, so Rapier knows its velocity and its contact strikes — a paddle
+at 400 sends a puck off at up to 800, not 230. It wakes a sleeping loose thing in its path (Rapier
+lets a walker through a sleeper). Cost: a walker's zone moments come a tick later, as a loose
+thing's already did. **Spin:** `loose = { grip }` unlocks a loose thing's rotation and gives its
+surface grip at contacts, so a glancing hit spins it (combined as the larger of two, so walls need
+none); `friction` damps the spin too; without `grip` it never turns. The drawing turns about the
+collider's centre (`Transform::pivot`), so `pos` holds still; a new body starts upright.
+`set { spin }` in degrees a second; the dump has `rot` and `spin`. Hockey's puck has a mark to see
+it turn, and the smoke has red strike it glancing and reads the spin. No curve from spin yet (that
+would be our own per-frame force). The Lua ↔ world contract is three kinds of call: describe
+(`view`), command (`set`, `after`), and questions. **Questions:** `world(id):ray(from, to,
+{ skip })` → nil or `{ id, at, normal, dist, tick }` (zones do not stop it), and `:at(point)` →
+the sorted ids of colliders and zones there, with `tick`; allowed in `view` as well as handlers;
+as of the last step, which the world now counts (`tick` in the dump). The answer envelope is
+agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. Next, in order:
+a fixed step (1/120 s, at most 8 catch-up steps, as 3D); the camera (`camera = { follow, ease,
+bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
+**Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
+(hockey was written with full context). A fresh agent, given only the docs, builds carrom and
+logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
+[design/lua-app-tests.md](design/lua-app-tests.md) records app-shipped Lua tests run beside, not
+inside, the app VM; slice 1 is built (`RunTests` discovers `tests/*.lua`, opens a non-persisting
+temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`,
+`t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns pass/fail results). This supersedes the narrower hints-in-dump and
+bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
+and `t.world()` snapshots. Soft bodies (rope, cape)
+are the assets session's own verlet solver, not Rapier joints.
 
 ### Assets — shared drawings, an asset editor, stages
 
@@ -560,6 +681,80 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
 
 ### Environment — composable 3D interfaces and worlds
 
+**2026-10-01 implementation, branch `3d-math`, pending user acceptance:** mathematical
+Lua-authored geometry precedes Blender import, aiming toward a procedural marble machine. The
+[math-first plan](design/3d-math.md) separates geometry/materials/inspection from retained physics.
+- Adopted the committed `3d-mesh-data` validator (`c1d4eb7`), not its uncommitted follow-up:
+  finite bounded positions/normals, triangle indices/counts, nondegenerate triangles and bounds.
+- Immutable shared native meshes and strict Lua `gfx.mesh({vertices, indices})`; vertex records
+  contain position/normal, indices are dense 1-based triangles. Generated resources are capped
+  at 128 and 32 MiB per VM, including payloads still retained by native scenes. Cube remains a
+  shorthand; no specific demo geometry is embedded in Rust.
+- Scene objects reference actual meshes. Unique mesh payload is limited to 16 MiB per scene,
+  with 131,072 triangles counted across instances. GPU resources are cached by native identity;
+  adjacent shared instances batch without reordering. Absent resources leave the next rendered
+  snapshot; rendering a non-3D frame clears the cache. No mutable native handle registry ships.
+- Picking uses actual triangles with back-face culling and camera near/far clipping. Partial
+  viewport clipping now preserves full camera projection and screen rays using a crop matrix.
+  Lighting uses inverse-transpose normal direction for positive nonuniform scales.
+- `DumpTree` adds process-local mesh identity, local bounds, counts and payload bytes; it does
+  not yet expose recipes, world bounds, raw buffer reads or general spatial query RPCs.
+- `demo_apps/mesh_math` calculates a sinusoidal heightfield and analytic normals in Lua, shares
+  it between two objects, regenerates/rotates geometry and supports orbit/zoom/triangle picking.
+  Registered `smoke_mesh_math.py` proves raw inspection, shared identity, real pointer picking,
+  regeneration, revision-checked source editing and live/custom captures with a clean console
+  (`shots/mesh-math.png`, `shots/mesh-math-custom.png`).
+Higher-level curves/tubes/revolve, spatial gradients, Blender import and Lua 3D physics remain unbuilt.
+One viewport, cube-only text surfaces and incorrect foreground Vello composition remain limits.
+
+**2026-10-01 Marble Gates groundwork, pending user acceptance:** integrated the committed
+`world-engine` foundation through `e23660b`, preserving mesh work and registering both sets of
+smokes. Its 2D commands, timers, sensors and contact events are reused infrastructure, not a
+new 3D API. Added a private native Rapier3D backend in `world/src/physics3d.rs`: metre-scale
+sphere/full-size-box colliders, Y-up gravity, fixed 1/120-second solver steps, observational
+pose/velocity/sleep inspection, reset clearing motion/forces, and body removal. Native regression
+tests target fall/bounce/settle/sleep, reset, determinism, validation and contact teardown.
+**Retained-body/clock slices added:** `world::world3d::World3d` keeps at most 256 bodies by
+stable author ID, with ECS/Rapier handles private. Reconciliation validates the whole batch
+before mutation and preserves live pose; authored positions update reset targets. Collider/body
+type changes reject until that ID is removed. Native time planning uses 120 Hz steps, eight-step
+catch-up maximum with dropped-time reporting, pause/resume without hidden-time catch-up, and
+quiet-world suspension. Inspection sorts IDs and separates authored recipes from resolved poses.
+`resolved_scene` applies simulated poses by matching object IDs without stepping, changing the
+authored scene or duplicating mesh resources; camera/scale/appearance remain presentation data.
+**Runner hook added:** `App::advance_simulation(elapsed)` runs before normal-frame `view`,
+skips live/custom captures, and can request the next redraw. Targeted runtime tests verify
+ordering and capture exclusion; an explicitly run GPU test verifies real live/custom readback.
+A real `World3d` through `Headless` proves native gravity/settling, pre-view resolved poses,
+reset through ordinary pointer input, and pause/resume without hidden-time catch-up. Those
+initial proofs were Rust fixtures; the later Lua binding and visible proof below extend them.
+**Reload preflight groundwork added:** `World3d::validate_reconcile` is observational;
+app-local `Worlds3d` validates all world recipes before updating reset targets, reconciling
+bodies or dropping omitted worlds. At most eight worlds, each with a nonempty ID of at most
+128 bytes. Tests cover failed-batch nonmutation, accepted-batch pose/clock retention, removal,
+invalid new recipes, budgets and isolation between app-local collections.
+**Lua drop/reset proof added:** module-scope `gfx.world3d({id,scene,bodies})`, `game:scene(camera)`
+and input-handler `game:reset(id)` now connect app-local worlds to Runner through the shell.
+Recipes commit only after accepted staged loads/trial-view calls. View omission and inactive tabs
+pause; source omission and app teardown release worlds. Frame/hover handlers cannot reset them.
+`DumpTree.worlds3d` exposes authored/resolved bodies, velocities, sleeping, tick and dropped time.
+`demo_apps/marble_gates` has a Lua-generated sphere, platform, orbit/zoom, Reset and hide/resume;
+its registered smoke proves fall/settle/reset, pause, reload rejection and live/custom capture
+nonmutation. Falling and settled screenshots were inspected. Rotated ramps, 3D sensors and goal
+rules remain unbuilt. Ordinary offscreen RPCs now repaint without advancing the virtual clock;
+frame/advance and pointer drivers move time explicitly. A 2D regression fix preserves controller
+velocity through zero-time observations, so contact events retain their closing speed; hockey's
+approach smoke now drives its previously implicit inspection-time frames explicitly.
+The [math-first plan](design/3d-math.md) moves this game ahead of curves and spatial gradients.
+Earlier validation: 76 targeted `world` tests passed;
+`cargo check -p app_host -p shell2` passes with existing warnings; all eight registered smokes
+pass after integrating the 2D and mesh foundations and again after the Runner hook.
+Latest validation: `cargo check --workspace` passes with existing warnings; 84 `world` tests
+and 197 `app_host` tests pass (two host tests ignored), including kanban round-trip. Targeted
+runtime simulation tests and the explicitly run real-pixel capture test pass. All nine registered
+smokes pass with the Lua marble proof and zero-time 2D regression fix. The full workspace test
+suite was not rerun.
+
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,
 ECS, 3D mesh/depth renderer, physics binding, PBD cloth, projected UI surface or world picking is
@@ -608,8 +803,8 @@ Roughly in dependency order:
      (`Ping`/`ListAccounts`/`Signup`/`Unlock`/`Lock`, an addition to this list: headless
      login is the automation story's first step), workspaces/items (incl. `CreateWorkspace`
      and `OpenItem`), files (`WriteFile` reloads an open tab; `ReloadItem` forces the staged
-     reload), senses (`DumpTree`/`Click`/`ReadConsole`), and `AppDataGet` (the write half of
-     the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
+     reload), senses (`DumpTree`/`Click`/`ReadConsole`), app-shipped test runner (`RunTests`),
+     and `AppDataGet` (the write half of the old `AppData*` family was removed 2026-09-10 — see the senses bullet) by `item_id`
      alone (ids are 128-bit random). The sthalam families are deleted. Not
      ported from the old repo's control server, on purpose: `eval`, coordinate `ui_mouse_*`,
      p2p, recording. Socket must be created `0600` — passphrases cross it.
@@ -627,10 +822,18 @@ Roughly in dependency order:
      screen), then `Msg::AuthDone` commits the account, replies, and lands the screen
      transition on the UI thread; a script-side signup returns the mnemonic and skips the
      mnemonic screen (the script is its reader), workspaces/items (`CreateWorkspace`,
-     `ListItems`, `CreateItem`, `OpenItem`), and app source files (`ListFiles`, `ReadFile`,
-     `WriteFile`, `ReloadItem`). Everything else answers an honest `not wired yet`. Python harness:
+     `ListItems`, `CreateItem`, `OpenItem`), app source files (`ListFiles`, `ReadFile`,
+     `WriteFile`, `ReloadItem`), and the first `RunTests` slice. Everything else answers an honest `not wired yet`. Python harness:
      `scripts/osvauld/` (`client.py` framing + `session.py` spawn/wait/teardown) and
      `scripts/smoke_bridge.py` — the end-to-end proof over a fresh, locked vault.
+   - **landed 2026-10-01, app-shipped test runner slice 1**: `RunTests { item_id, filter }`
+     discovers `tests/*.lua` in the app source doc, opens a non-persisting temporary app tab with
+     empty docs and a `test:<item>:<run>` retained-id namespace, runs each file in a separate
+     source-only test VM with `t.expect`, Runner-driven `t.step`/`t.click_at`, `t.rects`/`t.centre_of`, `t.text`, and `t.world`, and returns `{name, ok, frames, failure}` results. `tally`,
+     `scratch` and `pomodoro` now ship basic `tests/*.lua`, pinned by `scripts/smoke_lua_app_tests.py`.
+     Test VMs run on a worker and step/click through deferred Runner driver ops; the batch remains
+     bounded (32 files / 256 KiB plus the Luau interrupt budget). Pinned by `scripts/smoke_bridge.py`
+     over the real socket. See [Lua app tests](design/lua-app-tests.md).
    - **landed 2026-09-10, senses & actions on running apps**: `DumpTree` (the pre-layout
      `ElInfo` tree as JSON — kinds, ids, text, handler flags; overlays included), and the
      verbs `Click`/`Type`/`Key` (`enter`/`esc`): each resolves the element by id on a fresh

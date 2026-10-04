@@ -128,6 +128,7 @@ pub fn invite(
         token,
         role: role.to_string(),
         scope,
+        public: false,
     };
     unpack(call(socket, &Request::Invite(request))?)
 }
@@ -152,6 +153,29 @@ pub fn claim_invite(
         node_encryption_key: ticket.node_encryption_key,
         token: welcome.token,
     })
+}
+
+/// What one text box accepts: a `ConnectionTicket` (`osv1.`) claims an unowned node, an
+/// `InviteTicket` (`osvi1.`) joins one, and anything else shaped like a name is looked up
+/// on-chain for the public invite it points at. The prefixes tell them apart on sight.
+pub fn join(
+    socket: &Path,
+    vault: &Vault,
+    text: &str,
+    now: u64,
+) -> Result<DesktopNodeRecord, String> {
+    if let Ok(ticket) = ConnectionTicket::from_text(text) {
+        return claim(socket, vault, &ticket, now);
+    }
+    let invite = match InviteTicket::from_text(text) {
+        Ok(ticket) => ticket,
+        Err(_) if crate::names::is_name(text) => {
+            InviteTicket::from_text(&crate::names::resolve(text)?)
+                .map_err(|_| format!("'{text}' does not point at an invite"))?
+        }
+        Err(_) => return Err("not a node ticket, invite or name".to_string()),
+    };
+    claim_invite(socket, vault, invite, now)
 }
 
 /// The socket round trip only — `hello` is built against a live `LoroDoc` before this call

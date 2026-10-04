@@ -111,6 +111,7 @@ local function button(id, label, on_click, filled)
 		on_click = on_click,
 		ui.text({
 			label,
+			id = id .. ":label",
 			no_wrap = true,
 			color = filled and "#ffffff" or C.text,
 			font_size = 13,
@@ -141,6 +142,7 @@ return function()
 		}),
 		ui.text({
 			clock_face(remaining()),
+			id = "timer",
 			no_wrap = true,
 			color = C.text,
 			font_size = 76,
@@ -155,6 +157,7 @@ return function()
 		}),
 		ui.text({
 			done == 1 and "1 session done" or (done .. " sessions done"),
+			id = "sessions",
 			no_wrap = true,
 			color = C.muted,
 			font_size = 12,

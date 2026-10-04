@@ -90,7 +90,7 @@ implicit clip or scale.
 | `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
 | `gfx.radial_gradient({…})` | `center` · `radius` · (`focus` · `focus_radius`) · `stops` · `extend` | colour spreads from the focus circle (a point at the centre by default) out to `radius`; an off-centre `focus` moves the light |
 | `gfx.sweep_gradient({…})` | `center` · (`from_angle` · `to_angle`) · `stops` · `extend` | colour turns around `center`; angles in degrees from +x towards +y, a full turn (0–360) by default |
-| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required |
+| `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required; the result reads them back (`f.width`, `f.height`) |
 | `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
 | `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
@@ -202,7 +202,7 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider` and `sensor` — nothing else.
+  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else.
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -235,14 +235,33 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+- The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
+  one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
+  per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
+  `length`, `looped`). Check a world by reading it, not by probing pixels.
 - A carried entity is off the floor: its collider and sensor go while `attach` is set. Let go,
   it keeps its carrier's momentum, slides, bounces off walls and settles where it stops — never
-  inside a wall. Top-down, height is a pose, not a place: attach the thing where it would stand
+  inside a wall: carried, nothing stopped its footprint going into one, so let go it comes from
+  its carrier's body to its spot and stops against whatever is in the way. Top-down, height is a pose, not a place: attach the thing where it would stand
   on the floor and let a clip lift its drawing into the hands; let go, a `fall` clip drops the
   drawing back to a footprint that never left the floor (the demo's `lift` / `fall`).
 - `sensor = { circle = 72, at = { 48, 68 } }` is a zone in the same shape words: it blocks
   nothing, and `on_zone` reports what comes into it and leaves it. An entity may have a
   `collider`, a `sensor`, both, or neither.
+- `loose = true` (or `loose = { bounce = 0.9, friction = 0.5 }`) hands an entity to physics: a
+  walker pushes it, it bounces off what it hits and the floor slows it. `bounce` is the share of
+  speed kept off a wall, 0 to 1 (default 0.5); `friction` is speed lost per second, 0 or more
+  (default 6, a heavy crate; a ball wants under 1). It needs a `collider`, and cannot have a
+  `controller`. At rest it sleeps, still loose, and the next push wakes it.
+- `grip` (0 or more; `loose = { grip = 0.3 }`) lets a loose thing turn: its surface catches at a
+  contact, so a glancing hit sets it spinning, and the spin changes how it bounces off. A head-on
+  hit gives no spin. `friction` slows the spin as it slows the slide. Without `grip` it never
+  turns — the drawing stays upright. It turns about its collider's centre, so its `pos` holds
+  still while it spins in place; the dump shows `rot` (degrees) and `spin` (degrees a second).
+- `group = "paddle"` puts an entity's collider in a named group; `blocks = { "paddle" }` makes a
+  collider stop only those groups. Without either, a collider is in the common group and stops
+  everything. A hockey centre line is `blocks = { "paddle" }`: the paddles stop at it, the puck
+  crosses. Both need a `collider`; a world has at most 31 group names.
 
 ### Clips
 
@@ -301,7 +320,7 @@ local wasd = {
   leaves keys alone.
 - There are no walls yet: nothing stops an entity leaving the world's box.
 
-### Moments — `on_action`, `on_move`, `on_clip_end` and `on_zone`
+### Moments — `on_action`, `on_move`, `on_clip_end`, `on_zone`, `on_timer` and `on_hit`
 
 The world does the per-frame work; the moments come to Lua to decide on. A handler runs a few times
 a second at most, never once a frame.
@@ -326,9 +345,72 @@ on_move = function(e) print(e.id, e.dx, e.dy) end,   -- -1/0/1 each; 0, 0 is sto
   despawned `who` leaves quietly. (`on_enter` is the Enter key on an input, so the world's is
   `on_zone`, phased like `on_hover`.) The demo's reach to the chest is one flag:
   `near = e.phase == "enter"`, and E picks up only when `near`.
+- `on_hit(e)` gets `e.id`, `e.who` and `e.speed` when a loose (or thrown) thing comes into
+  contact with something solid: `e.id` is the moving one, `e.who` what it met, and `e.speed` how
+  fast they closed along the contact, in units a second — a tap is slow, a slap fast. Once per
+  meeting: resting against a wall afterwards is not more hits, and under 1 unit a second is
+  settling, not a hit. Two loose things meeting each get one. A walker meeting a wall is not a
+  hit — a walker stops itself — only what Rapier moves hits.
 - A jump is all three together, with no jump in Rust: `on_action` sets `jumping`, the hero
   describes `clip = jumping and jump or …` (a once clip lifting `body`, which the other parts hang
   off — the feet stay put, so draw order ignores it), and `on_clip_end` clears `jumping`.
+
+### Commands — `world(id):set`
+
+A description never moves an entity that already exists: its `pos` is where it spawns. To change
+one at a moment — a puck back on the spot, a striker launched — a handler commands the world:
+
+```lua
+world("rink"):set("puck", { pos = { 434, 234 } })             -- put it there
+world("rink"):set("puck", { velocity = { 600, 0 } })          -- send it off; { 0, 0 } stops it
+world("rink"):set("puck", { spin = 0 })                       -- stop it turning
+```
+
+- `pos` is the drawing box's top-left, as in the description; `velocity` is per second, and only
+  a `loose` thing has one to set; `spin` is degrees a second, and only a loose thing with `grip`
+  has one. Any may be left out; any other field is an error.
+- It applies at once — the dump shows it before the next frame. Something put inside a solid is
+  pushed out, as when it spawns there.
+- Only in handlers: `set` inside `view` is an error, since a description only describes. A
+  carried entity goes where its carrier puts it, so it cannot be set.
+- The names are the dump's: what `set` writes is what an agent reads back.
+
+A moment later is a timer, kept by Rust on the world's frame clock — Lua runs once, when it fires:
+
+```lua
+world("rink"):after(1.5, "faceoff")      -- on_timer gets e.name == "faceoff" then
+world("rink"):cancel("faceoff")          -- never mind
+on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   -- on ui.world
+```
+
+- It counts from the world's next frame, since a handler has no clock of its own. The same name
+  again starts it over — a cooldown is `after` on every press.
+- A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
+  lists them as `timers = { { name, left } }` beside `entities`.
+
+### Questions — `world(id):ray` and `:at`
+
+Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
+is in front of the player when they press E, what did the click land on:
+
+```lua
+local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
+-- nil, or { id = "wall", at = { x, y }, normal = { nx, ny }, dist = 280, tick = 1042 }
+if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
+
+local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+```
+
+- `ray` answers the first solid thing on the line from one point to the other: `at` where the line
+  met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop
+  it. A line starting inside something meets it at once — `skip` leaves out one entity, a
+  looker's own body. Only `skip` may be given; `from` and `to` must differ.
+- `at` answers the ids of everything whose collider or zone covers the point, sorted, each once.
+- Answers are plain tables of ids and numbers: look your own data up by id, as handlers do.
+- Both are as of the last frame — the world's `tick`, also in the dump. A `set` or a spawn shows
+  in answers from the next frame on.
+- Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
+  five hundred things take a few milliseconds; a ray per guard per frame is fine.
 
 ### Facing and gait — decided in Lua
 
@@ -360,18 +442,73 @@ opens on click or on E, through `on_action`.
 ## 3D scenes (experimental proof)
 
 `gfx.scene3d` compiles a bounded immutable scene containing a perspective camera and up to 256
-built-in cubes. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the
-viewport size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`,
-`fov_y` in degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh = "cube"`,
-`position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and CSS `color`.
+objects. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the viewport
+size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`, `fov_y` in
+degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh` (a `gfx.mesh` handle,
+or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and
+CSS `color`. Coordinates are right-handed with Y up.
+
+`gfx.mesh({ vertices = {...}, indices = {...} })` constructs an immutable shared triangle mesh.
+Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz} }`; indices are a dense **1-based**
+list, three per triangle. Counterclockwise winding is front-facing; back faces are neither
+rendered nor picked. Positions/normals must be finite and bounded; normals cannot be zero,
+and triangles cannot be degenerate. Unknown fields, sparse arrays and fractional indices fail.
+At most 65,536 vertices and 65,536 triangles per mesh; a VM may hold at most 128 generated
+resources and 32 MiB of live mesh payload, including resources still retained by scene handles.
+Scene limits are 16 MiB of unique mesh payload and 131,072 triangles counted across instances.
+Create meshes outside `view`; reuse handles across objects and views. Edits create a new handle.
+`DumpTree` reports mesh resource identity (process-local, not persistent), local bounds, counts
+and payload bytes. No raw vertex dump or general curve/sweep/material constructor ships yet.
+
+An optional `surface = gfx.text_surface({ text = "label", font_size = 32,
+color = "#ffffff", background = "#171923" })` is supported only on the built-in cube resource;
+it is not a general mesh text/UV mapping facility.
 
 This is a rendering proof, not the public Environment API. It currently supports one visible 3D
 viewport, 4× MSAA, simple directional lighting and app-driven rebuilds. The model-viewer demo uses
 `on_drag` for orbit and `on_wheel` for zoom. An `on_click` on the scene leaf ray-picks the
-nearest visible cube and reports its stable ID, world hit point, normal and distance. GLB assets,
+nearest rendered triangle and reports its stable ID, world hit point, normal and distance.
+Camera near/far clipping and back-face culling apply to picking. GLB assets,
 hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
 the validated camera,
-objects, transforms and colors so an agent can inspect the same scene declaration that renders.
+objects, transforms, colors and mesh summaries so an agent can inspect the same scene declaration
+that renders.
+
+### Retained 3D physics (experimental)
+
+Create `gfx.world3d({ id, scene, bodies })` at module scope. `scene` is a compiled
+`gfx.scene3d`; `bodies` is a dense list of `{ id, position = {x,y,z}, sphere = radius }`
+or `{ id, position = {x,y,z}, box = {width,height,depth} }`, optionally `dynamic = true`
+(default fixed). Exactly one shape is required; unknown fields are errors. Dimensions and
+positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
+At most eight worlds per app and 256 bodies per world; IDs are nonempty and at most 128 bytes.
+
+`ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
+visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
+are independent: scale does not resize a collider. Initial body orientation is identity;
+bound visuals must have identity authored rotation. Invisible bodies and unbound decoration
+are allowed. `demo_apps/marble_gates` generates its sphere in Lua and demonstrates the first
+native drop, bounce, sleep and reset.
+
+The native solver runs at 120 Hz before normal-frame view construction, with at most eight
+catch-up steps. No Lua runs per physics tick. `game:reset("marble")` restores the latest
+authored position and clears motion/forces, waking the body. Reset is allowed only in input
+handlers, never module initialization, `view`, `on_frame`, hover or animation-completion
+handlers. Scene handles resolve current poses when walked; they do not step the world.
+
+A world survives successful reload; existing IDs keep their simulated poses and new authored
+positions become reset targets. Collider/type changes on retained IDs reject: remove the body
+in one accepted source revision before recreating it. All staged recipes validate before any
+live world changes; failed load or trial-view calls leave native state untouched. Worlds omitted
+from an accepted source are dropped. Omitting a viewport pauses its world on the next simulation
+hook without deleting it; inactive tabs pause too, with no hidden-time catch-up on resume. Closing
+the app drops its worlds. Both screenshot paths skip native simulation; legacy `on_frame`
+callbacks retain their existing behavior, but cannot reset native bodies.
+
+`DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `tick`,
+`dropped_seconds` and ID-sorted `entities`. Each entity separates `authored` (shape, position,
+dynamic) from `resolved` (position, quaternion rotation, linear/angular velocity and sleeping).
+3D sensors, adjustable rotated ramps, goal rules and spatial-query RPCs remain unbuilt.
 
 ## Layout
 
@@ -450,7 +587,7 @@ Nine, and no others. Anything else is `unknown tag`.
 | `ui.input({…})` | none | `value` · `id` · `on_input` | extras: `on_enter` · `on_esc` · `autofocus` |
 | `ui.text_area({…})` | none | `value` · `id` · `on_input` | same, multi-line |
 | `ui.frame({ visual = v, … })` | none | `visual` (a `gfx.frame`) | the frame's `width`/`height` are its layout claim |
-| `ui.scene3d({ scene = s, … })` | none | `scene` (a `gfx.scene3d`) | experimental; viewport size comes from layout |
+| `ui.scene3d({ scene = s, … })` | none | `scene` (a `gfx.scene3d` or `game:scene()` handle) | experimental; viewport size comes from layout |
 | `ui.overlay({ anchor, panel, … })` | **exactly two** | — | takes *only* `id` · `side` · `align` · `on_dismiss` — no box or paint props; style the panel child instead |
 
 `ui.state(id, init)` is not an element — it is per-viewer scratch, see [State](#state).
@@ -492,6 +629,8 @@ before `fade`.
 | animation | `fade_in` | ms |
 | | `fade` | `{target_opacity, ms}` |
 | | `slide_in` | `{{dx, dy}, ms}` — a **nested** pair, then the duration |
+| pointer | `system_cursor` | bool — `false` hides the system pointer while over this element, for an app that draws its own (`demo_apps/pointer/cursor.lua`) |
+| | `cursor` | a look name (`"grab"`, `"text"`, any string your cursor knows) or a `gfx.frame` to draw — hover handlers get the topmost declared one as `e.look` |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
 | | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
 | | `on_zoom` | `function(e)` — `e.scale` is the camera's zoom, told on the first frame and on each change. Divide by it to keep a mark (a selection outline, a handle) its size on screen. Only beside `zoomable`/`zoom_x`. |
@@ -533,11 +672,15 @@ end
 - `on_click(e)` — `e.x, e.y` are where the click landed, from the element's top-left corner in
   its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
   whatever the camera is doing. Fired from the bridge, with no layout, they are `0, 0`. Inside a
-  `zoomable`, a press that travels past 5pt pans instead. On a `ui.scene3d`, a visible cube hit also
+  `zoomable`, a press that travels past 5pt pans instead. On a `ui.scene3d`, a visible mesh hit also
   supplies `e.object`, `e.distance`, `e.world_x/y/z` and `e.normal_x/y/z`; these fields are absent
   when the ray hits no object.
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
-  the element on `"leave"`). An element is hovered while the pointer is inside it, like
+  the element on `"leave"`), `e.down` true while the primary button is held — a press or release
+  under a still pointer fires a `"move"`, so a cursor the app draws can show it. `e.look` is the
+  `cursor` declared by the topmost element under the pointer that declares one — a name or the
+  `gfx.frame` it supplied — or `nil`; a change of look is a `"move"` too. Declare looks on the
+  things being pointed at and draw the cursor once at the root: neither has to know the other. An element is hovered while the pointer is inside it, like
   `hover_fill`: a parent stays hovered over its children, and an element painted on top doesn't
   hide the one below — check your own geometry if that matters. It is sampled every frame as well
   as on every pointer move, so geometry that drifts under a still pointer reports it: an element
@@ -664,6 +807,57 @@ An asset that does not exist yet opens empty, and your first write creates it.
 apps seeing each other's edits live — today each app holds its own copy, and the last to save
 wins. Slices 2c and 3 of the design close these.*
 
+## Search
+
+Ship an `index.lua` beside `main.lua` and your documents become searchable. It says what a
+searchable **record** is; the shell does the rest — indexes on every save, keeps the index sealed
+in the vault, and catches up on open (including docs written while the app was closed).
+`demo_apps/chat` is the reference.
+
+```lua
+-- index.lua
+return {
+	doc = "channel:*",                       -- a doc name, or a `prefix*` family of docs
+	each = { "messages" },                   -- path to the collection: one record per entry
+	key = function(m) return m.id end,       -- lists only: the stable id, read from the record
+	fields = function(id, m, doc)            -- doc = the whole doc, for joins
+		return {
+			title = m.subject,               -- optional; ranks above body
+			body = m.text,
+			facet = { author = m.author },   -- exact filters: `author:anu`
+			time = m.sent_at,                -- optional; sortable
+		}                                    -- return nil to leave the record out
+	end,
+	rank = "recent",                         -- "relevance" (default) or "recent"
+}
+```
+
+```lua
+-- main.lua, anywhere — even in view
+local hits = search.query("author:anu deploy", { limit = 20 })
+for _, h in ipairs(hits) do
+	print(h.doc, h.id, h.score, h.snippet)   -- open the record by (h.doc, h.id)
+end
+```
+
+The rules:
+
+- **`index.lua` runs in its own VM.** No `ui`, no `doc`, no `gfx`, no `require`; records and
+  `doc` are frozen copies — a write is an error. A broken `index.lua` is reported in the console
+  and the app keeps running on the last good index.
+- **Strict, like the rest.** An unknown key in the spec, in what `fields` returns, or in
+  `search.query`'s options is an error naming it. A list collection without `key` is an error:
+  a position is not an id.
+- **Only what changed is re-indexed.** Each record is fingerprinted; `fields` runs again only for
+  a record whose value changed. A change *outside* `each` re-runs every record of that doc (it
+  may feed a join), and so does editing `index.lua`.
+- **Index ids for anything that changes; resolve names when you display.** Index the author's
+  id, not their display name, and a rename re-indexes nothing.
+- **Queries**: words match title and body (all must match); `name:value` words are exact facet
+  filters. `search.query` is cheap to call in `view` — the same query against an unchanged
+  index is answered from memo. Hits are your own app's records only.
+- Snippets are plain text around the match, no markup — draw them however you like.
+
 ## Animation
 
 Presentation animation is declarative:
@@ -773,8 +967,8 @@ The kanban split, worth copying at any size:
 ## The sandbox, and what happens when you err
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
-only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `now()` (unix
-seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
+only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
+(unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
 
 `now()` is for recording *when* something happened — a created-at, a last-edited. It is not for
 measuring how long something took: it follows the system clock, so it can jump, including
@@ -796,6 +990,17 @@ The fastest agent authoring loop is: upload once, then use the Python bridge cli
 rendered tree and console after activation, then repair against the new revision if needed.
 `WriteFile` is for initial upload, file creation or an explicit wholesale replacement—not the
 normal edit loop. Keep files small enough that a reported line number means one obvious thing.
+
+## App-shipped tests
+
+An app may include `tests/*.lua` beside `main.lua`. The first built slice runs those files over the
+bridge in a separate sandboxed test VM with `t.expect(cond, message)`, `t.step(frames)`,
+`t.world()`, `t.rects()`, `t.centre_of(id)`, `t.click_at(x, y)`, `t.text(id)` and
+`t.type(id, text)` (sets an input's text, as typing would), after opening a temporary
+non-persisting app tab with empty docs. That tab gets its own in-memory search index, so an app
+can test its search (`demo_apps/chat/tests/search.lua`). The planned behavioural runner will add
+keyboard helpers while still keeping tests outside the app VM; see
+`docs/design/lua-app-tests.md`.
 
 ## Checking it without a window
 
@@ -852,8 +1057,9 @@ the id form to drive an app, the coordinate form to test that it is *touchable*.
 Offscreen the clock is **virtual and driven**: nothing moves until a request asks. A frame is
 1/60s and a pointer event lands 8ms after the frame it is tested against, whatever the machine
 actually took — so `frame(250)` is a little over four seconds of app time, on every machine, every
-run. `advance(secs)` jumps instead, then paints once so the app notices: a 25-minute timer
-finishing is one request, not 90,000 frames.
+run. Ordinary bridge requests, inspection and screenshots repaint without spending virtual time;
+only frame/advance and pointer drivers move the clock. `advance(secs)` jumps instead, then paints
+once so the app notices: a 25-minute timer finishing is one request, not 90,000 frames.
 
 Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
 a drag and fires **no** click, and a press that travels less is a click reported at the point it

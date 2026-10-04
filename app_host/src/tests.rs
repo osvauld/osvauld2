@@ -3,11 +3,13 @@ use mlua::{FromLua, Table};
 use runtime::HoverPhase;
 use std::rc::Rc;
 
+mod index;
 mod reload;
 mod require;
 mod round_trip;
 mod scratch;
 mod source_edit;
+mod world3d;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
@@ -147,6 +149,50 @@ fn lua_builds_a_nested_gradient_frame_element() {
     assert_eq!(info.id.as_deref(), Some("picture"));
 }
 
+/// `system_cursor` is a bool where only `false` does anything — an app drawing its own pointer
+/// hides the system one. Anything that isn't a bool is a type error, like every other prop.
+#[test]
+fn system_cursor_takes_a_bool() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let walk_src = |src: &str| {
+        let node: Table = lua.load(src).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut ctx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut ctx).map(|_| ())
+    };
+    assert!(walk_src("return ui.col({ system_cursor = false })").is_ok());
+    assert!(walk_src("return ui.col({ system_cursor = true })").is_ok());
+    let err = walk_src(r#"return ui.col({ system_cursor = "none" })"#).unwrap_err();
+    assert!(err.to_string().contains("bool"), "{err}");
+}
+
+/// `cursor` names a look or hands over a drawing; anything else is a type error.
+#[test]
+fn cursor_takes_a_name_or_a_gfx_frame() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let walk_src = |src: &str| {
+        let node: Table = lua.load(src).eval().unwrap();
+        let mut handlers = Handlers::new();
+        let mut ctx = Ctx::new(&mut handlers, identity());
+        walk(node, &mut ctx).map(|_| ())
+    };
+    assert!(walk_src(r#"return ui.col({ cursor = "grab" })"#).is_ok());
+    assert!(walk_src("return ui.col({ cursor = gfx.frame({ width = 8, height = 8 }) })").is_ok());
+    let err = walk_src("return ui.col({ cursor = 3 })").unwrap_err();
+    assert!(err.to_string().contains("gfx frame"), "{err}");
+}
+
+/// A frame reports its size, so Lua can place a drawing by its centre (a cursor look's hotspot).
+#[test]
+fn a_gfx_frame_reads_back_its_size() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let (w, h): (f64, f64) = lua
+        .load("local f = gfx.frame({ width = 24, height = 16 }) return f.width, f.height")
+        .eval()
+        .unwrap();
+    assert_eq!((w, h), (24.0, 16.0));
+}
+
 #[test]
 fn lua_builds_a_bounded_3d_scene_leaf() {
     let (lua, _) = sandboxed_vm().unwrap();
@@ -233,7 +279,7 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
                 id = "plot",
                 visual = gfx.frame({ width = 10, height = 10 }),
                 on_hover = function(e)
-                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy }
+                    seen = { e.phase, e.x, e.y, e.shape, e.sx, e.sy, e.down, e.look }
                 end,
             })
         end"#,
@@ -243,7 +289,7 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
     let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
     let seen = |app: &LuaApp<LuaMsg>| {
         let t: Table = app.vm.globals().get("seen").unwrap();
-        (1..=6)
+        (1..=8)
             .map(|i| match t.get::<Value>(i).unwrap() {
                 Value::Nil => "nil".to_string(),
                 v => v.to_string().unwrap(),
@@ -254,17 +300,19 @@ fn a_pointer_handler_is_told_which_shape_it_is_on() {
     let key = Key::new("plot", "on_hover");
     let _ = app.view(); // handlers are registered by the walk, not by the source
 
-    app.update(LuaMsg::CallPhase(
+    app.update(LuaMsg::CallHover(
         key.clone(),
         "move",
         40.0,
         12.0,
         Shape(Some(("slice:2".into(), 3.5, 1.0))),
+        false,
+        Some(runtime::CursorLook::Named("grab".into())),
     ));
-    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1");
+    assert_eq!(seen(&app), "move 40 12 slice:2 3.5 1 false grab");
 
-    app.update(LuaMsg::CallPhase(key, "move", 40.0, 12.0, Shape::default()));
-    assert_eq!(seen(&app), "move 40 12 nil nil nil");
+    app.update(LuaMsg::CallHover(key, "move", 40.0, 12.0, Shape::default(), true, None));
+    assert_eq!(seen(&app), "move 40 12 nil nil nil true nil");
 }
 
 /// A drag's shape rides at the very end, after the seven arguments it already had.
@@ -1000,6 +1048,53 @@ fn an_attach_is_checked_strictly() {
     ];
     for (attach, wanted) in cases {
         let err = walk_world(&lua, &worlds, &room(attach)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn a_loose_thing_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |loose: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {loose} }} }})")
+    };
+    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }"] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("1", "world entity 1.loose must be true or a table, got integer"),
+        ("{ bounce = 'high' }", "loose.bounce must be a number, got string"),
+        ("{ bouncy = 1 }", "loose: unknown field bouncy"),
+        ("{ bounce = 2 }", "bounce must be from 0 to 1, got 2"),
+        ("{ friction = -1 }", "friction must be 0 or more, got -1"),
+    ];
+    for (loose, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(loose)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn groups_are_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |fields: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'line', pos = {{ 0, 0 }}, drawing = hero, collider = {{ rect = {{ 2, 2 }} }}, {fields} }} }})")
+    };
+    for fine in ["group = 'paddle'", "blocks = { 'paddle' }", "group = 'a', blocks = { 'b', 'c' }"] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("group = 3", "world entity 1.group must be a group name (a string), got integer"),
+        ("blocks = 'paddle'", "world entity 1.blocks must be a table, got string"),
+        ("blocks = { 'a', true }", "world entity 1.blocks[2] must be a group name"),
+        ("blocks = {}", "blocks is empty"),
+    ];
+    for (fields, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(fields)).unwrap_err().to_string();
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
 }
@@ -5288,4 +5383,213 @@ fn asset_editor_stage_plays_with_the_hat_on() {
     assert!(app.error.is_none(), "{:?}", app.error);
     let console = app.console(100);
     assert!(console.is_empty(), "{console:?}");
+}
+
+#[test]
+fn a_handler_sets_an_entity_through_world_and_is_checked_strictly() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(fields, id) \
+           local ok, e = pcall(function() world('room'):set(id or 'hero', fields) end) \
+           if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               try({{ pos = {{ 30, 5 }} }}) \
+               try({{ velocity = {{ 1, 0 }} }}) \
+               try({{ speed = 1 }}) \
+               try({{ spin = 90 }}) \
+               try({{ spin = 'fast' }}) \
+               try({{ pos = {{ 1 }} }}) \
+               try({{ pos = {{ 0, 0 }} }}, 'ghost') end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    assert_eq!(app.inspect_worlds()["room"].entities[0].pos, (30.0, 5.0));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "velocity needs a loose thing",
+        "spin needs a loose thing with grip",
+        "world \"room\":set \"hero\".spin must be a number, got string",
+        "world \"room\":set \"hero\": unknown field speed",
+        "world \"room\":set \"hero\".pos needs x and y",
+        "entity \"ghost\": there is no such entity",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}
+
+#[test]
+fn world_set_is_refused_while_view_describes() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = "return function() world('room'):set('hero', { pos = { 1, 1 } }) \
+        return ui.text({ 'x' }) end";
+    main.insert(0, view).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let console = app.console(10).join("\n");
+    assert!(console.contains("only in a handler; view describes"), "{console}");
+}
+
+#[test]
+fn a_handler_sets_a_timer_and_on_timer_hears_it() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               local room = world('room') \
+               room:after(0.5, 'ping') \
+               room:after(0.2, 'never') room:cancel('never') \
+               try(function() room:after('soon', 'x') end) \
+               try(function() room:after(1, 7) end) \
+               try(function() room:after(-1, 'x') end) end, \
+             on_timer = function(e) table.insert(heard, 'timer ' .. e.name) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 1.0));
+    let timers = &app.inspect_worlds()["room"].timers;
+    assert_eq!((timers.len(), timers[0].name.as_str(), timers[0].left), (1, "ping", 0.5));
+    app.update(LuaMsg::TickWorld("room".into(), 0.1, 1.5));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "world \"room\":after: seconds must be a number, got string",
+        "world \"room\":after: the timer's name must be a string, got integer",
+        "timer \"x\": seconds must be a finite number, zero or more",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+    assert!(heard.ends_with("timer ping"), "{heard}");
+    assert!(app.inspect_worlds()["room"].timers.is_empty());
+}
+
+#[test]
+fn on_hit_hears_a_loose_thing_strike_a_wall() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() world('room'):set('ball', {{ velocity = {{ 300, 0 }} }}) end, \
+             on_hit = function(e) table.insert(heard, e.id .. '>' .. e.who .. '@' .. math.floor(e.speed + 0.5)) end, \
+             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+               loose = {{ bounce = 0, friction = 0 }} }}, \
+             {{ id = 'wall', pos = {{ 100, -50 }}, drawing = hero, collider = {{ rect = {{ 4, 100 }} }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let heard = app.view().info().children[0].text.clone();
+    assert_eq!(heard.as_deref(), Some("ball>wall@300"));
+}
+
+#[test]
+fn a_loose_thing_with_grip_is_set_spinning() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           actions = {{ go = 'Space' }}, \
+           on_action = function() world('room'):set('ball', {{ spin = 90 }}) end, \
+           {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+             loose = {{ friction = 0, grip = 0.5 }} }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let ball = &app.inspect_worlds()["room"].entities[0];
+    assert!((ball.spin - 90.0).abs() < 1.0 && (ball.rot - 90.0).abs() < 2.0, "{} {}", ball.spin, ball.rot);
+    assert_eq!(ball.pos, (0.0, 0.0), "it turns in place");
+}
+
+#[test]
+fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function ask() \
+           local room = world('room') \
+           local hit = room:ray({{ 4, 4 }}, {{ 190, 4 }}, {{ skip = 'hero' }}) \
+           local miss = room:ray({{ 4, 70 }}, {{ 190, 70 }}, {{ skip = 'hero' }}) \
+           local here = room:at({{ 4, 4 }}) \
+           return string.format('%s@%d,%d n%d d%d t%d miss=%s at=%s t%d', hit.id, hit.at[1], hit.at[2], \
+             hit.normal[1], math.floor(hit.dist + 0.5), hit.tick, tostring(miss), table.concat(here, ','), here.tick) end \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() \
+           local seen = pcall(ask) and ask() or 'not yet' \
+           return ui.col({{ ui.text({{ seen }}), ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               table.insert(heard, ask()) \
+               try(function() world('room'):ray({{ 0, 0 }}, {{ 0, 0 }}) end) \
+               try(function() world('room'):ray({{ 0, 0 }}, {{ 9, 0 }}, {{ through = true }}) end) \
+               try(function() world('room'):at({{ 1 }}) end) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }} }}, \
+             {{ id = 'wall', pos = {{ 100, -50 }}, drawing = hero, collider = {{ rect = {{ 4, 100 }} }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, 1.0 / 60.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    let info = app.view().info();
+    let said = |i: usize| info.children[i].text.clone().unwrap();
+    assert_eq!(said(0), "wall@100,4 n-1 d96 t1 miss=nil at=hero t1", "asked in view");
+    let heard = said(1);
+    assert!(heard.starts_with("wall@100,4 n-1 d96 t1 miss=nil at=hero t1"), "asked in a handler: {heard}");
+    for wanted in [
+        "ray: from and to are the same point",
+        "world \"room\":ray: unknown field through",
+        "world \"room\":at needs x and y",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
 }

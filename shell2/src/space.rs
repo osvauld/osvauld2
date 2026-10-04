@@ -1,10 +1,9 @@
 use crate::item::ItemsScreen;
 use crate::node;
 use crate::{Msg, Screen, theme};
-use courier::invite::InviteTicket;
+use courier::DesktopNodeRecord;
 use courier::publish::{PublishedItem, PublishedWorkspace};
 use courier::token::Scope;
-use courier::{ConnectionTicket, DesktopNodeRecord};
 use runtime::{
     Anchor, El, EventLoopProxy, Placement, PlacementAlign, PlacementSide, col, row, text,
     text_input,
@@ -363,33 +362,15 @@ impl SpaceScreen {
                 let text = self.claim_ticket.trim().to_string();
                 let vault = vault.clone();
                 let proxy = proxy.clone();
-                // Two ticket kinds share one box: `ConnectionTicket` (`osv1.`) claims a node
-                // that has no admin yet, `InviteTicket` (`osvi1.`) joins one that already
-                // does. Their prefixes are how `from_text` tells them apart on sight.
-                if let Ok(ticket) = ConnectionTicket::from_text(&text) {
-                    std::thread::spawn(move || {
-                        let socket = kunki::bridge::socket_path();
-                        let now = node::now_secs();
-                        let result = node::claim(&socket, &vault, &ticket, now).and_then(|r| {
+                std::thread::spawn(move || {
+                    let socket = kunki::bridge::socket_path();
+                    let result =
+                        node::join(&socket, &vault, &text, node::now_secs()).and_then(|r| {
                             node::save_relationship(&vault, &r)?;
                             Ok(r)
                         });
-                        let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::ClaimResult(result)));
-                    });
-                } else if let Ok(ticket) = InviteTicket::from_text(&text) {
-                    std::thread::spawn(move || {
-                        let socket = kunki::bridge::socket_path();
-                        let now = node::now_secs();
-                        let result =
-                            node::claim_invite(&socket, &vault, ticket, now).and_then(|r| {
-                                node::save_relationship(&vault, &r)?;
-                                Ok(r)
-                            });
-                        let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::ClaimResult(result)));
-                    });
-                } else {
-                    self.claim_error = Some("not a recognized node ticket or invite".to_string());
-                }
+                    let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::ClaimResult(result)));
+                });
                 None
             }
             SpaceScreenMsg::ClaimResult(result) => {

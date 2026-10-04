@@ -1,0 +1,14 @@
+[package]
+name = "xnet_names"
+version = "0.1.0"
+
+[addresses]
+xnet = "_"
+
+[dev-addresses]
+xnet = "0xCAFE"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "mainnet"
+subdir = "aptos-move/framework/aptos-framework"

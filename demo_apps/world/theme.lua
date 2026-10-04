@@ -7,6 +7,6 @@ return {
 	button_hover = "#3a3f5e",
 	text = "#e7e9f3",
 	muted = "#8a8fa8",
-	width = 720,
-	height = 400,
+	width = 1080,
+	height = 600,
 }

@@ -22,7 +22,7 @@ def readout(tree, prefix):
     return None
 
 
-with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
+with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     s.rpc.signup("world", "world passphrase")
     ws = s.rpc.create_workspace("world smoke")
     item = s.rpc.create_item(ws["id"], "world", "app")["id"]
@@ -35,6 +35,23 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     def entity_at(x, y):
         s.rpc.move_to(room["x"] + x, room["y"] + y)
         return readout(s.rpc.dump_tree(item), "entity: ")
+
+    # The dump carries the world itself: each entity's place, body, velocity, carrier and zones.
+    def entities(tree=None):
+        tree = s.rpc.dump_tree(item) if tree is None else tree
+        if tree.get("id") == "room":
+            return {e["id"]: e for e in tree["world"]["entities"]}
+        for child in tree.get("children", []):
+            found = entities(child)
+            if found:
+                return found
+        return None
+
+    seen = entities()
+    assert (seen["hero"]["body"], seen["chest"]["body"], seen["wall:n"]["body"]) == ("moved", "fixed", "fixed"), seen
+    assert seen["hero"]["zones"] == [] and seen["hero"]["clip"]["looped"], seen["hero"]
+    loose = ("crate:door", "crate:2", "crate:3", "ball")
+    assert all((seen[i]["body"], seen[i]["velocity"]) == ("loose", [0, 0]) for i in loose), seen
 
     # Hero spawned at (120, 80); its body is ~(80, 130) into the drawing.
     assert entity_at(200, 210) == "hero"
@@ -172,7 +189,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     hold("KeyW", "w", 6)
     hold("KeyD", "d", 22)
     assert (entity_at(570, 240), entity_at(570, 250)) == ("hero", "chest"), "behind the chest"
-    hold("KeyD", "d", 60)
+    hold("KeyD", "d", 43)  # to x 612 (top-left), where the old east wall stopped it
     hold("KeyS", "s", 30)
     hold("KeyA", "a", 50)
     assert entity_at(550, 280) == "hero", "come round below: in front of the chest"
@@ -183,16 +200,21 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # ~80 left, and after E again it stays where it was dropped while the hero walks off.
     assert entity_at(560, 300) == "hero", "standing in front of the chest"
     assert near() == "yes", "on_zone: the hero walked into the chest's zone"
+    assert entities()["hero"]["zones"] == ["chest"], "the dump agrees"
     tap("KeyE", "e")
     s.rpc.frame(15)  # `lift` raises it from the floor into the hands
     assert entity_at(560, 300) == "chest", "picked up, held in front of the hero"
     assert near() == "no", "carried, the chest has no zone"
+    chest = entities()["chest"]
+    assert chest["attached"] == {"to": "hero", "part": "body"} and chest["body"] == "none", chest
     # Carried, the chest is off the floor: it neither blocks the hero nor stops at its own
     # footprint's old place.
     hold("KeyA", "a", 30)
     assert (entity_at(480, 300), entity_at(560, 300)) == ("chest", "—"), "carried left"
     tap("KeyE", "e")
     assert near() == "yes", "put down beside the hero, its zone is back"
+    chest = entities()["chest"]
+    assert chest["attached"] is None and chest["body"] in ("thrown", "fixed"), chest
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(60)
     s.rpc.keyboard("KeyD", "d", False)
@@ -201,24 +223,45 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # Let go, `fall` drops the drawing from the hands to where its footprint already was.
     assert (entity_at(480, 300), entity_at(480, 370)) == ("—", "chest"), "fell to the floor"
     assert entity_at(635, 250) == "hero", "and the hero walked off"
+    chest = entities()["chest"]
+    assert chest["body"] == "fixed" and chest["velocity"] == [0, 0], ("settled", chest)
+    seen = entities()
+    assert all(seen[w]["body"] == "fixed" for w in ("wall:mid", "wall:mid_s", "pillar:1", "pillar:2")), seen
 
-    # Walls: the hero collides by its feet. Walking on into the east wall it stops with its body
-    # just inside, the nose behind the wall; walking up it stops at the foot of the tall back
-    # wall, the whole hero still in the room — the world clips anything that spills past it.
+    # Walls: the hero collides by its feet. Walking on into the inner wall (x 760, above its
+    # doorway) it stops with its body just inside, the nose behind the wall; walking up it stops at
+    # the foot of the tall back wall, the whole hero still in the room — the world clips anything
+    # that spills past it.
     s.rpc.keyboard("KeyD", "d", True)
     s.rpc.frame(120)
     s.rpc.keyboard("KeyD", "d", False)
     s.rpc.frame(2)
-    assert (entity_at(700, 210), entity_at(714, 210)) == ("hero", "wall:e"), "stopped at the east wall"
+    assert (entity_at(752, 210), entity_at(766, 210)) == ("hero", "wall:mid"), "stopped at the inner wall"
     s.rpc.keyboard("KeyW", "w", True)
     s.rpc.frame(120)
     s.rpc.keyboard("KeyW", "w", False)
     s.rpc.frame(2)
-    assert entity_at(680, 30) == "hero", "stopped at the back wall, head inside the room"
-    assert entity_at(680, 196) == "hero", "feet at the foot of the back wall"
+    assert entity_at(732, 30) == "hero", "stopped at the back wall, head inside the room"
+    assert entity_at(732, 196) == "hero", "feet at the foot of the back wall"
+
+    # Pushing: the hero's feet are at ~(736, 206). Step west, walk down level with crate:3 (x 560
+    # to 608, y 440 to 488), then walk west into it: the crate moves, and comes to rest still loose.
+    def go(code, key, dist):
+        hold(code, key, round(dist / (160 / 60)))
+
+    go("KeyA", "a", 80)
+    go("KeyS", "s", 258)
+    before = entities()["crate:3"]["pos"]
+    go("KeyA", "a", 120)
+    pushed = entities()["crate:3"]
+    assert pushed["body"] == "loose" and pushed["pos"][0] < before[0] - 20, (before, pushed)
+    s.rpc.frame(120)
+    rested = entities()["crate:3"]
+    assert (rested["body"], rested["velocity"]) == ("loose", [0, 0]), ("at rest, still loose", rested)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
 
     if len(sys.argv) > 1:
         s.rpc.click(item, "add")
         s.rpc.frame(1)
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall")
+    print("world: spawn/despawn by id, hits by id, clips on the clock, survives reload, WASD, facing views, order by feet, on_action and on_move, jump, carry, walls, a solid chest, a sensor, lift and fall, the world in the dump, pushing crates")

@@ -114,7 +114,7 @@ return function()
 			px = 24,
 			py = 14,
 			align_center = true,
-			ui.text({ "Scratch", no_wrap = true, color = C.text, font_size = 18 }),
+			ui.text({ "Scratch", id = "title", no_wrap = true, color = C.text, font_size = 18 }),
 			ui.row({
 				px = 7,
 				py = 1,
@@ -122,7 +122,7 @@ return function()
 				fill = C.line_soft,
 				center = true,
 				no_shrink = true,
-				ui.text({ tostring(#notes), no_wrap = true, color = C.muted, font_size = 11 }),
+				ui.text({ tostring(#notes), id = "note-count", no_wrap = true, color = C.muted, font_size = 11 }),
 			}),
 			ui.col({ grow = true }),
 		}),

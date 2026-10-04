@@ -40,14 +40,15 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 
 ## How we work — the process rules
 
-- **Write in slices.** One write lands at most **~100 new or changed lines of code**; tests
-  ride free. A task needing more is *first* broken into chunks — think through each, explain
-  it so the user understands it, get a nod, then write chunk by chunk. The extension warns
-  when a write exceeds the cap.
+- **Long-horizon, test-first.** A task starts as a plan doc in `docs/design/` whose first
+  section is the end-to-end tests that prove it done — through the real path (bridge, shell,
+  Lua VM, vault), not only unit tests. Write those tests first and watch them fail, then build
+  until they pass; every step leaves `cargo test` and the smokes green. No line cap — the plan
+  doc's steps are the unit of review. *(Revised 2026-10-03: replaces the ~100-line slice cap.)*
 - **The user is the judge.** Reviews (yours, other agents') are advisory; nothing lands
   without their nod.
 - **Self-check before writing**: load the matching expert skill
-  (`.agents/skills/expert-*`) and run its checklist against your plan. After the slice
+  (`.agents/skills/expert-*`) and run its checklist against your plan. After a step
   lands, a **fresh** review instance reads the diff — `pi -p` with the expert's checklist —
   before the user judges. Fresh eyes, no sunk cost.
 - **Discuss before writing docs or designs.** Decisions get talked through first; the repo's
