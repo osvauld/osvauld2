@@ -27,8 +27,7 @@ use crate::Msg;
 /// long enough for a frame-bound handler, short enough that a stuck shell fails loudly.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long the bridge waits for a connected client to send its request — a client that
-/// connects and stalls must not wedge the (serial, one-request-per-connection) bridge.
+/// How long the bridge waits for a connected client to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn socket_path() -> PathBuf {
@@ -51,13 +50,19 @@ pub fn spawn(proxy: EventLoopProxy<Msg>) {
     }
 }
 
+/// A thread per connection: a request waiting on a busy app must not hold up one for another
+/// app or the shell (`docs/design/app-threads.md` step 4). Each client still sees its own
+/// requests in order — a connection carries one, and the client waits for its reply.
 fn serve(listener: UnixListener, proxy: EventLoopProxy<Msg>) {
     for conn in listener.incoming() {
         match conn {
             Ok(conn) => {
-                if let Err(e) = handle(conn, &proxy) {
-                    eprintln!("bridge: request failed: {e}");
-                }
+                let proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = handle(conn, &proxy) {
+                        eprintln!("bridge: request failed: {e}");
+                    }
+                });
             }
             Err(e) => eprintln!("bridge: accept failed: {e}"),
         }

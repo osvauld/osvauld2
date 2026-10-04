@@ -99,6 +99,13 @@ pub(crate) fn draw<M>(
         if let Some(custom) = &p.appearance.custom {
             custom(scene, text, p.rect, t * p.transform);
         }
+        if let Some(tile) = &p.appearance.tile {
+            // A tile draws in its own coordinates from (0, 0); it may not paint past its rect.
+            scene.push_clip_layer(Fill::NonZero, t * p.transform, &p.rect);
+            let origin = Affine::translate((p.rect.x0, p.rect.y0));
+            scene.append(&tile.scene, Some(t * p.transform * origin));
+            scene.pop_layer();
+        }
         if let Some(frame) = &p.appearance.frame {
             let origin = Affine::translate((p.rect.x0 + p.pad.x0, p.rect.y0 + p.pad.y0));
             frame.draw(scene, t * p.transform * origin, p.alpha);

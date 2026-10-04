@@ -71,6 +71,7 @@ class Session:
         socket_path: str | None = None,
         show_shell_output: bool = False,
         offscreen: tuple[int, int] | None = None,
+        stdout_path: str | None = None,
     ):
         self.tmp = tempfile.mkdtemp(prefix="osvauld-test-")
         self.data_dir = data_dir or os.path.join(self.tmp, "data")
@@ -82,6 +83,9 @@ class Session:
         # only advances per request. Still needs a DISPLAY — winit will not build a loop without
         # one — so this hides the window, it does not remove the display dependency.
         self.offscreen = offscreen if offscreen is not None else offscreen_default()
+        # Where the shell's stdout goes (Lua `print` lands there), for a test that reads it back.
+        self.stdout_path = stdout_path
+        self._stdout = None
         self.process: subprocess.Popen | None = None
         self.rpc = Bridge(self.socket_path)
 
@@ -101,9 +105,11 @@ class Session:
         argv = [str(self.shell_binary)]
         if self.offscreen:
             argv += ["--offscreen", "%dx%d" % self.offscreen]
+        if self.stdout_path:
+            self._stdout = open(self.stdout_path, "ab")
         self.process = subprocess.Popen(
             argv, env=env,
-            stdout=None if self.show_shell_output else subprocess.DEVNULL,
+            stdout=self._stdout or (None if self.show_shell_output else subprocess.DEVNULL),
             stderr=None if self.show_shell_output else subprocess.DEVNULL,
         )
         deadline = time.monotonic() + self.startup_timeout
@@ -128,4 +134,7 @@ class Session:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
+        if self._stdout:
+            self._stdout.close()
+            self._stdout = None
         shutil.rmtree(self.tmp, ignore_errors=True)

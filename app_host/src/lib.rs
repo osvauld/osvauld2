@@ -6,9 +6,11 @@
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
 mod gfx;
+mod budget;
 pub mod index;
 mod modules;
 mod props;
+pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
 
@@ -86,10 +88,17 @@ pub fn run_lua_tests_with(tests: Vec<LuaTest>, api: LuaTestApi) -> Vec<LuaTestRe
         .collect()
 }
 
+/// A `t.*` call that reaches the app: its time is the app's (and the app's own budget's), not
+/// the test's.
+fn driving<T>(budget: &Arc<Budget>, f: impl FnOnce() -> T) -> T {
+    let _paused = budget.pause();
+    f()
+}
+
 fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
     let frames = Rc::new(Cell::new(0u32));
     let failure = (|| -> mlua::Result<()> {
-        let (vm, fires) = test_vm()?;
+        let (vm, budget) = test_vm()?;
         let t = vm.create_table()?;
         t.set(
             "expect",
@@ -104,33 +113,37 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let step = api.step.clone();
+        let b = budget.clone();
         let frame_count = frames.clone();
         t.set(
             "step",
             vm.create_function(move |_, n: u32| match &step {
-                Some(step) => step(n)
+                Some(step) => driving(&b, || step(n))
                     .inspect(|done| frame_count.set(frame_count.get().saturating_add(*done)))
                     .map_err(Error::runtime),
                 None => Err(Error::runtime("t.step is not available in this runner")),
             })?,
         )?;
         let world = api.world.clone();
+        let b = budget.clone();
         t.set(
             "world",
             vm.create_function(move |lua, ()| match &world {
-                Some(world) => json_to_lua(lua, &world().map_err(Error::runtime)?),
+                Some(world) => json_to_lua(lua, &driving(&b, || world()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.world is not available in this runner")),
             })?,
         )?;
         let rects = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "rects",
             vm.create_function(move |lua, ()| match &rects {
-                Some(rects) => json_to_lua(lua, &rects().map_err(Error::runtime)?),
+                Some(rects) => json_to_lua(lua, &driving(&b, || rects()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.rects is not available in this runner")),
             })?,
         )?;
         let centres = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "centre_of",
             vm.create_function(move |_, id: String| {
@@ -139,7 +152,8 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
                         "t.centre_of is not available in this runner",
                     ));
                 };
-                let serde_json::Value::Array(rs) = rects().map_err(Error::runtime)? else {
+                let serde_json::Value::Array(rs) = driving(&b, || rects()).map_err(Error::runtime)?
+                else {
                     return Err(Error::runtime("rects response was not an array"));
                 };
                 for r in rs {
@@ -155,18 +169,20 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let click_at = api.click_at.clone();
+        let b = budget.clone();
         t.set(
             "click_at",
             vm.create_function(move |_, (x, y): (f32, f32)| match &click_at {
-                Some(click_at) => click_at(x, y).map_err(Error::runtime),
+                Some(click_at) => driving(&b, || click_at(x, y)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.click_at is not available in this runner")),
             })?,
         )?;
         let text = api.text.clone();
+        let b = budget.clone();
         t.set(
             "text",
             vm.create_function(move |lua, id: String| match &text {
-                Some(text) => match text(id).map_err(Error::runtime)? {
+                Some(text) => match driving(&b, || text(id)).map_err(Error::runtime)? {
                     Some(s) => Ok(Value::String(lua.create_string(&s)?)),
                     None => Ok(Value::Nil),
                 },
@@ -174,10 +190,11 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let type_text = api.type_text.clone();
+        let b = budget.clone();
         t.set(
             "type",
             vm.create_function(move |_, (id, text): (String, String)| match &type_text {
-                Some(type_text) => type_text(id, text).map_err(Error::runtime),
+                Some(type_text) => driving(&b, || type_text(id, text)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.type is not available in this runner")),
             })?,
         )?;
@@ -186,7 +203,7 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             .set_name(&test.name)
             .set_mode(ChunkMode::Text)
             .eval::<Function>()?;
-        fires.store(0, Ordering::Relaxed);
+        let _armed = budget.arm();
         f.call::<()>(t)
     })()
     .err()
@@ -374,7 +391,7 @@ pub struct LuaApp<M> {
     /// app. `error` is the other kind: a source that never loaded at all, which leaves nothing to
     /// run. Cleared by the next successful reload, since that replaces the whole struct.
     reload_error: Option<String>,
-    fires: Arc<AtomicU64>,
+    budget: Arc<Budget>,
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     /// Which version of the source this VM was built from. Read *before* the build, so an edit
     /// landing mid-build leaves the VM stale rather than falsely current.
@@ -553,7 +570,7 @@ impl<M: 'static> LuaApp<M> {
         // The other order marks this VM current for an edit it never read, and that edit is then
         // lost until the next one happens to arrive.
         let src_seen = src.version.load(Ordering::Relaxed);
-        let (vm, fires) = sandboxed_vm()?;
+        let (vm, budget) = sandboxed_vm()?;
         let map = src.doc.get_map("files");
         let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
             return Err(Error::runtime("no main.lua in app source"));
@@ -574,17 +591,19 @@ impl<M: 'static> LuaApp<M> {
         modules::install(&vm, &src.doc)?;
 
         let main_src = t.to_string();
+        let armed = budget.arm();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        drop(armed);
         Ok(Self {
             vm,
             view_fn,
             handlers: RefCell::new(HashMap::new()),
             error,
             reload_error: None,
-            fires,
+            budget,
             to_msg,
             src_seen,
             src,
@@ -849,8 +868,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     pub fn view(&self) -> El<M> {
-        //reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         let body = self.body();
         let Some(e) = &self.reload_error else {
             return body;
@@ -1078,8 +1096,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     pub fn update(&mut self, msg: LuaMsg) {
-        // reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
             if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
                 match &msg {
@@ -1378,23 +1395,44 @@ fn shadow_os(vm: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-fn test_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
+fn test_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let fires = Arc::new(AtomicU64::new(0));
-    let f = fires.clone();
-    vm.set_interrupt(move |_lua| {
-        if f.fetch_add(1, Ordering::Relaxed) > 1_000_000 {
-            Err(mlua::Error::runtime("interrupt budget exceeded"))
-        } else {
-            Ok(mlua::VmState::Continue)
-        }
-    });
-    Ok((vm, fires))
+    let budget = budget::install(&vm, budget::Policy::app())?;
+    Ok((vm, budget))
 }
 
-pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
+/// Stand-ins for native work the interrupt cannot see, and a flushed log line, for `scripts/e2e_app_threads.py`
+/// (`docs/design/app-threads.md` §0). Debug builds with `OSVAULD_TEST_BINDINGS=1` only: both
+/// can only waste the app's own time, which a loop already can.
+fn install_test_bindings(vm: &Lua) -> mlua::Result<()> {
+    if !cfg!(debug_assertions) || std::env::var_os("OSVAULD_TEST_BINDINGS").is_none() {
+        return Ok(());
+    }
+    let busy = vm.create_function(|_, ms: u64| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            std::hint::spin_loop();
+        }
+        Ok(())
+    })?;
+    let stall = vm.create_function(|_, ()| -> mlua::Result<()> {
+        loop {
+            std::thread::park();
+        }
+    })?;
+    // Not `print`: Luau's goes through C stdio, block-buffered into a file and lost on kill.
+    let log = vm.create_function(|_, line: String| {
+        println!("{line}");
+        Ok(())
+    })?;
+    vm.globals().set("__log", log)?;
+    vm.globals().set("__busy", busy)?;
+    vm.globals().set("__stall", stall)
+}
+
+pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
     let now_fn = vm.create_function(|_, ()| wall_clock())?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
@@ -1402,18 +1440,11 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
+    install_test_bindings(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let fires = Arc::new(AtomicU64::new(0));
-    let f = fires.clone();
-    vm.set_interrupt(move |_lua| {
-        if f.fetch_add(1, Ordering::Relaxed) > 1_000_000 {
-            Err(mlua::Error::runtime("interrupt budget exceeded"))
-        } else {
-            Ok(mlua::VmState::Continue)
-        }
-    });
-    Ok((vm, fires))
+    let budget = budget::install(&vm, budget::Policy::app())?;
+    Ok((vm, budget))
 }
 fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
     let msg = if context.path.is_empty() {
