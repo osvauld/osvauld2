@@ -772,6 +772,43 @@ The rules that bite, once each:
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
 
+## Signals
+
+A **signal** is app state whose value is frozen: reading it is plain and fast, and the only way
+to change it is `set` or `update`, in a handler. A write that skips them errors at once instead
+of going unseen. (Signals will let parts of `view` re-run only when what they read changed —
+`docs/design/signals.md`; today they are the value half.)
+
+```lua
+local coins = signal({ { id = "c1", x = 40, y = 80 } }, "coins")   -- the name is for errors
+local score = signal(0, "score")
+
+for _, c in coins() do ... end                 -- read: a plain table; ipairs, #, all of it
+
+coins:update(function(list)                    -- in a handler: a writable copy of the list
+  table.insert(list, { id = uuid(), x = 5, y = 9 })
+  list[1] = { id = list[1].id, x = 0, y = list[1].y }   -- change an item by replacing it
+end)
+score:update(function(n) return n + 1 end)     -- not a table: return the new value
+coins:set({})                                  -- replace outright
+```
+
+- **Everything in it is frozen**, items too: `coins()[1].x = 5`, `table.insert(coins(), …)` and
+  `table.sort(coins(), …)` error with "attempt to modify a readonly table". The table you pass
+  to `signal` or `set` is frozen in place — keep no writable reference to it.
+- `update` hands a list or map a **shallow** copy: add, remove, sort and replace entries freely;
+  the entries themselves stay frozen. For anything else it hands the value and takes back what
+  the function returns — forgetting to return is an error, not a silent no-op.
+- An `update` of a 5000-item list costs about half a millisecond: the freeze looks at every
+  entry to find the new ones. Fine in a handler; split a huge list across signals if it is not.
+- A failed `update` (the function errors) leaves the value as it was. `set` with the value it
+  already holds changes nothing.
+- `set` and `update` are refused while `view` describes, like `world(id):set`, and a signal's
+  `update` inside its own `update` is refused (the outer one would overwrite it). Changing another
+  signal from inside is fine.
+- A table with a metatable inside the value (a doc mirror, a `doc.map{}`) is left unfrozen: it
+  belongs to something else.
+
 ## Search
 
 Ship an `index.lua` beside `main.lua` and your documents become searchable. It says what a

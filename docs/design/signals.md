@@ -1,6 +1,7 @@
 # Signals — re-describe only what changed
 
-Status: **design draft, 2026-10-04; nothing built.** Talked through in conversation; the two
+Status: **design draft, 2026-10-04.** Step 1 (`signal`: T1, T2, T7 for `view`) landed
+2026-10-04; groups are not built. Talked through in conversation; the two
 probes behind it (§8) ran in a release build on the apps' Luau VM. `docs/status.md` says what is
 real.
 
@@ -14,22 +15,32 @@ Companions:
 ## 1. End-to-end tests — done means these pass
 
 Through the real path: Lua VM in `app_host`, the shell over the bridge, `DumpTree` for what an
-agent sees. Written first, watched failing, then built until green.
+agent sees. Written first, watched failing, then built until green. The status column is kept current as
+steps land; the tests behind ✅ are in `app_host/src/tests.rs` (search `signal`).
 
-| # | test | proves |
-|---|---|---|
-| T1 | `signal(v)` freezes `v` deeply; `s()` returns it; `s()[1].x = 5`, `table.insert(s(), …)`, `table.sort(s(), …)` each error with the signal's name in the message | a missed write is loud, never silent |
-| T2 | `s:update(fn)` hands `fn` a writable shallow copy, freezes the result and stores it; `s:set(v)` replaces it; an unchanged `set` (same table) is a no-op | the two ways to write |
-| T3 | Two groups read different signals; a handler updates one; the next view calls only that group's function (a counter per group) | only dirty groups re-run |
-| T4 | A group that reads no signal re-runs every view | today's apps keep working unchanged |
-| T5 | A clean group's output is reused: same UI nodes and handlers, clicks inside it still land | reuse is safe for interaction |
-| T6 | A world with `ui.group("coins", …)` of 5000 entities and a hero: moving the hero re-runs neither the coins function nor their reconcile; picking a coin re-runs the coins group only | the world case, measured: describe cost with one coin picked < 1 ms in release |
-| T7 | Writing a signal inside `view` or a group function is an error naming it | describing never changes state |
-| T8 | Nothing a view reads changed (a hover elsewhere): `view` is not called at all | `view` is the root group |
-| T9 | Dev check: a clean group is re-run on a sampled frame; if its output differs, the console says which group and which plain value it seems to depend on | state outside signals is caught, not silently stale |
-| T10 | `DumpTree` lists groups: id, the signals each read, runs, last run tick | an agent can see why something did or did not update |
-| T11 | Smoke: a world app over the bridge with 5000 coins; walking costs no coin re-describes (dump's run counters); a pickup costs one | the whole path, real socket and pixels |
-| T12 | A doc read inside a group makes the group depend on that doc; a remote edit (second peer) re-runs it | docs and signals are one mechanism (§6) |
+Step 1 also pinned, beyond the table: a click's handler updating a signal shows on the next view;
+a nested `update` of the same signal is refused (the outer would overwrite the inner) while
+another signal may change inside; freezing ends at cycles, freezes table keys and leaves
+userdata and metatabled tables (doc mirrors, `doc.map`) alone, so a mirror in a signal still
+follows its doc; maps, returned tables, `nil`, booleans and strings all work. **Gain so far:
+safety only** — a missed write is an error, not a stale screen. No re-describing is skipped
+until T6. Cost: an `update` of a 5000-item list is ~0.45 ms in release, nearly all of it the
+freeze looking at each entry for new ones (`table.clone` alone: 0.06 ms).
+
+| # | test | proves | status |
+|---|---|---|---|
+| T1 | `signal(v, name)` freezes `v` deeply; `s()` returns it; `s()[1].x = 5`, `table.insert(s(), …)`, `table.sort(s(), …)` each error ("attempt to modify a readonly table" — Luau's own message, which cannot name the signal) | a missed write is loud, never silent | ✅ step 1 |
+| T2 | `s:update(fn)` hands `fn` a writable shallow copy, freezes the result and stores it; `s:set(v)` replaces it; an unchanged `set` (same table) is a no-op | the two ways to write | ✅ step 1 |
+| T3 | Two groups read different signals; a handler updates one; the next view calls only that group's function (a counter per group) | only dirty groups re-run | step 2 |
+| T4 | A group that reads no signal re-runs every view | today's apps keep working unchanged | step 2 |
+| T5 | A clean group's output is reused: same UI nodes and handlers, clicks inside it still land | reuse is safe for interaction | step 3 |
+| T6 | A world with `ui.group("coins", …)` of 5000 entities and a hero: moving the hero re-runs neither the coins function nor their reconcile; picking a coin re-runs the coins group only | the world case, measured: describe cost with one coin picked < 1 ms in release | step 2 |
+| T7 | Writing a signal inside `view` or a group function is an error naming it | describing never changes state | ✅ `view` (step 1); groups step 2 |
+| T8 | Nothing a view reads changed (a hover elsewhere): `view` is not called at all | `view` is the root group | step 4 |
+| T9 | Dev check: a clean group is re-run on a sampled frame; if its output differs, the console says which group and which plain value it seems to depend on | state outside signals is caught, not silently stale | step 5 |
+| T10 | `DumpTree` lists groups: id, the signals each read, runs, last run tick | an agent can see why something did or did not update | step 5 |
+| T11 | Smoke: a world app over the bridge with 5000 coins; walking costs no coin re-describes (dump's run counters); a pickup costs one | the whole path, real socket and pixels | step 5 |
+| T12 | A doc read inside a group makes the group depend on that doc; a remote edit (second peer) re-runs it | docs and signals are one mechanism (§6) | step 6 |
 
 ## 2. Why
 

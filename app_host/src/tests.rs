@@ -4737,3 +4737,189 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
         assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
     }
 }
+
+/// An app whose `main.lua` is `src`, viewed once.
+fn app_of(src_lua: &str) -> LuaApp<LuaMsg> {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, src_lua).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let _ = app.view();
+    app
+}
+
+/// Runs `code` in the app's VM as a handler would, answering what it returns or why it failed.
+fn said(app: &LuaApp<LuaMsg>, code: &str) -> String {
+    let run = format!("local ok, e = pcall(function() {code} end) return ok and tostring(e) or tostring(e)");
+    app.vm.load(&run).eval::<String>().unwrap()
+}
+
+#[test]
+fn a_signal_holds_a_frozen_value_that_only_set_and_update_change() {
+    let app = app_of(
+        "coins = signal({ { x = 1 }, { x = 2 } }, 'coins') \
+         count = signal(0, 'count') \
+         return function() return ui.text({ tostring(#coins()) }) end",
+    );
+    // Read: a plain table, at full speed, with every ordinary read.
+    assert_eq!(said(&app, "local n = 0 for _, c in ipairs(coins()) do n += c.x end return n .. '/' .. #coins()"), "3/2");
+    // Every write that skips set and update is refused, nested ones too.
+    for write in [
+        "coins()[1].x = 5",
+        "table.insert(coins(), { x = 3 })",
+        "table.remove(coins(), 1)",
+        "table.sort(coins(), function(a, b) return a.x > b.x end)",
+        "coins()[3] = { x = 3 }",
+    ] {
+        assert!(said(&app, write).contains("readonly"), "{write}: {}", said(&app, write));
+    }
+    // update hands a writable copy; what it inserts is frozen too, and the old value is untouched.
+    assert_eq!(said(&app, "local old = coins() \
+        coins:update(function(list) table.insert(list, { x = 3 }) end) \
+        return #old .. '/' .. #coins()"), "2/3");
+    assert!(said(&app, "coins()[3].x = 9").contains("readonly"));
+    // A number (anything not a table) is updated by returning the new value.
+    assert_eq!(said(&app, "count:update(function(n) return n + 1 end) return count()"), "1");
+    let forgot = said(&app, "count:update(function(n) n = n + 1 end)");
+    assert!(forgot.contains("signal \"count\": update's function must return the new value"), "{forgot}");
+    assert_eq!(said(&app, "return count()"), "1", "unchanged by the failed update");
+    // set replaces, and freezes what it is given.
+    assert_eq!(said(&app, "coins:set({ { x = 9 } }) return coins()[1].x"), "9");
+    assert!(said(&app, "coins()[1].x = 1").contains("readonly"));
+    // A failing update leaves the value as it was.
+    assert!(said(&app, "coins:update(function(list) error('nope') end)").contains("nope"));
+    assert_eq!(said(&app, "return #coins()"), "1");
+}
+
+#[test]
+fn a_signal_needs_a_name_and_is_not_written_while_view_describes() {
+    let app = app_of(
+        "hero = signal({ hp = 10 }, 'hero') \
+         heard = '' \
+         return function() \
+           local ok, e = pcall(function() hero:set({ hp = 9 }) end) \
+           local ok2, e2 = pcall(function() hero:update(function(h) end) end) \
+           heard = tostring(e) .. ' | ' .. tostring(e2) \
+           return ui.text({ tostring(hero().hp) }) end",
+    );
+    let heard = said(&app, "return heard");
+    assert!(heard.contains("signal \"hero\": set only in a handler; view describes"), "{heard}");
+    assert!(heard.contains("signal \"hero\": update only in a handler; view describes"), "{heard}");
+    assert_eq!(said(&app, "return hero().hp"), "10");
+    assert!(said(&app, "signal({})").contains("signal needs a name"), "{}", said(&app, "signal({})"));
+}
+
+/// How many times the global signal `name` has changed.
+fn version(app: &LuaApp<LuaMsg>, name: &str) -> u64 {
+    let s: mlua::AnyUserData = app.vm.globals().get(name).unwrap();
+    crate::signal::version(&s).unwrap()
+}
+
+#[test]
+fn a_click_updates_a_signal_and_the_next_view_shows_it() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, "score = signal(0, 'score') \
+         return function() return ui.button({ id = 'add', \
+           on_click = function() score:update(function(n) return n + 1 end) end, \
+           ui.text({ 'score ' .. score() }) }) end").unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let click = app.view().trigger("add", runtime::Action::Click).unwrap();
+    app.update(click.clone());
+    app.update(click);
+    let info = app.view().info();
+    assert_eq!(info.children[0].text.as_deref(), Some("score 2"));
+}
+
+#[test]
+fn setting_the_value_a_signal_holds_changes_nothing() {
+    let app = app_of("hero = signal({ hp = 10 }, 'hero') n = signal(3, 'n') \
+                      return function() return ui.text({ '' }) end");
+    said(&app, "hero:set(hero()) n:set(3)");
+    assert_eq!((version(&app, "hero"), version(&app, "n")), (0, 0), "same table, same number");
+    said(&app, "hero:set({ hp = 10 }) n:set(4)");
+    assert_eq!((version(&app, "hero"), version(&app, "n")), (1, 1), "an equal new table is a change");
+    said(&app, "hero:update(function(h) end)");
+    assert_eq!(version(&app, "hero"), 2, "an update is a change: it cannot tell");
+    said(&app, "n:update(function(v) error('no') end)");
+    assert_eq!(version(&app, "n"), 1, "a failed update is not");
+}
+
+#[test]
+fn a_signal_is_not_updated_from_inside_its_own_update() {
+    let app = app_of("coins = signal({}, 'coins') other = signal(0, 'other') \
+                      return function() return ui.text({ '' }) end");
+    let nested = said(&app, "coins:update(function(list) \
+        coins:update(function(l) table.insert(l, 'inner') end) \
+        table.insert(list, 'outer') end)");
+    assert!(nested.contains("signal \"coins\": update inside its own update"), "{nested}");
+    assert_eq!(said(&app, "return #coins()"), "0", "neither change landed");
+    // Another signal may change from inside, and reading this one gives the value before.
+    assert_eq!(said(&app, "coins:update(function(list) \
+        other:update(function(n) return n + 1 end) \
+        table.insert(list, #coins()) end) return other() .. '/' .. coins()[1]"), "1/0");
+    assert_eq!(said(&app, "coins:update(function(l) end) return 'again'"), "again", "the guard is released");
+}
+
+#[test]
+fn freezing_stops_at_cycles_keys_and_things_that_belong_elsewhere() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    // A table holding itself, and a table used as a key: both frozen, no endless walk.
+    assert_eq!(said(&app, "local t = {} t.me = t local k = {} t[k] = 1 \
+        local s = signal(t, 'loop') \
+        local a = pcall(function() s().me.x = 1 end) local b = pcall(function() k.x = 1 end) \
+        return tostring(a) .. tostring(b)"), "falsefalse");
+    // A drawing (userdata) inside a signal still draws; a table with a metatable is left alone.
+    assert_eq!(said(&app, "local tagged = doc.map({ a = 1 }) \
+        local s = signal({ look = gfx.frame({ width = 4, height = 4 }), tagged = tagged }, 'mixed') \
+        tagged.b = 2 return s().look.width .. '/' .. s().tagged.b"), "4/2");
+}
+
+#[test]
+fn a_doc_mirror_kept_in_a_signal_still_follows_the_doc() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, "local board = doc:open('board') \
+         held = signal({ board = board }, 'held') \
+         function rename(s) board:set({ 'meta', 'title' }, s) end \
+         return function() return ui.text({ tostring(held().board.meta.title) }) end").unwrap();
+    src.commit();
+    let resolve = serving("board", snapshot_of(&board(&["a"])));
+    let app = LuaApp::open(src, resolve, noop_wake(), identity()).unwrap();
+    assert_eq!(app.view().info().text.as_deref(), Some("Todo"));
+    let rename: Function = app.vm.globals().get("rename").unwrap();
+    rename.call::<()>("todo").unwrap();
+    let _ = app.view();
+    assert_eq!(app.view().info().text.as_deref(), Some("todo"), "the mirror inside the signal was patched");
+}
+
+#[test]
+fn update_works_on_maps_and_takes_a_returned_table_or_any_value() {
+    let app = app_of("m = signal({ a = 1, b = 2 }, 'm') v = signal(nil, 'v') \
+                      return function() return ui.text({ '' }) end");
+    assert_eq!(said(&app, "m:update(function(t) t.a = nil t.c = 3 end) \
+        return tostring(m().a) .. m().b .. m().c"), "nil23");
+    assert_eq!(said(&app, "m:update(function(t) return { z = 1 } end) return tostring(m().b) .. m().z"), "nil1");
+    assert!(said(&app, "m().z = 2").contains("readonly"), "a returned table is frozen too");
+    assert_eq!(said(&app, "v:set(true) v:update(function(b) return not b end) \
+        local a = v() v:set('word') return tostring(a) .. ' ' .. v()"), "false word");
+    assert_eq!(said(&app, "v:set(nil) return tostring(v())"), "nil");
+    assert_eq!(said(&app, "return tostring(m)"), "signal \"m\"");
+}
+
+#[test]
+fn updating_five_thousand_items_is_cheap() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    said(&app, "local list = {} for i = 1, 5000 do list[i] = { id = i, x = i, y = i } end \
+                big = signal(list, 'big')");
+    let started = std::time::Instant::now();
+    said(&app, "for i = 1, 10 do big:update(function(l) table.insert(l, { id = 0, x = 0, y = 0 }) end) end");
+    let each = started.elapsed() / 10;
+    // Release: ~0.45 ms, nearly all of it the freeze walking 5000 entries to find the new one.
+    eprintln!("update of a 5000-item list: {each:?}");
+    assert_eq!(said(&app, "return #big()"), "5010");
+    assert!(each.as_millis() < 20, "{each:?}");
+}

@@ -648,8 +648,15 @@ the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STE
 leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
 ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
 Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
-body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
-bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
+body taken away still leaves. No interpolation between steps yet. **5000 small things**
+(release, `five_thousand_small_things_cost_this_much`): a frame of steps 0.76 ms; re-describing
+3.2 ms in Rust plus ~3.5 ms of Lua building the tables; painting all of them is refused by the
+frame's 4096-item cap. So the camera culls, and **signals** ([design/signals.md](design/signals.md))
+let a part of the description re-run only when what it read changed. Step 1 landed:
+`signal(value, name)` — a frozen value read as a plain table, changed only by `set`/`update` in a
+handler; writes that skip them error. Next, in order: the camera with culling (`camera = { follow,
+ease, bounds }`, `set_camera`, agreed with 3D); signals step 2, `ui.group` in worlds; a `follow`
+controller; acceleration; then the RPG.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**

@@ -10,6 +10,7 @@ mod budget;
 pub mod index;
 mod modules;
 mod props;
+mod signal;
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
@@ -587,6 +588,7 @@ impl<M: 'static> LuaApp<M> {
         let viewing = Rc::new(Cell::new(false));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         worlds3d.install(&vm, viewing.clone())?;
+        signal::install(&vm, viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
