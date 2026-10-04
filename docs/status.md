@@ -100,7 +100,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ### Group chat sync (2026-10-04, in progress) — [plan](design/group-chat-sync.md)
 - `scripts/e2e_chat_sync.py` (T1–T15) over `scripts/osvauld/net.py`: one kunki and N offscreen
-  shells per test, screenshots per peer in `target/e2e-shots/`. Green: T1–T5, T13.
+  shells per test, screenshots per peer in `target/e2e-shots/`. Green: T1–T5, T13, T16 (Rust).
 - sync pushes only what changed since the node's last acked version vector (`SyncAck.vv`); a
   `since` the node never reached comes back `missing` and the desktop resends full history.
 - an open doc syncs on first sight (closed items and restarts catch up on open, not on the
@@ -110,6 +110,9 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   stale ones are dropped and an old listener stops — closes the "async completions not
   scoped to an account generation" hazard below for sync and push (not `NodeRpcDone`).
 - bridge: `CloseItem`, `Whoami`, `SyncNow`.
+- proven caller (T16): every node request that names a desktop is signed by it
+  (`courier::proof`, kunki `Envelope`/`Gate`); a forged, unsigned, stale or replayed request is
+  refused before dispatch. `node::claim`/`claim_invite` now save the relationship themselves.
 
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a

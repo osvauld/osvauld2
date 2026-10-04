@@ -22,6 +22,7 @@ use thiserror::Error;
 
 pub mod invite;
 pub mod policy;
+pub mod proof;
 pub mod publish;
 pub mod subscribe;
 pub mod sync;
@@ -69,6 +70,12 @@ pub enum CourierError {
     ChainTooLong,
     #[error("token expired")]
     Expired,
+    #[error("request timestamp outside the window")]
+    StaleRequest,
+    #[error("request replayed")]
+    Replayed,
+    #[error("node is busy")]
+    Busy,
     #[error("token revoked")]
     Revoked,
     #[error("parent token forbids delegation")]

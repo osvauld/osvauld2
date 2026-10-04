@@ -1,6 +1,7 @@
 use std::os::unix::net::UnixStream;
 
 use courier::invite::{InviteRequest, InviteTicket, desktop_start_invite_claim};
+use courier::proof;
 use courier::publish::{PublishedItem, PublishedWorkspace, desktop_publish};
 use courier::subscribe::desktop_start_subscribe;
 use courier::sync::{SyncLayer, desktop_start_sync};
@@ -47,15 +48,37 @@ fn claim(vault: &Vault, desktop: &Identity) -> Token {
 
 /// One request over a real `UnixStream`, the same pair `handle` sees in `serve_forever` —
 /// proves the wire framing and JSON tagging round-trip, not only `Admin::accept_publish`.
+/// Unsigned: for the requests that carry no caller (`Ping`, the two claims).
 fn roundtrip(vault: &Vault, req: &Request) -> Response {
-    let (mut client, server) = UnixStream::pair().unwrap();
-    let vault = vault.clone();
-    let worker = std::thread::spawn(move || handle(server, &vault, &NoopPusher).unwrap());
+    send(vault, &mut gate(vault), &Envelope::plain(req).unwrap())
+}
 
-    write_msg(&mut client, &serde_json::to_vec(req).unwrap()).unwrap();
-    let resp = serde_json::from_slice(&read_msg(&mut client).unwrap()).unwrap();
-    worker.join().unwrap();
-    resp
+/// Signed by `who`, as a desktop calling on its own behalf.
+fn roundtrip_as(vault: &Vault, who: &Identity, req: &Request) -> Response {
+    send(vault, &mut gate(vault), &sealed(vault, who, req))
+}
+
+fn node_did(vault: &Vault) -> String {
+    vault.with_signer(|node| node.did().to_string()).unwrap()
+}
+
+fn gate(vault: &Vault) -> Gate {
+    Gate::new(node_did(vault), now_ms() - 1000)
+}
+
+fn sealed(vault: &Vault, who: &Identity, req: &Request) -> Envelope {
+    Envelope::signed(req, who, &node_did(vault), now_ms()).unwrap()
+}
+
+fn send(vault: &Vault, gate: &mut Gate, env: &Envelope) -> Response {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    write_msg(&mut client, &serde_json::to_vec(env).unwrap()).unwrap();
+    handle(server, vault, gate, &NoopPusher).unwrap();
+    serde_json::from_slice(&read_msg(&mut client).unwrap()).unwrap()
+}
+
+fn is_err_containing(resp: &Response, needle: &str) -> bool {
+    matches!(resp, Response::Err { message } if message.contains(needle))
 }
 
 #[test]
@@ -110,7 +133,7 @@ fn a_publish_lands_in_the_nodes_vault_over_the_wire() {
     };
     let hello = desktop_publish(alice.did(), token, ws.clone(), vec![item]);
 
-    let resp = roundtrip(&vault, &Request::Publish(hello));
+    let resp = roundtrip_as(&vault, &alice, &Request::Publish(hello));
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     assert_eq!(vault.items(&ws.id).unwrap().len(), 1);
 }
@@ -129,7 +152,7 @@ fn an_invite_is_minted_and_redeemed_over_the_wire() {
         scope: Scope::Workspace("a".repeat(32)),
         public: false,
     };
-    let ticket: InviteTicket = match roundtrip(&vault, &Request::Invite(request)) {
+    let ticket: InviteTicket = match roundtrip_as(&vault, &alice, &Request::Invite(request)) {
         Response::Ok { result } => serde_json::from_value(result).unwrap(),
         other => panic!("{other:?}"),
     };
@@ -160,7 +183,7 @@ fn a_sync_push_lands_in_the_nodes_vault_over_the_wire() {
     )
     .unwrap();
 
-    let resp = roundtrip(&vault, &Request::Sync(hello));
+    let resp = roundtrip_as(&vault, &alice, &Request::Sync(hello));
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
 
     let stored = vault.get_doc(&ws_id, &item_id, "board").unwrap().unwrap();
@@ -180,14 +203,14 @@ fn a_subscribe_and_unsubscribe_round_trip_over_the_wire() {
     let layer = SyncLayer::Doc("board".to_string());
 
     let hello = desktop_start_subscribe(alice.did(), token, &ws_id, &item_id, layer.clone());
-    let resp = roundtrip(&vault, &Request::Subscribe(hello.clone()));
+    let resp = roundtrip_as(&vault, &alice, &Request::Subscribe(hello.clone()));
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     assert_eq!(
         admin.subscribers_for(&ws_id, &item_id, &layer).unwrap(),
         vec![alice.did().to_string()]
     );
 
-    let resp = roundtrip(&vault, &Request::Unsubscribe(hello));
+    let resp = roundtrip_as(&vault, &alice, &Request::Unsubscribe(hello));
     assert!(matches!(resp, Response::Ok { .. }), "{resp:?}");
     assert!(
         admin
@@ -202,7 +225,7 @@ fn a_subscribe_and_unsubscribe_round_trip_over_the_wire() {
 fn wait_for_bridge(socket: &std::path::Path) {
     for _ in 0..200 {
         if let Ok(mut conn) = UnixStream::connect(socket) {
-            let req = serde_json::to_vec(&Request::Ping).unwrap();
+            let req = serde_json::to_vec(&Envelope::plain(&Request::Ping).unwrap()).unwrap();
             if write_msg(&mut conn, &req).is_ok() {
                 if let Ok(bytes) = read_msg(&mut conn) {
                     if matches!(serde_json::from_slice(&bytes), Ok(Response::Ok { .. })) {
@@ -268,6 +291,7 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
         desktop_did: bob.did().to_string(),
         token: bob_token,
     };
+    let listen = sealed(&vault, &bob, &listen);
     write_msg(&mut conn, &serde_json::to_vec(&listen).unwrap()).unwrap();
     let ack: Response = serde_json::from_slice(&read_msg(&mut conn).unwrap()).unwrap();
     assert!(matches!(ack, Response::Ok { .. }), "{ack:?}");
@@ -293,4 +317,110 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
     let landed = LoroDoc::new();
     landed.import(&push.snapshot).unwrap();
     assert_eq!(landed.get_text("t").to_string(), "hello");
+}
+
+fn alice_sync(alice: &Identity, token: Token) -> Request {
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "hello").unwrap();
+    Request::Sync(
+        desktop_start_sync(
+            alice.did(),
+            token,
+            &"a".repeat(32),
+            &"b".repeat(32),
+            SyncLayer::Doc("board".to_string()),
+            &doc,
+            None,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_request_naming_alice_but_signed_by_bob_is_refused() {
+    let (_tmp, vault) = node_vault();
+    let alice = identity::generate().0;
+    let token = claim(&vault, &alice);
+    let bob = identity::generate().0;
+
+    let req = alice_sync(&alice, token);
+    // Built by hand: `Envelope::signed` itself refuses to sign for someone else.
+    let body = serde_json::value::to_raw_value(&req).unwrap();
+    let proof = proof::prove(&bob, &node_did(&vault), body.get().as_bytes(), now_ms());
+    let forged = Envelope {
+        body,
+        proof: Some(proof),
+    };
+
+    let resp = send(&vault, &mut gate(&vault), &forged);
+    assert!(is_err_containing(&resp, "signature"), "{resp:?}");
+    assert!(
+        vault
+            .get_doc(&"a".repeat(32), &"b".repeat(32), "board")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn envelope_signed_refuses_to_sign_for_another_desktop() {
+    let (_tmp, vault) = node_vault();
+    let alice = identity::generate().0;
+    let token = claim(&vault, &alice);
+    let bob = identity::generate().0;
+    let req = alice_sync(&alice, token);
+    assert!(Envelope::signed(&req, &bob, &node_did(&vault), now_ms()).is_err());
+}
+
+#[test]
+fn an_unsigned_request_on_behalf_of_a_desktop_is_refused() {
+    let (_tmp, vault) = node_vault();
+    let alice = identity::generate().0;
+    let token = claim(&vault, &alice);
+    let req = alice_sync(&alice, token);
+    let resp = send(&vault, &mut gate(&vault), &Envelope::plain(&req).unwrap());
+    assert!(is_err_containing(&resp, "unsigned"), "{resp:?}");
+}
+
+#[test]
+fn a_replayed_request_is_refused() {
+    let (_tmp, vault) = node_vault();
+    let alice = identity::generate().0;
+    let token = claim(&vault, &alice);
+    let env = sealed(&vault, &alice, &alice_sync(&alice, token));
+    let mut gate = gate(&vault);
+
+    let first = send(&vault, &mut gate, &env);
+    assert!(matches!(first, Response::Ok { .. }), "{first:?}");
+    let again = send(&vault, &mut gate, &env);
+    assert!(is_err_containing(&again, "replay"), "{again:?}");
+}
+
+#[test]
+fn a_listen_for_alice_signed_by_bob_is_refused() {
+    let (_tmp, vault) = node_vault();
+    let alice = identity::generate().0;
+    let token = claim(&vault, &alice);
+    let bob = identity::generate().0;
+
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("bridge.sock");
+    let (served, bound) = (vault.clone(), socket.clone());
+    std::thread::spawn(move || serve(&bound, served, LiveRegistry::new()).unwrap());
+    wait_for_bridge(&socket);
+
+    let listen = Request::Listen {
+        desktop_did: alice.did().to_string(),
+        token,
+    };
+    let body = serde_json::value::to_raw_value(&listen).unwrap();
+    let proof = proof::prove(&bob, &node_did(&vault), body.get().as_bytes(), now_ms());
+    let mut conn = UnixStream::connect(&socket).unwrap();
+    let forged = Envelope {
+        body,
+        proof: Some(proof),
+    };
+    write_msg(&mut conn, &serde_json::to_vec(&forged).unwrap()).unwrap();
+    let ack: Response = serde_json::from_slice(&read_msg(&mut conn).unwrap()).unwrap();
+    assert!(is_err_containing(&ack, "signature"), "{ack:?}");
 }

@@ -1,6 +1,6 @@
 # Group chat sync — permissions, workspace index, shards, ephemeral
 
-Status: **steps 0–1 built 2026-10-04 (T1–T5, T13 green); steps 2–11 open.** A long-horizon,
+Status: **steps 0–2 built 2026-10-04 (T1–T5, T13, T16 green); steps 3–11 open.** A long-horizon,
 test-first plan driven by `demo_apps/chat`: §0 lists the end-to-end tests that prove it done;
 they are written first, then §7's steps make them pass. Branch `sync-hardening`. The general
 permission model is [`app-permissions.md`](app-permissions.md); this plan builds the slice
@@ -74,6 +74,14 @@ ts)`; the node checks it against `public_key_from_did(desktop_did)`, rejects a `
 a window, and remembers `request_id`s inside that window. `verify_chain` already binds the
 token to `sub == holder`; this binds `holder` to the connection's actual sender. Without it
 every DID rule below is decoration.
+
+As built (step 2): the signature covers `(osv/request/v1, node DID, request_id, ts_ms,
+sha256(body))`, where body is the request's exact wire bytes, so no canonical encoding is
+needed. A timestamp may be up to 60 s old and never in the node's future (desktop and node
+share a clock today; a remote transport needs node-issued time). The replay set is in
+memory, capped, and the node refuses anything stamped at or before its own start: an earlier
+process only admitted requests stamped before it stopped, so a restart re-admits nothing.
+`Ping` and the two claims stay unsigned: claims carry their own attestation.
 
 ## 3. Chat's manifest
 
@@ -184,7 +192,8 @@ and gets a fresh `pi -p` review with the matching expert checklist before the us
 0. **Harness.** ✓ `scripts/osvauld/net.py`, `scripts/e2e_chat_sync.py`, `SyncNow`.
 1. **Baseline fixes.** ✓ incremental `since`, first-sight sync, Listen re-subscribe, retry of
    failed subscribes, sync generation.
-2. **Proven caller** (§2). T16; `courier` + `kunki` + `shell2::node` tests.
+2. **Proven caller** (§2). ✓ `courier::proof`; the kunki bridge wraps every request in an
+   `Envelope` and its `Gate` checks it before dispatch; shell2 signs as the vault account.
 3. **App roles and scopes.** `role.assign` with the grant cone; invites carrying an app role
    at `Scope::App`; sync/subscribe/listen accept `App`/`Resource` scopes against the target
    (fixes `app-permissions.md` §10); `Cause::Under` recorded so revocation cascades; roles

@@ -364,11 +364,7 @@ impl SpaceScreen {
                 let proxy = proxy.clone();
                 std::thread::spawn(move || {
                     let socket = kunki::bridge::socket_path();
-                    let result =
-                        node::join(&socket, &vault, &text, node::now_secs()).and_then(|r| {
-                            node::save_relationship(&vault, &r)?;
-                            Ok(r)
-                        });
+                    let result = node::join(&socket, &vault, &text, node::now_secs());
                     let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::ClaimResult(result)));
                 });
                 None

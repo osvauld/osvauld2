@@ -298,13 +298,14 @@ fn spawn_push_listener(
     desktop_did: String,
     token: Token,
     current: Arc<AtomicU64>,
+    vault: Vault,
 ) {
     let proxy = proxy.clone();
     let gen_ = current.load(Ordering::SeqCst);
     std::thread::spawn(move || {
         while current.load(Ordering::SeqCst) == gen_ {
             let socket = kunki::bridge::socket_path();
-            match node::listen(&socket, &desktop_did, token.clone()) {
+            match node::listen(&socket, &vault, &desktop_did, token.clone()) {
                 Ok(mut conn) => {
                     // Registered on the node by now, so nothing synced after this is missed.
                     let _ = proxy.send_event(Msg::ListenUp(gen_));
@@ -332,6 +333,7 @@ fn spawn_push_listener(
 /// without waiting for the next tick) both need, so it exists once rather than twice.
 fn sync_doc(
     proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
@@ -357,9 +359,10 @@ fn sync_doc(
             let proxy = proxy.clone();
             let id = item_id.clone();
             let doc_name = name.to_string();
+            let vault = vault.clone();
             std::thread::spawn(move || {
                 let socket = kunki::bridge::socket_path();
-                let result = node::sync(&socket, hello);
+                let result = node::sync(&socket, &vault, hello);
                 let _ = proxy.send_event(Msg::SyncDone(gen_, id, doc_name, result));
             });
         }
@@ -384,6 +387,7 @@ fn newer_vv(old: Option<&Vec<u8>>, new: &[u8]) -> bool {
 /// caller answers with a sync: a doc opened from local storage may be behind the node.
 fn subscribe_if_new(
     proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
     gen_: u64,
     subscribed: &mut HashMap<Arc<str>, std::collections::HashSet<String>>,
     desktop_did: &str,
@@ -406,8 +410,9 @@ fn subscribe_if_new(
     let id = item_id.clone();
     let layer = SyncLayer::Doc(name.to_string());
     let log_name = name.to_string();
+    let vault = vault.clone();
     std::thread::spawn(move || {
-        if let Err(e) = node::subscribe(&socket, &did, token, &ws_id, &id, layer) {
+        if let Err(e) = node::subscribe(&socket, &vault, &did, token, &ws_id, &id, layer) {
             eprintln!("subscribe: {id}/{log_name}: {e}");
             let _ = proxy.send_event(Msg::SubscribeFailed(gen_, id, log_name));
         }
@@ -882,6 +887,7 @@ impl Shell {
         let since = self.node_vv.get(&(item_id.clone(), name.to_string()));
         sync_doc(
             &self.proxy,
+            &self.vault,
             &did,
             record.token.clone(),
             &o.ws_id,
@@ -931,11 +937,13 @@ impl Shell {
             if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
                 let socket = kunki::bridge::socket_path();
                 let (did, ws_id, item_id) = (desktop_did, o.ws_id.clone(), id.to_string());
+                let vault = self.vault.clone();
                 std::thread::spawn(move || {
                     for name in names {
                         let layer = SyncLayer::Doc(name.clone());
                         if let Err(e) = node::unsubscribe(
                             &socket,
+                            &vault,
                             &did,
                             record.token.clone(),
                             &ws_id,
@@ -968,7 +976,13 @@ impl Shell {
             &self.node,
             self.vault.with_signer(|d| d.did().to_string()),
         ) {
-            spawn_push_listener(&self.proxy, did, record.token.clone(), self.sync_gen.clone());
+            spawn_push_listener(
+                &self.proxy,
+                did,
+                record.token.clone(),
+                self.sync_gen.clone(),
+                self.vault.clone(),
+            );
         }
     }
 
@@ -1684,11 +1698,7 @@ impl App for Shell {
                 std::thread::spawn(move || {
                     eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
                     let socket = kunki::bridge::socket_path();
-                    let claimed = node::join(&socket, &vault, &ticket, node::now_secs());
-                    let result = claimed.and_then(|record| {
-                        node::save_relationship(&vault, &record)?;
-                        Ok(record)
-                    });
+                    let result = node::join(&socket, &vault, &ticket, node::now_secs());
                     eprintln!("DBG timing: ClaimNode send_event {}", debug_now_ms());
                     let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Claimed(result)));
                 });
@@ -2294,6 +2304,7 @@ impl App for Shell {
                 for name in o.app.open_doc_names() {
                     let first = subscribe_if_new(
                         &self.proxy,
+                        &vault,
                         gen_,
                         &mut self.subscribed,
                         did,
@@ -2310,6 +2321,7 @@ impl App for Shell {
                     let since = self.node_vv.get(&(item_id.clone(), name.clone()));
                     sync_doc(
                         &self.proxy,
+                        &vault,
                         did,
                         record.token.clone(),
                         &ws,
