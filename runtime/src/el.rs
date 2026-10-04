@@ -496,6 +496,13 @@ impl<M> El<M> {
         }
     }
 
+    /// Query the description without allocating an inspection tree or invoking behaviours.
+    pub fn contains_id(&self, id: &str) -> bool {
+        self.id.as_ref().is_some_and(|own| &**own == id)
+            || self.children.iter().any(|child| child.contains_id(id))
+            || self.behaviour.overlay.as_ref().is_some_and(|overlay| overlay.panel.contains_id(id))
+    }
+
     pub fn id(mut self, id: impl Into<Id>) -> Self {
         self.id = Some(id.into());
         self

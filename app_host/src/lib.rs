@@ -6,6 +6,7 @@
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
 mod gfx;
+pub mod host;
 pub mod index;
 mod modules;
 mod props;
@@ -267,7 +268,15 @@ pub enum LuaMsg {
     CallStr(Key, String),
     CallPhase(Key, &'static str, f32, f32, Shape),
     /// `on_hover`: a phase, whether the primary button is held, and the look under the pointer.
-    CallHover(Key, &'static str, f32, f32, Shape, bool, Option<runtime::CursorLook>),
+    CallHover(
+        Key,
+        &'static str,
+        f32,
+        f32,
+        Shape,
+        bool,
+        Option<runtime::CursorLook>,
+    ),
     CallDrag(Key, DragArgs),
     CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
@@ -374,7 +383,6 @@ pub struct LuaApp<M> {
     /// app. `error` is the other kind: a source that never loaded at all, which leaves nothing to
     /// run. Cleared by the next successful reload, since that replaces the whole struct.
     reload_error: Option<String>,
-    fires: Arc<AtomicU64>,
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     /// Which version of the source this VM was built from. Read *before* the build, so an edit
     /// landing mid-build leaves the VM stale rather than falsely current.
@@ -394,6 +402,8 @@ pub struct LuaApp<M> {
     worlds: Worlds,
     /// While `view` runs: `world(id):set` refuses then, since a description only describes.
     viewing: Rc<Cell<bool>>,
+    setup: Option<host::VmSetup>,
+    host_context: host::HostContext,
     resolve: Resolve,
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
@@ -517,10 +527,30 @@ impl<M: 'static> LuaApp<M> {
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     ) -> mlua::Result<Self> {
+        Self::open_with_setup(src, resolve, wake, to_msg, None)
+    }
+
+    pub fn open_with_setup(
+        src: LoroDoc,
+        resolve: Resolve,
+        wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+        setup: Option<host::VmSetup>,
+    ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
-        let app = Self::build(src, cores, resolve, wake, to_msg, search, Worlds::default())?;
+        let app = Self::build(
+            src,
+            cores,
+            resolve,
+            wake,
+            to_msg,
+            search,
+            Worlds::default(),
+            setup,
+            false,
+        )?;
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -541,6 +571,8 @@ impl<M: 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
         worlds: Worlds,
+        setup: Option<host::VmSetup>,
+        strict_trial: bool,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -560,23 +592,29 @@ impl<M: 'static> LuaApp<M> {
             wake.clone(),
         )?;
         index::install_query(&vm, search.clone())?;
-        let viewing = Rc::new(Cell::new(false));
+        // Candidate module load, like its trial view, cannot mutate retained worlds.
+        let viewing = Rc::new(Cell::new(strict_trial));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
+        let host_context = host::HostContext::new(fires);
+        if let Some(install) = &setup {
+            install(&vm, host_context.clone())?;
+        }
 
         let main_src = t.to_string();
+        host_context.reset_load_budget();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        viewing.set(false);
         Ok(Self {
             vm,
             view_fn,
             handlers: RefCell::new(HashMap::new()),
             error,
             reload_error: None,
-            fires,
             to_msg,
             src_seen,
             src,
@@ -588,6 +626,8 @@ impl<M: 'static> LuaApp<M> {
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds,
             viewing,
+            setup,
+            host_context,
         })
     }
 
@@ -606,14 +646,27 @@ impl<M: 'static> LuaApp<M> {
     /// `main.lua` that compiles and returns a closure which throws on its first call is the
     /// ordinary case, and without the trial frame we would have swapped before finding out.
     pub fn reload(&mut self) -> Result<(), String> {
+        *self = self.stage_reload(self.src.clone(), false)?;
+        Ok(())
+    }
+
+    /// Validate an independent source without activating it. Hosts can persist the candidate
+    /// before assigning it; validation/save failures leave the current source and VM intact.
+    pub fn stage_source(&self, source: LoroDoc) -> Result<Self, String> {
+        self.stage_reload(Rc::new(Source::new(source, self.wake.clone())), true)
+    }
+
+    fn stage_reload(&self, source: Rc<Source>, validate_tree: bool) -> Result<Self, String> {
         let mut staged = match Self::build(
-            self.src.clone(),
+            source,
             self.cores.clone(),
             self.resolve.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
             self.search.clone(),
             self.worlds.clone(),
+            self.setup.clone(),
+            validate_tree,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -622,10 +675,15 @@ impl<M: 'static> LuaApp<M> {
                 return Err(e);
             }
         };
+        if validate_tree {
+            staged.viewing.set(true);
+        }
         if let Some(e) = &staged.error {
             self.log(format!("reload error: {e}"));
             return Err(e.clone());
         }
+        self.host_context.reset_budget();
+        staged.host_context.reset_budget();
         let dropped = match carry_state(&self.vm, &staged.vm) {
             Ok(d) => d,
             Err(e) => {
@@ -638,10 +696,20 @@ impl<M: 'static> LuaApp<M> {
             self.log("reload error: no view loaded".to_string());
             "no view loaded".to_string()
         })?;
-        if let Err(e) = staged.describe(view_fn) {
+        staged.host_context.reset_budget();
+        let tree = staged.describe(view_fn).map_err(|e| {
             let e = e.to_string();
             self.log(format!("reload error: {e}"));
-            return Err(e);
+            e
+        })?;
+        if validate_tree {
+            let mut handlers = staged.handlers.borrow_mut();
+            // Trial geometry must not mutate the running world's retained state.
+            let mut context = Ctx::new(&mut handlers, staged.to_msg.clone());
+            walk(tree, &mut context).map_err(|e| e.to_string())?;
+            if !context.errors.is_empty() {
+                return Err(context.errors.join("\n"));
+            }
         }
         // A real frame, not half of one. `_sweep` is what drops carried state belonging to an
         // element the new source no longer draws — skip it and that state lingers until whenever
@@ -658,14 +726,14 @@ impl<M: 'static> LuaApp<M> {
         staged.handlers.borrow_mut().clear();
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
-        *self = staged;
         for name in dropped {
             let note =
                 format!("reload: dropped ui.state({name:?}) — it holds a value tied to the old VM");
             eprintln!("{note}");
             self.log(note);
         }
-        Ok(())
+        staged.viewing.set(false);
+        Ok(staged)
     }
 
     /// Give `search.query` an index to ask, or take it away. Survives reloads.
@@ -767,8 +835,14 @@ impl<M: 'static> LuaApp<M> {
     /// Each live world's entities, by world id.
     pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
         let worlds = self.worlds.borrow();
-        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers() };
-        worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
+        let inspect = |w: &world::World2d| world::WorldInspection {
+            entities: w.inspect(),
+            timers: w.timers(),
+        };
+        worlds
+            .iter()
+            .map(|(id, w)| (id.clone(), inspect(w)))
+            .collect()
     }
 
     /// The last `last` console lines, newest last.
@@ -820,8 +894,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     pub fn view(&self) -> El<M> {
-        //reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        self.host_context.reset_budget();
         let body = self.body();
         let Some(e) = &self.reload_error else {
             return body;
@@ -837,9 +910,9 @@ impl<M: 'static> LuaApp<M> {
     }
 
     fn describe(&self, view_fn: &Function) -> mlua::Result<Table> {
-        self.viewing.set(true);
+        let was_viewing = self.viewing.replace(true);
         let tree = view_fn.call::<Table>(());
-        self.viewing.set(false);
+        self.viewing.set(was_viewing);
         tree
     }
 
@@ -994,6 +1067,7 @@ impl<M: 'static> LuaApp<M> {
     /// `on_zone`; one
     /// without a handler is dropped.
     fn world_events(&self, id: &str) {
+        let _scope = self.host_context.enter();
         let events = match self.worlds.borrow_mut().get_mut(id) {
             Some(world) => world.drain_events(),
             None => return,
@@ -1031,7 +1105,11 @@ impl<M: 'static> LuaApp<M> {
                         table.set("name", name)?;
                         "on_timer"
                     }
-                    world::WorldEvent::Hit { id: entity, who, speed } => {
+                    world::WorldEvent::Hit {
+                        id: entity,
+                        who,
+                        speed,
+                    } => {
                         (table.set("id", entity)?, table.set("who", who)?);
                         table.set("speed", speed)?;
                         "on_hit"
@@ -1048,8 +1126,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     pub fn update(&mut self, msg: LuaMsg) {
-        // reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        self.host_context.reset_budget();
         if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
             if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
                 match &msg {
@@ -1083,6 +1160,7 @@ impl<M: 'static> LuaApp<M> {
         let Some(h) = handlers.get(key) else {
             return;
         };
+        let _scope = self.host_context.enter();
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -1645,7 +1723,14 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
-    for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
+    for handler in [
+        "on_action",
+        "on_move",
+        "on_clip_end",
+        "on_zone",
+        "on_timer",
+        "on_hit",
+    ] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
             Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,

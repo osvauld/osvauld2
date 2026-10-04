@@ -22,6 +22,7 @@ pub mod scene3d;
 mod scroll;
 mod state;
 mod text;
+mod timing;
 mod zoom;
 use crate::anim::{Driver, Spring, Transition};
 use crate::coords::{NodePoint, ScreenPoint};
@@ -672,6 +673,7 @@ impl<A: App> Runner<A> {
             (None, Some(v)) => (v, 1.0, Affine::IDENTITY),
             (None, None) => return,
         };
+        let mut timing = timing::FrameTiming::start();
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
         let now = self.now();
@@ -708,7 +710,11 @@ impl<A: App> Runner<A> {
         let debug = self.debug;
         let mut needs_redraw = false;
         let mut any_in_flight = false;
-        let mut placed = layout::solve(app.view(), text, viewport, store);
+        timing.mark(0);
+        let view = app.view();
+        timing.mark(1);
+        let mut placed = layout::solve(view, text, viewport, store);
+        timing.mark(2);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         let previous_key = hits.key.pop();
         hits.clear();
@@ -971,6 +977,7 @@ impl<A: App> Runner<A> {
             .as_ref()
             .and_then(Capture::thumb)
             .map(|t| (&t.id, t.axis));
+        timing.mark(3);
         paint::draw(
             &mut self.scene,
             &placed,
@@ -985,6 +992,7 @@ impl<A: App> Runner<A> {
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
+        timing.mark(4);
         let captured = if self.render.is_none() {
             None // nothing to present to, and a screenshot request just goes unanswered
         } else if custom_capture {
@@ -1018,6 +1026,8 @@ impl<A: App> Runner<A> {
                 }
             })
         };
+        timing.mark(5);
+        timing.finish(screenshot.is_some());
         let mut dispatched = !done_msgs.is_empty();
         if let (Some(request), Some(image)) = (screenshot, captured) {
             self.app.update((request.complete)(image));

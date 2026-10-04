@@ -61,6 +61,121 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
+### Lua shell groundwork
+- Launcher clicks and RPC `OpenItem` now share `open_tab`'s open-or-focus check: reopening
+  focuses the existing tab without replacing its VM. `scripts/smoke_open_or_focus.py`,
+  registered in `SMOKES`, checks Lua-local state survival, a single tab after repeated opens,
+  and missing-source refusal through both paths. Lua shell presentation remains unbuilt.
+- `app_host::LuaApp::open_with_setup` accepts a trusted Rust binding installer, rerun in
+  each staged VM before source evaluation. Ordinary `open` installs no extra bindings.
+  VM-local `HostContext::require_handler` lets command bindings reject load/view/trial calls;
+  dispatch scopes reset even on handler errors.
+- `shell2::shell_api` now builds launcher-only `shell.snapshot()` and `shell.open_item(id)`
+  bindings: fresh metadata copies, a read-only API table, handler-only commands checked against
+  current inventory and carrying workspace/item IDs. The eventual receiver must revalidate
+  account/workspace access. `ItemsScreen` now mounts the bundled launcher with these bindings;
+  Shell accepts its messages only on the active workspace Home screen, resolves commands
+  against current vault inventory, then uses the shared open-or-focus path.
+- The default Lua launcher source is in `shell2/src/launcher/`: palette/per-kind accents,
+  card hover/press feedback, wrapped scrolling inventory and empty state. Shell unit tests
+  run it with the real bindings and check inventory refresh and card reachability at
+  320/393/900pt. Rust navigation/import chrome remains, and launcher initialization failures
+  fall back to the Rust grid. The canonical Lua pointer component is embedded in the bundle
+  and mounted inside the launcher; an offset-root headless test verifies its coordinates.
+  Rust chrome retains the native cursor. Auth/tabs/tiling remain Rust-side.
+- Personal launcher source/config now lives in the account-owned sealed entry
+  `shell/launcher/v1`. Launcher-specific versioned reads/exact edits stage an independent
+  source and VM, validate load/view/tree, persist, then activate. Failed validation/save
+  keeps both working and saved source intact; successful reload carries `ui.state`.
+  Transactional trials block world commands during module load/view/state sweep and use
+  isolated walk geometry, so failed candidate validation cannot cancel running world timers.
+  Invalid saved overrides fall back to the bundle with a warning and are retained until reset.
+- The Rust strip owns a two-step Reset launcher control (available from Items and Spaces),
+  and `ResetLauncher` provides the same recovery over the bridge. `SelectWorkspace`,
+  `DumpLauncherTree`, `ReadLauncherConsole` and `ScreenshotShell` complete the agent feedback
+  loop without pretending the launcher is an app item. Launcher senses/edits require Home.
+  `scripts/check_launcher_customization.py` passed the real socket/pixels loop: edit,
+  bad-edit rollback, restart/unlock, pointer opening/open-or-focus and durable reset.
+  Full smokes were not rerun at the user's request. Shell-wide pointer mounting and Android
+  integration/testing of this branch remain pending. The live
+  Wayland preview refresh stalled after unlock; restarting the preview on X11/XWayland
+  (unset `WAYLAND_DISPLAY`/`WAYLAND_SOCKET`) restored responsiveness. Root cause is not yet
+  established; the default-backend offscreen acceptance loop passed.
+
+- The bundled launcher now has a Lua **Customize** editor for `theme.lua`, `main.lua` and
+  `cursor.lua`: temporary `ui.state` drafts, validated durable Save & apply, and Cancel.
+  Failed saves retain the draft and current source; successful activation/reset dismisses the
+  editor. File switches and lock/navigation/restart discard unsaved drafts. The plain text area
+  projects tabs to spaces while preserving unedited raw bytes, including tabs inside strings.
+  Launcher-only source bindings enqueue scoped plain-data edits through the same Rust authority
+  as RPC edits. Instance tokens reject queued input/save events from a recreated launcher even
+  when workspace IDs match. `ClickLauncher`/`TypeLauncher` extend Home-only feedback actions.
+  `scripts/check_launcher_editor.py` passed real pixel/input-action/pointer save/cancel checks
+  at 320/900pt; customization restart/recovery acceptance also passed. Shell tests: 65 passed,
+  one ignored. Native keyboard/IME is not covered: bridge `Keyboard` drives game-key events.
+  Reviews are deferred to the final combined pass at the user's request.
+
+### Lua workspace header (2026-10-04)
+- Default workspace title, Back and Add item presentation moved into launcher Lua. Handler-only
+  `shell.back()` / `shell.import_item()` enqueue plain-data workspace actions; Rust revalidates
+  unlocked-account membership, selected workspace and Home, then uses the existing navigation
+  and native folder-picker/import paths. App open-or-focus and VM hosting are unchanged.
+- `launcher:workspace-header` is the reserved opt-in marker. Rust renders navigation/import
+  fallback when it is absent, preserving older overrides and restoring controls on view failure.
+  `El::contains_id` is an allocation-free, read-only tree query (including overlay panels), not
+  a callback/VM probe. Rust recovery remains available regardless of the marker.
+- `scripts/check_launcher_navigation.py` passed real-pointer Back at 320pt, long-title wrapping,
+  old-source fallback and view-failure/Rust-reset recovery; screenshot:
+  `/tmp/lua-workspace-header-320.png`. Import enqueue/guards are unit-tested; native picker
+  interaction is still manual. Workspace listing/creation, auth, tabs and tiling remain Rust or
+  unbuilt. Bounded-concurrency suites passed: app-host 233 (two ignored), runtime 126 (one
+  ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
+  passed. No app-thread integration changes; final reviews/full smokes remain deferred.
+
+### Chrome VM limits (2026-10-04)
+- Launcher-only policy: 32 MiB Lua heap, 20,000 Luau interrupts per execution, cooperative
+  deadlines of 100 ms for source load and 10 ms for view/handlers. Trusted setup installs
+  `HostContext::set_limits` in each fresh/staged VM; ordinary apps retain their existing policy.
+  A 10 ms load deadline rejected normal module compilation in debug, so load has its own cap.
+- Failed load/view/allocation candidates preserve working source and the durable override.
+  Handler failures are recorded and the next execution starts a fresh budget. These are VM
+  limits, not a hard UI-frame/process bound: native bindings, state copying, Rust tree walk,
+  layout, GPU allocations and presentation remain outside preemption/Lua heap accounting.
+- Reset now constructs a fresh bundled launcher and validates it before deleting the override;
+  no old-VM state export, no saved-source evaluation, no scratch carry. A poisoned `_dump_state`
+  regression failed before this correction and passes after; new instance tokens discard stale
+  events from the old launcher. Normal customization still carries viewer state.
+- `scripts/check_launcher_limits.py` is registered in `SMOKES` and passed the real-socket loop
+  for runaway load/view/handler, heap rejection, source rollback and Rust pointer reset after
+  poisoned state export. Editor (320/900pt) and customization/restart focused checks also pass.
+  Full smokes and combined reviews remain deferred by request. No app-thread hosting changes.
+- Validation caveat: the full parallel shell suite had three valid-load deadline failures during
+  concurrent builds/heavy auth tests. Bounded concurrency (`--test-threads=2`) passed 67 tests
+  (one ignored); app-host passed 233 (two ignored). Wall-clock accounting includes descheduling;
+  CPU-time budgets were recommended but are not implemented. Limits are not finalized.
+
+### Interaction/performance diagnostic (2026-10-04)
+- `scripts/check_app_interaction.py` passes against release: current model viewer's real-pointer
+  picking, orbit drag and wheel zoom; kanban cross-column card drag commits to its document.
+  The user's stored viewer was the older pre-picking source (no viewport handlers); rebuilding
+  the binary does not replace uploaded source. No user app was overwritten. A live update was
+  blocked by the Wayland session's bridge timing out before any write; cause not established.
+  Later that day, bringing the window to the foreground restored the bridge; the verified
+  interactive demo was added as a separate item and opened, preserving the original viewer.
+- Opt-in `OSVAULD_FRAME_TIMINGS=1` emits CPU frame stages to stderr: preparation, view (including
+  Lua walk), layout, state/hit reconciliation, paint encoding and presentation/capture call.
+  Disabled mode performs no per-frame clock reads or allocations. Timing ends before post-frame
+  callback dispatch and does not include input-handler timing, GPU timestamps or display scanout.
+  `scripts/summarize_frame_timings.py` excludes captures and reports p50/p95/max. Offscreen normal
+  frames do not present to a window, so their present stage is effectively empty.
+- A 59-normal-frame mixed viewer/kanban diagnostic at 1000×800 measured debug CPU work
+  p50/p95 20.402/65.449 ms; release 1.117/4.663 ms. Layout dominated (debug 15.455/53.971 ms,
+  release 0.795/3.419 ms); release view was 0.099/0.521 ms. These are one-run diagnostic samples,
+  not input-to-display latency, a native/custom cursor comparison or a steady-state benchmark.
+  Logs: `/tmp/app-interaction-timings-{debug,release}.log`. Windowed measurements remain pending.
+  Runtime tests passed (125 passed, one ignored); full smokes and combined review remain deferred
+  by request.
+
 ### Voice POC (`voice/`, 2026-10-01)
 - standalone binary, not wired into the shell: mic (`cpal`) → capture cleaning → Opus 20 ms
   mono 48 kHz → iroh QUIC datagram `[seq u32][level u8][opus]` → Opus → playout buffer

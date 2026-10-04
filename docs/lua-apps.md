@@ -36,6 +36,64 @@ return function()
 end
 ```
 
+## Bundled workspace launcher
+
+The shell's default item grid lives in `shell2/src/launcher/` and runs as a separate Lua VM.
+It alone receives `shell.snapshot()` (fresh `{workspace = {id, name}, items = {{id, name, kind}, …}}`
+metadata) and `shell.open_item(id)` (handler-only, scoped to that workspace). Rust revalidates
+commands and opens or focuses the existing item instance. Ordinary uploaded apps do **not**
+receive `shell`. The default workspace title/Back/Add item header is also Lua-described.
+`shell.back()` and `shell.import_item()` enqueue handler-only, workspace-scoped requests;
+Rust rechecks unlocked-account membership and Home before navigating or opening its native
+folder picker/import path. No filesystem access is granted to Lua. Workspace listing, auth and
+tabs remain Rust-side.
+
+The reserved element ID `launcher:workspace-header` opts into Lua header presentation. If the
+rendered tree lacks it (older customized sources, initialization or view failure), Rust supplies
+its navigation/import header. Detection only inspects the Rust description; no handler executes.
+Rust recovery controls remain independent of this marker.
+
+Launcher source (including `theme.lua` configuration and the reused `cursor.lua` component) is
+saved as an account-owned sealed vault entry. On Home, use `rpc.select_workspace(ws_id)`,
+`rpc.read_launcher_file_versioned(path)` and `rpc.edit_launcher_file(path, revision, edits)`.
+Edits are staged through load/view/tree validation, persisted, then activated; a rejected edit
+or failed save changes neither the working source nor the saved override. Viewer `ui.state`
+is carried through successful reloads. `rpc.dump_launcher_tree()`, `rpc.read_launcher_console()`
+and `rpc.save_shell_screenshot(path)` provide feedback. Launcher senses/edits require Home
+focus; reset (`rpc.reset_launcher()` or the Rust strip's two-step Reset launcher button) also
+works from the workspace listing. Invalid saved source falls back to the bundle with a warning,
+without deleting the override. Ordinary app `WriteFile`/`EditFile` never target launcher source.
+
+**Customize** opens the bundled Lua editor for `theme.lua`, `main.lua` and `cursor.lua`.
+Its draft lives in `ui.state`, not the vault: failed saves retain it; Save validates and persists
+before applying; Cancel or changing files discards it. Lock/navigation/restart do not preserve
+unsaved drafts. The editor uses a plain `ui.text_area`, without syntax highlighting. Tabs display
+as four spaces; the input projection retains raw tabs outside the edited span.
+
+The launcher alone also receives `shell.read_launcher_file(path)` →
+`{content, revision, generation}` (copies of committed source) and handler-only
+`shell.edit_launcher_file(path, revision, {{old_text = ..., new_text = ...}})`.
+Edits enqueue plain data; Rust rechecks Home/workspace, validates, saves, then activates.
+`generation` changes after activation/reset so an open editor can dismiss without mutating in
+view. During a staging trial, reads still describe the committed source, not the candidate.
+`rpc.click_launcher(id)` and `rpc.type_launcher(id, text)` invoke current launcher handlers;
+use `rpc.click_at(*rpc.centre_of(id))` to test actual hit eligibility. Bridge `Keyboard` drives
+game-key events, not native field typing/IME; `TypeLauncher` exercises `on_input` directly.
+
+The launcher alone has a 32 MiB Lua heap cap and a 20,000-interrupt ceiling per execution,
+with cooperative wall-clock deadlines of 100 ms for source load and 10 ms for view/handlers.
+The policy is reinstalled in staged VMs; ordinary uploaded apps retain their existing sandbox
+policy. Resource-exhausting candidates reject without changing committed or working source.
+These limits are not a hard frame-time or process-memory bound: Rust bindings, state copying,
+tree walking, layout, GPU resources and presentation are not preempted or covered by the Lua
+heap cap. Wall-clock deadlines include descheduling: concurrent builds/heavy parallel tests
+have rejected valid loads; CPU-time accounting is under discussion and policy is not finalized.
+A runtime failure can still damage viewer scratch; Rust Reset starts a fresh bundled
+VM, discards scratch and does not execute the old VM, even to export state.
+
+The bundled custom pointer is active inside the launcher; Rust chrome keeps the native cursor.
+Shell-wide pointer mounting and Lua auth/tabs remain unbuilt.
+
 ## The model — Elm, in Lua
 
 The architecture is **Elm's**: state, view, update.
@@ -423,8 +481,14 @@ children keep their natural size there. A scrolling container with `grow` uses t
 main-axis space instead of letting its content enlarge its viewport. **Needs an `id`.**
 
 **Overlay positioning** — `absolute` takes the element out of the flow; `top`/`left`/
-`right`/`bottom` position it in viewport coordinates. This is how kanban draws its drag ghost
-and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
+`right`/`bottom` position it relative to its containing parent. At a viewport-sized root this
+is the app viewport; a nested launcher root uses its own local coordinates, matching `on_hover`.
+
+*Corrected 2026-10-03: this previously said “position it in viewport coordinates” without the
+root qualification. The launcher mounts below Rust chrome; an offset-root headless test pins
+local pointer coordinates against the final painted position.*
+
+This is how kanban draws its drag ghost and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
 anchor then the root-painted panel. `side` is `bottom` (default), `top`, `left`, or `right`;
 `align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher and,
 like every handler, needs an `id`:

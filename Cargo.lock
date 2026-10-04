@@ -6472,6 +6472,7 @@ dependencies = [
  "identity",
  "kunki",
  "loro",
+ "mlua",
  "osvauld-rpc",
  "rfd",
  "runtime",

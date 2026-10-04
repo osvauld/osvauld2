@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 runtime = { path = "../runtime" }
 app_host = { path = "../app_host" }
+mlua = { version = "0.10", features = ["luau"] }
 world = { path = "../world" }
 vault = { path = "../vault" }
 search = { path = "../search" }

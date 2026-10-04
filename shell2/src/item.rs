@@ -1,10 +1,11 @@
-//! Items screen: inside one workspace — the apps it holds, drawn as the same card grid as
-//! the workspaces themselves. List-only for now: app upload/creation is the next design
-//! discussion, so an empty workspace just says so.
+//! Workspace items: Lua navigation/import presentation, with Rust authority and fallback chrome.
+//! Keeps the Rust grid as a fallback if the launcher cannot initialize.
 
 use crate::app_src::{app_name, read_app_folder, snapshot};
+use crate::launcher::{Command, Launcher};
 use crate::space::SpaceScreen;
 use crate::{Msg, Screen, theme};
+use app_host::LuaMsg;
 use runtime::{El, EventLoopProxy, col, row, text};
 use vault::{Vault, WorkspaceItem, WorkspaceMeta};
 
@@ -12,6 +13,7 @@ pub struct ItemsScreen {
     ws: WorkspaceMeta,
     items: Vec<WorkspaceItem>,
     error: Option<String>,
+    launcher: Option<Launcher>,
 }
 
 #[derive(Clone)]
@@ -19,6 +21,7 @@ pub enum ItemsScreenMsg {
     Back,
     Upload,
     Open(WorkspaceItem),
+    Launcher(String, u64, LuaMsg),
 }
 
 impl ItemsScreen {
@@ -33,7 +36,56 @@ impl ItemsScreen {
             Ok(i) => (i, None),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
-        ItemsScreen { ws, items, error }
+        let launcher = Launcher::new(vault, ws.clone(), items.clone());
+        let error = error.or_else(|| launcher.as_ref().err().cloned());
+        ItemsScreen {
+            ws,
+            items,
+            error,
+            launcher: launcher.ok(),
+        }
+    }
+
+    pub fn update_launcher(&mut self, instance: u64, msg: LuaMsg) -> Vec<Command> {
+        self.launcher
+            .as_mut()
+            .map(|l| l.update(instance, msg))
+            .unwrap_or_default()
+    }
+
+    pub fn launcher(&self) -> Result<&Launcher, String> {
+        self.launcher
+            .as_ref()
+            .ok_or_else(|| "launcher is unavailable; reset it".into())
+    }
+
+    pub fn launcher_mut(&mut self) -> Result<&mut Launcher, String> {
+        self.launcher
+            .as_mut()
+            .ok_or_else(|| "launcher is unavailable; reset it".into())
+    }
+
+    pub fn reset_launcher(&mut self, vault: &Vault) -> Result<(), String> {
+        if let Some(launcher) = &mut self.launcher {
+            launcher.reset(vault)?;
+        } else {
+            Launcher::clear_override(vault)?;
+            self.launcher = Some(Launcher::new(vault, self.ws.clone(), self.items.clone())?);
+        }
+        self.error = None;
+        Ok(())
+    }
+
+    pub fn refresh(&mut self, vault: &Vault) {
+        match vault.items(&self.ws.id) {
+            Ok(items) => {
+                self.items = items;
+                if let Some(launcher) = &self.launcher {
+                    launcher.refresh(self.items.clone());
+                }
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
     }
 
     pub fn view(&self) -> El<Msg> {
@@ -77,7 +129,9 @@ impl ItemsScreen {
             .child(col().grow())
             .child(upload_btn);
 
-        let body = if self.items.is_empty() {
+        let body = if let Some(launcher) = &self.launcher {
+            launcher.view()
+        } else if self.items.is_empty() {
             col().grow().center().child(
                 text("no apps in this workspace yet")
                     .font_size(13.0)
@@ -108,10 +162,19 @@ impl ItemsScreen {
             col().id("items").grow().scroll_y().child(grid)
         };
 
-        let mut page = col().full().pad(40.0).gap(24.0).child(header);
+        // The reserved marker opts into Lua presentation. Old overrides and failed views keep
+        // the Rust controls; query the Rust description, never execute a handler to probe it.
+        let mut page = col().full().pad(40.0).gap(24.0);
+        if !body.contains_id("launcher:workspace-header") {
+            page = page.child(header);
+        }
         // Upload failures land here (no main.lua, non-utf8 file, locked vault) — without this
         // the button is a silent no-op.
-        if let Some(error) = &self.error {
+        if let Some(error) = self
+            .error
+            .as_deref()
+            .or_else(|| self.launcher.as_ref().and_then(Launcher::warning))
+        {
             page = page.child(text(error).font_size(12.0).color(theme::error()));
         }
         page.child(body)
@@ -129,7 +192,7 @@ impl ItemsScreen {
                 self.error = self.upload(vault).err();
                 None
             }
-            ItemsScreenMsg::Open(item) => None, //intercepted before its reaced here
+            ItemsScreenMsg::Open(_) | ItemsScreenMsg::Launcher(..) => None, // intercepted by Shell
         }
     }
 
@@ -147,6 +210,9 @@ impl ItemsScreen {
             .put_src(&self.ws.id, &item.id, &snapshot_bytes)
             .map_err(|e| e.to_string())?;
         self.items = vault.items(&self.ws.id).map_err(|e| e.to_string())?;
+        if let Some(launcher) = &self.launcher {
+            launcher.refresh(self.items.clone());
+        }
         Ok(())
     }
 }

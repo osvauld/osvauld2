@@ -200,6 +200,33 @@ pub enum Request {
         item_id: String,
         path: String,
     },
+    /// Select a current account workspace on Home without closing any app instances.
+    SelectWorkspace {
+        ws_id: String,
+    },
+    /// Account-owned launcher source, scoped to the selected workspace UI (not an app item).
+    ReadLauncherFile {
+        path: String,
+    },
+    EditLauncherFile {
+        path: String,
+        expected_revision: String,
+        edits: Vec<SourceTextEdit>,
+    },
+    DumpLauncherTree {},
+    ClickLauncher {
+        el_id: String,
+    },
+    TypeLauncher {
+        el_id: String,
+        content: String,
+    },
+    ReadLauncherConsole {
+        last: usize,
+    },
+    /// Restore the account's bundled launcher; also available from the workspace listing.
+    ResetLauncher {},
+
     /// Read source plus an opaque per-file content revision for [`Request::EditFile`].
     ReadFileVersioned {
         item_id: String,
@@ -315,6 +342,12 @@ pub enum Request {
     ReadConsole {
         item_id: String,
         last: usize,
+    },
+    /// Capture shell chrome/Home too, without requiring a focused app item.
+    ScreenshotShell {
+        width: Option<f32>,
+        height: Option<f32>,
+        scale: Option<f32>,
     },
     /// Capture the next live frame. With no dimensions this is the exact visible window;
     /// width/height are logical points and scale controls physical pixels per point.

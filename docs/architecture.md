@@ -95,6 +95,7 @@ ws/<ws>/…                     workspace metadata
 ws/<ws>/item/<id>/meta        item metadata (name, kind)
 ws/<ws>/item/<id>/src         the app's source doc, exported as a Loro snapshot
 ws/<ws>/item/<id>/doc/<name>  the app's state docs, name-keyed
+entry/shell/launcher/v1       personal launcher source/config snapshot, sealed to the account
 ```
 
 The **source doc** holds a `files` LoroMap — path string → one `LoroText` per file
@@ -120,6 +121,20 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
   share a field.
 - **Reload stages a whole second VM and swaps** (Lua can't unload a chunk); doc cores and
   per-viewer scratch outlive the VM; a failed reload leaves the running app untouched.
+- **Launcher customization is account-owned and transactional.** Its source/config is a sealed
+  entry, not a workspace item. `LuaApp::stage_source` validates an independent candidate with
+  a tree walk before the shell persists and activates it. Rust-owned reset/fallback never depends
+  on customized Lua, and ordinary apps receive no launcher editing or shell capability grant.
+- **Host bindings are explicit capability grants.** Trusted Rust callers may opt into
+  `LuaApp::open_with_setup`; its installer runs in each fresh VM before app source. Command
+  bindings must check the supplied VM-local `HostContext::require_handler` before side effects,
+  so load, view and reload trials cannot issue commands. Ordinary `open` grants none of these
+  extra bindings; installers only construct bindings, never perform host actions. A trusted
+  installer may also set VM-local `host::VmLimits` through `HostContext::set_limits`; launcher
+  load/view/handler budgets reset independently and policy is reinstalled on staging. The Lua
+  heap cap excludes Rust-owned resources; interrupt deadlines are cooperative, not a hard UI
+  thread watchdog. Reset builds a fresh bundled launcher without calling the old VM or carrying
+  its scratch state.
 - **Reads and writes to docs are different paths**: reads are plain Lua tables (the mirror,
   a frame behind), writes are explicit CRDT calls addressed by **stable id, never index**.
 - **Elements are tagged tables** — only `ui.*` constructors produce them; a bare table is a
