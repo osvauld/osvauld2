@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–1 built 2026-10-04 (T3, T6, T8 green; T2 half); steps 2–11 open.** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–2 built 2026-10-04 (T3, T6, T8 green; T2 half); steps 3–11 open.** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -142,6 +142,14 @@ Each leaves `cargo test` and the smokes green.
 2. **Tile runtime.** Split `Runner` into a windowless `Tile` (layout, hit, paint, clock,
    state, text) and the windowed driver; `Headless` becomes a `Tile`. Add the tile slot
    element and input translation. Verify `vello::Scene` is `Send`. No threads yet.
+   *Built 2026-10-04, revised:* `Tile` (`runtime/src/tile/`) wraps the same `Runner` rather than
+   splitting it — a `Runner` with no `Render` already is the windowless half, so the split is
+   two fields (`virtual_clock`, `wants_frame`). `Headless` stays as is. The slot is
+   `tile(Arc<Scene>)` + `.on_tile(id, map)`; input crosses as `TileInput` (pointer in tile
+   coordinates, capture on press, keyboard after a press inside, wheel not shared with
+   ancestors). `Scene` and `TileInput` are `Send`; a GPU test paints a tile framed on another
+   thread into its slot. Not yet: the tile's cursor and rects back to the host (step 4), a
+   virtual clock for tiles (step 4), and the slot in the Lua vocabulary (the Lua chrome).
 3. **App thread, focused app only.** `OpenApp` becomes a handle (`TileIn` sender, latest
    frame, ids); `LuaApp` + `Tile` live on the thread. T1, T2 green.
 4. **Bridge through the boundary.** Senses and actions become `TileIn` requests with reply
@@ -162,7 +170,8 @@ Each leaves `cargo test` and the smokes green.
 ## 7. Open
 
 - **Font caches per thread** — memory cost at 10+ open apps; a shared read-only glyph atlas
-  may be needed.
+  may be needed. *Measured 2026-10-04 (release, 60 lines of text per tile): the first
+  tile ~15 MB, each further one ~3.6 MB — font data is shared already. Not a problem at 10.*
 - **Cross-tile drag/drop** and clipboard formats beyond text.
 - **IME** forwarding: composition events to the focused tile; the bridge's `Keyboard` does not
   cover native IME today.
