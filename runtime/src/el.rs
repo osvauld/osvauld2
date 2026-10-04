@@ -143,7 +143,7 @@ pub(crate) struct Appearance {
     pub scene3d: Option<Arc<crate::scene3d::Scene3d>>,
     pub custom: Option<CustomFn>,
     /// Another runtime's last frame, painted at this element's rect (`crate::tile`).
-    pub tile: Option<Arc<Scene>>,
+    pub tile: Option<crate::tile::TileFrame>,
     pub repaint: bool,
 }
 pub struct Overlay<M> {
@@ -315,7 +315,7 @@ pub(crate) struct Behaviour<M> {
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
     pub on_hover: Option<(Id, Box<dyn Fn(HoverEvent) -> M>)>,
-    pub on_tile: Option<(Id, Box<dyn Fn(crate::tile::TileInput) -> M>)>,
+    pub on_tile: Option<(Id, Box<dyn Fn(crate::tile::TileEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
@@ -473,9 +473,9 @@ pub fn scene3d<M>(scene: Arc<crate::scene3d::Scene3d>) -> El<M> {
 
 /// A leaf that shows another runtime's frame — an app running on its own thread — clipped to
 /// its rect. Pair with [`El::on_tile`] to give that runtime its input.
-pub fn tile<M>(scene: Arc<Scene>) -> El<M> {
+pub fn tile<M>(frame: crate::tile::TileFrame) -> El<M> {
     let mut e = El::new(Style::default());
-    e.appearance.tile = Some(scene);
+    e.appearance.tile = Some(frame);
     e
 }
 
@@ -878,7 +878,7 @@ impl<M> El<M> {
     pub fn on_tile(
         mut self,
         id: impl Into<Id>,
-        map: impl Fn(crate::tile::TileInput) -> M + 'static,
+        map: impl Fn(crate::tile::TileEvent) -> M + 'static,
     ) -> Self {
         self.behaviour.on_tile = Some((id.into(), Box::new(map)));
         self

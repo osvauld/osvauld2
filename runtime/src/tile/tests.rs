@@ -1,5 +1,5 @@
 use super::*;
-use crate::{El, Headless, col, row, text, tile};
+use crate::{El, ElRect, Headless, KeyInput, col, row, text, tile};
 use std::sync::Arc;
 
 /// The host: a 100-wide strip, then a 200×100 tile slot. It only records what it is told.
@@ -21,9 +21,9 @@ impl App for Host {
         row()
             .child(col().w(100.0).h(100.0))
             .child(
-                tile(Arc::new(Scene::new()))
+                tile(TileFrame::default())
                     .size(200.0, 100.0)
-                    .on_tile("t", HostMsg::Tile),
+                    .on_tile("t", |e| HostMsg::Tile(e.input)),
             )
             .on_wheel("host", |_| HostMsg::Wheel)
     }
@@ -77,8 +77,8 @@ fn a_click_in_the_slot_reaches_the_tile_app() {
         matches!(got.first(), Some(TileInput::Move(x, y)) if *x == 50.0 && *y == 50.0),
         "{got:?}"
     );
-    for i in got {
-        guest.input(i);
+    for input in got {
+        guest.input(TileEvent { input, at: 0.0 });
     }
     assert_eq!(guest.app().clicks, 1);
 }
@@ -104,7 +104,10 @@ fn a_press_captures_until_release() {
             .any(|i| matches!(i, TileInput::Move(x, _) if *x == -80.0)),
         "{got:?}"
     );
-    assert!(!got.iter().any(|i| matches!(i, TileInput::Leave)), "{got:?}");
+    assert!(
+        !got.iter().any(|i| matches!(i, TileInput::Leave)),
+        "{got:?}"
+    );
     host.release();
     let got = drain(&mut host);
     assert!(
@@ -191,9 +194,13 @@ fn a_tile_painted_on_another_thread_shows_in_its_slot() {
     impl App for Shows {
         type Msg = ();
         fn view(&self) -> El<()> {
-            row()
-                .child(col().w(100.0).h(100.0))
-                .child(tile(self.0.clone()).size(150.0, 100.0))
+            row().child(col().w(100.0).h(100.0)).child(
+                tile(TileFrame {
+                    scene: self.0.clone(),
+                    rects: Arc::new([]),
+                })
+                .size(150.0, 100.0),
+            )
         }
         fn update(&mut self, _: ()) {}
         fn clear(&self) -> Color {
@@ -231,7 +238,7 @@ fn a_vanished_tile_lets_go_of_the_keyboard() {
     impl App for Maybe {
         type Msg = bool;
         fn view(&self) -> El<bool> {
-            let slot = tile(Arc::new(Scene::new()))
+            let slot = tile(TileFrame::default())
                 .size(100.0, 100.0)
                 .on_tile("t", |_| true);
             if self.0 { row().child(slot) } else { row() }
@@ -240,11 +247,137 @@ fn a_vanished_tile_lets_go_of_the_keyboard() {
     }
     let mut host = Tile::new(Maybe(true), (100.0, 100.0));
     host.frame();
-    host.input(TileInput::Move(50.0, 50.0));
-    host.input(TileInput::Button(true));
-    host.input(TileInput::Button(false));
+    host.input(TileEvent {
+        input: TileInput::Move(50.0, 50.0),
+        at: 0.0,
+    });
+    host.input(TileEvent {
+        input: TileInput::Button(true),
+        at: 0.0,
+    });
+    host.input(TileEvent {
+        input: TileInput::Button(false),
+        at: 0.0,
+    });
     assert!(host.runner.keyboard_tile().is_some());
     host.app_mut().0 = false;
     host.frame();
     assert_eq!(host.runner.keyboard_tile(), None);
+}
+
+/// A host whose slot carries a tile's rects, and which records what the runtime tells it.
+struct Rects {
+    rects: Arc<[ElRect]>,
+    sized: Vec<Vec<(String, (f32, f32))>>,
+    got: Vec<TileInput>,
+}
+
+impl App for Rects {
+    type Msg = TileInput;
+    fn view(&self) -> El<TileInput> {
+        row().child(col().w(100.0).h(100.0)).child(
+            tile(TileFrame {
+                scene: Arc::new(Scene::new()),
+                rects: self.rects.clone(),
+            })
+            .size(200.0, 100.0)
+            .on_tile("t", |e| e.input),
+        )
+    }
+    fn update(&mut self, msg: TileInput) {
+        self.got.push(msg);
+    }
+    fn tiles_sized(&mut self, sizes: &[(String, (f32, f32))]) -> bool {
+        self.sized.push(sizes.to_vec());
+        false
+    }
+}
+
+fn rects_host() -> Tile<Rects> {
+    let go = ElRect {
+        id: "go".into(),
+        x: 40.0,
+        y: 40.0,
+        w: 40.0,
+        h: 30.0,
+        hits: vec!["click"],
+    };
+    let past = ElRect {
+        id: "past".into(),
+        x: 190.0,
+        y: 0.0,
+        w: 40.0,
+        h: 10.0,
+        hits: vec!["click"],
+    };
+    Tile::new(
+        Rects {
+            rects: Arc::new([go, past]),
+            sized: Vec::new(),
+            got: Vec::new(),
+        },
+        (300.0, 100.0),
+    )
+}
+
+/// The host's rects include the tile's, moved to where the slot is and cut to it — so a driver
+/// aims at an app's element the same way whether or not it runs in a tile.
+#[test]
+fn a_tiles_rects_are_the_hosts_rects() {
+    let mut host = rects_host();
+    host.frame();
+    let rects = host.rects();
+    let go = rects
+        .iter()
+        .find(|r| r.id == "go")
+        .expect("go is reachable");
+    assert_eq!((go.x, go.y, go.w, go.h), (140.0, 40.0, 40.0, 30.0));
+    let past = rects
+        .iter()
+        .find(|r| r.id == "past")
+        .expect("past is partly in");
+    assert_eq!((past.x, past.w), (290.0, 10.0));
+}
+
+/// The host hears a slot's size when it changes, not every frame.
+#[test]
+fn a_slot_size_is_told_once() {
+    let mut host = rects_host();
+    host.frame();
+    host.update(TileInput::Leave);
+    host.frame();
+    assert_eq!(
+        host.app().sized,
+        vec![vec![("t".to_string(), (200.0, 100.0))]]
+    );
+}
+
+/// With nothing pressed and no field of the host's focused, keys go to the tile — the app on
+/// screen has the keyboard by default.
+#[test]
+fn keys_reach_a_tile_without_a_press() {
+    let mut host = rects_host();
+    host.frame();
+    let key = KeyInput {
+        code: Some("KeyW".into()),
+        key: "w".into(),
+        down: true,
+        repeat: false,
+        cancelled: false,
+        mods: crate::Mods {
+            shift: false,
+            ctrl: false,
+            alt: false,
+            super_: false,
+        },
+    };
+    host.input(TileEvent {
+        input: TileInput::GameKey(key),
+        at: 0.0,
+    });
+    assert!(
+        matches!(host.app().got.as_slice(), [TileInput::GameKey(k)] if k.key == "w"),
+        "{:?}",
+        host.app().got
+    );
 }

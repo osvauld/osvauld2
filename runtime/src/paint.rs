@@ -103,7 +103,7 @@ pub(crate) fn draw<M>(
             // A tile draws in its own coordinates from (0, 0); it may not paint past its rect.
             scene.push_clip_layer(Fill::NonZero, t * p.transform, &p.rect);
             let origin = Affine::translate((p.rect.x0, p.rect.y0));
-            scene.append(tile, Some(t * p.transform * origin));
+            scene.append(&tile.scene, Some(t * p.transform * origin));
             scene.pop_layer();
         }
         if let Some(frame) = &p.appearance.frame {

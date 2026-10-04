@@ -56,16 +56,15 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, At, El, ElInfo, FrameTick, KeyInput, Placement, PlacementAlign,
-    PlacementSide, WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
-    tile,
+    Action, Anchor, At, El, ElInfo, FrameTick, KeyInput, Placement, PlacementAlign, PlacementSide,
+    WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input, tile,
 };
 pub use headless::Headless;
 pub use hover::{CursorLook, HoverEvent, HoverPhase};
 pub use render::{CapturedImage, Render};
 use state::Store;
-pub use tile::{Tile, TileInput};
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
+pub use tile::{Tile, TileEvent, TileFrame, TileInput};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -205,6 +204,16 @@ pub trait App {
     fn is_ambient(&self, _msg: &Self::Msg) -> bool {
         false
     }
+
+    /// Before each frame lays out, with the time it is drawn at. A host of tiles fetches their
+    /// latest frames here — offscreen it waits for them, which keeps a driven run exact.
+    fn before_frame(&mut self, _now: f64) {}
+
+    /// The `on_tile` slots laid out at a new size, by id. `true` lays the frame out again, for a
+    /// host that resized a tile and already has its frame at that size.
+    fn tiles_sized(&mut self, _sizes: &[(String, (f32, f32))]) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -288,6 +297,8 @@ struct Runner<A: App> {
     tile_over: Option<Id>,
     tile_grab: Option<Id>,
     tile_keys: Option<Id>,
+    /// What `tiles_sized` was last told.
+    tile_sizes: Vec<(String, (f32, f32))>,
     last_frame: Option<f64>,
     /// When the pointer event now being processed arrived, on the same monotonic clock as
     /// `start`. Stamped once per event so everything one event fires shares it.
@@ -391,7 +402,7 @@ struct Hits<M> {
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
     no_cursor: Vec<Geometry>,
     looks: Vec<(Geometry, CursorLook)>,
-    tile: Vec<(Geometry, Id, Box<dyn Fn(TileInput) -> M>)>,
+    tile: Vec<(Geometry, Id, Box<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -674,6 +685,29 @@ impl<A: App> Runner<A> {
                 }),
             }
         }
+        // A tile's elements, from its last frame, moved into this window and cut to the slot.
+        for (g, _, _, rects) in &self.hits.tile {
+            let (Some(visible), origin, k) = (
+                g.visible_rect_kurbo(),
+                g.screen_rect_kurbo().origin(),
+                g.scale() as f64,
+            ) else {
+                continue;
+            };
+            for r in rects.iter() {
+                let (x, y) = (origin.x + r.x as f64 * k, origin.y + r.y as f64 * k);
+                let at = Rect::new(x, y, x + r.w as f64 * k, y + r.h as f64 * k).intersect(visible);
+                if at.width() > 0.0 && at.height() > 0.0 {
+                    out.push(ElRect {
+                        x: at.x0 as f32,
+                        y: at.y0 as f32,
+                        w: at.width() as f32,
+                        h: at.height() as f32,
+                        ..r.clone()
+                    });
+                }
+            }
+        }
         for e in &mut out {
             e.hits.sort_unstable();
         }
@@ -723,7 +757,15 @@ impl<A: App> Runner<A> {
                 &Rect::new(0.0, 0.0, viewport.0 as f64, viewport.1 as f64),
             );
         }
-        let app = &self.app;
+        self.app.before_frame(now);
+        let mut placed = layout::solve(self.app.view(), &mut self.text, viewport, &self.store);
+        let sizes = layout::tile_sizes(&placed);
+        if sizes != self.tile_sizes {
+            self.tile_sizes = sizes;
+            if self.app.tiles_sized(&self.tile_sizes) {
+                placed = layout::solve(self.app.view(), &mut self.text, viewport, &self.store);
+            }
+        }
         let pointer = self.pointer;
         let hits = &mut self.hits;
         let store = &mut self.store;
@@ -736,7 +778,6 @@ impl<A: App> Runner<A> {
         let debug = self.debug;
         let mut needs_redraw = false;
         let mut any_in_flight = false;
-        let mut placed = layout::solve(app.view(), text, viewport, store);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         let previous_key = hits.key.pop();
         hits.clear();
@@ -873,7 +914,9 @@ impl<A: App> Runner<A> {
             if let Some((id, handler)) = p.behaviour.on_tile.take()
                 && visible.is_some()
             {
-                hits.tile.push((geometry, id, handler));
+                let rects = p.appearance.tile.as_ref().map(|f| f.rects.clone());
+                hits.tile
+                    .push((geometry, id, handler, rects.unwrap_or_else(|| Arc::new([]))));
             }
             if let Some((id, handler)) = p.behaviour.on_key.take()
                 && visible.is_some()
@@ -1803,6 +1846,10 @@ impl<A: App> Runner<A> {
     }
 
     fn on_game_key(&mut self, event: KeyInput) {
+        if let Some(id) = self.keyboard_tile() {
+            self.to_tile(&id, TileInput::GameKey(event));
+            return;
+        }
         if self.focused.get().is_some() {
             return;
         }
@@ -1989,7 +2036,12 @@ impl<A: App> Runner<A> {
     /// The topmost tile under a window point, and that point in the tile's coordinates.
     fn tile_at(&self, (x, y): (f32, f32)) -> Option<(Id, (f32, f32))> {
         let p = Point::new(x as f64, y as f64);
-        let (g, id, _) = self.hits.tile.iter().rev().find(|(g, _, _)| g.contains(p))?;
+        let (g, id, _, _) = self
+            .hits
+            .tile
+            .iter()
+            .rev()
+            .find(|(g, _, _, _)| g.contains(p))?;
         Some((id.clone(), Self::tile_local(g, (x, y))))
     }
 
@@ -1998,18 +2050,27 @@ impl<A: App> Runner<A> {
         (n.x as f32, n.y as f32)
     }
 
-    /// The tile holding the keyboard, if it is still on screen; a vanished one lets go.
+    /// The tile the keyboard goes to: the one last pressed while it is still on screen, else
+    /// the topmost one unless a field of this runtime's own has focus.
     fn keyboard_tile(&mut self) -> Option<Id> {
-        let id = self.tile_keys.as_ref()?;
-        if !self.hits.tile.iter().any(|(_, i, _)| i == id) {
+        if let Some(id) = &self.tile_keys
+            && !self.hits.tile.iter().any(|(_, i, _, _)| i == id)
+        {
             self.tile_keys = None;
         }
-        self.tile_keys.clone()
+        if self.tile_keys.is_some() {
+            return self.tile_keys.clone();
+        }
+        if self.focused.get().is_some() {
+            return None;
+        }
+        self.hits.tile.last().map(|(_, id, _, _)| id.clone())
     }
 
     fn to_tile(&mut self, id: &Id, input: TileInput) {
-        if let Some((_, _, handler)) = self.hits.tile.iter().find(|(_, i, _)| i == id) {
-            let msg = handler(input);
+        let at = self.now();
+        if let Some((_, _, handler, _)) = self.hits.tile.iter().find(|(_, i, _, _)| i == id) {
+            let msg = handler(TileEvent { input, at });
             self.app.update(msg);
         }
     }
@@ -2030,8 +2091,8 @@ impl<A: App> Runner<A> {
                 .hits
                 .tile
                 .iter()
-                .find(|(_, i, _)| *i == grab)
-                .map(|(g, _, _)| (grab.clone(), Self::tile_local(g, at))),
+                .find(|(_, i, _, _)| *i == grab)
+                .map(|(g, _, _, _)| (grab.clone(), Self::tile_local(g, at))),
             None => under,
         };
         if let Some((id, (x, y))) = target {
@@ -2046,7 +2107,10 @@ impl<A: App> Runner<A> {
             }
             return;
         }
-        let under = self.pointer.and_then(|at| self.tile_at(at)).map(|(id, _)| id);
+        let under = self
+            .pointer
+            .and_then(|at| self.tile_at(at))
+            .map(|(id, _)| id);
         if self.tile_keys != under
             && let Some(old) = self.tile_keys.take()
         {
@@ -2245,6 +2309,7 @@ impl<A: App> Runner<A> {
             tile_over: None,
             tile_grab: None,
             tile_keys: None,
+            tile_sizes: Vec::new(),
             last_frame: None,
             event_at: 0.0,
             pressed: None,

@@ -5,12 +5,39 @@
 //! Nothing here starts a thread. A `Tile` is built on the thread that drives it and never moves:
 //! its `El` closures are not `Send`. What crosses is plain data — a [`TileInput`] in, a `Scene` out.
 
+use std::sync::Arc;
+
 use vello::Scene;
 use winit::dpi::PhysicalPosition;
 use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::ModifiersState;
 
-use crate::{App, Runner};
+use crate::{App, ElRect, KeyInput, Runner};
+
+/// One frame of a tile, as its host shows it: the paint, and where its elements are — the
+/// latter only when asked for, since only a driven (offscreen) host reads it.
+#[derive(Clone)]
+pub struct TileFrame {
+    pub scene: Arc<Scene>,
+    pub rects: Arc<[ElRect]>,
+}
+
+impl Default for TileFrame {
+    fn default() -> Self {
+        Self {
+            scene: Arc::new(Scene::new()),
+            rects: Arc::new([]),
+        }
+    }
+}
+
+/// A [`TileInput`] and when it happened on the host's clock — which a tile on a virtual clock
+/// adopts, so a driven gesture is timed the same on both sides.
+#[derive(Clone, Debug)]
+pub struct TileEvent {
+    pub input: TileInput,
+    pub at: f64,
+}
 
 /// What the host routes to a tile. Coordinates are logical points from the tile's top-left.
 #[derive(Clone, Debug)]
@@ -23,6 +50,8 @@ pub enum TileInput {
     /// Logical pixels, already scaled.
     Wheel(f32, f32),
     Key(KeyEvent),
+    /// A driver's synthetic key (`DriverOp::Keyboard`).
+    GameKey(KeyInput),
     Ime(Ime),
     Modifiers(ModifiersState),
     /// The tile lost the keyboard: held keys are cancelled.
@@ -42,6 +71,19 @@ impl<A: App> Tile<A> {
         Self { runner }
     }
 
+    /// Time is only what [`Self::set_clock`] and input stamps say — for a driven host.
+    pub fn with_virtual_clock(mut self) -> Self {
+        self.runner.virtual_clock = true;
+        self
+    }
+
+    /// Move a virtual clock to the host's. Never backwards.
+    pub fn set_clock(&mut self, now: f64) {
+        if self.runner.virtual_clock && now > self.runner.clock {
+            self.runner.clock = now;
+        }
+    }
+
     pub fn resize(&mut self, size: (f32, f32)) {
         if self.runner.offscreen != Some(size) {
             self.runner.offscreen = Some(size);
@@ -49,7 +91,8 @@ impl<A: App> Tile<A> {
         }
     }
 
-    pub fn input(&mut self, input: TileInput) {
+    pub fn input(&mut self, TileEvent { input, at }: TileEvent) {
+        self.set_clock(at);
         let r = &mut self.runner;
         match input {
             TileInput::Move(x, y) => r.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64)),
@@ -60,6 +103,7 @@ impl<A: App> Tile<A> {
                 PhysicalPosition::new(dx as f64, dy as f64),
             )),
             TileInput::Key(event) => r.handle_input(event),
+            TileInput::GameKey(event) => r.on_game_key(event),
             TileInput::Ime(ime) => r.on_ime(ime),
             TileInput::Modifiers(m) => r.modifiers = m,
             TileInput::Blur => r.cancel_keys(),
@@ -81,6 +125,11 @@ impl<A: App> Tile<A> {
     pub fn frame(&mut self) -> Scene {
         self.runner.frame();
         std::mem::take(&mut self.runner.scene)
+    }
+
+    /// Where every reachable element is, as of the last frame — tile coordinates.
+    pub fn rects(&self) -> Vec<ElRect> {
+        self.runner.reachable()
     }
 
     pub fn app(&self) -> &A {
