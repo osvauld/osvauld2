@@ -290,9 +290,12 @@ local wasd = {
 
 - Key names are physical codes, the same as `on_key`'s `e.code`. A misspelt code (`"W"` for
   `"KeyW"`) is not caught — it simply never matches.
-- Both keys of an axis held cancel; a diagonal is no faster than a straight line. Movement uses the
-  runtime's frame `dt`, capped at 0.1s after a stall, so `rpc.frame(n)` is the exact way to drive
-  it offscreen — `rpc.advance` moves by at most one capped step.
+- Both keys of an axis held cancel; a diagonal is no faster than a straight line.
+- **The world moves in fixed steps of 1/120 s**, whatever the frame rate: two a frame at 60 fps,
+  one at 120. A frame's time short of a step waits for the next frame, so a second is the same
+  120 steps at 30, 60 or 144 fps — the same hits, bounces and paths. After a stall a frame runs
+  at most 8 steps and the rest is dropped (the game slows rather than jumps); the dump's
+  `dropped` says how many seconds. `rpc.frame(n)` is the exact way to drive it offscreen.
 - A world with a controller or actions takes keyboard input itself (it attaches `on_key`, and
   releases every key on blur), so `on_key` on a `ui.world` is an error. A world with neither
   leaves keys alone.
@@ -385,8 +388,8 @@ local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, 
   looker's own body. Only `skip` may be given; `from` and `to` must differ.
 - `at` answers the ids of everything whose collider or zone covers the point, sorted, each once.
 - Answers are plain tables of ids and numbers: look your own data up by id, as handlers do.
-- Both are as of the last frame — the world's `tick`, also in the dump. A `set` or a spawn shows
-  in answers from the next frame on.
+- Both are as of the last step — the world's `tick` (steps so far, 120 a second), also in the
+  dump. A `set` or a spawn shows in answers from the next frame on.
 - Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
   five hundred things take a few milliseconds; a ray per guard per frame is fine.
 

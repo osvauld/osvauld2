@@ -616,8 +616,12 @@ would be our own per-frame force). The Lua ↔ world contract is three kinds of 
 { skip })` → nil or `{ id, at, normal, dist, tick }` (zones do not stop it), and `:at(point)` →
 the sorted ids of colliders and zones there, with `tick`; allowed in `view` as well as handlers;
 as of the last step, which the world now counts (`tick` in the dump). The answer envelope is
-agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. Next, in order:
-a fixed step (1/120 s, at most 8 catch-up steps, as 3D); the camera (`camera = { follow, ease,
+agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. **Fixed step:**
+the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STEPS`), as 3D;
+leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
+ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
+Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
+body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
 bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and

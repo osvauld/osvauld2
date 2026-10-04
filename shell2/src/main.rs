@@ -670,7 +670,7 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
     serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
-        "tick": world.tick })
+        "tick": world.tick, "dropped": world.dropped })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.

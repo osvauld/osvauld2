@@ -782,7 +782,7 @@ impl<M: 'static> LuaApp<M> {
     /// Each live world's entities, by world id.
     pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
         let worlds = self.worlds.borrow();
-        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers(), tick: w.steps() };
+        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers(), tick: w.steps(), dropped: w.dropped() };
         worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
     }
 
