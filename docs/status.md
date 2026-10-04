@@ -113,6 +113,10 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - proven caller (T16): every node request that names a desktop is signed by it
   (`courier::proof`, kunki `Envelope`/`Gate`); a forged, unsigned, stale or replayed request is
   refused before dispatch. `node::claim`/`claim_invite` now save the relationship themselves.
+- `manifest` crate: parses `manifest.osv` with line-numbered errors; `resolve(doc)` picks the
+  governing declaration (literal beats variable, day/month shards only match dates);
+  `can_grant`/`satisfies` follow the transitive grant cone with `owner` as root. Every
+  `demo_apps` manifest parses. Not yet read by the node.
 
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a

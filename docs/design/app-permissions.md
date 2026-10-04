@@ -1,6 +1,6 @@
 # App permissions — tokens, membership docs, manifest, rules
 
-Status: **design, agreed 2026-10-04; nothing below is built.** The first slice is built by
+Status: **design, agreed 2026-10-04. Built: the §3 parser (`manifest` crate, 2026-10-04); nothing enforces it yet.** The first slice is built by
 [`group-chat-sync.md`](group-chat-sync.md) (chat needs §3–§6). This doc is the general model;
 that plan is the first app proven against it. Extends — does not replace —
 [`workspace-permissions-sync.md`](workspace-permissions-sync.md) §4 (decided 2026-09-17/18),
@@ -86,7 +86,7 @@ app "chat" {
 
   uses "people" read                                                -- directory (§8)
   channel presence { send member  slot sender }
-  channel typing   { send members(group/{gid}/meta)  rate 4/s  slot sender }
+  channel typing   { send member  rate 4/s  slot sender }   -- per-group typing: see §11
 }
 ```
 
@@ -102,6 +102,16 @@ app "chat" {
 | `uses "<namespace>" read\|write` | cross-app binding, approved at install; access = binding ∩ the user's roles |
 | `local "<path>"` | durable but never synced (drafts) |
 | `sim "<file>" { tick N }` | node-authoritative simulation (games); later |
+
+Parser rules, as built 2026-10-04:
+- A doc name segment is 1–128 bytes of `[A-Za-z0-9._:-]` and never `.` or `..`. Anything
+  else matches nothing.
+- Where two patterns match a name, the one with a literal at the first differing position
+  wins.
+- `{day}`/`{month}` match only real dates.
+- `owner` and `node` are reserved as role and variable names.
+- Grant cycles and duplicate roles are refused.
+- `derive`, `local` and `sim` are refused as not built yet.
 
 ## 4. Reads, indexes, fan-out
 
@@ -225,3 +235,6 @@ Found by reading, to be pinned by tests when the step that fixes each lands:
 - Install-time approval UI for `uses` bindings and role mapping.
 - Exact-cut `since_join` (a membership change rolls the shard) — later; day precision now.
 - `sim` and blob store — with the game and file apps, not chat.
+- Parameterized channels (`channel typing/{gid} { send members(group/{gid}/meta) }`):
+  until a channel has variables, `members(...)` in `send` may not use any (parser refuses
+  it, 2026-10-04).

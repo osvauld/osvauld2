@@ -1,6 +1,6 @@
 # Group chat sync — permissions, workspace index, shards, ephemeral
 
-Status: **steps 0–2 built 2026-10-04 (T1–T5, T13, T16 green); steps 3–11 open.** A long-horizon,
+Status: **steps 0–2 and 4 built 2026-10-04 (T1–T5, T13, T16 green); steps 3, 5–11 open.** A long-horizon,
 test-first plan driven by `demo_apps/chat`: §0 lists the end-to-end tests that prove it done;
 they are written first, then §7's steps make them pass. Branch `sync-hardening`. The general
 permission model is [`app-permissions.md`](app-permissions.md); this plan builds the slice
@@ -9,6 +9,10 @@ chat needs and proves it end to end.
 *Revised 2026-10-04 (after app-permissions.md): app roles get their own step (3); read rules
 are declarative incl. `members(doc)`; private groups, reactions, moderation, bans and the
 people directory join the scope (T17–T25); membership-driven re-indexing moves in from §8.*
+
+*Revised 2026-10-04 (step 3 start): step 4 is built before step 3 — `role.assign` needs the
+grant cone, which lives in the manifest. Numbers are kept so §0's step column stays valid.
+T23's removal half needs step 7's rule, so it goes fully green there.*
 
 ## 0. Done means these pass
 
@@ -36,14 +40,14 @@ after those images were looked at, not only the assertions.
 | T13 | Node restarted mid-session, including right after a peer joined; pushes resume without restarting the shells | Listen/subscribe recovery | 1 ✓ |
 | T14 | B writes an index entry for a doc path the manifest doesn't declare; rejected, C never sees it | index writes are validated | 8 |
 | T15 | B writes under `user/<A's did>`; rejected | DID segments bind to the caller | 2, 5 |
-| T16 | A request whose `desktop_did` is A's but signed by B's key is refused; a replayed request is refused | proven caller | 2 |
+| T16 | A request whose `desktop_did` is A's but signed by B's key is refused; a replayed request is refused | proven caller | 2 ✓ |
 | T17 | B edits A's message; rejected and rolled back on B; A's text unchanged everywhere | `owned` | 7 |
 | T18 | B reacts 👍 on A's message: accepted. B removes A's reaction: rejected | `slot` | 7 |
 | T19 | B deletes A's message: rejected. Moderator removes B's message: accepted, text kept for the mod log, hidden in the UI | `soft_delete` + app role | 3, 7 |
 | T20 | Private group A+B: C's index never lists it; C requesting it is refused | `members(doc)` read rule | 5, 8 |
 | T21 | A adds C to the group (`history all`): C sees it and its history. A removes C: C receives nothing new. A `since_join` group shows C only shards from the join day | membership-driven fan-out | 8, 9 |
 | T22 | Changing a message's `author`, `at` or `id` after creation; rejected | `immutable` | 7 |
-| T23 | Admin A assigns B `moderator`; B can then remove messages. Member C cannot assign roles; revoking A's grant revokes B's | `role.assign`, cone, cascade | 3 |
+| T23 | Admin A assigns B `moderator`; B can then remove messages. Member C cannot assign roles; revoking A's grant revokes B's | `role.assign`, cone, cascade | 3, 7 |
 | T24 | A moderator bans B for 10 min; B's post is rejected; after expiry (virtual clock) B posts | `deny` with expiry | 7 |
 | T25 | Typing `@b` in A's composer suggests B's handle; the sent message stores B's DID; B gets a mention | people directory | 8, 10 |
 
@@ -198,8 +202,9 @@ and gets a fresh `pi -p` review with the matching expert checklist before the us
    at `Scope::App`; sync/subscribe/listen accept `App`/`Resource` scopes against the target
    (fixes `app-permissions.md` §10); `Cause::Under` recorded so revocation cascades; roles
    computed from the node's grant records. T23.
-4. **Manifest parse.** A small `manifest` crate (pure, no Loro, no Lua): grammar of §3,
-   errors with line numbers, `resolve(doc_name) → (decl, vars)`. Unit tests only.
+4. **Manifest parse.** ✓ (before 3) A small `manifest` crate (pure, no Loro, no Lua): grammar of §3,
+   errors with line numbers, `resolve(doc_name) → (decl, vars)`, plus `can_grant`/`satisfies`
+   over the transitive grant cone (osvauld1's `ManifestAuthorizer`). Unit tests only.
 5. **Declarative enforcement** (§4): roles, DID variables, `members(doc)` for read and
    write. T8 (node half), T10 and T20 (direct-request half), T15.
 6. **Rejection and rollback** (§5). T8 green.
