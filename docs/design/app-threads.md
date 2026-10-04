@@ -190,6 +190,12 @@ Each leaves `cargo test` and the smokes green.
    under build contention; `Budget::pause` stops the clock across `t.*` calls. Gap: a 3D
    world inside a tile does not show — `Runner` gathers one `SceneView3d` per frame beside
    the Scene and `TileFrame` has no slot for it.
+
+   *Revised 2026-10-04 (budget, step 1's guard):* the clock is the app thread's CPU time, not
+   the wall — a wall deadline failed valid loads under build contention (lua-shell saw the
+   same in the launcher). A call blocked off the CPU is the stuck watchdog's (step 8), not
+   the budget's. `budget::install(vm, Policy)` is public so the launcher sets its own limits
+   on the one interrupt hook. Unix reads `CLOCK_THREAD_CPUTIME_ID`; elsewhere it is still wall.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.

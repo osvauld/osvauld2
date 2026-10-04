@@ -10,7 +10,7 @@ mod budget;
 pub mod index;
 mod modules;
 mod props;
-pub use budget::Budget;
+pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
 
@@ -1366,7 +1366,7 @@ fn test_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let budget = budget::install(&vm)?;
+    let budget = budget::install(&vm, budget::Policy::app())?;
     Ok((vm, budget))
 }
 
@@ -1410,7 +1410,7 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     install_test_bindings(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let budget = budget::install(&vm)?;
+    let budget = budget::install(&vm, budget::Policy::app())?;
     Ok((vm, budget))
 }
 fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {

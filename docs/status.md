@@ -118,8 +118,10 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
   `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
-  interrupt count, a wall-time limit (1 s) that runs only while app Lua is entered (`view`,
-  `update`, module load, tests, index calls). `OSVAULD_APP_BUDGET_MS` / `_MEMORY_MB` override.
+  interrupt count, a limit of 1 s of the thread's CPU time that runs only while app Lua is
+  entered (`view`, `update`, module load, tests, index calls). `OSVAULD_APP_BUDGET_MS` /
+  `_MEMORY_MB` override; another host (the launcher) passes its own `budget::Policy`. Was wall
+  time until 2026-10-04: valid loads failed under build contention.
 - `runtime::Tile`: a windowless runtime whose frame is a `Scene` the host shows with the
   `tile` element; `.on_tile` forwards pointer/wheel/keys as `TileInput`. No threads yet.
 - Every open app runs on its own thread (`shell2/src/app_thread.rs`): VM, docs, index and

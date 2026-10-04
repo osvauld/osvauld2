@@ -847,8 +847,9 @@ only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `s
 (unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
 
 Each run of your code — a `view`, a handler, module load, a test — has a budget: about a
-million interrupts (loop turns and calls) **and** one second of wall time, whichever runs out
-first. Memory is capped at 512 MB per app. Hitting either is an ordinary error in that run;
+million interrupts (loop turns and calls) **and** one second of CPU time, whichever runs out
+first. Time your app spends waiting — for a core while the machine is busy, or for a test's
+`t.step` — does not count. Memory is capped at 512 MB per app. Hitting either is an ordinary error in that run;
 the app and its siblings keep going.
 
 `now()` is for recording *when* something happened — a created-at, a last-edited. It is not for

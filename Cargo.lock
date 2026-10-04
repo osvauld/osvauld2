@@ -211,6 +211,7 @@ version = "0.1.0"
 dependencies = [
  "csscolorparser",
  "glam 0.30.10",
+ "libc",
  "loro",
  "lua_tree",
  "mlua",
