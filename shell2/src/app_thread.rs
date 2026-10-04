@@ -335,6 +335,9 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                         tile.invalidate();
                     }
                 }
+                // An abandoned thread that comes unstuck must not act for whoever holds the
+                // vault now. Dropping the call drops its reply sender: the waiter hears no.
+                In::Call(_) if ctx.closed.load(Ordering::SeqCst) => {}
                 In::Call(f) => {
                     f(tile.app_mut());
                     tile.invalidate();
