@@ -1361,6 +1361,35 @@ fn test_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     Ok((vm, fires))
 }
 
+/// Stand-ins for native work the interrupt cannot see, and a flushed log line, for `scripts/e2e_app_threads.py`
+/// (`docs/design/app-threads.md` §0). Debug builds with `OSVAULD_TEST_BINDINGS=1` only: both
+/// can only waste the app's own time, which a loop already can.
+fn install_test_bindings(vm: &Lua) -> mlua::Result<()> {
+    if !cfg!(debug_assertions) || std::env::var_os("OSVAULD_TEST_BINDINGS").is_none() {
+        return Ok(());
+    }
+    let busy = vm.create_function(|_, ms: u64| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            std::hint::spin_loop();
+        }
+        Ok(())
+    })?;
+    let stall = vm.create_function(|_, ()| -> mlua::Result<()> {
+        loop {
+            std::thread::park();
+        }
+    })?;
+    // Not `print`: Luau's goes through C stdio, block-buffered into a file and lost on kill.
+    let log = vm.create_function(|_, line: String| {
+        println!("{line}");
+        Ok(())
+    })?;
+    vm.globals().set("__log", log)?;
+    vm.globals().set("__busy", busy)?;
+    vm.globals().set("__stall", stall)
+}
+
 pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     let vm = Lua::new();
     let now_fn = vm.create_function(|_, ()| wall_clock())?;
@@ -1369,6 +1398,7 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
+    install_test_bindings(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
     let fires = Arc::new(AtomicU64::new(0));

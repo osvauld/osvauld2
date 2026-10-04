@@ -15,17 +15,24 @@ real vaults).** Wall-clock assertions measure the *bridge round trip* and
 
 | # | scenario | proves | step |
 |---|---|---|---|
-| T1 | App A's `view` busy-waits 300 ms every frame (under the kill budget). Chrome tab switch, a click in app B, and `Rects` each answer in < 50 ms | a slow app costs only its own tile | 3 |
-| T2 | App A's handler spins until killed. Its tile keeps its last frame, then shows the budget error card; chrome and B stay live throughout; shell process survives | wall-time budget, per tile | 1, 3 |
-| T3 | App A allocates without bound. A's tile shows a memory error; B and chrome unaffected; shell process survives | memory cap, per tile | 1 |
-| T4 | App A blocks forever in native code (test-only `__stall` binding). After N s the chrome badges A "not responding"; closing A's tab works; B unaffected | watchdog + stuck thread containment | 8 |
-| T5 | Two shells + node. Chat is open in B's shell but **not focused**; A sends. B's chat tile, read via `DumpTree` without focusing, already shows the message | background apps process pushes | 6, 8 |
-| T6 | An idle open app receives no wakeups for 5 s (wake counter via `ReadConsole`/dump) | event-driven: idle = zero CPU | 8 |
-| T7 | Two tiles side by side, each with a ~40 ms view. One frame of both finishes in well under 80 ms wall | apps use separate cores | 9 |
-| T8 | `edit_file` + `ReloadItem` on a running app still hot-reloads, keeps `ui.state`, and a bad edit shows the banner — through the threaded path | reload over the boundary | 5 |
-| T9 | `search.query` from an app returns hits for docs written while it was in the background | index lives with the app | 7 |
-| T10 | An app asks for its own window; the chrome opens it, the app renders there with no code change; closing the window docks it back as a tile | tile vs window invisible to apps | 10 |
-| T11 | The chrome VM given a hot loop is killed by the strict chrome budget; the Rust fallback chrome appears | the one shared VM is guarded hardest | 11 |
+| T1 | App A's handler runs 300 ms of native work (`__busy`), eight times in a row. Meanwhile `DumpTree(B)` and `OpenItem(B)` each answer in < 50 ms | a slow app costs only its own tile | 3, 4 |
+| T2 | With `OSVAULD_APP_BUDGET_MS=500`, A's handler loops `__busy(10)` 1000 times (few interrupts, 10 s of wall time). The click returns in < 2 s, A's console names the budget, B answers in < 50 ms throughout | wall-time budget, per tile | 1, 3 |
+| T3 | With `OSVAULD_APP_MEMORY_MB=32`, A's handler holds 128 MB. A's console names memory; the shell survives; B answers | memory cap, per tile | 1 |
+| T4 | A's handler blocks forever (`__stall`). B still answers; with `OSVAULD_WATCHDOG_MS=1000`, `ListTabs` reports A `responding: false`; `CloseItem(A)` works; the shell survives | watchdog + stuck-thread containment | 8 |
+| T5 | One kunki node, two shells. Bob has the probe open but **focused elsewhere**; Alice adds a note. Bob's probe prints a `view` line with the note, with no request to Bob's probe | background apps process pushes | 6, 8 |
+| T6 | *(guard, green today)* Two open apps, nothing happening for 5 s: no `view` runs | event-driven: idle = zero CPU | 8 |
+| T7 | Two tiles side by side (`SplitWith`), each view with 40 ms of `__busy`. A frame costs < 20 ms more than with one tile | apps use separate cores | 9 |
+| T8 | *(guard, green today)* `edit_file` + `ReloadItem` changes the running app; a syntax-error edit leaves it running | reload over the boundary | 5 |
+| T9 | *(guard)* `smoke_search.py`, unchanged | index lives with the app | 7 |
+| T10 | `PopOut(A)` gives A its own window and `DockIn(A)` brings it back; A answers throughout | tile vs window invisible to apps | 10 |
+| T11 | *(deferred until the Lua chrome lands from `lua-shell`)* the chrome VM in a hot loop is killed by its budget; the Rust fallback chrome appears | the one shared VM is guarded hardest | 11 |
+
+The probe app lives inline in the script. `__busy(ms)` and `__stall()` are test-only bindings
+(debug builds, `OSVAULD_TEST_BINDINGS=1`) standing in for native work the interrupt cannot
+see. A view's Lua `print` is read back from the shell's stdout, so a test can tell an app ran
+without asking it to (asking runs it). New bridge ops the tests define: `ListTabs`,
+`CloseItem`, `SplitWith`, `PopOut`, `DockIn`. T1, T2 and T4 also need the bridge to serve
+connections concurrently: today it is serial, so B's request waits behind A's (step 4).
 
 **Unchanged:** every script in `scripts/smoke.py`'s `SMOKES` passes without edits after
 every step. They are the proof that driving, rects and pixels still mean the same thing.
@@ -129,7 +136,7 @@ never calls into an app synchronously.
 Each leaves `cargo test` and the smokes green.
 
 0. **Tests.** `scripts/e2e_app_threads.py` with T1–T11 and the test-only Lua bindings they
-   need (`__stall`, a wake counter), all failing for the right reason.
+   need (`__busy`, `__stall`); every non-guard test fails for the right reason.
 1. **Guards, on today's code.** Per-VM `set_memory_limit`; the interrupt checks elapsed wall
    time against a budget instead of counting. T3 green; T2's kill half green.
 2. **Tile runtime.** Split `Runner` into a windowless `Tile` (layout, hit, paint, clock,
@@ -138,7 +145,7 @@ Each leaves `cargo test` and the smokes green.
 3. **App thread, focused app only.** `OpenApp` becomes a handle (`TileIn` sender, latest
    frame, ids); `LuaApp` + `Tile` live on the thread. T1, T2 green.
 4. **Bridge through the boundary.** Senses and actions become `TileIn` requests with reply
-   channels; offscreen barrier. All smokes still green unchanged.
+   channels; the bridge serves connections concurrently; offscreen barrier. All smokes still green unchanged.
 5. **Source edit and reload** on the app thread. T8 green.
 6. **Docs and sync.** Hello/import/list/flush cross as bytes; node push routes to the app
    thread by item id; persistence stays a worker. T5's sync half green. Coordinates with
