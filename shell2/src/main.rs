@@ -582,7 +582,15 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
         .map(|object| {
             serde_json::json!({
                 "id": object.id,
-                "mesh": match object.mesh { runtime::scene3d::BuiltinMesh::Cube => "cube" },
+                "mesh": match object.mesh {
+                    runtime::scene3d::MeshKind::Cube => "cube",
+                    runtime::scene3d::MeshKind::Triangles => "triangles",
+                },
+                "mesh_resource": object.mesh_resource,
+                "vertices": object.vertex_count,
+                "triangles": object.triangle_count,
+                "mesh_bytes": object.mesh_bytes,
+                "local_bounds": { "min": object.local_bounds.0, "max": object.local_bounds.1 },
                 "position": object.position,
                 "rotation": object.rotation,
                 "scale": object.scale,
@@ -627,6 +635,25 @@ fn worlds_json(
             .map(|(id, w)| (id.clone(), world_json(w)))
             .collect(),
     )
+}
+
+fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value {
+    use world::world3d::Shape3d;
+    let entities: Vec<_> = world.entities.iter().map(|e| {
+        let shape = match e.authored.shape {
+            Shape3d::Sphere(radius) => serde_json::json!({ "sphere": radius }),
+            Shape3d::Box(size) => serde_json::json!({ "box": size }),
+        };
+        serde_json::json!({
+            "authored": { "id": e.authored.id, "shape": shape,
+                "position": e.authored.position, "dynamic": e.authored.dynamic },
+            "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
+                "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
+                "sleeping": e.resolved.sleeping },
+        })
+    }).collect();
+    serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
+        "entities": entities })
 }
 
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
@@ -1068,6 +1095,11 @@ impl Shell {
                         .map(|(id, w)| (id.as_str(), world_json(w)))
                         .collect();
                     add_worlds(&mut tree, &worlds);
+                    let worlds3d = o.app.inspect_worlds3d();
+                    if !worlds3d.is_empty() {
+                        tree["worlds3d"] = serde_json::Value::Object(worlds3d.iter()
+                            .map(|(id, w)| (id.clone(), world3d_json(w))).collect());
+                    }
                     Response::ok(tree)
                 }
             },
@@ -1378,6 +1410,18 @@ impl App for Shell {
         // some winit backends. Runner calls this only after the renderer and event loop are live.
         bridge::spawn(self.proxy.clone());
         arm_sync_tick(&self.proxy);
+    }
+
+    fn advance_simulation(&mut self, elapsed: f64) -> bool {
+        let focused = match self.tabs.get(self.focused) {
+            Some(Tab::App((id, _))) => Some(id.clone()),
+            _ => None,
+        };
+        let mut ticking = false;
+        for (id, open) in &mut self.apps {
+            ticking |= open.app.advance_simulation(elapsed, focused.as_ref() == Some(id));
+        }
+        ticking
     }
 
     fn view(&self) -> El<Msg> {

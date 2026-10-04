@@ -4,10 +4,13 @@
 //! world sorts by feet (`Order::Feet`). Nothing
 //! outside this crate sees ECS types. Held keys and motion live here too: Lua describes a
 //! controller once, and `tick` moves the entity every frame without Lua. Moments — a press, a
-//! change of direction — queue as `WorldEvent`s for Lua to decide on.
+//! change of direction — queue as `WorldEvent`s for Lua to decide on. Private 3D collider/solver
+//! groundwork and retained 3D body IDs live here too; their host binding is not exposed yet.
 
 pub mod clip;
 mod physics;
+mod physics3d;
+pub mod world3d;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -735,7 +738,9 @@ impl World2d {
                 self.events.push(WorldEvent::Move { id, dx, dy });
             }
             e.insert(heading);
-            if length > 0.0 {
+            if length > 0.0 && dt > 0.0 {
+                // A zero-time observation must not overwrite the last real movement velocity.
+                // Contacts on the next solver step use it to report the closing speed.
                 // A solid entity goes only as far as the others let it.
                 let wanted = (dx / length * step, dy / length * step);
                 let (mx, my) = match e.get::<Solid>() {
@@ -750,11 +755,8 @@ impl World2d {
                     .get_mut::<Transform>()
                     .expect("every entity has a Transform");
                 (t.x, t.y) = (t.x + mx, t.y + my);
-                e.insert(match dt > 0.0 {
-                    true => Velocity(mx / dt, my / dt),
-                    false => Velocity::default(),
-                });
-            } else {
+                e.insert(Velocity(mx / dt, my / dt));
+            } else if length == 0.0 {
                 e.insert(Velocity::default());
             }
         }

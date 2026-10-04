@@ -1371,6 +1371,35 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
 }
 
 #[test]
+fn zero_time_observations_preserve_controller_velocity_for_the_next_contact() {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(200.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, puck]).unwrap();
+    world.key("KeyD", true);
+    let mut hits = vec![];
+    for i in 1..=20 {
+        let elapsed = i as f64 / 60.0;
+        world.tick(elapsed, 1.0 / 60.0);
+        hits.extend(world.drain_events().into_iter().filter(|e| matches!(e, WorldEvent::Hit { .. })));
+        let before = world.inspect()[0].velocity;
+        world.tick(elapsed, 0.0);
+        assert_eq!(world.inspect()[0].velocity, before);
+        hits.extend(world.drain_events().into_iter().filter(|e| matches!(e, WorldEvent::Hit { .. })));
+    }
+    let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
+    assert_eq!((id.as_str(), who.as_str()), ("puck", "hero"));
+    assert!(*speed > 100.0);
+}
+
+#[test]
 fn a_walker_running_into_a_loose_thing_is_a_hit_for_the_loose_thing() {
     let d = drawing();
     let hero = EntitySpec {

@@ -396,18 +396,73 @@ opens on click or on E, through `on_action`.
 ## 3D scenes (experimental proof)
 
 `gfx.scene3d` compiles a bounded immutable scene containing a perspective camera and up to 256
-built-in cubes. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the
-viewport size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`,
-`fov_y` in degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh = "cube"`,
-`position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and CSS `color`.
+objects. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the viewport
+size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`, `fov_y` in
+degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh` (a `gfx.mesh` handle,
+or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and
+CSS `color`. Coordinates are right-handed with Y up.
+
+`gfx.mesh({ vertices = {...}, indices = {...} })` constructs an immutable shared triangle mesh.
+Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz} }`; indices are a dense **1-based**
+list, three per triangle. Counterclockwise winding is front-facing; back faces are neither
+rendered nor picked. Positions/normals must be finite and bounded; normals cannot be zero,
+and triangles cannot be degenerate. Unknown fields, sparse arrays and fractional indices fail.
+At most 65,536 vertices and 65,536 triangles per mesh; a VM may hold at most 128 generated
+resources and 32 MiB of live mesh payload, including resources still retained by scene handles.
+Scene limits are 16 MiB of unique mesh payload and 131,072 triangles counted across instances.
+Create meshes outside `view`; reuse handles across objects and views. Edits create a new handle.
+`DumpTree` reports mesh resource identity (process-local, not persistent), local bounds, counts
+and payload bytes. No raw vertex dump or general curve/sweep/material constructor ships yet.
+
+An optional `surface = gfx.text_surface({ text = "label", font_size = 32,
+color = "#ffffff", background = "#171923" })` is supported only on the built-in cube resource;
+it is not a general mesh text/UV mapping facility.
 
 This is a rendering proof, not the public Environment API. It currently supports one visible 3D
 viewport, 4× MSAA, simple directional lighting and app-driven rebuilds. The model-viewer demo uses
 `on_drag` for orbit and `on_wheel` for zoom. An `on_click` on the scene leaf ray-picks the
-nearest visible cube and reports its stable ID, world hit point, normal and distance. GLB assets,
+nearest rendered triangle and reports its stable ID, world hit point, normal and distance.
+Camera near/far clipping and back-face culling apply to picking. GLB assets,
 hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
 the validated camera,
-objects, transforms and colors so an agent can inspect the same scene declaration that renders.
+objects, transforms, colors and mesh summaries so an agent can inspect the same scene declaration
+that renders.
+
+### Retained 3D physics (experimental)
+
+Create `gfx.world3d({ id, scene, bodies })` at module scope. `scene` is a compiled
+`gfx.scene3d`; `bodies` is a dense list of `{ id, position = {x,y,z}, sphere = radius }`
+or `{ id, position = {x,y,z}, box = {width,height,depth} }`, optionally `dynamic = true`
+(default fixed). Exactly one shape is required; unknown fields are errors. Dimensions and
+positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
+At most eight worlds per app and 256 bodies per world; IDs are nonempty and at most 128 bytes.
+
+`ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
+visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
+are independent: scale does not resize a collider. Initial body orientation is identity;
+bound visuals must have identity authored rotation. Invisible bodies and unbound decoration
+are allowed. `demo_apps/marble_gates` generates its sphere in Lua and demonstrates the first
+native drop, bounce, sleep and reset.
+
+The native solver runs at 120 Hz before normal-frame view construction, with at most eight
+catch-up steps. No Lua runs per physics tick. `game:reset("marble")` restores the latest
+authored position and clears motion/forces, waking the body. Reset is allowed only in input
+handlers, never module initialization, `view`, `on_frame`, hover or animation-completion
+handlers. Scene handles resolve current poses when walked; they do not step the world.
+
+A world survives successful reload; existing IDs keep their simulated poses and new authored
+positions become reset targets. Collider/type changes on retained IDs reject: remove the body
+in one accepted source revision before recreating it. All staged recipes validate before any
+live world changes; failed load or trial-view calls leave native state untouched. Worlds omitted
+from an accepted source are dropped. Omitting a viewport pauses its world on the next simulation
+hook without deleting it; inactive tabs pause too, with no hidden-time catch-up on resume. Closing
+the app drops its worlds. Both screenshot paths skip native simulation; legacy `on_frame`
+callbacks retain their existing behavior, but cannot reset native bodies.
+
+`DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `tick`,
+`dropped_seconds` and ID-sorted `entities`. Each entity separates `authored` (shape, position,
+dynamic) from `resolved` (position, quaternion rotation, linear/angular velocity and sleeping).
+3D sensors, adjustable rotated ramps, goal rules and spatial-query RPCs remain unbuilt.
 
 ## Layout
 
@@ -486,7 +541,7 @@ Nine, and no others. Anything else is `unknown tag`.
 | `ui.input({…})` | none | `value` · `id` · `on_input` | extras: `on_enter` · `on_esc` · `autofocus` |
 | `ui.text_area({…})` | none | `value` · `id` · `on_input` | same, multi-line |
 | `ui.frame({ visual = v, … })` | none | `visual` (a `gfx.frame`) | the frame's `width`/`height` are its layout claim |
-| `ui.scene3d({ scene = s, … })` | none | `scene` (a `gfx.scene3d`) | experimental; viewport size comes from layout |
+| `ui.scene3d({ scene = s, … })` | none | `scene` (a `gfx.scene3d` or `game:scene()` handle) | experimental; viewport size comes from layout |
 | `ui.overlay({ anchor, panel, … })` | **exactly two** | — | takes *only* `id` · `side` · `align` · `on_dismiss` — no box or paint props; style the panel child instead |
 
 `ui.state(id, init)` is not an element — it is per-viewer scratch, see [State](#state).
@@ -568,7 +623,7 @@ end
 - `on_click(e)` — `e.x, e.y` are where the click landed, from the element's top-left corner in
   its own units, zoom and scroll undone: a click on a 1400×900 canvas reports canvas numbers
   whatever the camera is doing. Fired from the bridge, with no layout, they are `0, 0`. Inside a
-  `zoomable`, a press that travels past 5pt pans instead. On a `ui.scene3d`, a visible cube hit also
+  `zoomable`, a press that travels past 5pt pans instead. On a `ui.scene3d`, a visible mesh hit also
   supplies `e.object`, `e.distance`, `e.world_x/y/z` and `e.normal_x/y/z`; these fields are absent
   when the ray hits no object.
 - `on_hover(e)` — `e.phase` is `"enter"` / `"move"` / `"leave"`, `e.x, e.y` as `on_click` (outside
@@ -940,8 +995,9 @@ the id form to drive an app, the coordinate form to test that it is *touchable*.
 Offscreen the clock is **virtual and driven**: nothing moves until a request asks. A frame is
 1/60s and a pointer event lands 8ms after the frame it is tested against, whatever the machine
 actually took — so `frame(250)` is a little over four seconds of app time, on every machine, every
-run. `advance(secs)` jumps instead, then paints once so the app notices: a 25-minute timer
-finishing is one request, not 90,000 frames.
+run. Ordinary bridge requests, inspection and screenshots repaint without spending virtual time;
+only frame/advance and pointer drivers move the clock. `advance(secs)` jumps instead, then paints
+once so the app notices: a 25-minute timer finishing is one request, not 90,000 frames.
 
 Two behaviours are easier to see here than to reason about: a press that travels more than 5pt is
 a drag and fires **no** click, and a press that travels less is a click reported at the point it

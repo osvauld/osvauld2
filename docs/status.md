@@ -627,6 +627,80 @@ are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
 
+**2026-10-01 implementation, branch `3d-math`, pending user acceptance:** mathematical
+Lua-authored geometry precedes Blender import, aiming toward a procedural marble machine. The
+[math-first plan](design/3d-math.md) separates geometry/materials/inspection from retained physics.
+- Adopted the committed `3d-mesh-data` validator (`c1d4eb7`), not its uncommitted follow-up:
+  finite bounded positions/normals, triangle indices/counts, nondegenerate triangles and bounds.
+- Immutable shared native meshes and strict Lua `gfx.mesh({vertices, indices})`; vertex records
+  contain position/normal, indices are dense 1-based triangles. Generated resources are capped
+  at 128 and 32 MiB per VM, including payloads still retained by native scenes. Cube remains a
+  shorthand; no specific demo geometry is embedded in Rust.
+- Scene objects reference actual meshes. Unique mesh payload is limited to 16 MiB per scene,
+  with 131,072 triangles counted across instances. GPU resources are cached by native identity;
+  adjacent shared instances batch without reordering. Absent resources leave the next rendered
+  snapshot; rendering a non-3D frame clears the cache. No mutable native handle registry ships.
+- Picking uses actual triangles with back-face culling and camera near/far clipping. Partial
+  viewport clipping now preserves full camera projection and screen rays using a crop matrix.
+  Lighting uses inverse-transpose normal direction for positive nonuniform scales.
+- `DumpTree` adds process-local mesh identity, local bounds, counts and payload bytes; it does
+  not yet expose recipes, world bounds, raw buffer reads or general spatial query RPCs.
+- `demo_apps/mesh_math` calculates a sinusoidal heightfield and analytic normals in Lua, shares
+  it between two objects, regenerates/rotates geometry and supports orbit/zoom/triangle picking.
+  Registered `smoke_mesh_math.py` proves raw inspection, shared identity, real pointer picking,
+  regeneration, revision-checked source editing and live/custom captures with a clean console
+  (`shots/mesh-math.png`, `shots/mesh-math-custom.png`).
+Higher-level curves/tubes/revolve, spatial gradients, Blender import and Lua 3D physics remain unbuilt.
+One viewport, cube-only text surfaces and incorrect foreground Vello composition remain limits.
+
+**2026-10-01 Marble Gates groundwork, pending user acceptance:** integrated the committed
+`world-engine` foundation through `e23660b`, preserving mesh work and registering both sets of
+smokes. Its 2D commands, timers, sensors and contact events are reused infrastructure, not a
+new 3D API. Added a private native Rapier3D backend in `world/src/physics3d.rs`: metre-scale
+sphere/full-size-box colliders, Y-up gravity, fixed 1/120-second solver steps, observational
+pose/velocity/sleep inspection, reset clearing motion/forces, and body removal. Native regression
+tests target fall/bounce/settle/sleep, reset, determinism, validation and contact teardown.
+**Retained-body/clock slices added:** `world::world3d::World3d` keeps at most 256 bodies by
+stable author ID, with ECS/Rapier handles private. Reconciliation validates the whole batch
+before mutation and preserves live pose; authored positions update reset targets. Collider/body
+type changes reject until that ID is removed. Native time planning uses 120 Hz steps, eight-step
+catch-up maximum with dropped-time reporting, pause/resume without hidden-time catch-up, and
+quiet-world suspension. Inspection sorts IDs and separates authored recipes from resolved poses.
+`resolved_scene` applies simulated poses by matching object IDs without stepping, changing the
+authored scene or duplicating mesh resources; camera/scale/appearance remain presentation data.
+**Runner hook added:** `App::advance_simulation(elapsed)` runs before normal-frame `view`,
+skips live/custom captures, and can request the next redraw. Targeted runtime tests verify
+ordering and capture exclusion; an explicitly run GPU test verifies real live/custom readback.
+A real `World3d` through `Headless` proves native gravity/settling, pre-view resolved poses,
+reset through ordinary pointer input, and pause/resume without hidden-time catch-up. Those
+initial proofs were Rust fixtures; the later Lua binding and visible proof below extend them.
+**Reload preflight groundwork added:** `World3d::validate_reconcile` is observational;
+app-local `Worlds3d` validates all world recipes before updating reset targets, reconciling
+bodies or dropping omitted worlds. At most eight worlds, each with a nonempty ID of at most
+128 bytes. Tests cover failed-batch nonmutation, accepted-batch pose/clock retention, removal,
+invalid new recipes, budgets and isolation between app-local collections.
+**Lua drop/reset proof added:** module-scope `gfx.world3d({id,scene,bodies})`, `game:scene(camera)`
+and input-handler `game:reset(id)` now connect app-local worlds to Runner through the shell.
+Recipes commit only after accepted staged loads/trial-view calls. View omission and inactive tabs
+pause; source omission and app teardown release worlds. Frame/hover handlers cannot reset them.
+`DumpTree.worlds3d` exposes authored/resolved bodies, velocities, sleeping, tick and dropped time.
+`demo_apps/marble_gates` has a Lua-generated sphere, platform, orbit/zoom, Reset and hide/resume;
+its registered smoke proves fall/settle/reset, pause, reload rejection and live/custom capture
+nonmutation. Falling and settled screenshots were inspected. Rotated ramps, 3D sensors and goal
+rules remain unbuilt. Ordinary offscreen RPCs now repaint without advancing the virtual clock;
+frame/advance and pointer drivers move time explicitly. A 2D regression fix preserves controller
+velocity through zero-time observations, so contact events retain their closing speed; hockey's
+approach smoke now drives its previously implicit inspection-time frames explicitly.
+The [math-first plan](design/3d-math.md) moves this game ahead of curves and spatial gradients.
+Earlier validation: 76 targeted `world` tests passed;
+`cargo check -p app_host -p shell2` passes with existing warnings; all eight registered smokes
+pass after integrating the 2D and mesh foundations and again after the Runner hook.
+Latest validation: `cargo check --workspace` passes with existing warnings; 84 `world` tests
+and 197 `app_host` tests pass (two host tests ignored), including kanban round-trip. Targeted
+runtime simulation tests and the explicitly run real-pixel capture test pass. All nine registered
+smokes pass with the Lua marble proof and zero-time 2D regression fix. The full workspace test
+suite was not rerun.
+
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,
 ECS, 3D mesh/depth renderer, physics binding, PBD cloth, projected UI surface or world picking is

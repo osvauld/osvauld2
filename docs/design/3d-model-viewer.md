@@ -11,6 +11,12 @@ runtime dependency. This plan narrows the first proof
 of the [Environment runtime](environment-runtime.md); it does not freeze a public Lua API
 or select a full game engine.
 
+**2026-10-01 branch extension (`3d-math`, pending user acceptance):** arbitrary bounded
+triangle resources can now be authored with Lua `gfx.mesh`, shared across scene objects,
+rendered and triangle-picked. `DumpTree` reports geometry summaries. Partial viewport clipping
+preserves the full camera projection; foreground Vello composition is still unbuilt. The
+[math-first plan](3d-math.md) records the revised direction; GLB remains unbuilt.
+
 ## 1. Goal
 
 Import models authored in Blender (or another glTF exporter), display them inside Osvauld,
@@ -134,6 +140,10 @@ revision before reversing this decision; dependency compatibility and maintenanc
 rechecked when each later tier begins.
 
 ## 5. Sequence
+
+**2026-10-01 revision:** mathematical Lua-authored geometry and raw agent feedback now precede
+GLB import; see [math-first 3D](3d-math.md). The sequence below is retained as the earlier
+import-oriented route, not the immediate implementation order. The owned-WGPU choice stays.
 
 1. Lua rendering proof above: shared final-composite path, depth target, built-in mesh pass,
    viewport, experimental Lua controls, then picking and screenshot verification.

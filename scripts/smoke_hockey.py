@@ -63,7 +63,8 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     # Frame by frame, to catch the squash the puck plays when blue hits it (on_hit, 0.15 s).
     s.rpc.keyboard("KeyD", "KeyD", True)
     squashed = False
-    for _ in range(40):
+    # Inspection no longer spends a frame of virtual time: drive the full approach explicitly.
+    for _ in range(80):
         s.rpc.frame(1)
         clip = look()[0]["puck"]["clip"]
         squashed = squashed or (clip is not None and abs(clip["length"] - 0.15) < 1e-6)

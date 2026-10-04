@@ -183,6 +183,13 @@ pub trait App {
     }
     fn reload(&mut self) {}
 
+    /// Advance app-owned native simulation before a normal frame's view. Time is absolute
+    /// monotonic Runner seconds; the app owns fixed-step planning and catch-up limits.
+    /// Never called for live/custom capture frames. Return true to request another normal frame.
+    fn advance_simulation(&mut self, _elapsed: f64) -> bool {
+        false
+    }
+
     /// Take a pending screenshot request, if any. The default keeps non-automation apps unaware
     /// of capture; implementations must remove the request when returning it.
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Self::Msg>> {
@@ -693,6 +700,7 @@ impl<A: App> Runner<A> {
         } else {
             surface_transform
         };
+        let simulation_active = screenshot.is_none() && self.app.advance_simulation(now);
         let clear = self.app.clear();
         self.scene.reset();
         let app = &self.app;
@@ -707,7 +715,7 @@ impl<A: App> Runner<A> {
         let text = &mut self.text;
         let debug = self.debug;
         let mut needs_redraw = false;
-        let mut any_in_flight = false;
+        let mut any_in_flight = simulation_active;
         let mut placed = layout::solve(app.view(), text, viewport, store);
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         let previous_key = hits.key.pop();
@@ -740,11 +748,13 @@ impl<A: App> Runner<A> {
                     p.rect.x1 - p.pad.x1,
                     p.rect.y1 - p.pad.y1,
                 );
-                let rect = p.transform.transform_rect_bbox(content).intersect(visible);
-                if rect.width() > 0.0 && rect.height() > 0.0 {
+                let rect = p.transform.transform_rect_bbox(content);
+                let clip = rect.intersect(visible);
+                if clip.width() > 0.0 && clip.height() > 0.0 {
                     scene3d = Some(render::SceneView3d {
                         scene: scene.clone(),
                         rect,
+                        clip,
                     });
                 }
             }
@@ -2004,7 +2014,6 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
 
 impl<A: App> Runner<A> {
     fn deliver(&mut self, msg: A::Msg) {
-        let ambient = self.app.is_ambient(&msg);
         self.app.update(msg);
         // A driver op is answered here rather than by the app, because only this side owns the
         // clock and the frame. Draining after `update` is what lets the request that asked for it
@@ -2019,16 +2028,15 @@ impl<A: App> Runner<A> {
         };
         // Windowed, `redraw` asks the compositor and the frame comes back as an event. Offscreen
         // there is nobody to ask, so the frame happens here instead — one delivered message, one
-        // frame, which keeps the bridge's "answering also repaints" contract intact. It is also
-        // the only thing that advances the virtual clock, so an app animates per request rather
-        // than per second: deterministic, and never free-running.
+        // frame, which keeps the bridge's "answering also repaints" contract intact. Ordinary
+        // requests are observations, not elapsed time: only explicit frame/advance and pointer
+        // drivers move the virtual clock. In particular screenshots cannot create catch-up debt.
         //
         // A driver op painted its own frames and is not owed another, or `Frame(n)` would be n+1.
         match self.offscreen {
             None => self.redraw(),
-            Some(_) if drove => {}
-            Some(_) if ambient => self.frame(),
-            Some(_) => self.tick(),
+            Some(_) if !drove => self.frame(),
+            Some(_) => {}
         }
     }
 }
