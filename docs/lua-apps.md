@@ -231,6 +231,11 @@ ui.world({
   speed kept off a wall, 0 to 1 (default 0.5); `friction` is speed lost per second, 0 or more
   (default 6, a heavy crate; a ball wants under 1). It needs a `collider`, and cannot have a
   `controller`. At rest it sleeps, still loose, and the next push wakes it.
+- `grip` (0 or more; `loose = { grip = 0.3 }`) lets a loose thing turn: its surface catches at a
+  contact, so a glancing hit sets it spinning, and the spin changes how it bounces off. A head-on
+  hit gives no spin. `friction` slows the spin as it slows the slide. Without `grip` it never
+  turns — the drawing stays upright. It turns about its collider's centre, so its `pos` holds
+  still while it spins in place; the dump shows `rot` (degrees) and `spin` (degrees a second).
 - `group = "paddle"` puts an entity's collider in a named group; `blocks = { "paddle" }` makes a
   collider stop only those groups. Without either, a collider is in the common group and stops
   everything. A hockey centre line is `blocks = { "paddle" }`: the paddles stop at it, the puck
@@ -336,10 +341,12 @@ one at a moment — a puck back on the spot, a striker launched — a handler co
 ```lua
 world("rink"):set("puck", { pos = { 434, 234 } })             -- put it there
 world("rink"):set("puck", { velocity = { 600, 0 } })          -- send it off; { 0, 0 } stops it
+world("rink"):set("puck", { spin = 0 })                       -- stop it turning
 ```
 
 - `pos` is the drawing box's top-left, as in the description; `velocity` is per second, and only
-  a `loose` thing has one to set. Either may be left out; any other field is an error.
+  a `loose` thing has one to set; `spin` is degrees a second, and only a loose thing with `grip`
+  has one. Any may be left out; any other field is an error.
 - It applies at once — the dump shows it before the next frame. Something put inside a solid is
   pushed out, as when it spawns there.
 - Only in handlers: `set` inside `view` is an error, since a description only describes. A

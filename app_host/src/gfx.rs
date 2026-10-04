@@ -373,15 +373,17 @@ impl WorldHandle {
 
 impl UserData for WorldHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy } })`; either may be left out.
+        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy }, spin = degrees_a_second })`;
+        // any may be left out.
         methods.add_method("set", |_, this, (entity, fields): (String, Table)| {
             let owner = format!("world {:?}:set {entity:?}", this.id);
-            named_fields(&fields, &owner, &["pos", "velocity"])?;
+            named_fields(&fields, &owner, &["pos", "velocity", "spin"])?;
             let pair = |field| match maybe_table(&fields, &owner, field)? {
                 Some(t) => point(t, &format!("{owner}.{field}")).map(|p| Some((p.x, p.y))),
                 None => Ok(None),
             };
-            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")? };
+            let spin = maybe_number(&fields, &owner, "spin")?;
+            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")?, spin };
             this.command(&owner, |w| w.set(&entity, to))
         });
         // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
@@ -490,8 +492,22 @@ fn name(value: Value, owner: &str) -> mlua::Result<String> {
     }
 }
 
-/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n }` with either left
-/// to its default; `false` or absent, it is not loose. The world checks the ranges.
+/// `table.field` as a number, if there; an integer is one too.
+fn maybe_number(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<f64>> {
+    match table.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::Integer(n) => Ok(Some(n as f64)),
+        Value::Number(n) => Ok(Some(n)),
+        other => {
+            let what = other.type_name();
+            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
+        }
+    }
+}
+
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n }` with any
+/// left to its default (no grip: it never turns); `false` or absent, it is not loose. The world
+/// checks the ranges.
 fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
     let m = match spec.get::<Value>("loose")? {
         Value::Nil | Value::Boolean(false) => return Ok(None),
@@ -503,20 +519,13 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip"])?;
     let d = world::Material::default();
-    let number = |field: &str, or: f64| match m.get::<Value>(field)? {
-        Value::Nil => Ok(or),
-        Value::Integer(n) => Ok(n as f64),
-        Value::Number(n) => Ok(n),
-        other => {
-            let what = other.type_name();
-            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
-        }
-    };
+    let number = |field: &str| maybe_number(&m, &owner, field);
     Ok(Some(world::Material {
-        bounce: number("bounce", d.bounce)?,
-        friction: number("friction", d.friction)?,
+        bounce: number("bounce")?.unwrap_or(d.bounce),
+        friction: number("friction")?.unwrap_or(d.friction),
+        grip: number("grip")?,
     }))
 }
 

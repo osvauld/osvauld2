@@ -637,7 +637,7 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
-            "velocity": [e.velocity.0, e.velocity.1],
+            "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
             "attached": attached, "zones": e.zones, "clip": clip,
         })
     });

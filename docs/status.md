@@ -605,9 +605,15 @@ longer stops at loose things and shoves them with character impulses; it is move
 `set_next_kinematic_translation`, so Rapier knows its velocity and its contact strikes — a paddle
 at 400 sends a puck off at up to 800, not 230. It wakes a sleeping loose thing in its path (Rapier
 lets a walker through a sleeper). Cost: a walker's zone moments come a tick later, as a loose
-thing's already did. The Lua ↔ world contract is three kinds of call: describe (`view`), command
-(`set`, `after`), and questions. Next, in order: spin (rotation, grip at contacts, the turn
-drawn); questions (`ray`, `at`); controller acceleration; a `follow` controller.
+thing's already did. **Spin:** `loose = { grip }` unlocks a loose thing's rotation and gives its
+surface grip at contacts, so a glancing hit spins it (combined as the larger of two, so walls need
+none); `friction` damps the spin too; without `grip` it never turns. The drawing turns about the
+collider's centre (`Transform::pivot`), so `pos` holds still; a new body starts upright.
+`set { spin }` in degrees a second; the dump has `rot` and `spin`. Hockey's puck has a mark to see
+it turn, and the smoke has red strike it glancing and reads the spin. No curve from spin yet (that
+would be our own per-frame force). The Lua ↔ world contract is three kinds of call: describe
+(`view`), command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`);
+controller acceleration; a `follow` controller.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**

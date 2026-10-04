@@ -1031,7 +1031,7 @@ fn fling(material: Material, wall_x: Option<f64>, after: usize) -> (Vec<(f64, f6
 #[test]
 fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
     let rebound = |bounce| {
-        let (trace, _) = fling(Material { bounce, friction: 0.5 }, Some(52.0), 20);
+        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None }, Some(52.0), 20);
         trace.iter().map(|&(_, vx)| vx).fold(f64::MAX, f64::min)
     };
     // Let go at 100/s, 4 short of the wall: it hits almost at once, then comes back.
@@ -1043,7 +1043,7 @@ fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
 #[test]
 fn friction_decides_how_far_a_loose_thing_slides() {
     let slid = |friction| {
-        let (trace, _) = fling(Material { bounce: 0.5, friction }, None, 60);
+        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None }, None, 60);
         trace.last().unwrap().0
     };
     let (ball, crate_) = (slid(0.5), slid(8.0));
@@ -1145,7 +1145,7 @@ fn a_line_stops_only_the_group_it_blocks() {
             ..solid("line", (30.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d)
         };
         let thing = EntitySpec {
-            loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
             ..solid("box", (12.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
         };
         let mut world = World2d::default();
@@ -1183,7 +1183,7 @@ fn a_fast_loose_thing_does_not_pass_through_a_thin_wall() {
             pivot: (0.0, 0.0),
             turn: false,
         }),
-        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
         ..solid("puck", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
     let wall = || solid("wall", (320.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
@@ -1233,7 +1233,7 @@ fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() 
         ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction: 6.0 }),
+        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None }),
         ..solid("puck", (5.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     world.reconcile(vec![hero, puck]).unwrap();
@@ -1250,7 +1250,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     let specs = || {
         let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
         let puck = EntitySpec {
-            loose: Some(Material { bounce: 0.5, friction: 0.0 }),
+            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None }),
             ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
         };
         vec![wall, puck]
@@ -1259,7 +1259,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     world.reconcile(specs()).unwrap();
     world.tick(0.0, 0.0);
     // Asleep at rest: set wakes it, and it goes on until the wall stops it.
-    let to = Set { pos: Some((50.0, 0.0)), velocity: Some((200.0, 0.0)) };
+    let to = Set { pos: Some((50.0, 0.0)), velocity: Some((200.0, 0.0)), spin: None };
     world.set("puck", to).unwrap();
     assert_eq!(world.inspect()[1].pos, (50.0, 0.0), "moved at once, before a tick");
     assert!(world.needs_ticks(), "a woken puck needs the clock");
@@ -1272,7 +1272,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     world.reconcile(specs()).unwrap();
     assert_eq!(world.inspect()[1].pos.0, x);
     // The wall is fixed: it can be put somewhere, not given a velocity.
-    world.set("wall", Set { pos: Some((200.0, -50.0)), velocity: None }).unwrap();
+    world.set("wall", Set { pos: Some((200.0, -50.0)), velocity: None, spin: None }).unwrap();
     assert_eq!(world.inspect()[0].pos, (200.0, -50.0));
 }
 
@@ -1285,11 +1285,11 @@ fn set_is_checked() {
     };
     let mut world = World2d::default();
     world.reconcile(vec![hero]).unwrap();
-    let velocity = |v| Set { pos: None, velocity: Some(v) };
+    let velocity = |v| Set { pos: None, velocity: Some(v), spin: None };
     let cases = [
         ("ghost", velocity((1.0, 0.0)), "there is no such entity"),
         ("hero", velocity((1.0, 0.0)), "velocity needs a loose thing"),
-        ("hero", Set { pos: Some((f64::NAN, 0.0)), velocity: None }, "must be finite"),
+        ("hero", Set { pos: Some((f64::NAN, 0.0)), velocity: None, spin: None }, "must be finite"),
     ];
     for (id, to, wanted) in cases {
         let err = world.set(id, to).unwrap_err().to_string();
@@ -1352,13 +1352,13 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
     let d = drawing();
     let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
     world.reconcile(vec![wall, puck]).unwrap();
     world.tick(0.0, 0.0);
-    world.set("puck", Set { pos: None, velocity: Some((300.0, 0.0)) }).unwrap();
+    world.set("puck", Set { pos: None, velocity: Some((300.0, 0.0)), spin: None }).unwrap();
     let mut hits = vec![];
     for i in 1..=60 {
         world.tick(i as f64 / 60.0, 1.0 / 60.0);
@@ -1402,7 +1402,7 @@ fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
         ..solid("paddle", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 1.0, friction: 0.0 }),
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None }),
         ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1415,4 +1415,76 @@ fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
     }
     // Struck by something far heavier at 400, it leaves at up to twice that; shoved, at 400.
     assert!(fastest > 600.0, "the puck was struck, not shoved: {fastest}");
+}
+
+/// A puck 8 across at x 0..8, above a floor at y 40, set going at `velocity` and `spin`; where it
+/// was, its turn and its spin each tick for `ticks` ticks.
+fn spun(
+    grip: Option<f64>,
+    friction: f64,
+    velocity: (f64, f64),
+    spin: Option<f64>,
+    ticks: usize,
+) -> Vec<((f64, f64), f64, f64)> {
+    let d = drawing();
+    let floor = solid("floor", (-500.0, 40.0), Shape::Rect(1000.0, 4.0), (0.0, 0.0), &d);
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 0.5, friction, grip }),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![floor, puck]).unwrap();
+    world.tick(0.0, 0.0);
+    world.set("puck", Set { pos: None, velocity: Some(velocity), spin }).unwrap();
+    (1..=ticks)
+        .map(|i| {
+            world.tick(i as f64 / 60.0, 1.0 / 60.0);
+            let p = &world.inspect()[1];
+            (p.pos, p.rot, p.spin)
+        })
+        .collect()
+}
+
+#[test]
+fn a_thing_with_grip_struck_glancing_turns_and_one_without_never_does() {
+    // Down and to the right, onto the floor at a slant.
+    let gripped = spun(Some(0.8), 0.0, (300.0, 300.0), None, 30);
+    let (_, rot, spin) = *gripped.last().unwrap();
+    assert!(spin.abs() > 100.0 && rot != 0.0, "the floor caught it and set it turning: {spin} {rot}");
+    let slick = spun(None, 0.0, (300.0, 300.0), None, 30);
+    assert!(slick.iter().all(|&(_, rot, spin)| rot == 0.0 && spin == 0.0), "no grip, no turn");
+}
+
+#[test]
+fn a_thing_spinning_in_place_stays_put_and_its_spin_runs_down_with_friction() {
+    // Turning about its centre: the drawing box's corner does not wander.
+    let free = spun(Some(0.5), 0.0, (0.0, 0.0), Some(360.0), 30);
+    assert!(free.iter().all(|&(pos, ..)| pos == (0.0, 0.0)), "it spun in place: {:?}", free.last());
+    let (_, rot, spin) = *free.last().unwrap();
+    assert!((spin - 360.0).abs() < 1.0, "it keeps its spin with no friction: {spin}");
+    assert!((rot - 180.0).abs() < 2.0, "half a turn in half a second: {rot}");
+    let slowed = spun(Some(0.5), 4.0, (0.0, 0.0), Some(360.0), 180);
+    assert!(slowed.last().unwrap().2.abs() < 5.0, "friction ran it down: {:?}", slowed.last());
+}
+
+#[test]
+fn spin_and_grip_are_checked() {
+    let d = drawing();
+    let bad = EntitySpec {
+        loose: Some(Material { grip: Some(-1.0), ..Material::default() }),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let err = World2d::default().reconcile(vec![bad]).unwrap_err().to_string();
+    assert!(err.contains("grip must be 0 or more"), "{err}");
+    let slick = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![slick]).unwrap();
+    let spin = |s| Set { spin: Some(s), ..Set::default() };
+    let err = world.set("puck", spin(90.0)).unwrap_err().to_string();
+    assert!(err.contains("spin needs a loose thing with grip"), "{err}");
+    let err = world.set("puck", spin(f64::INFINITY)).unwrap_err().to_string();
+    assert!(err.contains("must be finite"), "{err}");
 }

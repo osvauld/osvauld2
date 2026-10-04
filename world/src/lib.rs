@@ -51,6 +51,8 @@ pub struct Set {
     pub pos: Option<(f64, f64)>,
     /// Per second; only a loose thing's, since Rapier moves only those.
     pub velocity: Option<(f64, f64)>,
+    /// Degrees a second; only a loose thing with grip turns.
+    pub spin: Option<f64>,
 }
 
 /// Bit 0 is the common group, everything not named into another.
@@ -84,6 +86,10 @@ pub struct EntityInspection {
     pub body: &'static str,
     /// Per second: Rapier's for a thrown body, the last tick's step for a controlled one.
     pub velocity: (f64, f64),
+    /// Degrees turned, about the solid shape's centre, and degrees a second: only a loose thing
+    /// with grip turns.
+    pub rot: f64,
+    pub spin: f64,
     /// `(carrier, part)`.
     pub attached: Option<(String, String)>,
     /// Ids of the zones it is inside, sorted.
@@ -175,12 +181,15 @@ pub struct Transform {
     pub y: f64,
     pub rot: f64,
     pub scale: f64,
+    /// The point in the drawing it turns about: a turning body's solid shape's centre.
+    pub pivot: (f64, f64),
 }
 
 impl Transform {
     fn affine(&self) -> Affine {
-        Affine::translate((self.x, self.y))
+        Affine::translate((self.x + self.pivot.0, self.y + self.pivot.1))
             * Affine::rotate(self.rot.to_radians())
+            * Affine::translate((-self.pivot.0, -self.pivot.1))
             * Affine::scale(self.scale)
     }
 }
@@ -405,6 +414,7 @@ impl World2d {
                         y,
                         rot: 0.0,
                         scale: 1.0,
+                        pivot: (0.0, 0.0),
                     };
                     let name = Name(spec.id.clone());
                     self.ecs.spawn((transform, name)).id()
@@ -433,6 +443,8 @@ impl World2d {
             if !kept {
                 if let Some(old) = e.take::<Solid>() {
                     self.physics.remove(old.body);
+                    // A new body starts upright.
+                    e.get_mut::<Transform>().expect("every entity has one").rot = 0.0;
                 }
                 if collider.is_some() || sensor.is_some() {
                     let t = e.get::<Transform>().expect("every entity has a Transform");
@@ -518,8 +530,9 @@ impl World2d {
             }
             let (cx, cy) = s.collider.as_ref().expect("only a solid slides").centre();
             let (x, y) = self.physics.centre_of(body);
+            let (rot, _) = self.physics.turn(body);
             let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
-            (t.x, t.y) = (x - cx, y - cy);
+            (t.x, t.y, t.rot, t.pivot) = (x - cx, y - cy, rot, (cx, cy));
             // Let go, it turns fixed at rest; loose, it only sleeps, to be pushed again.
             let rest = if loose { self.physics.asleep(body) } else { self.physics.settle(body) };
             self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = !rest;
@@ -870,8 +883,8 @@ impl World2d {
         let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
         let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
         let finite = |p: Option<(f64, f64)>| p.is_none_or(|(x, y)| x.is_finite() && y.is_finite());
-        if !finite(to.pos) || !finite(to.velocity) {
-            return Err(err("pos and velocity must be finite numbers"));
+        if !finite(to.pos) || !finite(to.velocity) || !to.spin.is_none_or(f64::is_finite) {
+            return Err(err("pos, velocity and spin must be finite numbers"));
         }
         let e = self.ecs.entity(entity);
         if e.contains::<Attached>() {
@@ -884,13 +897,17 @@ impl World2d {
         if to.velocity.is_some() && !solid.is_some_and(|(.., loose)| loose) {
             return Err(err("velocity needs a loose thing: Rapier moves only those"));
         }
+        let turns = e.get::<Solid>().and_then(|s| s.loose).is_some_and(|m| m.grip.is_some());
+        if to.spin.is_some() && !turns {
+            return Err(err("spin needs a loose thing with grip: nothing else turns"));
+        }
         if let Some((x, y)) = to.pos {
             let mut t = self.ecs.get_mut::<Transform>(entity).expect("every entity has one");
             (t.x, t.y) = (x, y);
         }
         if let Some((body, (cx, cy), loose)) = solid {
             let at = to.pos.map(|(x, y)| (x + cx, y + cy));
-            self.physics.set(body, at, to.velocity);
+            self.physics.set(body, at, to.velocity, to.spin);
             // Awake now, so followed until it rests again.
             self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding |= loose;
         }
@@ -923,6 +940,10 @@ impl World2d {
                     (_, Some(v)) => (v.0, v.1),
                     _ => (0.0, 0.0),
                 };
+                let spin = match solid {
+                    Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
+                    _ => 0.0,
+                };
                 let mut zones: Vec<String> = (self.inside.iter())
                     .filter(|(_, who)| *who == entity)
                     .map(|&(zone, _)| name(zone))
@@ -933,6 +954,8 @@ impl World2d {
                     pos: (t.x, t.y),
                     body,
                     velocity,
+                    rot: t.rot,
+                    spin,
                     attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
                     zones,
                     clip: e.get::<Animator>().map(|a| ClipInspection {

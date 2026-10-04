@@ -99,6 +99,27 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     s.rpc.frame(60)
     seen, _ = look()
     assert seen["puck"]["pos"][0] >= seen["blue"]["pos"][0] + 56 - 1, ("pushed out of blue", seen)
+    assert seen["puck"]["spin"] == 0 and seen["puck"]["rot"] == 0, ("a new puck is upright", seen["puck"])
+
+    # Red, up at the boards, comes down until its middle is a little above the puck's, then runs
+    # at it: a glancing hit, and the puck's grip sets it turning.
+    def middle(e, r):
+        return seen[e]["pos"][1] + r
+    s.rpc.keyboard("ArrowDown", "ArrowDown", True)
+    for _ in range(120):
+        seen, _ = look()
+        if middle("red", 28) >= middle("puck", 16) - 20:
+            break
+        s.rpc.frame(1)
+    s.rpc.keyboard("ArrowDown", "ArrowDown", False)
+    s.rpc.keyboard("ArrowLeft", "ArrowLeft", True)
+    for _ in range(90):
+        s.rpc.frame(1)
+        seen, _ = look()
+        if seen["puck"]["spin"] != 0:
+            break
+    s.rpc.keyboard("ArrowLeft", "ArrowLeft", False)
+    assert abs(seen["puck"]["spin"]) > 10, ("red's glancing hit set the puck spinning", seen["puck"])
     if len(sys.argv) > 1:
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a hit squashed it, a goal scored and the puck back on the spot")
+    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a hit squashed it, a goal scored and the puck back on the spot, a glancing hit spun it")
