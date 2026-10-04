@@ -5021,6 +5021,72 @@ fn asset_editor_drags_a_point_with_its_handles() {
     );
 }
 
+/// Dragging a part moves it, the parts under it and the sockets on them — every point by the
+/// same snapped step — and nothing above it.
+#[test]
+fn asset_editor_drags_a_part_with_what_rides_it() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    app.update(LuaMsg::CallZoom(Key::new("viewport", "on_zoom"), 1.0));
+    let _ = app.view();
+    // 10 by 3 canvas units is 4 by 1.2 in the drawing, which snaps to 4 by 1.
+    let drag = |app: &mut LuaApp<LuaMsg>, part: &str| {
+        for (phase, f) in [("start", 0.0), ("move", 0.5), ("end", 1.0)] {
+            let args = DragArgs {
+                phase,
+                at: (200.0 + 10.0 * f, 150.0 + 3.0 * f),
+                delta: (0.0, 0.0),
+                scale: 1.0,
+                origin: (0.0, 0.0),
+                shape: Shape(Some((part.into(), 0.0, 0.0))),
+                t: 0.0,
+            };
+            app.update(LuaMsg::CallDrag(Key::new("canvas", "on_drag"), args));
+            let _ = app.view();
+        }
+        assert!(app.error.is_none(), "{:?}", app.error);
+    };
+    let read = |app: &LuaApp<LuaMsg>| -> String {
+        app.vm
+            .load(
+                r#"
+                local a = asset:open("hero")
+                local at = {}
+                for _, p in ipairs(a.views.front.parts) do
+                    at[p.id] = p
+                end
+                local function pt(p) return string.format("%g,%g", p[1], p[2]) end
+                local m = at.head.shapes[1].path[1]
+                return table.concat({ pt(at.head.pivot), pt({ m[2], m[3] }), pt(a.sockets.head_top.at),
+                    pt(at.body.pivot), pt(at.arm_near.pivot) }, " ")
+                "#,
+            )
+            .eval()
+            .unwrap()
+    };
+    drag(&mut app, "head");
+    assert_eq!(read(&app), "84,89 114,59 84,35 80,166 104,98", "the head and its socket moved; its parent stayed");
+    drag(&mut app, "body");
+    assert_eq!(read(&app), "88,90 118,60 88,36 84,167 108,99", "the body took every part under it along");
+
+    // Gradient points and a shadow's corner are drawing space too; lengths and stops are not.
+    let moved: String = app
+        .vm
+        .load(
+            r#"
+            local p = require("model").moved({ pivot = { 0, 0 }, shapes = {
+                { shadow = { rect = { 6, 40, 52, 10 }, blur = 2 } },
+                { path = { { "move", 1, 2 } }, fill = { radial = { center = { 10, 10 }, radius = 5, stops = {} } } },
+            } }, { 4, 1 })
+            local r, g = p.shapes[1].shadow.rect, p.shapes[2].fill.radial
+            return table.concat({ r[1], r[2], r[3], r[4], g.center[1], g.center[2], g.radius }, " ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(moved, "10 41 52 10 14 11 5");
+}
+
 /// A selected part shows its path points as dots: one part per point, named by shape, command
 /// and point, at canvas scale; a click on one keeps the selection.
 #[test]

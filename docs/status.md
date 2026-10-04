@@ -549,12 +549,14 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   1×, twentieths up close), and an end point carries the cubic controls either side of it. The
   camera's `on_zoom` tells Lua its scale, so the dots and the selection outline keep their screen
   size. The canvas sets `drag_on_shapes`, so a drag from a part or a dot is the editor's and one
-  from empty canvas pans.
+  from empty canvas pans. **Part moves:** dragging a part selects it and moves it with every part
+  under it, by snapped steps — pivots, path points, gradient points and shadow corners — and the
+  sockets on them; release writes each path whole.
   **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
   its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
   pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.
   Not built: picking a var from a list (type `@name` for now), editing gradients, stage entity fields,
-  dragging points (E2b), adding parts, the clip timeline, colliders in stage play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
+  reparenting and reordering, adding parts, the clip timeline, colliders in stage play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
 
 ### Environment — composable 3D interfaces and worlds
 

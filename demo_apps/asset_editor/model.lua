@@ -45,6 +45,60 @@ local function tag(v)
 	end
 	return (n > 0 and n == #v) and doc.list(out) or doc.map(out)
 end
+M.tag = tag
+
+-- Part `id` and every part under it, as a set: a moved arm takes its hand along.
+function M.family(parts, id)
+	local ids, grew = { [id] = true }, true
+	while grew do -- a child may be listed before its parent
+		grew = false
+		for _, p in ipairs(parts) do
+			if p.parent and ids[p.parent] and not ids[p.id] then
+				ids[p.id], grew = true, true
+			end
+		end
+	end
+	return ids
+end
+
+local function shift(p, d)
+	return p and { p[1] + d[1], p[2] + d[2] }
+end
+
+-- A copy of `part` moved by `d`: its pivot and every point it draws in drawing space — path
+-- points, gradient points, a shadow's corner. Lengths, angles and stops stay.
+function M.moved(part, d)
+	local out = table.clone(part)
+	out.pivot = shift(part.pivot, d)
+	out.shapes = {}
+	for i, s in ipairs(part.shapes or {}) do
+		local c = table.clone(s)
+		if s.shadow then
+			local r = s.shadow.rect
+			c.shadow = table.clone(s.shadow)
+			c.shadow.rect = { r[1] + d[1], r[2] + d[2], r[3], r[4] }
+		end
+		if s.path then
+			c.path = {}
+			for j, cmd in ipairs(s.path) do
+				local m = { cmd[1] }
+				for k = 2, #cmd do -- x, y, x, y…
+					m[k] = cmd[k] + d[1 + k % 2]
+				end
+				c.path[j] = m
+			end
+		end
+		if type(s.fill) == "table" then
+			local kind, g = next(s.fill)
+			local f = table.clone(g)
+			f.from, f.to = shift(g.from, d), shift(g.to, d)
+			f.center, f.focus = shift(g.center, d), shift(g.focus, d)
+			c.fill = { [kind] = f }
+		end
+		out.shapes[i] = c
+	end
+	return out
+end
 
 local loaded = {}
 

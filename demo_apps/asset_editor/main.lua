@@ -9,7 +9,8 @@ local built = { key = nil, frame = nil } -- the canvas visual; rebuilt on a new 
 local play = nil -- { name, drawing, clip } while a clip plays on the canvas; nil is edit mode
 local seen_at = 1 -- the viewport's zoom, so selection marks keep their screen size
 -- While a point dot is held: its shape `i`, the points moving (`{ j, k, from }`, the held one
--- first), and `d`, how far they have moved, in drawing units.
+-- first), and `d`, how far they have moved, in drawing units. While a part is held: `ids`, the
+-- set of parts moving with it, and `d`.
 local drag = nil
 
 -- The canvas draws the asset scaled up by building a scaled copy, rather than scaling the
@@ -119,7 +120,9 @@ end
 local function dragged(parts)
 	local out = table.clone(parts)
 	for n, p in ipairs(parts) do
-		if p.id == selected then
+		if drag.ids then
+			out[n] = drag.ids[p.id] and M.moved(p, drag.d) or p
+		elseif p.id == selected then
 			local part, shape = table.clone(p), table.clone(p.shapes[drag.i])
 			shape.path = table.clone(shape.path)
 			for _, m in ipairs(drag.moves) do -- an end and its control can share a command
@@ -135,6 +138,37 @@ local function dragged(parts)
 		end
 	end
 	return out
+end
+
+local function key(...)
+	return { "views", M.view, "parts", ... }
+end
+
+-- Writes the held parts where the drag left them, and the sockets riding them. Paths go whole.
+local function write_moved(parts)
+	local d = drag.d
+	for _, p in ipairs(parts) do
+		if drag.ids[p.id] then
+			local m = M.moved(p, d)
+			M.asset:set(key(p.id, "pivot"), M.tag(m.pivot))
+			for i, s in ipairs(m.shapes) do
+				if s.path then
+					M.asset:set(key(p.id, "shapes", i, "path"), M.tag(s.path))
+				end
+				if type(s.fill) == "table" then
+					M.asset:set(key(p.id, "shapes", i, "fill"), M.tag(s.fill))
+				end
+				if s.shadow then
+					M.asset:set(key(p.id, "shapes", i, "shadow", "rect"), M.tag(s.shadow.rect))
+				end
+			end
+		end
+	end
+	for name, s in pairs(M.asset.sockets or {}) do
+		if drag.ids[s.part] then
+			M.asset:set({ "sockets", name, "at" }, M.tag({ s.at[1] + d[1], s.at[2] + d[2] }))
+		end
+	end
 end
 
 local function visual(parts)
@@ -233,11 +267,15 @@ local function canvas(parts)
 				selected = e.shape
 			end
 		end,
-		-- A held dot follows the pointer on the canvas alone; letting go writes its one point.
-		-- A drag from a part moves nothing yet; one from empty canvas pans.
+		-- A held dot or part follows the pointer on the canvas alone; letting go writes it. A
+		-- part takes the parts under it along. A drag from empty canvas pans.
 		drag_on_shapes = true,
 		on_drag = function(e)
 			if e.phase == "start" then
+				if e.shape and e.shape:sub(1, 3) ~= "pt:" then
+					selected = e.shape
+					drag = { ids = M.family(parts, e.shape), d = { 0, 0 }, x0 = e.x, y0 = e.y }
+				end
 				local i, j, k = (e.shape or ""):match("^pt:(%d+):(%d+):(%d+)$")
 				for _, p in ipairs(i and parts or {}) do
 					if p.id == selected then
@@ -254,13 +292,19 @@ local function canvas(parts)
 					end
 				end
 			elseif drag then
-				-- The held point snaps, and the rest move by what it moved.
-				local from = drag.moves[1].from
-				local x = snap(from[1] + (e.x - drag.x0) / C.zoom)
-				local y = snap(from[2] + (e.y - drag.y0) / C.zoom)
-				drag.d = { x - from[1], y - from[2] }
+				-- A held point snaps, and the rest move by what it moved; a part moves by snapped steps.
+				local dx, dy = (e.x - drag.x0) / C.zoom, (e.y - drag.y0) / C.zoom
+				if drag.ids then
+					drag.d = { snap(dx), snap(dy) }
+				else
+					local from = drag.moves[1].from
+					drag.d = { snap(from[1] + dx) - from[1], snap(from[2] + dy) - from[2] }
+				end
 				if e.phase == "end" then
-					for _, m in ipairs(drag.moves) do
+					if drag.ids then
+						write_moved(parts)
+					end
+					for _, m in ipairs(drag.moves or {}) do
 						local cmd = { "views", M.view, "parts", selected, "shapes", drag.i, "path", m.j }
 						local px, py = table.clone(cmd), table.clone(cmd)
 						table.insert(px, 2 * m.k)
