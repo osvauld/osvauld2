@@ -40,6 +40,7 @@ local d = doc:open("probe")
 local heavy = false
 local hoard = {}
 local views = 0
+local ticks = 0
 
 local function notes()
 	local n = 0
@@ -64,6 +65,8 @@ return function()
 	return ui.col({
 		id = "probe",
 		gap = 4,
+		-- heavy: a view of 40 ms on every frame, which only a declared on_frame asks for
+		on_frame = heavy and function() ticks += 1 end or nil,
 		ui.text({ "PROBE", id = "label", no_wrap = true }),
 		btn("add", function() d:set({ "note:" .. uuid() }, doc.map({ text = "hi" })) end),
 		btn("busy", function() __busy(300) end),
@@ -282,9 +285,17 @@ def t7_parallel_tiles(tmp):
             return sorted(timed(lambda: sh.rpc.frame(1)) for _ in range(5))[2]
 
         single = median_frame()
+        assert single > 0.04, f"one heavy tile framed in {single * 1000:.0f} ms: the view did not run"
         sh.rpc.request("SplitWith", item_id=b)
         split = median_frame()
         assert split - single < 0.02, f"one tile {single * 1000:.0f} ms, two {split * 1000:.0f} ms"
+
+        # Both on screen and both touchable: a click lands in the tile it is over, and only there.
+        adds = sorted((r for r in sh.rpc.rects() if r["id"] == "add"), key=lambda r: r["x"])
+        assert len(adds) == 2, adds
+        sh.rpc.click_at(adds[1]["x"] + 5, adds[1]["y"] + 5)
+        sh.rpc.frame(2)
+        assert sh.rpc.read_data(b)["probe"] and not sh.rpc.read_data(a)["probe"]
 
 
 @test

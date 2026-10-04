@@ -190,6 +190,22 @@ impl AppThread {
     /// which is what keeps a driven run exact. With a window: take whatever frame is newest and
     /// never wait. `true` when the frame changed.
     pub fn sync(&mut self, now: f64) -> bool {
+        let asked = self.ask(now);
+        self.take(asked)
+    }
+
+    /// `sync`'s first half: offscreen, ask for the frame at `now` without waiting for it, so
+    /// several tiles can be asked before any is waited on.
+    pub fn ask(&self, now: f64) -> Option<Receiver<Option<TileFrame>>> {
+        if !self.offscreen {
+            return None;
+        }
+        let (tx, rx) = channel();
+        self.tx.send(In::Sync(now, tx)).ok().map(|()| rx)
+    }
+
+    /// `sync`'s second half: the frame `ask` asked for, or with a window the newest one.
+    pub fn take(&mut self, asked: Option<Receiver<Option<TileFrame>>>) -> bool {
         if !self.offscreen {
             return match self.latest.lock().unwrap().take() {
                 Some(f) => {
@@ -199,10 +215,9 @@ impl AppThread {
                 None => false,
             };
         }
-        let (tx, rx) = channel();
-        if self.tx.send(In::Sync(now, tx)).is_err() {
+        let Some(rx) = asked else {
             return false;
-        }
+        };
         match rx.recv_timeout(STUCK) {
             Ok(Some(f)) => {
                 self.stuck = false;

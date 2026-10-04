@@ -114,7 +114,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
 
-### App threads (2026-10-04, steps 0–3) — [design](design/app-threads.md)
+### App threads (2026-10-04, steps 0–3 and 9) — [design](design/app-threads.md)
 - `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
   `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
@@ -126,8 +126,13 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   `Tile` live there; the shell shows its latest frame in a `tile` slot. Hidden apps still
   answer the bridge, import pushes and save. The bridge serves connections concurrently.
   Offscreen, each shell paint waits for shown tiles (smokes stay exact). Green: T1, T2.
-- not built: stuck-thread badge (T4), background view on push (T5, a decision), split tiles
-  (T7), own windows (T10), the Lua chrome's guards (T11).
+- Split: `SplitWith { item_id }` shows an open app beside the focused one, `Unsplit` goes
+  back; both paint, in parallel, and input goes to the tile under the pointer. A stand-in
+  until the Lua chrome owns layout. Green: T7.
+- A Lua test's wall clock pauses while `t.step`/`t.click_at`/… drive the app
+  (`Budget::pause`): those frames are the app's time. Under load they spent the test's 1 s.
+- not built: stuck-thread badge (T4), background view on push (T5, a decision), 3D worlds
+  in a tile (`TileFrame` carries no 3D view), own windows (T10), the Lua chrome's guards (T11).
 
 ## Not built
 

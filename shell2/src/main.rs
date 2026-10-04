@@ -914,6 +914,8 @@ struct Shell {
     /// Every open app, each on its own thread — shown or not.
     apps: HashMap<Arc<str>, AppThread>,
     focused: usize,
+    /// The open app shown beside the focused one, if any (`SplitWith`).
+    split: Option<Arc<str>>,
     /// Offscreen, tiles run on the shell's virtual clock and every paint waits for them.
     offscreen: Option<(f32, f32)>,
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
@@ -978,6 +980,7 @@ impl Shell {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
         self.focused = 0;
+        self.split = None;
         self.error = None;
     }
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
@@ -1201,18 +1204,36 @@ impl Shell {
                     }
                 }
             },
+            Request::SplitWith { item_id } => match self.apps.get_key_value(item_id.as_str()) {
+                Some((id, _)) => {
+                    self.split = Some(id.clone());
+                    Response::ok("split")
+                }
+                None => Response::err("item is not open; call OpenItem first"),
+            },
+            Request::Unsplit => {
+                self.split = None;
+                Response::ok("unsplit")
+            }
             req => answer(&self.vault, req),
         }
     }
 
-    /// Only the focused tab's app paints; every other one keeps running unseen.
-    fn show_focused(&mut self) {
-        let focused = match self.tabs.get(self.focused) {
-            Some(Tab::App((id, _))) => Some(id.clone()),
-            _ => None,
+    /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
+    fn on_screen(&self) -> Vec<Arc<str>> {
+        let Some(Tab::App((id, _))) = self.tabs.get(self.focused) else {
+            return Vec::new();
         };
+        let mut ids = vec![id.clone()];
+        ids.extend(self.split.clone().filter(|s| s != id));
+        ids
+    }
+
+    /// Only apps on screen paint; every other one keeps running unseen.
+    fn show_on_screen(&mut self) {
+        let shown = self.on_screen();
         for (id, a) in self.apps.iter_mut() {
-            a.show(focused.as_ref() == Some(id));
+            a.show(shown.contains(id));
         }
     }
 
@@ -1312,6 +1333,7 @@ impl Shell {
             tabs,
             apps: HashMap::new(),
             focused: 0,
+            split: None,
             offscreen,
             clock: 0.0,
             error: None,
@@ -1387,8 +1409,26 @@ impl Shell {
         Ok(id)
     }
 
+    /// An app's share of the screen: its latest frame, or why there is none.
+    fn app_slot(&self, id: &Arc<str>) -> El<Msg> {
+        match self.apps.get(id) {
+            Some(a) if a.stuck => text("this app is not responding")
+                .color(theme::error())
+                .grow(),
+            Some(a) => {
+                let to = id.clone();
+                tile(a.frame.clone())
+                    .h_full()
+                    .grow()
+                    .on_tile(id.to_string(), move |e| Msg::TileInput(to.clone(), e))
+            }
+            None => text("app not found").color(theme::error()).grow(),
+        }
+    }
+
     fn close_test_tab(&mut self, id: &Arc<str>, restore_focus: usize) {
         self.apps.remove(id);
+        self.split = self.split.take().filter(|s| s != id);
         if let Some(pos) = self
             .tabs
             .iter()
@@ -1485,17 +1525,16 @@ impl App for Shell {
                 Screen::Spaces(s) => s.view(),
                 Screen::Items(i) => i.view(),
             },
-            Tab::App((id, _name)) => match self.apps.get(id) {
-                Some(a) if a.stuck => text("this app is not responding").color(theme::error()),
-                Some(a) => {
-                    let to = id.clone();
-                    tile(a.frame.clone())
-                        .w_full()
-                        .grow()
-                        .on_tile(id.to_string(), move |e| Msg::TileInput(to.clone(), e))
+            Tab::App(_) => {
+                let mut tiles = row().w_full().grow();
+                for (i, id) in self.on_screen().into_iter().enumerate() {
+                    if i > 0 {
+                        tiles = tiles.child(col().w(1.0).h_full().fill(theme::bd_1()));
+                    }
+                    tiles = tiles.child(self.app_slot(&id));
                 }
-                None => text("app not found").color(theme::error()),
-            },
+                tiles
+            }
         };
 
         // Shell-level chrome, above whatever tab is focused: open failures surface here rather
@@ -1569,6 +1608,7 @@ impl App for Shell {
                     .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
                 if let Some(pos) = found {
                     self.tabs.remove(pos);
+                    self.split = self.split.take().filter(|s| *s != id);
                     let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
                     if let (Some(record), Some(names), Some(o)) = (
                         self.node.clone(),
@@ -2215,7 +2255,7 @@ impl App for Shell {
         };
         // Saving, indexing and reloading happen on each app's own thread now, after every
         // batch it handles (`app_thread::settle`); the shell only keeps tiles shown or hidden.
-        self.show_focused();
+        self.show_on_screen();
 
         if let Some(next) = next {
             self.screen = next;
@@ -2237,8 +2277,17 @@ impl App for Shell {
 
     fn before_frame(&mut self, now: f64) {
         self.clock = now;
-        for a in self.apps.values_mut().filter(|a| a.is_shown()) {
-            a.sync(now);
+        // Ask every shown tile first, then collect: they frame in parallel, not in turn.
+        let asked: Vec<_> = self
+            .apps
+            .iter()
+            .filter(|(_, a)| a.is_shown())
+            .map(|(id, a)| (id.clone(), a.ask(now)))
+            .collect();
+        for (id, asked) in asked {
+            if let Some(a) = self.apps.get_mut(&id) {
+                a.take(asked);
+            }
         }
     }
 

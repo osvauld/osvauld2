@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–3 built 2026-10-04 (T1, T2, T3, T6, T8 green; T9 placeholder); steps 4–11 open, partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–3 and 9 built 2026-10-04 (T1, T2, T3, T6, T7, T8 green; T9 placeholder); steps 4–8, 10, 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -181,6 +181,15 @@ Each leaves `cargo test` and the smokes green.
    thread that stops answering. T4, T5, T6 green.
 9. **Two tiles.** A minimal side-by-side split in the Rust chrome (the Lua chrome takes it over
    later). T7 green.
+   *Built 2026-10-04:* `SplitWith`/`Unsplit` bridge requests; the shell shows the focused app
+   and the split one, a 1 px rule between. The offscreen barrier asks every shown tile before
+   waiting on any (`AppThread::ask`/`take`) — asking in turn failed T7 (104 → 156 ms). T7's
+   probe declares `on_frame` when heavy, or its view never re-ran and the timing measured
+   nothing; T7 also clicks the right tile and checks only that app heard it. Found on the
+   way: a Lua test's wall budget counted the app frames it drives, so `smoke_search` failed
+   under build contention; `Budget::pause` stops the clock across `t.*` calls. Gap: a 3D
+   world inside a tile does not show — `Runner` gathers one `SceneView3d` per frame beside
+   the Scene and `TileFrame` has no slot for it.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.
