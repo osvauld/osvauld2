@@ -8,13 +8,15 @@ use rapier3d::prelude::RigidBodyHandle;
 use runtime::scene3d::{Scene3d, SceneError};
 
 use crate::physics3d::Physics3d;
-pub use crate::physics3d::{BodyState, Shape3d};
+pub use crate::physics3d::{BodyState, Set3d, Shape3d};
 
 mod clock;
 mod worlds;
+mod zones;
 use clock::FixedClock;
 pub use clock::{AdvanceReport, ClockError};
 pub use worlds::{WorldRecipes3d, Worlds3d, Worlds3dError};
+pub use zones::{ZoneEvent3d, ZonePhase3d};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntitySpec3d {
@@ -22,19 +24,24 @@ pub struct EntitySpec3d {
     pub shape: Shape3d,
     /// Metre-scale body centre: spawn position for a new ID, reset target for a retained ID.
     pub position: [f32; 3],
+    /// Quaternion x/y/z/w, normalized by physics; retained edits change only the reset target.
+    pub rotation: [f32; 4],
     pub dynamic: bool,
+    pub sensor: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityInspection3d {
     pub authored: EntitySpec3d,
     pub resolved: BodyState,
+    pub zones: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldInspection3d {
     pub tick: u64,
     pub dropped_seconds: f64,
+    pub dropped_zone_events: u64,
     pub entities: Vec<EntityInspection3d>,
 }
 
@@ -46,10 +53,14 @@ pub enum World3dError {
     Budget,
     #[error("3D body id is empty, too long, or repeated: {0}")]
     Id(String),
-    #[error("3D body {0} has invalid position or dimensions")]
+    #[error("3D body {0} has invalid position, rotation or dimensions")]
     Body(String),
     #[error("remove body {0} before changing its collider or body type")]
     Changed(String),
+    #[error("3D body {0} needs finite bounded commands; velocity/spin require a dynamic body")]
+    Command(String),
+    #[error("3D sensor {0} must be fixed")]
+    Sensor(String),
     #[error("3D body does not exist: {0}")]
     Missing(String),
 }
@@ -66,6 +77,10 @@ pub struct World3d {
     ids: HashMap<String, Entity>,
     physics: Physics3d,
     clock: FixedClock,
+    zones: std::collections::BTreeSet<(String, String)>,
+    events: std::collections::VecDeque<ZoneEvent3d>,
+    dropped_zone_events: u64,
+    dirty: bool,
 }
 
 impl World3d {
@@ -81,11 +96,17 @@ impl World3d {
             if spec.id.is_empty() || spec.id.len() > 128 || !seen.insert(spec.id.clone()) {
                 return Err(World3dError::Id(spec.id.clone()));
             }
-            Physics3d::validate(spec.shape, spec.position)
+            if spec.sensor && spec.dynamic {
+                return Err(World3dError::Sensor(spec.id.clone()));
+            }
+            Physics3d::validate(spec.shape, spec.position, spec.rotation)
                 .map_err(|_| World3dError::Body(spec.id.clone()))?;
             if let Some(e) = self.ids.get(&spec.id) {
                 let old = &self.ecs.get::<Body>(*e).unwrap().spec;
-                if old.shape != spec.shape || old.dynamic != spec.dynamic {
+                if old.shape != spec.shape
+                    || old.dynamic != spec.dynamic
+                    || old.sensor != spec.sensor
+                {
                     return Err(World3dError::Changed(spec.id.clone()));
                 }
             }
@@ -107,15 +128,24 @@ impl World3d {
             let e = self.ids.remove(&id).unwrap();
             self.physics.remove(self.ecs.get::<Body>(e).unwrap().handle);
             self.ecs.despawn(e);
+            self.dirty = true;
         }
+        self.prune_zones();
         for spec in specs {
             if let Some(e) = self.ids.get(&spec.id) {
                 self.ecs.get_mut::<Body>(*e).unwrap().spec = spec;
             } else {
                 let handle = self
                     .physics
-                    .add(spec.shape, spec.position, spec.dynamic)
+                    .add(
+                        spec.shape,
+                        spec.position,
+                        spec.rotation,
+                        spec.dynamic,
+                        spec.sensor,
+                    )
                     .expect("validated before reconciliation");
+                self.dirty = true;
                 let id = spec.id.clone();
                 self.ids
                     .insert(id, self.ecs.spawn(Body { spec, handle }).id());
@@ -126,6 +156,8 @@ impl World3d {
 
     pub fn step(&mut self) {
         self.physics.step();
+        self.dirty = false;
+        self.update_zones();
     }
     pub fn tick(&self) -> u64 {
         self.physics.tick
@@ -150,10 +182,11 @@ impl World3d {
     }
 
     pub fn needs_ticks(&self) -> bool {
-        self.ids.values().any(|e| {
-            let body = self.ecs.get::<Body>(*e).unwrap();
-            body.spec.dynamic && !self.physics.inspect(body.handle).sleeping
-        })
+        self.dirty
+            || self.ids.values().any(|e| {
+                let body = self.ecs.get::<Body>(*e).unwrap();
+                body.spec.dynamic && !self.physics.inspect(body.handle).sleeping
+            })
     }
 
     pub fn body(&self, id: &str) -> Result<BodyState, World3dError> {
@@ -196,6 +229,12 @@ impl World3d {
                 EntityInspection3d {
                     authored: body.spec.clone(),
                     resolved: self.physics.inspect(body.handle),
+                    zones: self
+                        .zones
+                        .iter()
+                        .filter(|(_, who)| who == &body.spec.id)
+                        .map(|(id, _)| id.clone())
+                        .collect(),
                 }
             })
             .collect();
@@ -203,8 +242,22 @@ impl World3d {
         WorldInspection3d {
             tick: self.tick(),
             dropped_seconds: self.dropped_seconds(),
+            dropped_zone_events: self.dropped_zone_events,
             entities,
         }
+    }
+
+    pub fn set(&mut self, id: &str, to: Set3d) -> Result<(), World3dError> {
+        let e = self
+            .ids
+            .get(id)
+            .ok_or_else(|| World3dError::Missing(id.to_owned()))?;
+        let handle = self.ecs.get::<Body>(*e).unwrap().handle;
+        self.physics
+            .set(handle, &to)
+            .map_err(|_| World3dError::Command(id.to_owned()))?;
+        self.dirty |= to.pos.is_some() || to.rotation.is_some();
+        Ok(())
     }
 
     pub fn reset(&mut self, id: &str) -> Result<(), World3dError> {
@@ -214,8 +267,10 @@ impl World3d {
             .ok_or_else(|| World3dError::Missing(id.to_owned()))?;
         let body = self.ecs.get::<Body>(*e).unwrap();
         self.physics
-            .reset(body.handle, body.spec.position)
-            .map_err(|_| World3dError::Body(id.to_owned()))
+            .reset(body.handle, body.spec.position, body.spec.rotation)
+            .map_err(|_| World3dError::Body(id.to_owned()))?;
+        self.dirty = true;
+        Ok(())
     }
 }
 
