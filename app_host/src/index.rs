@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use loro::{LoroDoc, LoroValue};
 use mlua::{Function, Lua, Table, Value};
@@ -113,7 +112,7 @@ pub struct IndexSpec {
     /// Folded into the `rest` fingerprint: an edited spec makes every record stale.
     src_hash: u64,
     vm: Lua,
-    fires: Arc<AtomicU64>,
+    budget: Arc<crate::Budget>,
     doc: String,
     each: Vec<String>,
     key: Option<Function>,
@@ -127,7 +126,7 @@ const FIELD_KEYS: &[&str] = &["title", "body", "facet", "time"];
 impl IndexSpec {
     pub fn load(source: &str) -> Result<Self, String> {
         let err = |m: String| format!("index.lua: {m}");
-        let (vm, fires) = crate::test_vm().map_err(|e| err(e.to_string()))?;
+        let (vm, budget) = crate::test_vm().map_err(|e| err(e.to_string()))?;
         let spec = match vm
             .load(source)
             .set_name("index.lua")
@@ -181,7 +180,7 @@ impl IndexSpec {
         Ok(Self {
             src_hash: h.finish(),
             vm,
-            fires,
+            budget,
             doc,
             each,
             key,
@@ -303,7 +302,7 @@ impl IndexSpec {
     }
 
     fn call_key(&self, key: &Function, v: &LoroValue) -> Result<String, String> {
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         let rec = frozen(&self.vm, v).map_err(|e| e.to_string())?;
         match key.call::<Value>(rec).map_err(|e| e.to_string())? {
             Value::String(s) => Ok(s.to_str().map_err(|e| e.to_string())?.to_string()),
@@ -314,7 +313,7 @@ impl IndexSpec {
     }
 
     fn run_fields(&self, id: &str, v: &LoroValue, doc: &Value) -> Result<Option<Fields>, String> {
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         let rec = frozen(&self.vm, v).map_err(|e| e.to_string())?;
         let t = match self
             .fields

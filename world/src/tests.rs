@@ -236,6 +236,20 @@ fn a_clip_track_for_a_part_the_drawing_lacks_is_skipped_and_noted_once() {
     assert_eq!(world.drain_notes().len(), 2, "body is missing from the winged one, then wing");
 }
 
+/// `dt` of frame time as 1/60 s frames ending at `elapsed`. Many tests tick in long frames,
+/// which the stall cap (`MAX_STEPS`) would cut short.
+fn frames(world: &mut World2d, elapsed: f64, dt: f64) {
+    let n = (dt * 60.0 - 1e-9).ceil().max(1.0) as usize;
+    for i in 1..=n {
+        world.tick(elapsed - dt + dt * i as f64 / n as f64, dt / n as f64);
+    }
+}
+
+/// Equal but for rounding: steps add up in f64 here and f32 in Rapier.
+fn near((ax, ay): (f64, f64), (bx, by): (f64, f64)) -> bool {
+    (ax - bx).abs() < 1e-4 && (ay - by).abs() < 1e-4
+}
+
 fn wasd(speed: f64) -> Controller {
     let axis = |neg: &str, pos: &str| {
         Some(Axis {
@@ -265,29 +279,26 @@ fn a_controller_moves_along_held_axes_and_a_diagonal_is_no_faster() {
         .reconcile(vec![controlled(&d, wasd(100.0))])
         .unwrap();
     assert!(world.needs_ticks());
-    world.tick(0.0, 0.5);
+    frames(&mut world, 0.0, 0.5);
     assert_eq!(world.transform("hero").unwrap().x, 0.0, "no key held");
 
     world.key("KeyD", true);
-    world.tick(0.5, 0.5);
-    assert_eq!(world.transform("hero").unwrap().x, 50.0);
+    frames(&mut world, 0.5, 0.5);
+    let t = world.transform("hero").unwrap();
+    assert!(near((t.x, t.y), (50.0, 0.0)), "{t:?}");
     world.key("KeyA", true);
-    world.tick(1.0, 0.5);
-    assert_eq!(
-        world.transform("hero").unwrap().x,
-        50.0,
-        "opposite keys cancel"
-    );
+    frames(&mut world, 1.0, 0.5);
+    assert_eq!(world.transform("hero").unwrap(), t, "opposite keys cancel");
 
     world.key("KeyA", false);
     world.key("KeyS", true);
-    world.tick(1.5, 0.5);
+    frames(&mut world, 1.5, 0.5);
     let t = world.transform("hero").unwrap();
     let step = ((t.x - 50.0).powi(2) + t.y.powi(2)).sqrt();
     assert!((step - 50.0).abs() < 1e-9, "diagonal stepped {step}");
 
     world.release_all();
-    world.tick(2.0, 0.5);
+    frames(&mut world, 2.0, 0.5);
     assert_eq!(
         world.transform("hero").unwrap(),
         t,
@@ -448,8 +459,8 @@ fn a_carried_entity_rides_its_carriers_part_and_stays_where_dropped() {
     );
 
     world.key("KeyD", true);
-    world.tick(0.5, 0.5);
-    assert_eq!(at(&world), (102.0, -5.0), "the hero walked 50, the body slid 50");
+    frames(&mut world, 0.5, 0.5);
+    assert!(near(at(&world), (102.0, -5.0)), "the hero walked 50, the body slid 50");
 
     let hero = EntitySpec {
         clip: Some(glide),
@@ -458,8 +469,8 @@ fn a_carried_entity_rides_its_carriers_part_and_stays_where_dropped() {
     world
         .reconcile(vec![spec("chest", (0.0, 0.0), &d), hero])
         .unwrap();
-    world.tick(1.0, 0.5);
-    assert_eq!(at(&world), (102.0, -5.0), "dropped where it was carried");
+    frames(&mut world, 1.0, 0.5);
+    assert!(near(at(&world), (102.0, -5.0)), "dropped where it was carried");
 }
 
 #[test]
@@ -717,7 +728,7 @@ fn a_carried_solid_is_off_the_floor_until_put_down() {
     assert_eq!(world.physics.centres(), [(4.0, 4.0)], "carried, it has no body");
     world.key("KeyD", true);
     for i in 1..=3 {
-        world.tick(i as f64 * 0.1, 0.1);
+        frames(&mut world, i as f64 * 0.1, 0.1);
     }
     world.key("KeyD", false);
     let x = world.transform("hero").unwrap().x;
@@ -725,7 +736,7 @@ fn a_carried_solid_is_off_the_floor_until_put_down() {
 
     world.reconcile(vec![hero(), chest(false)]).unwrap();
     let (cx, _) = world.physics.centres()[1];
-    assert_eq!(cx as f64, x + 10.0 + 4.0, "put down, solid again where it was let go");
+    assert!(near((cx as f64, 0.0), (x + 10.0 + 4.0, 0.0)), "put down, solid again where it was let go");
 }
 
 /// A hero walking right at 100 with a solid 8×8 box held 20 ahead of it, let go after `walk`
@@ -838,14 +849,15 @@ fn a_sensor_reports_who_comes_in_and_goes_out_once_each() {
     world.key("KeyD", true);
     let mut log = Vec::new();
     for i in 1..=10 {
-        world.tick(i as f64 * 0.1, 0.1);
+        frames(&mut world, i as f64 * 0.1, 0.1);
         log.extend(sensed(&mut world).into_iter().map(|e| (i, e)));
     }
     let (chest, hero) = ("chest".to_string(), "hero".to_string());
     assert_eq!(
         log,
-        [(4, (true, chest.clone(), hero.clone())), (7, (false, chest, hero))],
-        "in as its feet reach the zone, out as they leave it, a tick after each (Rapier steps first)"
+        [(3, (true, chest.clone(), hero.clone())), (6, (false, chest, hero))],
+        "in as its feet reach the zone (0.26 s), out as they leave it (0.58 s), two steps after \
+         each: a walker's step lands in Rapier's next one, and Rapier senses before it moves"
     );
 }
 
@@ -903,7 +915,7 @@ fn a_solid_hero_slides_along_a_wall() {
     world.key("KeyD", true);
     world.key("KeyS", true);
     for i in 1..=10 {
-        world.tick(i as f64 * 0.1, 0.1);
+        frames(&mut world, i as f64 * 0.1, 0.1);
     }
     // Blocked across, it keeps the diagonal's downward share: about 70 a second.
     let t = world.transform("hero").unwrap();
@@ -936,8 +948,9 @@ fn inspection_says_where_each_entity_is_how_it_moves_and_what_it_is_in() {
     world.tick(0.1, 0.05);
     let seen = world.inspect();
     let [hero, pad_seen, carried] = &seen[..] else { panic!("{seen:?}") };
-    assert_eq!((hero.id.as_str(), hero.body, hero.pos), ("hero", "moved", (10.0, 0.0)));
-    assert_eq!(hero.velocity, (100.0, 0.0));
+    assert_eq!((hero.id.as_str(), hero.body), ("hero", "moved"));
+    assert!(near(hero.pos, (10.0, 0.0)), "{hero:?}");
+    assert!(near(hero.velocity, (100.0, 0.0)), "{hero:?}");
     assert_eq!(hero.zones, ["pad"], "its feet are inside the pad's zone");
     assert_eq!(pad_seen.body, "fixed");
     let clip = pad_seen.clip.as_ref().unwrap();
@@ -1030,7 +1043,7 @@ fn fling(material: Material, wall_x: Option<f64>, after: usize) -> (Vec<(f64, f6
 #[test]
 fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
     let rebound = |bounce| {
-        let (trace, _) = fling(Material { bounce, friction: 0.5 }, Some(52.0), 20);
+        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None }, Some(52.0), 20);
         trace.iter().map(|&(_, vx)| vx).fold(f64::MAX, f64::min)
     };
     // Let go at 100/s, 4 short of the wall: it hits almost at once, then comes back.
@@ -1042,7 +1055,7 @@ fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
 #[test]
 fn friction_decides_how_far_a_loose_thing_slides() {
     let slid = |friction| {
-        let (trace, _) = fling(Material { bounce: 0.5, friction }, None, 60);
+        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None }, None, 60);
         trace.last().unwrap().0
     };
     let (ball, crate_) = (slid(0.5), slid(8.0));
@@ -1117,8 +1130,8 @@ fn a_walker_pushes_a_loose_thing_and_is_stopped_by_a_fixed_one() {
         let seen = world.inspect();
         (seen[0].pos.0, seen[1].pos.0, seen[1].body)
     };
-    // Half a second at 100/s: 50 units if nothing were in the way. The crate's friction drags,
-    // so the hero pushes it at about half pace, against it the whole way (its edge is at 8).
+    // Half a second at 100/s: 50 units if nothing were in the way. The hero pushes the crate
+    // along, against it the whole way (its edge is at 8).
     let (hero_x, box_x, body) = walk(Some(Material::default()));
     assert_eq!(body, "loose");
     assert!(box_x > 30.0, "the crate was pushed along: {box_x}");
@@ -1144,7 +1157,7 @@ fn a_line_stops_only_the_group_it_blocks() {
             ..solid("line", (30.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d)
         };
         let thing = EntitySpec {
-            loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
             ..solid("box", (12.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
         };
         let mut world = World2d::default();
@@ -1182,7 +1195,7 @@ fn a_fast_loose_thing_does_not_pass_through_a_thin_wall() {
             pivot: (0.0, 0.0),
             turn: false,
         }),
-        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
         ..solid("puck", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
     let wall = || solid("wall", (320.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
@@ -1232,7 +1245,7 @@ fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() 
         ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction: 6.0 }),
+        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None }),
         ..solid("puck", (5.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     world.reconcile(vec![hero, puck]).unwrap();
@@ -1249,7 +1262,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     let specs = || {
         let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
         let puck = EntitySpec {
-            loose: Some(Material { bounce: 0.5, friction: 0.0 }),
+            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None }),
             ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
         };
         vec![wall, puck]
@@ -1258,7 +1271,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     world.reconcile(specs()).unwrap();
     world.tick(0.0, 0.0);
     // Asleep at rest: set wakes it, and it goes on until the wall stops it.
-    let to = Set { pos: Some((50.0, 0.0)), velocity: Some((200.0, 0.0)) };
+    let to = Set { pos: Some((50.0, 0.0)), velocity: Some((200.0, 0.0)), spin: None };
     world.set("puck", to).unwrap();
     assert_eq!(world.inspect()[1].pos, (50.0, 0.0), "moved at once, before a tick");
     assert!(world.needs_ticks(), "a woken puck needs the clock");
@@ -1271,7 +1284,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     world.reconcile(specs()).unwrap();
     assert_eq!(world.inspect()[1].pos.0, x);
     // The wall is fixed: it can be put somewhere, not given a velocity.
-    world.set("wall", Set { pos: Some((200.0, -50.0)), velocity: None }).unwrap();
+    world.set("wall", Set { pos: Some((200.0, -50.0)), velocity: None, spin: None }).unwrap();
     assert_eq!(world.inspect()[0].pos, (200.0, -50.0));
 }
 
@@ -1284,11 +1297,11 @@ fn set_is_checked() {
     };
     let mut world = World2d::default();
     world.reconcile(vec![hero]).unwrap();
-    let velocity = |v| Set { pos: None, velocity: Some(v) };
+    let velocity = |v| Set { pos: None, velocity: Some(v), spin: None };
     let cases = [
         ("ghost", velocity((1.0, 0.0)), "there is no such entity"),
         ("hero", velocity((1.0, 0.0)), "velocity needs a loose thing"),
-        ("hero", Set { pos: Some((f64::NAN, 0.0)), velocity: None }, "must be finite"),
+        ("hero", Set { pos: Some((f64::NAN, 0.0)), velocity: None, spin: None }, "must be finite"),
     ];
     for (id, to, wanted) in cases {
         let err = world.set(id, to).unwrap_err().to_string();
@@ -1351,13 +1364,13 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
     let d = drawing();
     let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.0, friction: 0.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
     world.reconcile(vec![wall, puck]).unwrap();
     world.tick(0.0, 0.0);
-    world.set("puck", Set { pos: None, velocity: Some((300.0, 0.0)) }).unwrap();
+    world.set("puck", Set { pos: None, velocity: Some((300.0, 0.0)), spin: None }).unwrap();
     let mut hits = vec![];
     for i in 1..=60 {
         world.tick(i as f64 / 60.0, 1.0 / 60.0);
@@ -1367,6 +1380,35 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
     let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
     assert_eq!((id.as_str(), who.as_str()), ("puck", "wall"));
     assert!((speed - 300.0).abs() < 1.0, "met at its own speed: {speed}");
+}
+
+#[test]
+fn zero_time_observations_preserve_controller_velocity_for_the_next_contact() {
+    let d = drawing();
+    let hero = EntitySpec {
+        controller: Some(wasd(200.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, puck]).unwrap();
+    world.key("KeyD", true);
+    let mut hits = vec![];
+    for i in 1..=20 {
+        let elapsed = i as f64 / 60.0;
+        world.tick(elapsed, 1.0 / 60.0);
+        hits.extend(world.drain_events().into_iter().filter(|e| matches!(e, WorldEvent::Hit { .. })));
+        let before = world.inspect()[0].velocity;
+        world.tick(elapsed, 0.0);
+        assert_eq!(world.inspect()[0].velocity, before);
+        hits.extend(world.drain_events().into_iter().filter(|e| matches!(e, WorldEvent::Hit { .. })));
+    }
+    let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
+    assert_eq!((id.as_str(), who.as_str()), ("puck", "hero"));
+    assert!(*speed > 100.0);
 }
 
 #[test]
@@ -1391,4 +1433,315 @@ fn a_walker_running_into_a_loose_thing_is_a_hit_for_the_loose_thing() {
     let [WorldEvent::Hit { id, who, speed }] = hits.as_slice() else { panic!("{hits:?}") };
     assert_eq!((id.as_str(), who.as_str()), ("puck", "hero"));
     assert!(*speed > 100.0, "met at about the walker's speed: {speed}");
+}
+
+#[test]
+fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
+    let d = drawing();
+    let paddle = EntitySpec {
+        controller: Some(wasd(400.0)),
+        ..solid("paddle", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+    };
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None }),
+        ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![paddle, puck]).unwrap();
+    world.key("KeyD", true);
+    let mut fastest: f64 = 0.0;
+    for i in 1..=20 {
+        world.tick(i as f64 / 60.0, 1.0 / 60.0);
+        fastest = fastest.max(world.inspect()[1].velocity.0);
+    }
+    // Struck by something far heavier at 400, it leaves at up to twice that; shoved, at 400.
+    assert!(fastest > 600.0, "the puck was struck, not shoved: {fastest}");
+}
+
+/// A puck 8 across at x 0..8, above a floor at y 40, set going at `velocity` and `spin`; where it
+/// was, its turn and its spin each tick for `ticks` ticks.
+fn spun(
+    grip: Option<f64>,
+    friction: f64,
+    velocity: (f64, f64),
+    spin: Option<f64>,
+    ticks: usize,
+) -> Vec<((f64, f64), f64, f64)> {
+    let d = drawing();
+    let floor = solid("floor", (-500.0, 40.0), Shape::Rect(1000.0, 4.0), (0.0, 0.0), &d);
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 0.5, friction, grip }),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![floor, puck]).unwrap();
+    world.tick(0.0, 0.0);
+    world.set("puck", Set { pos: None, velocity: Some(velocity), spin }).unwrap();
+    (1..=ticks)
+        .map(|i| {
+            world.tick(i as f64 / 60.0, 1.0 / 60.0);
+            let p = &world.inspect()[1];
+            (p.pos, p.rot, p.spin)
+        })
+        .collect()
+}
+
+#[test]
+fn a_thing_with_grip_struck_glancing_turns_and_one_without_never_does() {
+    // Down and to the right, onto the floor at a slant.
+    let gripped = spun(Some(0.8), 0.0, (300.0, 300.0), None, 30);
+    let (_, rot, spin) = *gripped.last().unwrap();
+    assert!(spin.abs() > 100.0 && rot != 0.0, "the floor caught it and set it turning: {spin} {rot}");
+    let slick = spun(None, 0.0, (300.0, 300.0), None, 30);
+    assert!(slick.iter().all(|&(_, rot, spin)| rot == 0.0 && spin == 0.0), "no grip, no turn");
+}
+
+#[test]
+fn a_thing_spinning_in_place_stays_put_and_its_spin_runs_down_with_friction() {
+    // Turning about its centre: the drawing box's corner does not wander.
+    let free = spun(Some(0.5), 0.0, (0.0, 0.0), Some(360.0), 30);
+    assert!(free.iter().all(|&(pos, ..)| pos == (0.0, 0.0)), "it spun in place: {:?}", free.last());
+    let (_, rot, spin) = *free.last().unwrap();
+    assert!((spin - 360.0).abs() < 1.0, "it keeps its spin with no friction: {spin}");
+    assert!((rot - 180.0).abs() < 2.0, "half a turn in half a second: {rot}");
+    let slowed = spun(Some(0.5), 4.0, (0.0, 0.0), Some(360.0), 180);
+    assert!(slowed.last().unwrap().2.abs() < 5.0, "friction ran it down: {:?}", slowed.last());
+}
+
+#[test]
+fn spin_and_grip_are_checked() {
+    let d = drawing();
+    let bad = EntitySpec {
+        loose: Some(Material { grip: Some(-1.0), ..Material::default() }),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let err = World2d::default().reconcile(vec![bad]).unwrap_err().to_string();
+    assert!(err.contains("grip must be 0 or more"), "{err}");
+    let slick = EntitySpec {
+        loose: Some(Material::default()),
+        ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![slick]).unwrap();
+    let spin = |s| Set { spin: Some(s), ..Set::default() };
+    let err = world.set("puck", spin(90.0)).unwrap_err().to_string();
+    assert!(err.contains("spin needs a loose thing with grip"), "{err}");
+    let err = world.set("puck", spin(f64::INFINITY)).unwrap_err().to_string();
+    assert!(err.contains("must be finite"), "{err}");
+}
+
+/// Two walls across a corridor at x 50 and x 100, a zone between them at x 70, a hero at the
+/// start; stepped once, so Rapier has them all where it answers from.
+fn corridor() -> World2d {
+    let d = drawing();
+    let wall = |id, x| solid(id, (x, -50.0), Shape::Rect(4.0, 100.0), (0.0, 0.0), &d);
+    let hero = solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![hero, wall("near", 50.0), zone("lamp", (66.0, 0.0), None, &d), wall("far", 100.0)]).unwrap();
+    world.tick(1.0 / 60.0, 1.0 / 60.0);
+    world
+}
+
+#[test]
+fn a_ray_answers_the_first_solid_thing_on_it_and_where_it_met_it() {
+    let world = corridor();
+    // From the hero's centre, skipping the hero; the zone does not stop a ray.
+    let hit = world.ray((4.0, 4.0), (200.0, 4.0), Some("hero")).unwrap().unwrap();
+    assert_eq!(hit.id, "near");
+    assert!((hit.at.0 - 50.0).abs() < 1e-3 && (hit.at.1 - 4.0).abs() < 1e-3, "{hit:?}");
+    assert!((hit.normal.0 + 1.0).abs() < 1e-3 && hit.normal.1.abs() < 1e-3, "{hit:?}");
+    assert!((hit.dist - 46.0).abs() < 1e-3, "{hit:?}");
+    // Not skipped, the hero it starts inside is the first thing on it.
+    assert_eq!(world.ray((4.0, 4.0), (200.0, 4.0), None).unwrap().unwrap().id, "hero");
+    // Short of the wall, or along the corridor, nothing.
+    assert_eq!(world.ray((10.0, 4.0), (40.0, 4.0), None).unwrap(), None);
+    assert_eq!(world.ray((10.0, 4.0), (10.0, 200.0), None).unwrap(), None);
+}
+
+#[test]
+fn at_answers_everything_whose_collider_or_zone_covers_a_point() {
+    let world = corridor();
+    assert_eq!(world.at((70.0, 4.0)).unwrap(), ["lamp"]);
+    assert_eq!(world.at((52.0, 0.0)).unwrap(), ["near"]);
+    assert_eq!(world.at((4.0, 4.0)).unwrap(), ["hero"]);
+    assert!(world.at((30.0, 30.0)).unwrap().is_empty());
+}
+
+#[test]
+fn questions_are_checked() {
+    let world = corridor();
+    let err = |r: Result<_, WorldError>| r.map(|_: Option<RayHit>| ()).unwrap_err().to_string();
+    assert!(err(world.ray((0.0, 0.0), (f64::NAN, 0.0), None)).contains("must be finite"));
+    assert!(err(world.ray((1.0, 1.0), (1.0, 1.0), None)).contains("from and to are the same point"));
+    assert!(err(world.ray((0.0, 0.0), (9.0, 0.0), Some("ghost"))).contains("skip: there is no such entity"));
+    assert!(world.at((f64::INFINITY, 0.0)).unwrap_err().to_string().contains("must be finite"));
+}
+
+#[test]
+fn the_world_counts_its_steps_and_a_frame_with_no_time_is_not_one() {
+    let mut world = corridor();
+    assert_eq!(world.steps(), 2, "a 60 fps frame is two steps");
+    world.tick(1.0 / 60.0, 0.0);
+    assert_eq!(world.steps(), 2);
+    world.tick(2.0 / 60.0, 1.0 / 60.0);
+    assert_eq!(world.steps(), 4);
+}
+
+#[test]
+fn a_thousand_rays_over_five_hundred_things_are_cheap() {
+    let d = drawing();
+    let crates = (0..500).map(|i| {
+        let (x, y) = ((i % 25) as f64 * 40.0, (i / 25) as f64 * 40.0);
+        solid(&format!("crate{i}"), (x, y), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    });
+    let mut world = World2d::default();
+    world.reconcile(crates.collect()).unwrap();
+    world.tick(1.0 / 60.0, 1.0 / 60.0);
+    let started = std::time::Instant::now();
+    let mut hits = 0;
+    for i in 0..1000 {
+        let y = (i % 800) as f64 + 0.5;
+        hits += world.ray((-10.0, y), (1100.0, y + 37.0), None).unwrap().is_some() as usize;
+    }
+    let took = started.elapsed();
+    eprintln!("1000 rays over 500 things: {took:?} ({hits} hit)");
+    assert!(hits > 100, "most rays meet a crate: {hits}");
+    // Generous for a debug build; the printed number is the measurement.
+    assert!(took.as_millis() < 500, "{took:?}");
+}
+
+/// A walker held right and a puck thrown at a wall, run for a second and a half-step at `fps`:
+/// where each ended up and how many steps it took.
+fn run_at(fps: f64) -> ((f64, f64), (f64, f64), u64) {
+    let d = drawing();
+    let wall = solid("wall", (300.0, -100.0), Shape::Rect(4.0, 200.0), (0.0, 0.0), &d);
+    let puck = EntitySpec {
+        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.3) }),
+        ..solid("puck", (0.0, 40.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let hero = EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, -40.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![wall, puck, hero]).unwrap();
+    world.tick(0.0, 0.0);
+    world.set("puck", Set { pos: None, velocity: Some((500.0, 30.0)), spin: None }).unwrap();
+    world.key("KeyD", true);
+    let frames = ((1.0 + 0.5 / 120.0) * fps).floor() as usize;
+    for i in 1..=frames {
+        world.tick(i as f64 / fps, 1.0 / fps);
+    }
+    let at = |id| world.inspect().into_iter().find(|e| e.id == id).unwrap().pos;
+    (at("hero"), at("puck"), world.steps())
+}
+
+#[test]
+fn the_same_second_ends_the_same_at_any_frame_rate() {
+    let sixty = run_at(60.0);
+    assert_eq!(sixty.2, 120, "a step is 1/120 s");
+    assert!((sixty.0 .0 - 100.0).abs() < 1e-3, "a second at 100 per second: {sixty:?}");
+    assert!(sixty.1 .0 < 290.0, "the puck came back off the wall: {sixty:?}");
+    for fps in [30.0, 144.0, 120.0, 240.0] {
+        assert_eq!(run_at(fps), sixty, "at {fps} fps");
+    }
+}
+
+#[test]
+fn a_stall_runs_at_most_eight_steps_and_drops_the_rest() {
+    let mut world = World2d::default();
+    world.reconcile(vec![controlled(&drawing(), wasd(120.0))]).unwrap();
+    world.key("KeyD", true);
+    world.tick(1.0, 1.0);
+    assert_eq!(world.steps(), 8);
+    assert!((world.transform("hero").unwrap().x - 8.0).abs() < 1e-9, "eight steps of one");
+    assert!((world.dropped() - (1.0 - 8.0 / 120.0)).abs() < 1e-9, "{}", world.dropped());
+}
+
+#[test]
+fn time_short_of_a_step_carries_to_the_next_frame() {
+    let mut world = World2d::default();
+    world.reconcile(vec![controlled(&drawing(), wasd(120.0))]).unwrap();
+    world.key("KeyD", true);
+    world.tick(1.0 / 240.0, 1.0 / 240.0);
+    assert_eq!((world.steps(), world.transform("hero").unwrap().x), (0, 0.0), "half a step: none yet");
+    world.tick(2.0 / 240.0, 1.0 / 240.0);
+    assert_eq!(world.steps(), 1, "the halves make one");
+    assert!((world.transform("hero").unwrap().x - 1.0).abs() < 1e-9);
+    assert_eq!(world.dropped(), 0.0);
+}
+
+/// 5000 small things on a 4000×4000 map: 4000 drawings alone (grass, coins), 800 fixed solids
+/// (rocks), 200 loose balls thrown about inside four walls.
+fn crowd(d: &Arc<Drawing>) -> Vec<EntitySpec> {
+    let d = d.clone();
+    let mut specs = vec![];
+    let wall = |id: &str, pos, w, h| solid(id, pos, Shape::Rect(w, h), (0.0, 0.0), &d);
+    specs.push(wall("north", (0.0, -10.0), 4000.0, 10.0));
+    specs.push(wall("south", (0.0, 4000.0), 4000.0, 10.0));
+    specs.push(wall("west", (-10.0, 0.0), 10.0, 4000.0));
+    specs.push(wall("east", (4000.0, 0.0), 10.0, 4000.0));
+    for i in 0..4000 {
+        let at = ((i % 64) as f64 * 62.0 + 3.0, (i / 64) as f64 * 62.0 + 3.0);
+        specs.push(spec(&format!("grass{i}"), at, &d));
+    }
+    for i in 0..800 {
+        let at = ((i % 40) as f64 * 100.0 + 50.0, (i / 40) as f64 * 200.0 + 20.0);
+        specs.push(solid(&format!("rock{i}"), at, Shape::Rect(8.0, 8.0), (0.0, 0.0), &d));
+    }
+    for i in 0..200 {
+        let at = ((i % 20) as f64 * 200.0 + 100.0, (i / 20) as f64 * 400.0 + 120.0);
+        specs.push(EntitySpec {
+            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None }),
+            ..solid(&format!("ball{i}"), at, Shape::Circle(4.0), (4.0, 4.0), &d)
+        });
+    }
+    specs
+}
+
+/// Average time of `f` over `n` runs.
+fn timed(n: u32, mut f: impl FnMut()) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    for _ in 0..n {
+        f();
+    }
+    started.elapsed() / n
+}
+
+/// The measurement before a camera and culling: what 5000 things cost the world each frame.
+/// `cargo test --release -p world --lib -- --ignored five_thousand --nocapture`
+#[test]
+#[ignore = "a measurement: run in release with --ignored --nocapture"]
+fn five_thousand_small_things_cost_this_much() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let spawn = timed(1, || world.reconcile(crowd(&d)).unwrap());
+    world.tick(0.0, 0.0);
+    for i in 0..200 {
+        let v = ((i * 37 % 400) as f64 - 200.0, (i * 91 % 400) as f64 - 200.0);
+        world.set(&format!("ball{i}"), Set { pos: None, velocity: Some(v), spin: None }).unwrap();
+    }
+    // As a `view` does: the same handles, described afresh.
+    let describe = timed(20, || {
+        world.reconcile(crowd(&d)).unwrap();
+    });
+    let mut t = 0.0;
+    let frame_of_steps = timed(60, || {
+        t += 1.0 / 60.0;
+        world.tick(t, 1.0 / 60.0);
+        world.drain_events();
+    });
+    // Every entity goes into the frame until there is a camera to cull by: past the frame's
+    // item cap, it is refused — after the work of posing them all.
+    let mut painted = Ok(());
+    let paint = timed(20, || {
+        painted = world.frame(1280.0, 720.0).map(|_| ());
+    });
+    let inspect = timed(20, || {
+        world.inspect();
+    });
+    eprintln!(
+        "5000 things: spawn {spawn:?}, describe again {describe:?}, a 60 fps frame of steps \
+         {frame_of_steps:?}, paint {paint:?} ({painted:?}), inspect {inspect:?}"
+    );
 }

@@ -6,6 +6,7 @@
 //! to the UI thread — pure transport; handlers land family by family (docs/status.md, item 1).
 
 mod app_src;
+mod app_thread;
 mod bridge;
 mod indexer;
 mod item;
@@ -31,13 +32,14 @@ use std::{
 };
 
 use crate::{
+    app_thread::{AppThread, Open},
     item::{ItemsScreen, ItemsScreenMsg},
     login::{LoginMsg, LoginScreen},
     mnemonic::{Mnemonic, MnemonicMsg},
     space::{SpaceScreen, SpaceScreenMsg},
 };
 use app_host::{
-    LuaApp, LuaTest, LuaTestApi, Resolve, SourceEdit, Wake,
+    LuaApp, LuaTest, LuaTestApi, Resolve, SourceEdit,
     edit_source_file as edit_source_doc_file,
     read_source_file_versioned as read_source_doc_file_versioned, run_lua_tests,
     run_lua_tests_with, write_source_file as write_source_doc_file,
@@ -54,7 +56,7 @@ use osvauld_rpc::{
 };
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
-    KeyInput, Mods, ScreenshotRequest, col, row, text,
+    KeyInput, Mods, ScreenshotRequest, TileEvent, col, row, text, tile,
 };
 use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem, WorkspaceMeta};
 
@@ -67,16 +69,22 @@ pub enum Msg {
     Login(LoginMsg),
     Space(SpaceScreenMsg),
     Items(ItemsScreenMsg),
-    Tab(Arc<str>, app_host::LuaMsg),
+    /// Pointer, wheel or keys for an app's tile, in its coordinates — forwarded to its thread.
+    TileInput(Arc<str>, TileEvent),
+    /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
+    TileDirty(Arc<str>),
+    /// An app's thread saved: what changed (to sync), the docs it has open (to subscribe), and
+    /// whether the save failed.
+    AppSaved {
+        id: Arc<str>,
+        dirtied: Vec<String>,
+        names: Vec<String>,
+        error: Option<String>,
+    },
     Focus(usize),
     /// Keyed by item id, not index: closing is destructive, and a stale index would tear down
     /// the wrong app's VM. `Focus` can stay positional because being wrong there is harmless.
     Close(Arc<str>),
-    /// A doc changed from outside this window — a peer, the MCP bridge. Carries nothing and
-    /// updates nothing: delivering *any* user event runs `update` and then repaints, and the
-    /// repaint is the entire point. `view()` compares each doc's version counter against its
-    /// own watermark, so the mirror catches up on its own.
-    DocChanged,
     /// One bridge request (`bridge.rs` is pure transport). Executed here, on the UI thread —
     /// the single authority — and the sender is how the reply travels back to the socket.
     Rpc(
@@ -176,6 +184,15 @@ enum AuthOutcome {
     Signup(AuthJob<PreparedAccount>),
     Unlock(AuthJob<UnlockedAccount>),
 }
+
+impl AuthOutcome {
+    fn succeeded(&self) -> bool {
+        match self {
+            Self::Signup(job) => matches!(*job.lock().unwrap(), Some(Ok(_))),
+            Self::Unlock(job) => matches!(*job.lock().unwrap(), Some(Ok(_))),
+        }
+    }
+}
 pub enum Screen {
     Signup(SignupForm),
     Mnemonic(Mnemonic),
@@ -189,17 +206,6 @@ enum Tab {
     Home,
     App((Arc<str>, String)),
 }
-/// A running app plus the workspace it came from. The item id is the map key; `ws_id` has to
-/// be kept because `put_doc` is scoped by both and nothing else remembers it once `open_tab`
-/// has returned.
-struct OpenApp {
-    ws_id: String,
-    app: LuaApp<Msg>,
-    persist: bool,
-    /// `None` when the index could not open — the app runs, `search.query` says why.
-    index: Option<indexer::Shared>,
-}
-
 /// The two halves of doc persistence, as free functions rather than closures built inline.
 ///
 /// This is the only seam between `app_host`, which knows a doc by its name, and the vault,
@@ -243,18 +249,6 @@ fn resolver_with_node(
             &it,
             name,
         ))
-    })
-}
-
-/// A change from outside the window has to ask for a frame; a click already has one.
-///
-/// The proxy is the only part of the runtime that is `Send`, which is what makes this the seam:
-/// Loro's subscriber demands `Send + Sync` and so cannot hold the VM, the mirror, or anything
-/// else in the app. An integer bump and a wake-up are all that can cross, and all that needs to.
-fn waker(proxy: &EventLoopProxy<Msg>) -> Wake {
-    let proxy = proxy.clone();
-    Arc::new(move || {
-        let _ = proxy.send_event(Msg::DocChanged);
     })
 }
 
@@ -331,7 +325,7 @@ fn spawn_push_listener(
 /// Builds a `SyncHello` against one open doc and, if that succeeds, sends it off-thread —
 /// the one piece `SyncTick` and an immediate post-flush push (a local edit reaching the node
 /// without waiting for the next tick) both need, so it exists once rather than twice.
-fn sync_doc(
+fn sync_doc<M: 'static>(
     proxy: &EventLoopProxy<Msg>,
     vault: &Vault,
     desktop_did: &str,
@@ -339,7 +333,7 @@ fn sync_doc(
     ws_id: &str,
     item_id: &Arc<str>,
     name: &str,
-    app: &LuaApp<Msg>,
+    app: &LuaApp<M>,
     since: Option<&[u8]>,
     gen_: u64,
 ) {
@@ -422,8 +416,8 @@ fn subscribe_if_new(
 
 /// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
 /// `search.query`'s error — never a reason not to open the app.
-fn attach_index(
-    app: &mut LuaApp<Msg>,
+fn attach_index<M: 'static>(
+    app: &mut LuaApp<M>,
     opened: Result<indexer::ItemIndex, String>,
 ) -> Option<indexer::Shared> {
     let shared = match opened {
@@ -442,12 +436,176 @@ fn attach_index(
     }
 }
 
-fn reindex_open(o: &OpenApp, dirtied: &[String]) {
-    if let Some(ix) = &o.index {
-        if let Err(e) = indexer::index_dirty(ix, &o.app, dirtied) {
-            o.app.note(format!("search: {e}"));
+fn reindex<M: 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
+    if let Some(ix) = index {
+        if let Err(e) = indexer::index_dirty(ix, app, dirtied) {
+            app.note(format!("search: {e}"));
         }
     }
+}
+
+/// A bridge request against an open app, on its thread.
+fn serve(h: &mut app_thread::Hosted, req: Request, vault: &Vault) -> Response {
+    let (ws, item) = (h.ws_id.clone(), h.item_id.to_string());
+    match req {
+        Request::ListFiles { .. } => Response::ok(h.app.source_files()),
+        Request::ReadFile { path, .. } => {
+            let live = valid_source_path(&path)
+                .ok()
+                .and_then(|()| h.app.read_source_file(&path));
+            match live {
+                Some(s) => Response::ok(s),
+                None => source_doc(vault, &ws, &item)
+                    .and_then(|doc| read_source_file(&doc, &path))
+                    .map(Response::ok)
+                    .unwrap_or_else(Response::err),
+            }
+        }
+        Request::ReadFileVersioned { path, .. } => {
+            if let Err(e) = valid_source_path(&path) {
+                return Response::err(e);
+            }
+            h.app
+                .read_source_file_versioned(&path)
+                .map(|f| {
+                    Response::ok(VersionedFile {
+                        content: f.content,
+                        revision: f.revision,
+                    })
+                })
+                .unwrap_or_else(Response::err)
+        }
+        Request::EditFile {
+            path,
+            expected_revision,
+            edits,
+            ..
+        } => {
+            if let Err(e) = valid_source_path(&path) {
+                return Response::err(e);
+            }
+            let edits = match source_edits(edits) {
+                Ok(e) => e,
+                Err(e) => return Response::err(e),
+            };
+            let saved = h
+                .app
+                .edit_source_file(&path, &expected_revision, &edits)
+                .and_then(|edited| {
+                    vault
+                        .put_src(&ws, &item, &edited.snapshot)
+                        .map_err(|e| e.to_string())?;
+                    Ok(edited.revision)
+                });
+            match saved {
+                Err(e) => Response::err(e),
+                Ok(revision) => Response::ok(EditFileResult {
+                    revision,
+                    persisted: true,
+                    activation: match h.app.reload_if_stale() {
+                        Some(Err(error)) => SourceActivation::Failed { error },
+                        Some(Ok(())) | None => SourceActivation::Activated,
+                    },
+                }),
+            }
+        }
+        Request::WriteFile { path, content, .. } => {
+            if let Err(e) = valid_source_path(&path) {
+                return Response::err(e);
+            }
+            match h.app.write_source_file(&path, &content).and_then(|bytes| {
+                vault
+                    .put_src(&ws, &item, &bytes)
+                    .map_err(|e| e.to_string())
+            }) {
+                Ok(()) => Response::ok("written"),
+                Err(e) => Response::err(e),
+            }
+        }
+        Request::ReloadItem { .. } => h
+            .app
+            .reload()
+            .map(|()| Response::ok("reloaded"))
+            .unwrap_or_else(Response::err),
+        Request::DumpTree { .. } => {
+            // A dump after a WriteFile must show the source the next frame would run.
+            let _ = h.app.reload_if_stale();
+            let mut tree = info_json(&h.app.view().info());
+            let worlds = h.app.inspect_worlds();
+            let worlds = worlds
+                .iter()
+                .map(|(id, w)| (id.as_str(), world_json(w)))
+                .collect();
+            add_worlds(&mut tree, &worlds);
+            let worlds3d = h.app.inspect_worlds3d();
+            if !worlds3d.is_empty() {
+                tree["worlds3d"] = worlds3d
+                    .iter()
+                    .map(|(id, w)| (id.clone(), world3d_json(w)))
+                    .collect();
+            }
+            Response::ok(tree)
+        }
+        Request::Click { el_id, .. } => fire(h, &el_id, Action::Click),
+        Request::Type { el_id, content, .. } => fire(h, &el_id, Action::Type(&content)),
+        Request::Key { el_id, key, .. } => match key.as_str() {
+            "enter" => fire(h, &el_id, Action::Enter),
+            "esc" => fire(h, &el_id, Action::Esc),
+            k => Response::err(format!("unknown key {k:?} (enter|esc)")),
+        },
+        Request::ReadConsole { last, .. } => Response::ok(h.app.console(last)),
+        Request::AppDataGet { .. } => Response::ok(h.app.docs_json()),
+        Request::Search { query, limit, .. } => match &h.index {
+            None => Response::err("this item has no search index"),
+            Some(ix) => {
+                let ix = ix.borrow();
+                match ix.query(&query, limit.unwrap_or(20).clamp(1, 500)) {
+                    Err(e) => Response::err(e),
+                    Ok(hits) => Response::ok(serde_json::json!({
+                        "hits": hits.iter().map(|h| serde_json::json!({
+                            "doc": h.doc, "id": h.id, "score": h.score, "snippet": h.snippet,
+                        })).collect::<Vec<_>>(),
+                        "fields_runs": ix.fields_runs,
+                    })),
+                }
+            }
+        },
+        _ => Response::err("not an app request"),
+    }
+}
+
+/// Build the app's current view — the same fresh handler registration the next frame uses,
+/// since `view()` re-registers per call — fire `act` on the element with `el_id`, and apply
+/// the message it produces.
+fn fire(h: &mut app_thread::Hosted, el_id: &str, act: Action) -> Response {
+    let _ = h.app.reload_if_stale();
+    let mut tree = h.app.view();
+    match tree.trigger(el_id, act) {
+        Ok(msg) => {
+            h.app.update(msg);
+            Response::ok("fired")
+        }
+        Err(e) => Response::err(e),
+    }
+}
+
+/// The bridge's edits, bounded.
+fn source_edits(edits: Vec<osvauld_rpc::SourceTextEdit>) -> Result<Vec<SourceEdit>, String> {
+    let edit_bytes = edits.iter().fold(0usize, |total, e| {
+        total
+            .saturating_add(e.old_text.len())
+            .saturating_add(e.new_text.len())
+    });
+    if edits.len() > 128 || edit_bytes > 1024 * 1024 {
+        return Err("source edit batch is too large".into());
+    }
+    Ok(edits
+        .into_iter()
+        .map(|e| SourceEdit {
+            old_text: e.old_text,
+            new_text: e.new_text,
+        })
+        .collect())
 }
 
 fn persist(
@@ -626,7 +784,15 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
         .map(|object| {
             serde_json::json!({
                 "id": object.id,
-                "mesh": match object.mesh { runtime::scene3d::BuiltinMesh::Cube => "cube" },
+                "mesh": match object.mesh {
+                    runtime::scene3d::MeshKind::Cube => "cube",
+                    runtime::scene3d::MeshKind::Triangles => "triangles",
+                },
+                "mesh_resource": object.mesh_resource,
+                "vertices": object.vertex_count,
+                "triangles": object.triangle_count,
+                "mesh_bytes": object.mesh_bytes,
+                "local_bounds": { "min": object.local_bounds.0, "max": object.local_bounds.1 },
                 "position": object.position,
                 "rotation": object.rotation,
                 "scale": object.scale,
@@ -673,6 +839,27 @@ fn worlds_json(
     )
 }
 
+fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value {
+    use world::world3d::Shape3d;
+    let entities: Vec<_> = world.entities.iter().map(|e| {
+        let shape = match e.authored.shape {
+            Shape3d::Sphere(radius) => serde_json::json!({ "sphere": radius }),
+            Shape3d::Box(size) => serde_json::json!({ "box": size }),
+        };
+        serde_json::json!({
+            "authored": { "id": e.authored.id, "shape": shape,
+                "position": e.authored.position, "rotation": e.authored.rotation,
+                "dynamic": e.authored.dynamic, "sensor": e.authored.sensor },
+            "zones": e.zones,
+            "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
+                "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
+                "sleeping": e.resolved.sleeping },
+        })
+    }).collect();
+    serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
+        "dropped_zone_events": world.dropped_zone_events, "entities": entities })
+}
+
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
     let entities = world.entities.iter().map(|e| {
         let clip = e.clip.as_ref().map(|c| {
@@ -681,12 +868,13 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
-            "velocity": [e.velocity.0, e.velocity.1],
+            "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
             "attached": attached, "zones": e.zones, "clip": clip,
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
-    serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>() })
+    serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
+        "tick": world.tick, "dropped": world.dropped })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.
@@ -808,8 +996,15 @@ struct Shell {
     screen: Screen,
     vault: Vault,
     tabs: Vec<Tab>,
-    apps: HashMap<Arc<str>, OpenApp>,
+    /// Every open app, each on its own thread — shown or not.
+    apps: HashMap<Arc<str>, AppThread>,
     focused: usize,
+    /// The open app shown beside the focused one, if any (`SplitWith`).
+    split: Option<Arc<str>>,
+    /// Offscreen, tiles run on the shell's virtual clock and every paint waits for them.
+    offscreen: Option<(f32, f32)>,
+    /// The time of the last paint, for a resize that has to wait for a tile's frame.
+    clock: f64,
     error: Option<String>,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
@@ -868,8 +1063,8 @@ fn main() {
     let offscreen = offscreen_viewport();
     let vault = vault::Vault::open(data_dir).expect("failed to open the osvauld data directory");
     match offscreen {
-        Some(v) => runtime::run_offscreen(v, |proxy| Shell::new(proxy, vault)),
-        None => runtime::run_with(|proxy| Shell::new(proxy, vault)),
+        Some(v) => runtime::run_offscreen(v, |proxy| Shell::new(proxy, vault, offscreen)),
+        None => runtime::run_with(|proxy| Shell::new(proxy, vault, None)),
     }
 }
 impl Shell {
@@ -878,42 +1073,52 @@ impl Shell {
     /// was active, and the post-update flush must never write their docs into another
     /// account's store. Nothing is lost: every prior update already flushed.
     fn sync_one(&self, item_id: &Arc<str>, name: &str) {
-        let (Some(record), Some(o)) = (&self.node, self.apps.get(item_id)) else {
+        let (Some(record), Some(a)) = (&self.node, self.apps.get(item_id)) else {
             return;
         };
         let Some(did) = self.vault.with_signer(|d| d.did().to_string()) else {
             return;
         };
-        let since = self.node_vv.get(&(item_id.clone(), name.to_string()));
-        sync_doc(
-            &self.proxy,
-            &self.vault,
-            &did,
+        let since = self.node_vv.get(&(item_id.clone(), name.to_string())).cloned();
+        let (proxy, vault, token, ws, id, name, gen_) = (
+            self.proxy.clone(),
+            self.vault.clone(),
             record.token.clone(),
-            &o.ws_id,
-            item_id,
-            name,
-            &o.app,
-            since.map(Vec::as_slice),
+            a.ws_id.clone(),
+            item_id.clone(),
+            name.to_string(),
             self.gen_(),
         );
+        a.call(move |h| {
+            sync_doc(
+                &proxy,
+                &vault,
+                &did,
+                token,
+                &ws,
+                &id,
+                &name,
+                &h.app,
+                since.as_deref(),
+                gen_,
+            )
+        });
     }
 
-    /// The backstop pass: sync every open doc, and let the post-flush pass after this message
-    /// retry any subscribe that failed.
+    /// The backstop pass: retry any subscribe that failed, and sync every open doc.
     fn reconcile(&mut self) {
         for (id, name) in self.failed_subs.drain(..) {
             if let Some(names) = self.subscribed.get_mut(&id) {
                 names.remove(&name);
             }
         }
-        let open: Vec<(Arc<str>, String)> = self
+        let open: Vec<(Arc<str>, Vec<String>)> = self
             .apps
             .iter()
-            .flat_map(|(id, o)| o.app.open_doc_names().into_iter().map(|n| (id.clone(), n)))
+            .map(|(id, a)| (id.clone(), a.doc_names.clone()))
             .collect();
-        for (id, name) in open {
-            self.sync_one(&id, &name);
+        for (id, names) in open {
+            self.sync_open(&id, &names);
         }
     }
 
@@ -928,6 +1133,7 @@ impl Shell {
         };
         self.node_vv.retain(|(item, _), _| *item != id);
         self.tabs.remove(pos);
+        self.split = self.split.take().filter(|s| *s != id);
         let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
         if let (Some(record), Some(names), Some(o)) = (
             self.node.clone(),
@@ -1032,6 +1238,7 @@ impl Shell {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
         self.focused = 0;
+        self.split = None;
         self.error = None;
     }
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
@@ -1078,31 +1285,16 @@ impl Shell {
             }
             Request::ListFiles { item_id } => match find_item(&self.vault, &item_id) {
                 Err(e) => Response::err(e),
-                Ok(wi) => {
-                    if let Some(o) = self.apps.get(wi.id.as_str()) {
-                        Response::ok(o.app.source_files())
-                    } else {
-                        source_doc(&self.vault, &wi.ws_id, &wi.id)
-                            .map(|doc| Response::ok(source_files(&doc)))
-                            .unwrap_or_else(Response::err)
-                    }
-                }
+                Ok(wi) => source_doc(&self.vault, &wi.ws_id, &wi.id)
+                    .map(|doc| Response::ok(source_files(&doc)))
+                    .unwrap_or_else(Response::err),
             },
             Request::ReadFile { item_id, path } => match find_item(&self.vault, &item_id) {
                 Err(e) => Response::err(e),
-                Ok(wi) => {
-                    let text = self.apps.get(wi.id.as_str()).and_then(|o| {
-                        valid_source_path(&path).ok()?;
-                        o.app.read_source_file(&path)
-                    });
-                    match text {
-                        Some(s) => Response::ok(s),
-                        None => source_doc(&self.vault, &wi.ws_id, &wi.id)
-                            .and_then(|doc| read_source_file(&doc, &path))
-                            .map(Response::ok)
-                            .unwrap_or_else(Response::err),
-                    }
-                }
+                Ok(wi) => source_doc(&self.vault, &wi.ws_id, &wi.id)
+                    .and_then(|doc| read_source_file(&doc, &path))
+                    .map(Response::ok)
+                    .unwrap_or_else(Response::err),
             },
             Request::ReadFileVersioned { item_id, path } => {
                 match find_item(&self.vault, &item_id) {
@@ -1111,12 +1303,8 @@ impl Shell {
                         if let Err(e) = valid_source_path(&path) {
                             return Response::err(e);
                         }
-                        let file = if let Some(o) = self.apps.get(wi.id.as_str()) {
-                            o.app.read_source_file_versioned(&path)
-                        } else {
-                            source_doc(&self.vault, &wi.ws_id, &wi.id)
-                                .and_then(|doc| read_source_doc_file_versioned(&doc, &path))
-                        };
+                        let file = source_doc(&self.vault, &wi.ws_id, &wi.id)
+                            .and_then(|doc| read_source_doc_file_versioned(&doc, &path));
                         file.map(|f| {
                             Response::ok(VersionedFile {
                                 content: f.content,
@@ -1138,28 +1326,13 @@ impl Shell {
                     if let Err(e) = valid_source_path(&path) {
                         return Response::err(e);
                     }
-                    let edit_bytes = edits.iter().fold(0usize, |total, e| {
-                        total
-                            .saturating_add(e.old_text.len())
-                            .saturating_add(e.new_text.len())
-                    });
-                    if edits.len() > 128 || edit_bytes > 1024 * 1024 {
-                        return Response::err("source edit batch is too large");
-                    }
-                    let edits: Vec<SourceEdit> = edits
-                        .into_iter()
-                        .map(|e| SourceEdit {
-                            old_text: e.old_text,
-                            new_text: e.new_text,
-                        })
-                        .collect();
-                    let edited = if let Some(o) = self.apps.get(wi.id.as_str()) {
-                        o.app.edit_source_file(&path, &expected_revision, &edits)
-                    } else {
-                        source_doc(&self.vault, &wi.ws_id, &wi.id).and_then(|doc| {
-                            edit_source_doc_file(&doc, &path, &expected_revision, &edits)
-                        })
+                    let edits = match source_edits(edits) {
+                        Ok(e) => e,
+                        Err(e) => return Response::err(e),
                     };
+                    let edited = source_doc(&self.vault, &wi.ws_id, &wi.id).and_then(|doc| {
+                        edit_source_doc_file(&doc, &path, &expected_revision, &edits)
+                    });
                     match edited.and_then(|edited| {
                         self.vault
                             .put_src(&wi.ws_id, &wi.id, &edited.snapshot)
@@ -1167,20 +1340,11 @@ impl Shell {
                         Ok(edited.revision)
                     }) {
                         Err(e) => Response::err(e),
-                        Ok(revision) => {
-                            let activation = match self.apps.get_mut(wi.id.as_str()) {
-                                None => SourceActivation::Closed,
-                                Some(o) => match o.app.reload_if_stale() {
-                                    Some(Err(error)) => SourceActivation::Failed { error },
-                                    Some(Ok(())) | None => SourceActivation::Activated,
-                                },
-                            };
-                            Response::ok(EditFileResult {
-                                revision,
-                                persisted: true,
-                                activation,
-                            })
-                        }
+                        Ok(revision) => Response::ok(EditFileResult {
+                            revision,
+                            persisted: true,
+                            activation: SourceActivation::Closed,
+                        }),
                     }
                 }
             },
@@ -1194,12 +1358,8 @@ impl Shell {
                     if let Err(e) = valid_source_path(&path) {
                         return Response::err(e);
                     }
-                    let snapshot = if let Some(o) = self.apps.get(wi.id.as_str()) {
-                        o.app.write_source_file(&path, &content)
-                    } else {
-                        source_doc(&self.vault, &wi.ws_id, &wi.id)
-                            .and_then(|doc| write_source_doc_file(&doc, &path, &content))
-                    };
+                    let snapshot = source_doc(&self.vault, &wi.ws_id, &wi.id)
+                        .and_then(|doc| write_source_doc_file(&doc, &path, &content));
                     match snapshot.and_then(|bytes| {
                         self.vault
                             .put_src(&wi.ws_id, &wi.id, &bytes)
@@ -1210,14 +1370,7 @@ impl Shell {
                     }
                 }
             },
-            Request::ReloadItem { item_id } => match self.apps.get_mut(item_id.as_str()) {
-                Some(o) => o
-                    .app
-                    .reload()
-                    .map(|()| Response::ok("reloaded"))
-                    .unwrap_or_else(Response::err),
-                None => Response::err("item is not open"),
-            },
+            Request::ReloadItem { .. } => Response::err("item is not open"),
             // Slice 1 runs only source-only `t.expect` tests, but it still opens a non-persisting
             // test tab so the runner path already has a distinct retained-id/doc namespace.
             Request::RunTests { item_id, filter } => match find_item(&self.vault, &item_id) {
@@ -1265,46 +1418,13 @@ impl Shell {
             // ── app actions: resolve by element id on a freshly built view, then route the
             // produced message exactly as the `Msg::Tab` arm would — we are already inside
             // `update`, so recursing into it would run the post-update flush twice.
-            Request::DumpTree { item_id } => match self.apps.get_mut(item_id.as_str()) {
-                None => Response::err("item is not open"),
-                Some(o) => {
-                    // Same freshness rule as `fire_on_app`: a dump after a WriteFile must
-                    // show the source the next frame would run.
-                    let _ = o.app.reload_if_stale();
-                    let mut tree = info_json(&o.app.view().info());
-                    let worlds = o.app.inspect_worlds();
-                    let worlds = worlds
-                        .iter()
-                        .map(|(id, w)| (id.as_str(), world_json(w)))
-                        .collect();
-                    add_worlds(&mut tree, &worlds);
-                    Response::ok(tree)
-                }
-            },
-            Request::Click { item_id, el_id } => self.fire_on_app(&item_id, &el_id, Action::Click),
-            Request::Type {
-                item_id,
-                el_id,
-                content,
-            } => self.fire_on_app(&item_id, &el_id, Action::Type(&content)),
-            Request::Key {
-                item_id,
-                el_id,
-                key,
-            } => {
-                let act = match key.as_str() {
-                    "enter" => Action::Enter,
-                    "esc" => Action::Esc,
-                    k => return Response::err(format!("unknown key {k:?} (enter|esc)")),
-                };
-                self.fire_on_app(&item_id, &el_id, act)
-            }
+            Request::DumpTree { .. }
+            | Request::Click { .. }
+            | Request::Type { .. }
+            | Request::Key { .. } => Response::err("item is not open"),
             // ── senses: the app's live data and its console. Open tabs only — a closed
             // item's data is what ReadFile sees, and its console no longer exists.
-            Request::ReadConsole { item_id, last } => match self.apps.get(item_id.as_str()) {
-                None => Response::err("item is not open"),
-                Some(o) => Response::ok(o.app.console(last)),
-            },
+            Request::ReadConsole { .. } => Response::err("item is not open"),
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
             Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
             // Same: the Runner owns the clock and the frame, so these cannot be answered here.
@@ -1316,82 +1436,136 @@ impl Shell {
             | Request::PointerRelease { .. }
             | Request::Drag { .. }
             | Request::Wheel { .. } => Response::err("driver op was not deferred"),
-            Request::AppDataGet { item_id } => match self.apps.get(item_id.as_str()) {
-                None => Response::err("item is not open"),
-                Some(o) => Response::ok(o.app.docs_json()),
-            },
-            Request::Search {
-                item_id,
-                query,
-                limit,
-            } => match self.apps.get(item_id.as_str()).map(|o| o.index.as_ref()) {
-                None => Response::err("item is not open"),
-                Some(None) => Response::err("this item has no search index"),
-                Some(Some(ix)) => {
-                    let ix = ix.borrow();
-                    match ix.query(&query, limit.unwrap_or(20).clamp(1, 500)) {
-                        Err(e) => Response::err(e),
-                        Ok(hits) => Response::ok(serde_json::json!({
-                            "hits": hits.iter().map(|h| serde_json::json!({
-                                "doc": h.doc, "id": h.id, "score": h.score, "snippet": h.snippet,
-                            })).collect::<Vec<_>>(),
-                            "fields_runs": ix.fields_runs,
-                        })),
-                    }
-                }
-            },
+            Request::AppDataGet { .. } | Request::Search { .. } => {
+                Response::err("item is not open")
+            }
             // Opening an already-open item focuses its tab — never a second VM for one
             // item. A fresh item with no source yet refuses honestly (WriteFile is its
             // other half).
             Request::OpenItem { item_id } => match find_item(&self.vault, &item_id) {
                 Err(e) => Response::err(e),
-                Ok(wi) => {
-                    let id: Arc<str> = wi.id.as_str().into();
-                    match self
-                        .tabs
-                        .iter()
-                        .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id))
-                    {
-                        Some(pos) => {
-                            self.focused = pos;
-                            Response::ok("open")
-                        }
-                        None => self
-                            .open_tab(wi)
-                            .map(|()| Response::ok("open"))
-                            .unwrap_or_else(Response::err),
-                    }
-                }
+                Ok(wi) => self
+                    .open_tab(wi)
+                    .map(|()| Response::ok("open"))
+                    .unwrap_or_else(Response::err),
             },
+            Request::SplitWith { item_id } => match self.apps.get_key_value(item_id.as_str()) {
+                Some((id, _)) => {
+                    self.split = Some(id.clone());
+                    Response::ok("split")
+                }
+                None => Response::err("item is not open; call OpenItem first"),
+            },
+            Request::Unsplit => {
+                self.split = None;
+                Response::ok("unsplit")
+            }
             req => answer(&self.vault, req),
         }
     }
 
-    /// Build the app's current view — the same fresh handler registration the next frame
-    /// uses, since `view()` re-registers per call — fire `act` on the element with `el_id`,
-    /// and route the produced message exactly as the `Msg::Tab` arm does. Not by calling
-    /// `update` recursively: we are inside it, and the post-update flush must run once.
-    fn fire_on_app(&mut self, item_id: &str, el_id: &str, act: Action) -> Response {
-        let Some(o) = self.apps.get_mut(item_id) else {
-            return Response::err("item is not open");
+    /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
+    fn on_screen(&self) -> Vec<Arc<str>> {
+        let Some(Tab::App((id, _))) = self.tabs.get(self.focused) else {
+            return Vec::new();
         };
-        let _ = o.app.reload_if_stale();
-        let mut tree = o.app.view();
-        match tree.trigger(el_id, act) {
-            Ok(Msg::Tab(tid, lua)) => match self.apps.get_mut(&tid) {
-                Some(o) => {
-                    o.app.update(lua);
-                    Response::ok("fired")
-                }
-                None => Response::err("app message routed to a closed tab"),
-            },
-            // Unreachable in practice: the app's `to_msg` wraps everything in `Msg::Tab`.
-            Ok(_) => Response::err("app produced an unexpected message"),
-            Err(e) => Response::err(e),
+        let mut ids = vec![id.clone()];
+        ids.extend(self.split.clone().filter(|s| s != id));
+        ids
+    }
+
+    /// Only apps on screen paint; every other one keeps running unseen.
+    fn show_on_screen(&mut self) {
+        let shown = self.on_screen();
+        for (id, a) in self.apps.iter_mut() {
+            a.show(shown.contains(id));
         }
     }
 
-    fn new(proxy: EventLoopProxy<Msg>, vault: Vault) -> Self {
+    /// Subscribe to an open app's docs, and send `names` to the node — plus any doc seen for the
+    /// first time, since one opened from local storage may be behind the node. A no-op
+    /// unclaimed.
+    fn sync_open(&mut self, id: &Arc<str>, names: &[String]) {
+        let (Some(record), Some(did)) = (
+            self.node.clone(),
+            self.vault.with_signer(|d| d.did().to_string()),
+        ) else {
+            return;
+        };
+        let Some(a) = self.apps.get(id) else { return };
+        let ws = a.ws_id.clone();
+        let mut send = names.to_vec();
+        for name in &a.doc_names {
+            let first = subscribe_if_new(
+                &self.proxy,
+                &self.vault,
+                self.gen_(),
+                &mut self.subscribed,
+                &did,
+                record.token.clone(),
+                &ws,
+                id,
+                name,
+            );
+            if first && !send.contains(name) {
+                send.push(name.clone());
+            }
+        }
+        for name in send {
+            self.sync_one(id, &name);
+        }
+    }
+
+    /// Bytes from the node into an open app's doc, on its thread. `ws` is checked when given.
+    fn import(&self, id: &Arc<str>, ws: Option<&str>, name: String, bytes: Vec<u8>) {
+        let Some(a) = self.apps.get(id) else { return };
+        if ws.is_some_and(|ws| ws != a.ws_id) {
+            return;
+        }
+        let id = id.clone();
+        a.call(move |h| {
+            h.app.with_doc(&name, |doc| {
+                if let Err(e) = doc.import(&bytes) {
+                    eprintln!("import failed for {id}/{name}: {e}");
+                }
+            });
+        });
+    }
+
+    /// A request for an open app goes to its thread, which replies itself; anything else comes
+    /// back for `answer_mut`, which serves a closed item from the vault.
+    fn forward(
+        &mut self,
+        req: Request,
+        tx: std::sync::mpsc::Sender<Response>,
+    ) -> Option<(Request, std::sync::mpsc::Sender<Response>)> {
+        let id = match &req {
+            Request::ListFiles { item_id }
+            | Request::ReadFile { item_id, .. }
+            | Request::ReadFileVersioned { item_id, .. }
+            | Request::EditFile { item_id, .. }
+            | Request::WriteFile { item_id, .. }
+            | Request::ReloadItem { item_id }
+            | Request::DumpTree { item_id }
+            | Request::Click { item_id, .. }
+            | Request::Type { item_id, .. }
+            | Request::Key { item_id, .. }
+            | Request::ReadConsole { item_id, .. }
+            | Request::AppDataGet { item_id }
+            | Request::Search { item_id, .. } => item_id.clone(),
+            _ => return Some((req, tx)),
+        };
+        let Some(a) = self.apps.get(id.as_str()) else {
+            return Some((req, tx));
+        };
+        let vault = self.vault.clone();
+        a.call(move |h| {
+            let _ = tx.send(serve(h, req, &vault));
+        });
+        None
+    }
+
+    fn new(proxy: EventLoopProxy<Msg>, vault: Vault, offscreen: Option<(f32, f32)>) -> Self {
         let screen = if vault.is_empty() {
             Screen::Signup(SignupForm::default())
         } else {
@@ -1406,6 +1580,9 @@ impl Shell {
             tabs,
             apps: HashMap::new(),
             focused: 0,
+            split: None,
+            offscreen,
+            clock: 0.0,
             error: None,
             screenshot: None,
             driver: None,
@@ -1418,7 +1595,17 @@ impl Shell {
         shell.start_listener();
         shell
     }
+    /// Open-or-focus, the one path every opener takes: an open item's tab is focused, never
+    /// given a second thread.
     fn open_tab(&mut self, wi: WorkspaceItem) -> Result<(), String> {
+        if let Some(pos) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == wi.id))
+        {
+            self.focused = pos;
+            return Ok(());
+        }
         let src = self
             .vault
             .get_src(&wi.ws_id, &wi.id)
@@ -1427,38 +1614,25 @@ impl Shell {
             return Err(format!("{} has no source", wi.name));
         };
 
-        let doc = LoroDoc::new();
-        doc.import(&src).map_err(|e| e.to_string())?;
         let id: Arc<str> = wi.id.as_str().into();
-        let to_msg_id = id.clone();
-
-        let node_credentials = self.node.as_ref().and_then(|record| {
+        let node = self.node.as_ref().and_then(|record| {
             self.vault
                 .with_signer(|d| d.did().to_string())
                 .map(|did| (did, record.token.clone()))
         });
-        let resolve = match node_credentials {
-            Some((did, token)) => resolver_with_node(&self.vault, &wi.ws_id, &wi.id, did, token),
-            None => resolver(&self.vault, &wi.ws_id, &wi.id),
-        };
-        let app = LuaApp::open(
-            doc,
-            resolve,
-            waker(&self.proxy),
-            Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
-        )
-        .map_err(|e| e.to_string())?;
-        let mut app = app;
-        let index = attach_index(&mut app, indexer::ItemIndex::open(&self.vault, &wi.ws_id, &wi.id));
-        self.apps.insert(
-            id.clone(),
-            OpenApp {
+        let app = AppThread::spawn(
+            Open {
+                item_id: id.clone(),
                 ws_id: wi.ws_id.clone(),
-                app,
+                src,
+                vault: self.vault.clone(),
                 persist: true,
-                index,
+                node,
             },
-        );
+            self.proxy.clone(),
+            self.offscreen,
+        )?;
+        self.apps.insert(id.clone(), app);
         self.focused = self.tabs.len();
         self.tabs.push(Tab::App((id, wi.name)));
         Ok(())
@@ -1472,36 +1646,45 @@ impl Shell {
     ) -> Result<Arc<str>, String> {
         let id: Arc<str> = format!("test:{}:{run}", wi.id).into();
         self.close_test_tab(&id, self.focused);
-        let doc = LoroDoc::new();
-        doc.import(&src).map_err(|e| e.to_string())?;
-        let to_msg_id = id.clone();
-        let app = LuaApp::open(
-            doc,
-            Rc::new(|_| Ok(None)),
-            waker(&self.proxy),
-            Rc::new(move |msg| Msg::Tab(to_msg_id.clone(), msg)),
-        )
-        .map_err(|e| e.to_string())?;
-        let mut app = app;
-        // A tab that persists nothing still searches: its own index, in memory, gone with it.
-        let index = attach_index(&mut app, indexer::ItemIndex::in_memory());
-        self.apps.insert(
-            id.clone(),
-            OpenApp {
+        let app = AppThread::spawn(
+            Open {
+                item_id: id.clone(),
                 ws_id: wi.ws_id.clone(),
-                app,
+                src,
+                vault: self.vault.clone(),
                 persist: false,
-                index,
+                node: None,
             },
-        );
+            self.proxy.clone(),
+            self.offscreen,
+        )?;
+        self.apps.insert(id.clone(), app);
         self.focused = self.tabs.len();
         self.tabs
             .push(Tab::App((id.clone(), format!("test: {}", wi.name))));
         Ok(id)
     }
 
+    /// An app's share of the screen: its latest frame, or why there is none.
+    fn app_slot(&self, id: &Arc<str>) -> El<Msg> {
+        match self.apps.get(id) {
+            Some(a) if a.stuck => text("this app is not responding")
+                .color(theme::error())
+                .grow(),
+            Some(a) => {
+                let to = id.clone();
+                tile(a.frame.clone())
+                    .h_full()
+                    .grow()
+                    .on_tile(id.to_string(), move |e| Msg::TileInput(to.clone(), e))
+            }
+            None => text("app not found").color(theme::error()).grow(),
+        }
+    }
+
     fn close_test_tab(&mut self, id: &Arc<str>, restore_focus: usize) {
         self.apps.remove(id);
+        self.split = self.split.take().filter(|s| s != id);
         if let Some(pos) = self
             .tabs
             .iter()
@@ -1598,12 +1781,15 @@ impl App for Shell {
                 Screen::Spaces(s) => s.view(),
                 Screen::Items(i) => i.view(),
             },
-            Tab::App((id, _name)) => {
-                if let Some(o) = self.apps.get(id) {
-                    o.app.view()
-                } else {
-                    text("app not found").color(theme::error())
+            Tab::App(_) => {
+                let mut tiles = row().w_full().grow();
+                for (i, id) in self.on_screen().into_iter().enumerate() {
+                    if i > 0 {
+                        tiles = tiles.child(col().w(1.0).h_full().fill(theme::bd_1()));
+                    }
+                    tiles = tiles.child(self.app_slot(&id));
                 }
+                tiles
             }
         };
 
@@ -1640,10 +1826,27 @@ impl App for Shell {
                 self.error = self.open_tab(wi).err();
                 None
             }
-            Msg::Tab(id, msg) => {
-                if let Some(o) = self.apps.get_mut(&id) {
-                    o.app.update(msg);
+            Msg::TileInput(id, e) => {
+                if let Some(a) = self.apps.get(&id) {
+                    a.input(e);
                 }
+                None
+            }
+            // The paint that follows delivering this is the point; `before_frame` fetches.
+            Msg::TileDirty(_) => None,
+            Msg::AppSaved {
+                id,
+                dirtied,
+                names,
+                error,
+            } => {
+                if error.is_some() {
+                    self.error = error;
+                }
+                if let Some(a) = self.apps.get_mut(&id) {
+                    a.doc_names = names;
+                }
+                self.sync_open(&id, &dirtied);
                 None
             }
             Msg::Focus(idx) => {
@@ -1716,8 +1919,9 @@ impl App for Shell {
             // were flushed on the previous update), and face a login screen again — or
             // signup, if this device holds no accounts.
             Msg::Rpc(Request::Lock, tx) => {
-                self.vault.lock();
+                // Apps first: closing waits for their last save, which must land in this account.
                 self.reset_tabs();
+                self.vault.lock();
                 self.node = None;
                 self.start_listener();
                 self.screen = match self.vault.accounts() {
@@ -2126,31 +2330,41 @@ impl App for Shell {
                 None
             }
             Msg::TestWorld(id, reply) => {
-                let result = self
-                    .apps
-                    .get(&id)
-                    .map(|o| worlds_json(&o.app.inspect_worlds()))
-                    .ok_or_else(|| "test app is not open".to_string());
-                let _ = reply.send(result);
+                match self.apps.get(&id) {
+                    Some(a) => a.call(move |h| {
+                        let _ = reply.send(Ok(worlds_json(&h.app.inspect_worlds())));
+                    }),
+                    None => {
+                        let _ = reply.send(Err("test app is not open".into()));
+                    }
+                }
                 None
             }
             Msg::TestText(id, el_id, reply) => {
-                let result = self
-                    .apps
-                    .get_mut(&id)
-                    .map(|o| text_by_id(&o.app.view().info(), &el_id))
-                    .ok_or_else(|| "test app is not open".to_string());
-                let _ = reply.send(result);
+                match self.apps.get(&id) {
+                    Some(a) => a.call(move |h| {
+                        let _ = reply.send(Ok(text_by_id(&h.app.view().info(), &el_id)));
+                    }),
+                    None => {
+                        let _ = reply.send(Err("test app is not open".into()));
+                    }
+                }
                 None
             }
             Msg::TestType(id, el_id, text, reply) => {
-                let result = match self.fire_on_app(&id, &el_id, Action::Type(&text)) {
-                    Response::Ok { .. } => Ok(()),
-                    Response::Err { message } => Err(message),
-                };
-                let _ = reply.send(result);
-                // The flush after this match saves — and indexes — what the input's handler
-                // wrote, before the test's next step.
+                // The thread saves — and indexes — what the input's handler wrote right after
+                // this call, before it handles the test's next step.
+                match self.apps.get(&id) {
+                    Some(a) => a.call(move |h| {
+                        let _ = reply.send(match fire(h, &el_id, Action::Type(&text)) {
+                            Response::Ok { .. } => Ok(()),
+                            Response::Err { message } => Err(message),
+                        });
+                    }),
+                    None => {
+                        let _ = reply.send(Err("test app is not open".into()));
+                    }
+                }
                 None
             }
             Msg::TestRunDone(reply, results, test_id, old_focus) => {
@@ -2197,6 +2411,11 @@ impl App for Shell {
                 None
             }
             Msg::AuthDone(reply, outcome) => {
+                // An account switch closes every app; close them before it, so their last saves
+                // land in the account they belong to.
+                if outcome.succeeded() {
+                    self.reset_tabs();
+                }
                 let (resp, next) = finish_auth(&mut self.vault, outcome);
                 let _ = reply.send(resp);
                 // A successful auth may have switched accounts: whatever was running
@@ -2213,13 +2432,11 @@ impl App for Shell {
                 next
             }
             Msg::Rpc(req, tx) => {
-                let _ = tx.send(self.answer_mut(req));
+                if let Some((req, tx)) = self.forward(req, tx) {
+                    let _ = tx.send(self.answer_mut(req));
+                }
                 None
             }
-            // Deliberately empty. The state it announces is already in the doc; what was missing
-            // was a frame, and delivering this message is what produced one. The reload check and
-            // the flush below then act on the imported change like any other.
-            Msg::DocChanged => None,
 
             Msg::SyncTick => {
                 // Re-armed unconditionally: a node that is slow or unreachable this tick must
@@ -2237,12 +2454,8 @@ impl App for Shell {
                 let key = (item_id.clone(), name.clone());
                 match result {
                     Ok(ack) => {
-                        if let Some(o) = self.apps.get(&item_id) {
-                            o.app.with_doc(&name, |doc| {
-                                if let Err(e) = doc.import(&ack.update) {
-                                    eprintln!("sync: import failed for {item_id}/{name}: {e}");
-                                }
-                            });
+                        if self.apps.contains_key(&item_id) {
+                            self.import(&item_id, None, name.clone(), ack.update);
                             if ack.missing {
                                 // Our `since` was ahead of the node: push everything.
                                 self.node_vv.remove(&key);
@@ -2259,6 +2472,9 @@ impl App for Shell {
             Msg::ListenUp(_) => {
                 self.subscribed.clear();
                 self.node_vv.clear();
+                // At once: subscribing rides on an app's save, and a quiet app may not save
+                // before the next tick.
+                self.reconcile();
                 None
             }
             Msg::SubscribeFailed(_, item_id, name) => {
@@ -2267,18 +2483,8 @@ impl App for Shell {
             }
             Msg::PushReceived(_, push) => {
                 if let SyncLayer::Doc(name) = &push.layer {
-                    if let Some(o) = self.apps.get(push.item_id.as_str()) {
-                        if o.ws_id == push.ws_id {
-                            o.app.with_doc(name, |doc| {
-                                if let Err(e) = doc.import(&push.snapshot) {
-                                    eprintln!(
-                                        "push: import failed for {}/{name}: {e}",
-                                        push.item_id
-                                    );
-                                }
-                            });
-                        }
-                    }
+                    let id: Arc<str> = push.item_id.as_str().into();
+                    self.import(&id, Some(&push.ws_id), name.clone(), push.snapshot);
                 }
                 None
             }
@@ -2292,97 +2498,9 @@ impl App for Shell {
                 _ => None,
             },
         };
-        // Rebuild any app whose source moved. Here rather than in `view` because reloading needs
-        // `&mut self` and `App::view` takes `&self` — but `update` is also the better place on its
-        // own terms, since every writer reaches it: an MCP write and a peer arrive as `DocChanged`,
-        // and a code block edited in-app moved the source during the message just dispatched.
-        //
-        // After the match for that last case, and before the flush so a reload that opens a new
-        // doc gets it saved in the same pass. The error is reported by the app's own banner; this
-        // line is only so a terminal is watching too.
-        for o in self.apps.values_mut() {
-            if let Some(Err(e)) = o.app.reload_if_stale() {
-                eprintln!("reload failed: {e}");
-            }
-        }
-
-        // Persist after every message, not only Lua ones: MCP and peer writes reach the docs
-        // without ever passing through `LuaApp::update`, so this is the single place that sees
-        // all three writers. `flush` is a no-op for any doc whose version hasn't moved.
-        //
-        // Whatever it found dirty is also synced immediately, not left for `SyncTick`'s next
-        // backstop pass — the same per-doc `sync_doc` that tick uses, just triggered by the
-        // write that just happened, so a local edit reaches the node without a 20s wait.
-        let vault = self.vault.clone();
-        let claimed = self.node.clone();
-        let desktop_did = claimed
-            .as_ref()
-            .and_then(|_| self.vault.with_signer(|d| d.did().to_string()));
-        let mut failed = None;
-        let gen_ = self.gen_();
-        for (item_id, o) in self.apps.iter_mut() {
-            let mut dirtied = Vec::new();
-            if !o.persist {
-                // Nothing to save, but the flush still says what changed — the test tab's index
-                // needs it as much as a real one.
-                let _ = o.app.flush(|name, _| {
-                    dirtied.push(name.to_string());
-                    Ok(())
-                });
-                reindex_open(o, &dirtied);
-                continue;
-            }
-            let ws = o.ws_id.clone();
-            let mut put = persist(&vault, &ws, item_id);
-            let result = o.app.flush(|name, bytes| {
-                dirtied.push(name.to_string());
-                put(name, bytes)
-            });
-            if let Err(e) = result {
-                failed = Some(format!("save failed: {e}"));
-            }
-            // After the save, so the index never holds a record the vault does not.
-            reindex_open(o, &dirtied);
-            if let (Some(record), Some(did)) = (&claimed, &desktop_did) {
-                // Subscribing here, not only in `SyncTick`, is what makes a freshly opened
-                // doc start receiving pushes right away instead of waiting up to
-                // `SYNC_INTERVAL` for the backstop tick to notice it.
-                for name in o.app.open_doc_names() {
-                    let first = subscribe_if_new(
-                        &self.proxy,
-                        &vault,
-                        gen_,
-                        &mut self.subscribed,
-                        did,
-                        record.token.clone(),
-                        &ws,
-                        item_id,
-                        &name,
-                    );
-                    if first && !dirtied.contains(&name) {
-                        dirtied.push(name);
-                    }
-                }
-                for name in &dirtied {
-                    let since = self.node_vv.get(&(item_id.clone(), name.clone()));
-                    sync_doc(
-                        &self.proxy,
-                        &vault,
-                        did,
-                        record.token.clone(),
-                        &ws,
-                        item_id,
-                        name,
-                        &o.app,
-                        since.map(Vec::as_slice),
-                        gen_,
-                    );
-                }
-            }
-        }
-        if failed.is_some() {
-            self.error = failed;
-        }
+        // Saving, indexing and reloading happen on each app's own thread now, after every
+        // batch it handles (`app_thread::settle`); the shell only keeps tiles shown or hidden.
+        self.show_on_screen();
 
         if let Some(next) = next {
             self.screen = next;
@@ -2394,13 +2512,40 @@ impl App for Shell {
     fn is_ambient(&self, msg: &Msg) -> bool {
         matches!(
             msg,
-            Msg::DocChanged
-                | Msg::SyncTick
+            Msg::SyncTick
                 | Msg::SyncDone(..)
                 | Msg::PushReceived(..)
                 | Msg::ListenUp(_)
                 | Msg::SubscribeFailed(..)
+                | Msg::TileDirty(_)
+                | Msg::AppSaved { .. }
         )
+    }
+
+    fn before_frame(&mut self, now: f64) {
+        self.clock = now;
+        // Ask every shown tile first, then collect: they frame in parallel, not in turn.
+        let asked: Vec<_> = self
+            .apps
+            .iter()
+            .filter(|(_, a)| a.is_shown())
+            .map(|(id, a)| (id.clone(), a.ask(now)))
+            .collect();
+        for (id, asked) in asked {
+            if let Some(a) = self.apps.get_mut(&id) {
+                a.take(asked);
+            }
+        }
+    }
+
+    fn tiles_sized(&mut self, sizes: &[(String, (f32, f32))]) -> bool {
+        let mut again = false;
+        for (id, size) in sizes {
+            if let Some(a) = self.apps.get_mut(id.as_str()) {
+                again |= a.resize(*size, self.clock);
+            }
+        }
+        again
     }
 
     fn take_driver(&mut self) -> Option<DriverRequest<Msg>> {

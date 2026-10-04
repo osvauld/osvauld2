@@ -6,9 +6,11 @@
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
 mod crdt;
 mod gfx;
+mod budget;
 pub mod index;
 mod modules;
 mod props;
+pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
 
@@ -86,10 +88,17 @@ pub fn run_lua_tests_with(tests: Vec<LuaTest>, api: LuaTestApi) -> Vec<LuaTestRe
         .collect()
 }
 
+/// A `t.*` call that reaches the app: its time is the app's (and the app's own budget's), not
+/// the test's.
+fn driving<T>(budget: &Arc<Budget>, f: impl FnOnce() -> T) -> T {
+    let _paused = budget.pause();
+    f()
+}
+
 fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
     let frames = Rc::new(Cell::new(0u32));
     let failure = (|| -> mlua::Result<()> {
-        let (vm, fires) = test_vm()?;
+        let (vm, budget) = test_vm()?;
         let t = vm.create_table()?;
         t.set(
             "expect",
@@ -104,33 +113,37 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let step = api.step.clone();
+        let b = budget.clone();
         let frame_count = frames.clone();
         t.set(
             "step",
             vm.create_function(move |_, n: u32| match &step {
-                Some(step) => step(n)
+                Some(step) => driving(&b, || step(n))
                     .inspect(|done| frame_count.set(frame_count.get().saturating_add(*done)))
                     .map_err(Error::runtime),
                 None => Err(Error::runtime("t.step is not available in this runner")),
             })?,
         )?;
         let world = api.world.clone();
+        let b = budget.clone();
         t.set(
             "world",
             vm.create_function(move |lua, ()| match &world {
-                Some(world) => json_to_lua(lua, &world().map_err(Error::runtime)?),
+                Some(world) => json_to_lua(lua, &driving(&b, || world()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.world is not available in this runner")),
             })?,
         )?;
         let rects = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "rects",
             vm.create_function(move |lua, ()| match &rects {
-                Some(rects) => json_to_lua(lua, &rects().map_err(Error::runtime)?),
+                Some(rects) => json_to_lua(lua, &driving(&b, || rects()).map_err(Error::runtime)?),
                 None => Err(Error::runtime("t.rects is not available in this runner")),
             })?,
         )?;
         let centres = api.rects.clone();
+        let b = budget.clone();
         t.set(
             "centre_of",
             vm.create_function(move |_, id: String| {
@@ -139,7 +152,8 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
                         "t.centre_of is not available in this runner",
                     ));
                 };
-                let serde_json::Value::Array(rs) = rects().map_err(Error::runtime)? else {
+                let serde_json::Value::Array(rs) = driving(&b, || rects()).map_err(Error::runtime)?
+                else {
                     return Err(Error::runtime("rects response was not an array"));
                 };
                 for r in rs {
@@ -155,18 +169,20 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let click_at = api.click_at.clone();
+        let b = budget.clone();
         t.set(
             "click_at",
             vm.create_function(move |_, (x, y): (f32, f32)| match &click_at {
-                Some(click_at) => click_at(x, y).map_err(Error::runtime),
+                Some(click_at) => driving(&b, || click_at(x, y)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.click_at is not available in this runner")),
             })?,
         )?;
         let text = api.text.clone();
+        let b = budget.clone();
         t.set(
             "text",
             vm.create_function(move |lua, id: String| match &text {
-                Some(text) => match text(id).map_err(Error::runtime)? {
+                Some(text) => match driving(&b, || text(id)).map_err(Error::runtime)? {
                     Some(s) => Ok(Value::String(lua.create_string(&s)?)),
                     None => Ok(Value::Nil),
                 },
@@ -174,10 +190,11 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             })?,
         )?;
         let type_text = api.type_text.clone();
+        let b = budget.clone();
         t.set(
             "type",
             vm.create_function(move |_, (id, text): (String, String)| match &type_text {
-                Some(type_text) => type_text(id, text).map_err(Error::runtime),
+                Some(type_text) => driving(&b, || type_text(id, text)).map_err(Error::runtime),
                 None => Err(Error::runtime("t.type is not available in this runner")),
             })?,
         )?;
@@ -186,7 +203,7 @@ fn run_lua_test(test: LuaTest, api: LuaTestApi) -> LuaTestResult {
             .set_name(&test.name)
             .set_mode(ChunkMode::Text)
             .eval::<Function>()?;
-        fires.store(0, Ordering::Relaxed);
+        let _armed = budget.arm();
         f.call::<()>(t)
     })()
     .err()
@@ -374,7 +391,7 @@ pub struct LuaApp<M> {
     /// app. `error` is the other kind: a source that never loaded at all, which leaves nothing to
     /// run. Cleared by the next successful reload, since that replaces the whole struct.
     reload_error: Option<String>,
-    fires: Arc<AtomicU64>,
+    budget: Arc<Budget>,
     to_msg: Rc<dyn Fn(LuaMsg) -> M>,
     /// Which version of the source this VM was built from. Read *before* the build, so an edit
     /// landing mid-build leaves the VM stale rather than falsely current.
@@ -392,6 +409,7 @@ pub struct LuaApp<M> {
     /// the log: the console, like the cores, outlives the VM it reports on.
     console: Rc<RefCell<VecDeque<String>>>,
     worlds: Worlds,
+    worlds3d: gfx::world3d::Host,
     /// While `view` runs: `world(id):set` refuses then, since a description only describes.
     viewing: Rc<Cell<bool>>,
     resolve: Resolve,
@@ -520,7 +538,12 @@ impl<M: 'static> LuaApp<M> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
-        let app = Self::build(src, cores, resolve, wake, to_msg, search, Worlds::default())?;
+        let mut app = Self::build(src, cores, resolve, wake, to_msg, search, Worlds::default(), gfx::world3d::Host::default())?;
+        if app.error.is_none() {
+            if let Err(e) = app.worlds3d.commit() {
+                app.error = Some(e.to_string());
+            }
+        }
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -541,12 +564,13 @@ impl<M: 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
         worlds: Worlds,
+        worlds3d: gfx::world3d::Host,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
         // lost until the next one happens to arrive.
         let src_seen = src.version.load(Ordering::Relaxed);
-        let (vm, fires) = sandboxed_vm()?;
+        let (vm, budget) = sandboxed_vm()?;
         let map = src.doc.get_map("files");
         let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
             return Err(Error::runtime("no main.lua in app source"));
@@ -562,21 +586,24 @@ impl<M: 'static> LuaApp<M> {
         index::install_query(&vm, search.clone())?;
         let viewing = Rc::new(Cell::new(false));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
+        worlds3d.install(&vm, viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
         let main_src = t.to_string();
+        let armed = budget.arm();
         let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(e.to_string())),
         };
+        drop(armed);
         Ok(Self {
             vm,
             view_fn,
             handlers: RefCell::new(HashMap::new()),
             error,
             reload_error: None,
-            fires,
+            budget,
             to_msg,
             src_seen,
             src,
@@ -587,6 +614,7 @@ impl<M: 'static> LuaApp<M> {
             search,
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds,
+            worlds3d,
             viewing,
         })
     }
@@ -614,6 +642,7 @@ impl<M: 'static> LuaApp<M> {
             self.to_msg.clone(),
             self.search.clone(),
             self.worlds.clone(),
+            self.worlds3d.staged(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -656,6 +685,11 @@ impl<M: 'static> LuaApp<M> {
         // The trial frame filled the staged app's handler table with closures nothing will ever
         // dispatch to; clear it so the first real frame starts from an empty one.
         staged.handlers.borrow_mut().clear();
+        if let Err(e) = staged.worlds3d.commit() {
+            let e = e.to_string();
+            self.log(format!("reload error: {e}"));
+            return Err(e);
+        }
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
         *self = staged;
@@ -767,8 +801,12 @@ impl<M: 'static> LuaApp<M> {
     /// Each live world's entities, by world id.
     pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
         let worlds = self.worlds.borrow();
-        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers() };
+        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers(), tick: w.steps(), dropped: w.dropped() };
         worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
+    }
+
+    pub fn inspect_worlds3d(&self) -> std::collections::BTreeMap<String, world::world3d::WorldInspection3d> {
+        self.worlds3d.inspect()
     }
 
     /// The last `last` console lines, newest last.
@@ -819,9 +857,38 @@ impl<M: 'static> LuaApp<M> {
         self.cores.borrow().get(name).map(|core| f(&core.doc))
     }
 
+    pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
+        match self.worlds3d.advance(elapsed, active) {
+            Ok(ticking) => {
+                let _armed = self.budget.arm();
+                for (id, event) in self.worlds3d.zone_events(active) {
+                    self.worlds3d.commanding.set(true);
+                    let result = (|| {
+                        let table = self.vm.create_table()?;
+                        table.set("id", event.id)?;
+                        table.set("who", event.who)?;
+                        table.set("tick", event.tick)?;
+                        table.set("phase", match event.phase {
+                            world::world3d::ZonePhase3d::Enter => "enter",
+                            world::world3d::ZonePhase3d::Leave => "leave",
+                        })?;
+                        let handler = self.handlers.borrow().get(&Key::new(&id, "on_zone")).cloned();
+                        handler.map_or(Ok(()), |h| h.call::<()>(table))
+                    })();
+                    self.worlds3d.commanding.set(false);
+                    if let Err(e) = result { self.log(format!("handler error: {e}")); }
+                }
+                ticking
+            },
+            Err(e) => {
+                self.log(format!("3D simulation error: {e}"));
+                false
+            }
+        }
+    }
+
     pub fn view(&self) -> El<M> {
-        //reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         let body = self.body();
         let Some(e) = &self.reload_error else {
             return body;
@@ -844,6 +911,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     fn body(&self) -> El<M> {
+        self.worlds3d.begin_view();
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
         }
@@ -1048,8 +1116,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     pub fn update(&mut self, msg: LuaMsg) {
-        // reset budget
-        self.fires.store(0, Ordering::Relaxed);
+        let _armed = self.budget.arm();
         if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
             if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
                 match &msg {
@@ -1083,6 +1150,8 @@ impl<M: 'static> LuaApp<M> {
         let Some(h) = handlers.get(key) else {
             return;
         };
+        self.worlds3d.commanding.set(matches!(key.name,
+            "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key"));
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -1092,6 +1161,7 @@ impl<M: 'static> LuaApp<M> {
                 Err(e) => Err(e),
             },
         };
+        self.worlds3d.commanding.set(false);
         if let Err(e) = result {
             eprintln!("handler error: {e}");
             self.log(format!("handler error: {e}"));
@@ -1345,23 +1415,44 @@ fn shadow_os(vm: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
-fn test_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
+fn test_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let fires = Arc::new(AtomicU64::new(0));
-    let f = fires.clone();
-    vm.set_interrupt(move |_lua| {
-        if f.fetch_add(1, Ordering::Relaxed) > 1_000_000 {
-            Err(mlua::Error::runtime("interrupt budget exceeded"))
-        } else {
-            Ok(mlua::VmState::Continue)
-        }
-    });
-    Ok((vm, fires))
+    let budget = budget::install(&vm, budget::Policy::app())?;
+    Ok((vm, budget))
 }
 
-pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
+/// Stand-ins for native work the interrupt cannot see, and a flushed log line, for `scripts/e2e_app_threads.py`
+/// (`docs/design/app-threads.md` §0). Debug builds with `OSVAULD_TEST_BINDINGS=1` only: both
+/// can only waste the app's own time, which a loop already can.
+fn install_test_bindings(vm: &Lua) -> mlua::Result<()> {
+    if !cfg!(debug_assertions) || std::env::var_os("OSVAULD_TEST_BINDINGS").is_none() {
+        return Ok(());
+    }
+    let busy = vm.create_function(|_, ms: u64| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            std::hint::spin_loop();
+        }
+        Ok(())
+    })?;
+    let stall = vm.create_function(|_, ()| -> mlua::Result<()> {
+        loop {
+            std::thread::park();
+        }
+    })?;
+    // Not `print`: Luau's goes through C stdio, block-buffered into a file and lost on kill.
+    let log = vm.create_function(|_, line: String| {
+        println!("{line}");
+        Ok(())
+    })?;
+    vm.globals().set("__log", log)?;
+    vm.globals().set("__busy", busy)?;
+    vm.globals().set("__stall", stall)
+}
+
+pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
     let now_fn = vm.create_function(|_, ()| wall_clock())?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
@@ -1369,18 +1460,11 @@ pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<AtomicU64>)> {
     gfx::install(&vm)?;
     vm.globals().set("now", now_fn)?;
     vm.globals().set("uuid", uuid_fn)?;
+    install_test_bindings(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
-    let fires = Arc::new(AtomicU64::new(0));
-    let f = fires.clone();
-    vm.set_interrupt(move |_lua| {
-        if f.fetch_add(1, Ordering::Relaxed) > 1_000_000 {
-            Err(mlua::Error::runtime("interrupt budget exceeded"))
-        } else {
-            Ok(mlua::VmState::Continue)
-        }
-    });
-    Ok((vm, fires))
+    let budget = budget::install(&vm, budget::Policy::app())?;
+    Ok((vm, budget))
 }
 fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
     let msg = if context.path.is_empty() {
@@ -1757,12 +1841,24 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
             }
-            let scene = node
-                .get::<AnyUserData>("scene")?
-                .borrow::<gfx::LuaScene3d>()?
-                .0
-                .clone();
-            scene3d_el(scene)
+            let handle = node.get::<AnyUserData>("scene")?;
+            if handle.is::<gfx::world3d::SceneHandle>() {
+                let retained = handle.borrow::<gfx::world3d::SceneHandle>()?;
+                if let Some(f) = node.get::<Option<Function>>("on_zone")? {
+                    let id: String = node.get::<Option<String>>("id")?
+                        .ok_or_else(|| Error::runtime("scene3d on_zone needs an id"))?;
+                    register(context.handlers, &id, "on_zone", f)?;
+                    retained.route_zone(id)?;
+                }
+                let (scene, ticking) = retained.resolve()?;
+                let el = scene3d_el(scene);
+                if ticking { el.repaint() } else { el }
+            } else {
+                if node.contains_key("on_zone")? {
+                    return Err(Error::runtime("scene3d on_zone needs a retained 3D world"));
+                }
+                scene3d_el(handle.borrow::<gfx::LuaScene3d>()?.0.clone())
+            }
         }
         "input" | "text_area" => {
             if max_index(&node) > 0 {
@@ -1807,7 +1903,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     }
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
-        "scene3d" => &["scene"],
+        "scene3d" => &["scene", "on_zone"],
         "world" => &[
             "width",
             "height",

@@ -44,12 +44,20 @@ Rust screen: El builders (typed M) ───────────────
 - **Messages are plain data.** Lua callbacks register into a per-frame table and dispatch by
   index (`LuaMsg::Call(u32)`); Rust screens use typed enums. The VM never leaks into the
   runtime — this is what keeps "apps off the UI thread" a door that stays open.
+  **2026-10-04:** that door is now walked through — see the app-thread invariant below.
 - **The CRDT is document truth** (Loro). Ephemeral per-viewer state (scroll, drags,
   unfinished UI input) never enters it. An app's *source* and its *data* are separate docs.
   **Clarified 2026-09-11:** “draft” previously meant transient viewer scratch here, not
   a durable local-only document such as an unsubmitted order. The latter can use Loro
   and persistence; its exclusion from network discovery/transfer is part of the unbuilt
   [sync design](design/workspace-permissions-sync.md).
+- **Native simulation runs before normal-frame description.** `App::advance_simulation(elapsed)`
+  receives absolute monotonic Runner time; the app owns fixed-step/catch-up policy and returns
+  whether another normal frame is needed. Live and custom capture frames skip this hook. Legacy
+  `on_frame` callbacks still follow their existing after-snapshot behavior; this is not a global
+  promise that arbitrary user handlers cannot mutate state during capture. Offscreen ordinary
+  bridge requests repaint without advancing virtual time; frame/advance and pointer drivers move
+  the clock explicitly, so inspection and captures create no time debt.
 - **External event sources start at `App::ready`.** Runner calls it once after winit has a
   window/renderer and is actively polling. Publishing a bridge socket from `run_with`'s builder
   creates a startup race: `EventLoopProxy::send_event` can succeed before events are deliverable.
@@ -66,6 +74,7 @@ Rust screen: El builders (typed M) ───────────────
 | crate | what it is |
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
+| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. |
 | `lua_tree` | isolated full-moon (Luau) parse → 22-kind semantic tree → printer groundwork. Semantic source storage and nids are deferred; the planned agent write path edits LoroText directly. See [`design/agent-source-editing.md`](design/agent-source-editing.md). |
@@ -118,7 +127,13 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 - **`walk` is the hot path** (~80% of a frame's Lua cost). New per-element reads need a cost
   argument — this is why dev breadcrumbs are gated.
 - **Retained-store ids are namespaced per item** (`tab:<id>:…`) — two open apps must never
-  share a field.
+  share a field. (Since app threads each app also has its own store; the prefix stays.)
+- **Each open app has its own thread** (`shell2/src/app_thread.rs`, 2026-10-04): its VM, docs,
+  search index and `runtime::Tile` are built there and never leave. The shell reaches an app
+  only through `AppThread` — input, sizes, and `Send` closures that reply on a channel — and
+  shows its latest frame with a `tile` element. Saving and indexing run on that thread after
+  every batch it handles. Offscreen, every shell paint waits for its shown tiles at the same
+  virtual clock, so driven runs stay exact; with a window the shell never waits.
 - **Reload stages a whole second VM and swaps** (Lua can't unload a chunk); doc cores and
   per-viewer scratch outlive the VM; a failed reload leaves the running app untouched.
 - **Reads and writes to docs are different paths**: reads are plain Lua tables (the mirror,
