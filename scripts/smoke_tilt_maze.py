@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from osvauld.scene3d import assert_3d_pixels
 from osvauld.session import Session, build_shell, shell_binary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,7 +56,7 @@ return function()
     return ui.col({full=true, stretch=true,
         ui.text({id="title", title}),
         ui.scene3d({id="maze-view", grow=true, scene=game:scene(nil, {running=running}),
-            on_zone=function(e) end}),
+            on_zone=function(e) end, on_click=function() end}),
         ui.button({id="retry", h=40, "Retry checkpoint", on_click=function()
             game:set("floor", {pos={0,-0.5,0}, rotation={0,0,0,1}})
             game:set("checkpoint", {pos={2.6,0.05,0}, rotation={0,0,0,1}})
@@ -71,6 +72,7 @@ end
 def capture_repro(rpc, item):
     rpc.write_file(item, "main.lua", CAPTURE_REPRO)
     rpc.open_item(item)
+    assert_3d_pixels(rpc, item, "maze-view", "ball")
     # First independently prove a surgical reload in a paused native world.
     rpc.frame(20)
     rpc.click_at(*rpc.centre_of("pause"))
@@ -129,6 +131,13 @@ def main():
         # Initial upload is intentionally the first red assertion before any app exists.
         rpc.upload_folder(item, ROOT / "demo_apps/tilt_maze")
         rpc.open_item(item)
+        # Rects exposes hit regions, not passive layout. Instrument only the uploaded copy
+        # with a no-op click handler so the pixel probe gets the real viewport, not a guess.
+        src = rpc.read_file_versioned(item, "main.lua")
+        activated = rpc.edit_file(item, "main.lua", src["revision"], [{
+            "old_text": "ui.scene3d({", "new_text": "ui.scene3d({ on_click=function() end,",
+        }])
+        assert activated["activation"] == "activated", activated
 
         def snapshot():
             return rpc.dump_tree(item)
@@ -150,7 +159,12 @@ def main():
         ready = snapshot()
         assert text(ready, "status") == "Ready"
         assert len(world(ready)["entities"]) >= 10
+        assert_3d_pixels(rpc, item, "maze-view", "ball")
+        assert world(snapshot()) == world(ready), "pixel probe must not spend physics time"
         shot("ready")
+        if "--pixels-only" in sys.argv:
+            print("tilt maze pixel gate ok (not full gameplay acceptance)")
+            return
         click("release")
         assert text(snapshot(), "status") == "Playing"
         rpc.frame(20)

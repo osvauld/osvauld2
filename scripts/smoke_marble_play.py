@@ -1,6 +1,7 @@
 """A complete Lua level: ready, tilt, release, win/loss, frozen snapshots and retry."""
 from pathlib import Path
 
+from osvauld.scene3d import assert_3d_pixels
 from osvauld.session import Session, shell_binary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,9 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     assert read(rpc, item)[0] == ready, "Ready must hold actual poses without time debt"
     shots = ROOT / "shots"
     shots.mkdir(exist_ok=True)
+    assert_3d_pixels(rpc, item, "marble-view", "marble")
+    assert_3d_pixels(rpc, item, "marble-view", "platform")
+    assert read(rpc, item)[0] == ready, "pixel probes must not spend physics time"
     rpc.save_screenshot(item, shots / "marble-gates-ready.png")
     rpc.click_at(*rpc.centre_of("gates-release"))
     won, labels = finish(rpc, item, "Won")

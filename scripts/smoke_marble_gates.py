@@ -1,6 +1,7 @@
 """Real Lua sphere, native physics, raw inspection, reload safety and capture exclusion."""
 from pathlib import Path
 
+from osvauld.scene3d import assert_3d_pixels
 from osvauld.session import Session, shell_binary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +47,8 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     # Both capture paths must be observational, not hidden simulation frames.
     shots = ROOT / "shots"
     shots.mkdir(exist_ok=True)
+    assert_3d_pixels(rpc, item, "marble-view", "marble")
+    assert_3d_pixels(rpc, item, "marble-view", "platform")
     rpc.save_screenshot(item, shots / "marble-gates-falling.png")
     rpc.save_screenshot(item, shots / "marble-gates-custom.png", width=1000, height=700, scale=1)
     assert world(rpc, item) == falling

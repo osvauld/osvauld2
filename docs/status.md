@@ -799,6 +799,17 @@ rerun: three older scripts initially could not find the temporary worktree's `ta
 binary; providing its usual debug-path symlink resolved that harness setup issue. Tilt Maze
 acceptance remains blocked and deliberately unregistered; no observation-bug fix is claimed.
 
+**3D smoke pixel gates:** mesh, marble drop/play and Tilt Maze now use the shared
+`scripts/osvauld/scene3d.py` probe. It projects inspected object centres through the camera into
+resolved viewport rectangles and requires live screenshot RGB contrast against an empty corner;
+inspection/picking alone cannot satisfy it. Both marble smokes check the ball and platform.
+Two Python unit controls prove empty pixels fail despite valid scene metadata and scaled
+projected pixels pass. Mesh and both marble smokes pass on the app-thread build; Tilt Maze's
+`--pixels-only` path passes, without claiming its still-blocked gameplay acceptance. Its passive
+viewport is made inspectable through a no-op click handler in the uploaded test copy only.
+Multiple 3D views per frame remain unimplemented; this change is test coverage, not a renderer
+extension. The previous dev integration exercised all 13 registered smokes across sweep/rerun.
+
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,
 ECS, 3D mesh/depth renderer, physics binding, PBD cloth, projected UI surface or world picking is
