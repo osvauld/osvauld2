@@ -1,6 +1,9 @@
 use super::*;
+
+mod simulation;
+
 use crate::frame::{Brush, Frame, Item, Path};
-use crate::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d};
+use crate::scene3d::{Camera3d, Object3d, Scene3d, mesh::MeshData};
 use glam::{Quat, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -169,7 +172,7 @@ fn scene_click_picks_the_visible_object_through_normal_routing() {
     };
     let object = Object3d {
         id: "cube".into(),
-        mesh: BuiltinMesh::Cube,
+        mesh: MeshData::cube(),
         position: Vec3::ZERO,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,

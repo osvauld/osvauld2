@@ -1,17 +1,25 @@
 //! Lua declarations for immutable runtime Frame resources. This module validates and compiles
 //! aggregate values; it never renders or retains VM callbacks.
 
+mod mesh;
+pub(crate) mod world3d;
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use glam::{Quat, Vec3};
-use mlua::{Error, Lua, Table, UserData, Value};
+use mlua::{Error, Lua, Table, UserData, UserDataMethods, Value};
+use runtime::drawing::{Drawing, PartSpec, Pose};
 use runtime::frame::{
     Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
 };
-use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
+use runtime::scene3d::{Camera3d, Object3d, Scene3d, TextSurface, mesh::MeshData};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
+use world::clip::{Clip, Easing, Key, Prop, Track};
 
 #[derive(Clone)]
 #[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
@@ -27,6 +35,38 @@ pub(crate) struct LuaFrame(pub Arc<Frame>);
 impl UserData for LuaFrame {}
 
 #[derive(Clone)]
+pub(crate) struct LuaDrawing(pub Arc<Drawing>);
+impl UserData for LuaDrawing {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("pose", |lua, this, overrides: Option<Table>| {
+            let mut poses = Vec::new();
+            let overrides = overrides.unwrap_or(lua.create_table()?);
+            for pair in overrides.pairs::<String, Table>() {
+                let (part, spec) = pair?;
+                named_fields(&spec, "pose", &["x", "y", "rot", "scale"])?;
+                let rest = Pose::default();
+                poses.push((
+                    part,
+                    Pose {
+                        x: spec.get::<Option<f64>>("x")?.unwrap_or(rest.x),
+                        y: spec.get::<Option<f64>>("y")?.unwrap_or(rest.y),
+                        rot: spec.get::<Option<f64>>("rot")?.unwrap_or(rest.rot),
+                        scale: spec.get::<Option<f64>>("scale")?.unwrap_or(rest.scale),
+                    },
+                ));
+            }
+            let poses: HashMap<&str, Pose> = poses.iter().map(|(k, p)| (k.as_str(), *p)).collect();
+            let frame = this.0.pose(&poses).map_err(Error::external)?;
+            lua.create_userdata(LuaFrame(Arc::new(frame)))
+        });
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct LuaClip(pub Arc<Clip>);
+impl UserData for LuaClip {}
+
+#[derive(Clone)]
 pub(crate) struct LuaScene3d(pub Arc<Scene3d>);
 impl UserData for LuaScene3d {}
 
@@ -36,21 +76,23 @@ impl UserData for LuaTextSurface {}
 
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
+    mesh::install(lua, &gfx)?;
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
-            let len = positional_len(&commands, "path")?;
-            if len > MAX_PATH_COMMANDS {
-                return Err(Error::runtime(format!(
-                    "path has {len} commands; maximum is {MAX_PATH_COMMANDS}"
-                )));
-            }
-            let mut elements = Vec::with_capacity(len);
-            for index in 1..=len {
-                elements.push(command(commands.get(index)?, index)?);
-            }
-            let path = Path::new(elements).map_err(Error::external)?;
-            lua.create_userdata(LuaPath(Arc::new(path)))
+            lua.create_userdata(LuaPath(Arc::new(path(&commands, "path")?)))
+        })?,
+    )?;
+    gfx.set(
+        "drawing",
+        lua.create_function(|lua, spec: Table| {
+            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec)?)))
+        })?,
+    )?;
+    gfx.set(
+        "clip",
+        lua.create_function(|lua, spec: Table| {
+            lua.create_userdata(LuaClip(Arc::new(clip(&spec)?)))
         })?,
     )?;
     gfx.set(
@@ -132,29 +174,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, spec: Table| {
             named_fields(&spec, "scene3d", &["camera", "objects"])?;
             let camera_spec: Table = need(&spec, "scene3d", "camera")?;
-            named_fields(
-                &camera_spec,
-                "scene3d.camera",
-                &["eye", "target", "up", "fov_y", "near", "far"],
-            )?;
-            let camera = Camera3d {
-                eye: vec3(need(&camera_spec, "scene3d.camera", "eye")?, "camera.eye")?,
-                target: vec3(
-                    need(&camera_spec, "scene3d.camera", "target")?,
-                    "camera.target",
-                )?,
-                up: camera_spec
-                    .get::<Option<Table>>("up")?
-                    .map(|v| vec3(v, "camera.up"))
-                    .transpose()?
-                    .unwrap_or(Vec3::Y),
-                fov_y_radians: camera_spec
-                    .get::<Option<f32>>("fov_y")?
-                    .unwrap_or(45.0)
-                    .to_radians(),
-                near: camera_spec.get::<Option<f32>>("near")?.unwrap_or(0.1),
-                far: camera_spec.get::<Option<f32>>("far")?.unwrap_or(100.0),
-            };
+            let camera = camera3d(&camera_spec)?;
             let objects_spec: Table = need(&spec, "scene3d", "objects")?;
             let len = positional_len(&objects_spec, "scene3d.objects")?;
             let mut objects = Vec::with_capacity(len);
@@ -192,6 +212,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     .exec()
 }
 
+fn camera3d(spec: &Table) -> mlua::Result<Camera3d> {
+    named_fields(spec, "scene3d.camera", &["eye", "target", "up", "fov_y", "near", "far"])?;
+    Ok(Camera3d {
+        eye: vec3(need(spec, "scene3d.camera", "eye")?, "camera.eye")?,
+        target: vec3(need(spec, "scene3d.camera", "target")?, "camera.target")?,
+        up: spec.get::<Option<Table>>("up")?.map(|v| vec3(v, "camera.up"))
+            .transpose()?.unwrap_or(Vec3::Y),
+        fov_y_radians: spec.get::<Option<f32>>("fov_y")?.unwrap_or(45.0).to_radians(),
+        near: spec.get::<Option<f32>>("near")?.unwrap_or(0.1),
+        far: spec.get::<Option<f32>>("far")?.unwrap_or(100.0),
+    })
+}
+
 fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
     named_fields(
         &spec,
@@ -200,9 +233,12 @@ fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
             "id", "mesh", "position", "rotation", "scale", "color", "surface",
         ],
     )?;
-    let mesh = match spec.get::<Option<String>>("mesh")?.as_deref() {
-        None | Some("cube") => BuiltinMesh::Cube,
-        Some(mesh) => return Err(Error::runtime(format!("unknown 3D mesh {mesh:?}"))),
+    let mesh = match spec.get::<Value>("mesh")? {
+        Value::Nil => MeshData::cube(),
+        Value::String(name) if name.to_str()?.as_ref() == "cube" => MeshData::cube(),
+        Value::UserData(handle) => handle.borrow::<mesh::LuaMesh>()
+            .map_err(|_| Error::runtime("object.mesh must be a gfx.mesh"))?.0.clone(),
+        _ => return Err(Error::runtime("object.mesh must be a gfx.mesh or 'cube'")),
     };
     let rotation = spec
         .get::<Option<Table>>("rotation")?
@@ -256,6 +292,403 @@ fn quat(table: Table, owner: &str) -> mlua::Result<Quat> {
         table.get(3)?,
         table.get(4)?,
     ))
+}
+
+fn path(commands: &Table, owner: &str) -> mlua::Result<Path> {
+    let len = positional_len(commands, owner)?;
+    if len > MAX_PATH_COMMANDS {
+        return Err(Error::runtime(format!(
+            "{owner} has {len} commands; maximum is {MAX_PATH_COMMANDS}"
+        )));
+    }
+    let mut elements = Vec::with_capacity(len);
+    for index in 1..=len {
+        elements.push(command(commands.get(index)?, index)?);
+    }
+    Path::new(elements).map_err(Error::external)
+}
+
+/// A drawing module is pure data — paths are command lists, not `gfx.path` handles — so the same
+/// table can be rewritten by an editor or moved into a document without changing shape.
+fn drawing(spec: &Table) -> mlua::Result<Drawing> {
+    named_fields(spec, "drawing", &["size", "parts"])?;
+    let size = point(need(spec, "drawing", "size")?, "drawing.size")?;
+    let parts: Table = need(spec, "drawing", "parts")?;
+    let mut specs = Vec::new();
+    for index in 1..=positional_len(&parts, "drawing.parts")? {
+        let part: Table = parts.get(index)?;
+        let owner = format!("drawing part {index}");
+        named_fields(&part, &owner, &["id", "parent", "pivot", "shapes"])?;
+        let shapes = match part.get::<Option<Table>>("shapes")? {
+            None => Vec::new(),
+            Some(list) => {
+                let mut shapes = Vec::new();
+                for i in 1..=positional_len(&list, &format!("{owner}.shapes"))? {
+                    shapes.extend(shape(list.get(i)?, &format!("{owner} shape {i}"))?);
+                }
+                shapes
+            }
+        };
+        specs.push(PartSpec {
+            id: need(&part, &owner, "id")?,
+            parent: part.get("parent")?,
+            pivot: point(need(&part, &owner, "pivot")?, &format!("{owner}.pivot"))?,
+            shapes,
+        });
+    }
+    Drawing::new(size.x, size.y, specs).map_err(Error::external)
+}
+
+/// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
+/// What `world(id)` returns: commands to a world at a moment, looked up by id at each call.
+struct WorldHandle {
+    id: String,
+    worlds: crate::Worlds,
+    viewing: Rc<Cell<bool>>,
+}
+
+impl WorldHandle {
+    /// Runs a command on the world, refusing while `view` describes.
+    fn command<R>(
+        &self,
+        owner: &str,
+        f: impl FnOnce(&mut world::World2d) -> Result<R, world::WorldError>,
+    ) -> mlua::Result<R> {
+        if self.viewing.get() {
+            return Err(Error::runtime(format!("{owner}: only in a handler; view describes")));
+        }
+        let mut worlds = self.worlds.borrow_mut();
+        let world = (worlds.get_mut(&self.id))
+            .ok_or_else(|| Error::runtime(format!("{owner}: there is no such world")))?;
+        f(world).map_err(|e| Error::runtime(format!("world {:?}: {e}", self.id)))
+    }
+}
+
+impl UserData for WorldHandle {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy } })`; either may be left out.
+        methods.add_method("set", |_, this, (entity, fields): (String, Table)| {
+            let owner = format!("world {:?}:set {entity:?}", this.id);
+            named_fields(&fields, &owner, &["pos", "velocity"])?;
+            let pair = |field| match maybe_table(&fields, &owner, field)? {
+                Some(t) => point(t, &format!("{owner}.{field}")).map(|p| Some((p.x, p.y))),
+                None => Ok(None),
+            };
+            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")? };
+            this.command(&owner, |w| w.set(&entity, to))
+        });
+        // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
+        methods.add_method("after", |_, this, (secs, name): (Value, Value)| {
+            let owner = format!("world {:?}:after", this.id);
+            let secs = match secs {
+                Value::Number(n) => n,
+                Value::Integer(i) => i as f64,
+                other => {
+                    let what = other.type_name();
+                    return Err(Error::runtime(format!("{owner}: seconds must be a number, got {what}")));
+                }
+            };
+            let name = timer_name(name, &owner)?;
+            this.command(&owner, |w| w.after(&name, secs))
+        });
+        methods.add_method("cancel", |_, this, name: Value| {
+            let owner = format!("world {:?}:cancel", this.id);
+            let name = timer_name(name, &owner)?;
+            this.command(&owner, |w| Ok(w.cancel(&name)))
+        });
+    }
+}
+
+fn timer_name(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!(
+            "{owner}: the timer's name must be a string, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+pub(crate) fn install_world(lua: &Lua, worlds: crate::Worlds, viewing: Rc<Cell<bool>>) -> mlua::Result<()> {
+    let world = lua.create_function(move |_, id: String| {
+        Ok(WorldHandle { id, worlds: worlds.clone(), viewing: viewing.clone() })
+    })?;
+    lua.globals().set("world", world)
+}
+
+pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpec> {
+    let owner = format!("world entity {index}");
+    let fields = [
+        "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
+        "loose", "group", "blocks",
+    ];
+    named_fields(&spec, &owner, &fields)?;
+    let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
+    let controller = match maybe_table(&spec, &owner, "controller")? {
+        Some(c) => Some(controller(&c, &format!("{owner}.controller"))?),
+        None => None,
+    };
+    // Checked by hand: mlua reads any value as a bool by truthiness, so `flip = "left"` would pass.
+    let flip = match spec.get::<Value>("flip")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.flip must be a boolean, got {what}")));
+        }
+    };
+    Ok(world::EntitySpec {
+        id: need(&spec, &owner, "id")?,
+        pos: (pos.x, pos.y),
+        drawing: need_gfx(&spec, &owner, "drawing", "a gfx.drawing", |d: &LuaDrawing| {
+            d.0.clone()
+        })?,
+        clip: maybe_gfx(&spec, &owner, "clip", "a gfx.clip", |c: &LuaClip| c.0.clone())?,
+        controller,
+        flip,
+        attach: match maybe_table(&spec, &owner, "attach")? {
+            Some(a) => Some(attach(&a, &format!("{owner}.attach"))?),
+            None => None,
+        },
+        collider: match maybe_table(&spec, &owner, "collider")? {
+            Some(c) => Some(collider(&c, &format!("{owner}.collider"))?),
+            None => None,
+        },
+        sensor: match maybe_table(&spec, &owner, "sensor")? {
+            Some(c) => Some(collider(&c, &format!("{owner}.sensor"))?),
+            None => None,
+        },
+        loose: loose(&spec, &owner)?,
+        group: match spec.get::<Value>("group")? {
+            Value::Nil => None,
+            other => Some(name(other, &format!("{owner}.group"))?),
+        },
+        blocks: match maybe_table(&spec, &owner, "blocks")? {
+            Some(list) => Some(list.sequence_values::<Value>().enumerate().map(|(i, v)| {
+                name(v?, &format!("{owner}.blocks[{}]", i + 1))
+            }).collect::<mlua::Result<_>>()?),
+            None => None,
+        },
+    })
+}
+
+/// A collision group's name: a string, nothing else.
+fn name(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!(
+            "{owner} must be a group name (a string), got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n }` with either left
+/// to its default; `false` or absent, it is not loose. The world checks the ranges.
+fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
+    let m = match spec.get::<Value>("loose")? {
+        Value::Nil | Value::Boolean(false) => return Ok(None),
+        Value::Boolean(true) => return Ok(Some(world::Material::default())),
+        Value::Table(m) => m,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.loose must be true or a table, got {what}")));
+        }
+    };
+    let owner = format!("{owner}.loose");
+    named_fields(&m, &owner, &["bounce", "friction"])?;
+    let d = world::Material::default();
+    let number = |field: &str, or: f64| match m.get::<Value>(field)? {
+        Value::Nil => Ok(or),
+        Value::Integer(n) => Ok(n as f64),
+        Value::Number(n) => Ok(n),
+        other => {
+            let what = other.type_name();
+            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
+        }
+    };
+    Ok(Some(world::Material {
+        bounce: number("bounce", d.bounce)?,
+        friction: number("friction", d.friction)?,
+    }))
+}
+
+/// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
+/// units; `at` (default the origin) is a circle's centre, a rect's top-left corner. A sensor is
+/// the same shape.
+fn collider(spec: &Table, owner: &str) -> mlua::Result<world::Collider> {
+    named_fields(spec, owner, &["circle", "rect", "at"])?;
+    let shape = match (spec.get::<Value>("circle")?, maybe_table(spec, owner, "rect")?) {
+        (Value::Nil, Some(size)) => {
+            let size = point(size, &format!("{owner}.rect"))?;
+            world::Shape::Rect(size.x, size.y)
+        }
+        (Value::Nil, None) => return Err(Error::runtime(format!("{owner} needs circle or rect"))),
+        (_, None) => world::Shape::Circle(need(spec, owner, "circle")?),
+        (_, Some(_)) => {
+            return Err(Error::runtime(format!("{owner} is a circle or a rect, not both")));
+        }
+    };
+    let at = match maybe_table(spec, owner, "at")? {
+        Some(at) => point(at, &format!("{owner}.at"))?,
+        None => Point::ZERO,
+    };
+    Ok(world::Collider { shape, at: (at.x, at.y) })
+}
+
+/// `{ to = id, part = id, at = {x, y} }` — `at` is a point in the carrier's drawing at rest.
+fn attach(spec: &Table, owner: &str) -> mlua::Result<world::Attach> {
+    named_fields(spec, owner, &["to", "part", "at", "pivot", "turn"])?;
+    let at = point(need(spec, owner, "at")?, &format!("{owner}.at"))?;
+    let pivot = match maybe_table(spec, owner, "pivot")? {
+        Some(p) => point(p, &format!("{owner}.pivot"))?,
+        None => Point::ZERO,
+    };
+    let turn = match spec.get::<Value>("turn")? {
+        Value::Nil => false,
+        Value::Boolean(b) => b,
+        other => {
+            let what = other.type_name();
+            return Err(Error::runtime(format!("{owner}.turn must be a boolean, got {what}")));
+        }
+    };
+    let (to, part) = (need(spec, owner, "to")?, need(spec, owner, "part")?);
+    Ok(world::Attach { to, part, at: (at.x, at.y), pivot: (pivot.x, pivot.y), turn })
+}
+
+/// An optional table field: absent is `None`, and anything but a table says which field it was.
+fn maybe_table(spec: &Table, owner: &str, field: &str) -> mlua::Result<Option<Table>> {
+    match spec.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::Table(t) => Ok(Some(t)),
+        other => Err(Error::runtime(format!(
+            "{owner}.{field} must be a table, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// An optional handle field: absent is `None`, anything else must be the right handle.
+fn maybe_gfx<T: 'static, R>(
+    spec: &Table,
+    owner: &str,
+    field: &str,
+    what: &str,
+    take: impl Fn(&T) -> R,
+) -> mlua::Result<Option<R>> {
+    match spec.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        _ => need_gfx(spec, owner, field, what, take).map(Some),
+    }
+}
+
+/// Key codes are physical names (`"KeyW"`, `"ArrowLeft"`), the same as `on_key`'s `e.code`.
+fn controller(spec: &Table, owner: &str) -> mlua::Result<world::Controller> {
+    named_fields(spec, owner, &["speed", "axis_x", "axis_y"])?;
+    let axis = |field: &str| -> mlua::Result<Option<world::Axis>> {
+        let Some(axis) = spec.get::<Option<Table>>(field)? else {
+            return Ok(None);
+        };
+        let owner = format!("{owner}.{field}");
+        named_fields(&axis, &owner, &["neg", "pos"])?;
+        let (neg, pos) = (need(&axis, &owner, "neg")?, need(&axis, &owner, "pos")?);
+        Ok(Some(world::Axis { neg, pos }))
+    };
+    let (axis_x, axis_y) = (axis("axis_x")?, axis("axis_y")?);
+    if axis_x.is_none() && axis_y.is_none() {
+        return Err(Error::runtime(format!("{owner} needs axis_x or axis_y")));
+    }
+    let speed = need(spec, owner, "speed")?;
+    Ok(world::Controller { speed, axis_x, axis_y })
+}
+
+/// `tracks = { part = { prop = { {time, value, easing?}, ... } } }`. Parts are sorted so a bad
+/// clip reports the same error every run, whatever order Lua's table walk takes.
+fn clip(spec: &Table) -> mlua::Result<Clip> {
+    named_fields(spec, "clip", &["length", "loop", "tracks"])?;
+    let by_part: Table = need(spec, "clip", "tracks")?;
+    let mut parts = Vec::new();
+    for pair in by_part.pairs::<String, Table>() {
+        parts.push(pair.map_err(|e| Error::runtime(format!("clip.tracks: {e}")))?);
+    }
+    parts.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut tracks = Vec::new();
+    for (part, props) in parts {
+        let owner = format!("clip track {part}");
+        named_fields(&props, &owner, &["x", "y", "rot", "scale"])?;
+        let props_by_name = [("x", Prop::X), ("y", Prop::Y), ("rot", Prop::Rot), ("scale", Prop::Scale)];
+        for (name, prop) in props_by_name {
+            let Some(list) = props.get::<Option<Table>>(name)? else {
+                continue;
+            };
+            let owner = format!("{owner}.{name}");
+            let mut keys = Vec::new();
+            for i in 1..=positional_len(&list, &owner)? {
+                keys.push(key(list.get(i)?, &format!("{owner} key {i}"))?);
+            }
+            tracks.push(Track { part: part.clone(), prop, keys });
+        }
+    }
+    let looped = spec.get::<Option<bool>>("loop")?.unwrap_or(false);
+    Clip::new(need(spec, "clip", "length")?, looped, tracks).map_err(Error::external)
+}
+
+fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
+    let easing = match positional_len(&spec, owner)? {
+        2 => Easing::Linear,
+        3 => match spec.get::<String>(3)?.as_str() {
+            "linear" => Easing::Linear,
+            "in_out" => Easing::InOut,
+            other => {
+                return Err(Error::runtime(format!(
+                    "{owner}: unknown easing {other:?}, expected linear or in_out"
+                )));
+            }
+        },
+        n => {
+            return Err(Error::runtime(format!(
+                "{owner} must be {{time, value, easing?}}, got {n} values"
+            )));
+        }
+    };
+    Ok(Key { time: spec.get(1)?, value: spec.get(2)?, easing })
+}
+
+/// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
+fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
+    named_fields(&spec, owner, &["path", "fill", "stroke"])?;
+    let path = Arc::new(path(
+        &need(&spec, owner, "path")?,
+        &format!("{owner}.path"),
+    )?);
+    let mut items = Vec::new();
+    if let Some(color) = spec.get::<Option<String>>("fill")? {
+        let brush = Brush::solid(crate::parse_color(&color)?).map_err(Error::external)?;
+        items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+    }
+    if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
+        if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
+            return Err(Error::runtime(format!(
+                "{owner}.stroke needs width and color"
+            )));
+        }
+        let brush = Brush::solid(crate::parse_color(&stroke.get::<String>(2)?)?)
+            .map_err(Error::external)?;
+        let style = StrokeStyle::new(
+            stroke.get(1)?,
+            StrokeCap::Round,
+            StrokeJoin::Round,
+            4.0,
+            Vec::new(),
+            0.0,
+        )
+        .map_err(Error::external)?;
+        items.push(Item::stroke(path, Arc::new(brush), style));
+    }
+    if items.is_empty() {
+        return Err(Error::runtime(format!("{owner} needs fill or stroke")));
+    }
+    Ok(items)
 }
 
 fn command(command: Table, index: usize) -> mlua::Result<PathEl> {

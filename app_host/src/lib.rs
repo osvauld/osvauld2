@@ -20,9 +20,9 @@ use runtime::{
     scene3d as scene3d_el, text, text_area, text_input,
 };
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -121,6 +121,10 @@ pub enum LuaMsg {
     CallWheel(Key, f32, f32),
     CallFrame(Key, f32, f64),
     CallKey(Key, runtime::KeyInput),
+    /// A `ui.world`'s frame tick, `(world id, dt, elapsed)`: runs that world in Rust, no Lua.
+    TickWorld(String, f64, f64),
+    /// A key reaching a `ui.world` with a controller: held-key state in Rust, no Lua.
+    KeyWorld(String, runtime::KeyInput),
 }
 
 /// A second element with the same id and handler would silently take the first one's events.
@@ -148,7 +152,16 @@ pub struct Ctx<'a, M> {
     pub errors: Vec<String>,
     pub path: String,
     pub to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    pub worlds: Worlds,
+    /// Worlds this walk drew. Marked before a world's description is checked, so a bad
+    /// description keeps the last good world rather than dropping it.
+    pub worlds_seen: HashSet<String>,
 }
+
+/// Retained worlds by `ui.world` id. Outlives the VM, like the console: reload must not reset a
+/// game, and a hidden tab runs no view, so nothing sweeps it.
+pub type Worlds = Rc<RefCell<HashMap<String, world::World2d>>>;
+
 impl<'a, M> Ctx<'a, M> {
     fn new(handlers: &'a mut Handlers, to_msg: Rc<dyn Fn(LuaMsg) -> M>) -> Self {
         Self {
@@ -157,6 +170,8 @@ impl<'a, M> Ctx<'a, M> {
             errors: Vec::new(),
             path: String::new(),
             to_msg,
+            worlds: Worlds::default(),
+            worlds_seen: HashSet::new(),
         }
     }
 }
@@ -225,6 +240,10 @@ pub struct LuaApp<M> {
     /// Shared like [`Self::cores`] so the whole-struct swap in [`reload`](Self::reload) keeps
     /// the log: the console, like the cores, outlives the VM it reports on.
     console: Rc<RefCell<VecDeque<String>>>,
+    worlds: Worlds,
+    worlds3d: gfx::world3d::Host,
+    /// While `view` runs: `world(id):set` refuses then, since a description only describes.
+    viewing: Rc<Cell<bool>>,
     resolve: Resolve,
     wake: Wake,
 }
@@ -348,7 +367,12 @@ impl<M: 'static> LuaApp<M> {
     ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
-        let app = Self::build(src, cores, resolve, wake, to_msg)?;
+        let mut app = Self::build(src, cores, resolve, wake, to_msg, Worlds::default(), gfx::world3d::Host::default())?;
+        if app.error.is_none() {
+            if let Err(e) = app.worlds3d.commit() {
+                app.error = Some(e.to_string());
+            }
+        }
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -367,6 +391,8 @@ impl<M: 'static> LuaApp<M> {
         resolve: Resolve,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+        worlds: Worlds,
+        worlds3d: gfx::world3d::Host,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -385,6 +411,9 @@ impl<M: 'static> LuaApp<M> {
             resolve.clone(),
             wake.clone(),
         )?;
+        let viewing = Rc::new(Cell::new(false));
+        gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
+        worlds3d.install(&vm, viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
@@ -408,6 +437,9 @@ impl<M: 'static> LuaApp<M> {
             resolve,
             wake,
             console: Rc::new(RefCell::new(VecDeque::new())),
+            worlds,
+            worlds3d,
+            viewing,
         })
     }
 
@@ -432,6 +464,8 @@ impl<M: 'static> LuaApp<M> {
             self.resolve.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
+            self.worlds.clone(),
+            self.worlds3d.staged(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -456,7 +490,7 @@ impl<M: 'static> LuaApp<M> {
             self.log("reload error: no view loaded".to_string());
             "no view loaded".to_string()
         })?;
-        if let Err(e) = view_fn.call::<Table>(()) {
+        if let Err(e) = staged.describe(view_fn) {
             let e = e.to_string();
             self.log(format!("reload error: {e}"));
             return Err(e);
@@ -474,6 +508,11 @@ impl<M: 'static> LuaApp<M> {
         // The trial frame filled the staged app's handler table with closures nothing will ever
         // dispatch to; clear it so the first real frame starts from an empty one.
         staged.handlers.borrow_mut().clear();
+        if let Err(e) = staged.worlds3d.commit() {
+            let e = e.to_string();
+            self.log(format!("reload error: {e}"));
+            return Err(e);
+        }
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
         *self = staged;
@@ -567,6 +606,17 @@ impl<M: 'static> LuaApp<M> {
         }
     }
 
+    /// Each live world's entities, by world id.
+    pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
+        let worlds = self.worlds.borrow();
+        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers() };
+        worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
+    }
+
+    pub fn inspect_worlds3d(&self) -> std::collections::BTreeMap<String, world::world3d::WorldInspection3d> {
+        self.worlds3d.inspect()
+    }
+
     /// The last `last` console lines, newest last.
     pub fn console(&self, last: usize) -> Vec<String> {
         self.console
@@ -615,6 +665,16 @@ impl<M: 'static> LuaApp<M> {
         self.cores.borrow().get(name).map(|core| f(&core.doc))
     }
 
+    pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
+        match self.worlds3d.advance(elapsed, active) {
+            Ok(ticking) => ticking,
+            Err(e) => {
+                self.log(format!("3D simulation error: {e}"));
+                false
+            }
+        }
+    }
+
     pub fn view(&self) -> El<M> {
         //reset budget
         self.fires.store(0, Ordering::Relaxed);
@@ -632,7 +692,15 @@ impl<M: 'static> LuaApp<M> {
             .child(body)
     }
 
+    fn describe(&self, view_fn: &Function) -> mlua::Result<Table> {
+        self.viewing.set(true);
+        let tree = view_fn.call::<Table>(());
+        self.viewing.set(false);
+        tree
+    }
+
     fn body(&self) -> El<M> {
+        self.worlds3d.begin_view();
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
         }
@@ -652,7 +720,7 @@ impl<M: 'static> LuaApp<M> {
                 }
             }
         }
-        let tree = match view_fn.call::<Table>(()) {
+        let tree = match self.describe(view_fn) {
             Ok(t) => t,
             Err(e) => {
                 self.log(format!("View error: {e}"));
@@ -665,8 +733,18 @@ impl<M: 'static> LuaApp<M> {
         let mut handlers = self.handlers.borrow_mut();
         handlers.clear();
         let mut context = Ctx::new(&mut handlers, self.to_msg.clone());
+        context.worlds = self.worlds.clone();
         let el = match walk(tree, &mut context) {
-            Ok(el) => el,
+            Ok(el) => {
+                let seen = &context.worlds_seen;
+                let mut worlds = self.worlds.borrow_mut();
+                worlds.retain(|id, _| seen.contains(id));
+                for (id, world) in worlds.iter_mut() {
+                    let notes = world.drain_notes().into_iter();
+                    context.errors.extend(notes.map(|n| format!("world {id:?}: {n}")));
+                }
+                el
+            }
             Err(e) => {
                 let msg = reason(&e);
                 context.errors.push(msg.clone());
@@ -741,14 +819,90 @@ impl<M: 'static> LuaApp<M> {
                     event.set("super", input.mods.super_)?;
                 }
             }
-            LuaMsg::Call(_) | LuaMsg::CallStr(_, _) => {}
+            LuaMsg::Call(_)
+            | LuaMsg::CallStr(_, _)
+            | LuaMsg::TickWorld(..)
+            | LuaMsg::KeyWorld(..) => {}
         }
         Ok(event)
+    }
+
+    /// Hands the world's queued moments to its `on_action` / `on_move` / `on_clip_end` /
+    /// `on_zone`; one
+    /// without a handler is dropped.
+    fn world_events(&self, id: &str) {
+        let events = match self.worlds.borrow_mut().get_mut(id) {
+            Some(world) => world.drain_events(),
+            None => return,
+        };
+        for event in events {
+            let result = (|| {
+                let table = self.vm.create_table()?;
+                let name = match event {
+                    world::WorldEvent::Action(action) => {
+                        table.set("action", action)?;
+                        "on_action"
+                    }
+                    world::WorldEvent::Move { id: entity, dx, dy } => {
+                        table.set("id", entity)?;
+                        table.set("dx", dx)?;
+                        table.set("dy", dy)?;
+                        "on_move"
+                    }
+                    world::WorldEvent::ClipEnd(entity) => {
+                        table.set("id", entity)?;
+                        "on_clip_end"
+                    }
+                    // One handler, phased like `on_hover`: `on_enter` is already the Enter key.
+                    world::WorldEvent::Enter { id: zone, who } => {
+                        (table.set("id", zone)?, table.set("who", who)?);
+                        table.set("phase", "enter")?;
+                        "on_zone"
+                    }
+                    world::WorldEvent::Exit { id: zone, who } => {
+                        (table.set("id", zone)?, table.set("who", who)?);
+                        table.set("phase", "leave")?;
+                        "on_zone"
+                    }
+                    world::WorldEvent::Timer(name) => {
+                        table.set("name", name)?;
+                        "on_timer"
+                    }
+                    world::WorldEvent::Hit { id: entity, who, speed } => {
+                        (table.set("id", entity)?, table.set("who", who)?);
+                        table.set("speed", speed)?;
+                        "on_hit"
+                    }
+                };
+                let handler = self.handlers.borrow().get(&Key::new(id, name)).cloned();
+                handler.map_or(Ok(()), |h| h.call::<()>(table))
+            })();
+            if let Err(e) = result {
+                eprintln!("handler error: {e}");
+                self.log(format!("handler error: {e}"));
+            }
+        }
     }
 
     pub fn update(&mut self, msg: LuaMsg) {
         // reset budget
         self.fires.store(0, Ordering::Relaxed);
+        if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
+            if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
+                match &msg {
+                    LuaMsg::TickWorld(_, dt, elapsed) => world.tick(*elapsed, *dt),
+                    LuaMsg::KeyWorld(_, key) if key.cancelled => world.release_all(),
+                    LuaMsg::KeyWorld(_, key) => {
+                        if let Some(code) = &key.code {
+                            world.key(code, key.down);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            self.world_events(id);
+            return;
+        }
         let handlers = self.handlers.borrow();
 
         // A message can outlive the view that registered its key (a click spans press to
@@ -760,10 +914,13 @@ impl<M: 'static> LuaApp<M> {
             | LuaMsg::CallWheel(k, _, _)
             | LuaMsg::CallFrame(k, _, _)
             | LuaMsg::CallKey(k, _) => k,
+            LuaMsg::TickWorld(..) | LuaMsg::KeyWorld(..) => unreachable!("handled above"),
         };
         let Some(h) = handlers.get(key) else {
             return;
         };
+        self.worlds3d.commanding.set(matches!(key.name,
+            "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key"));
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -773,6 +930,7 @@ impl<M: 'static> LuaApp<M> {
                 Err(e) => Err(e),
             },
         };
+        self.worlds3d.commanding.set(false);
         if let Err(e) = result {
             eprintln!("handler error: {e}");
             self.log(format!("handler error: {e}"));
@@ -940,6 +1098,7 @@ ui = {
     text_area = tagger("text_area"),
     frame = tagger("frame"),
     scene3d = tagger("scene3d"),
+    world = tagger("world"),
     overlay = tagger("overlay"),
 }
 
@@ -1253,6 +1412,110 @@ fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<
     Ok(anchor.overlay(panel, dismiss, Placement { side, align }, Anchor::Element))
 }
 
+/// Entities are the positional children, as data: the world owns them, so they are not walked
+/// as elements. Paints through the ordinary frame leaf, so layout and hits need nothing new.
+fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+    let id = node
+        .get::<Option<String>>("id")?
+        .ok_or_else(|| mlua::Error::runtime("world needs an id"))?;
+    if !context.worlds_seen.insert(id.clone()) {
+        return Err(mlua::Error::runtime(format!("two worlds share the id {id:?}")));
+    }
+    let size = |field: &str| -> mlua::Result<f64> {
+        node.get::<Option<f64>>(field)?
+            .ok_or_else(|| mlua::Error::runtime(format!("world needs {field}")))
+    };
+    let (width, height) = (size("width")?, size("height")?);
+    let order = match node.get::<Option<String>>("order")?.as_deref() {
+        None => world::Order::List,
+        Some("y") => world::Order::Feet,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "world order must be \"y\" or nil, got {other:?}"
+            )));
+        }
+    };
+    for (handler, what) in [("on_frame", "frame clock"), ("on_key", "keys")] {
+        if !node.get::<Value>(handler)?.is_nil() {
+            return Err(mlua::Error::runtime(format!(
+                "a world runs its own {what}; put {handler} on an element around it"
+            )));
+        }
+    }
+    let actions = world_actions(node)?;
+    for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
+        match node.get::<Value>(handler)? {
+            Value::Nil => {}
+            Value::Function(f) => _ = register(context.handlers, &id, handler, f)?,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "world {handler} must be a function, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    if actions.is_empty() != node.get::<Value>("on_action")?.is_nil() {
+        return Err(mlua::Error::runtime("a world's actions and on_action come together"));
+    }
+    let mut specs = Vec::new();
+    for index in 1..=max_index(node) {
+        match node.get::<Value>(index)? {
+            Value::Boolean(false) => {} // `friend or false`, the same idiom as child elements
+            Value::Table(spec) => specs.push(gfx::entity(spec, index)?),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "world entity {index} must be a table or false, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    let mut worlds = context.worlds.borrow_mut();
+    let world = worlds.entry(id.clone()).or_default();
+    world.reconcile(specs).map_err(mlua::Error::external)?;
+    world.set_order(order);
+    world.set_actions(actions);
+    let visual = world.frame(width, height).map_err(mlua::Error::external)?;
+    let mut el = frame_el(Arc::new(visual));
+    if world.wants_keys() {
+        let (to_msg, id) = (context.to_msg.clone(), id.clone());
+        el = el.on_key(id.clone(), move |key| to_msg(LuaMsg::KeyWorld(id.clone(), key)));
+    }
+    if world.needs_ticks() {
+        let to_msg = context.to_msg.clone();
+        el = el.on_frame(id.clone(), move |tick| {
+            to_msg(LuaMsg::TickWorld(id.clone(), tick.dt.into(), tick.elapsed))
+        });
+    }
+    Ok(el)
+}
+
+/// `actions = { jump = "Space" }`: action name to key code, sorted so events come in a stable
+/// order when two actions share a key.
+fn world_actions(node: &Table) -> mlua::Result<Vec<(String, String)>> {
+    let Some(table) = node.get::<Option<Table>>("actions")? else {
+        return Ok(Vec::new());
+    };
+    let mut actions = Vec::new();
+    for pair in table.pairs::<Value, Value>() {
+        match pair? {
+            (Value::String(name), Value::String(code)) => {
+                actions.push((name.to_str()?.to_owned(), code.to_str()?.to_owned()))
+            }
+            (name, code) => {
+                return Err(mlua::Error::runtime(format!(
+                    "world actions map a name to a key code, got {} = {}",
+                    name.type_name(),
+                    code.type_name()
+                )));
+            }
+        }
+    }
+    actions.sort();
+    Ok(actions)
+}
+
 fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
     if tag == "overlay" {
         return build_overlay(node, context);
@@ -1283,16 +1546,19 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 .clone();
             frame_el(visual)
         }
+        "world" => build_world(&node, context)?,
         "scene3d" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
             }
-            let scene = node
-                .get::<AnyUserData>("scene")?
-                .borrow::<gfx::LuaScene3d>()?
-                .0
-                .clone();
-            scene3d_el(scene)
+            let handle = node.get::<AnyUserData>("scene")?;
+            if handle.is::<gfx::world3d::SceneHandle>() {
+                let (scene, ticking) = handle.borrow::<gfx::world3d::SceneHandle>()?.resolve()?;
+                let el = scene3d_el(scene);
+                if ticking { el.repaint() } else { el }
+            } else {
+                scene3d_el(handle.borrow::<gfx::LuaScene3d>()?.0.clone())
+            }
         }
         "input" | "text_area" => {
             if max_index(&node) > 0 {
@@ -1338,6 +1604,10 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
         "scene3d" => &["scene"],
+        "world" => &[
+            "width", "height", "order", "actions", "on_action", "on_move", "on_clip_end",
+            "on_zone", "on_timer", "on_hit",
+        ],
         _ => &[],
     };
     el = props::apply(el, &node, context, id.as_deref(), consumed)?;
