@@ -114,6 +114,15 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
 
+### App threads (2026-10-04, steps 0–1) — [design](design/app-threads.md)
+- `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
+  `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
+- `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
+  interrupt count, a wall-time limit (1 s) that runs only while app Lua is entered (`view`,
+  `update`, module load, tests, index calls). `OSVAULD_APP_BUDGET_MS` / `_MEMORY_MB` override.
+- not built: steps 2–11 — apps still share the UI thread, so a slow app still stalls the shell
+  until it is killed.
+
 ## Not built
 
 ### Workspace permissions, sync, and sovereign node — design baseline

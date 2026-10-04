@@ -846,6 +846,11 @@ Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `r
 only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
 (unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
 
+Each run of your code — a `view`, a handler, module load, a test — has a budget: about a
+million interrupts (loop turns and calls) **and** one second of wall time, whichever runs out
+first. Memory is capped at 512 MB per app. Hitting either is an ordinary error in that run;
+the app and its siblings keep going.
+
 `now()` is for recording *when* something happened — a created-at, a last-edited. It is not for
 measuring how long something took: it follows the system clock, so it can jump, including
 backwards. Anything timing a gesture or an animation wants the monotonic clock instead, which

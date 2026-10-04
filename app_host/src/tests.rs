@@ -2067,7 +2067,7 @@ end
 fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
     const REPS: usize = 9;
 
-    let (lua, fires) = sandboxed_vm().unwrap();
+    let (lua, budget) = sandboxed_vm().unwrap();
     let view: Function = match lua.load(format!("{header}\n{app}")).eval() {
         Ok(f) => f,
         Err(e) => return eprintln!("{label:<14} {els:>7}  setup failed: {e}"),
@@ -2083,14 +2083,14 @@ fn frame(label: &str, header: &str, app: &str, els: usize, dev: bool) {
     let (mut spent, mut ok) = (0u64, true);
 
     for _ in 0..REPS {
-        fires.store(0, Ordering::Relaxed); // also refills the budget, exactly as view() does
+        let _armed = budget.arm(); // refills the budget, exactly as view() does
         let t0 = Instant::now();
         let node: Table = match view.call(()) {
             Ok(n) => n,
             Err(e) => return eprintln!("{label:<14} {els:>7}  {e}"),
         };
         lua_t = lua_t.min(t0.elapsed());
-        spent = fires.load(Ordering::Relaxed);
+        spent = budget.spent();
 
         // Fresh handlers per rep — the vec grows as callbacks are collected.
         let mut handlers = Handlers::new();

@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **plan, nothing built (2026-10-04).** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–1 built 2026-10-04 (T3, T6, T8 green; T2 half); steps 2–11 open.** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
