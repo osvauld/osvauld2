@@ -1186,23 +1186,10 @@ impl Shell {
             // other half).
             Request::OpenItem { item_id } => match find_item(&self.vault, &item_id) {
                 Err(e) => Response::err(e),
-                Ok(wi) => {
-                    let id: Arc<str> = wi.id.as_str().into();
-                    match self
-                        .tabs
-                        .iter()
-                        .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id))
-                    {
-                        Some(pos) => {
-                            self.focused = pos;
-                            Response::ok("open")
-                        }
-                        None => self
-                            .open_tab(wi)
-                            .map(|()| Response::ok("open"))
-                            .unwrap_or_else(Response::err),
-                    }
-                }
+                Ok(wi) => self
+                    .open_tab(wi)
+                    .map(|()| Response::ok("open"))
+                    .unwrap_or_else(Response::err),
             },
             Request::SplitWith { item_id } => match self.apps.get_key_value(item_id.as_str()) {
                 Some((id, _)) => {
@@ -1349,7 +1336,17 @@ impl Shell {
         }
         shell
     }
+    /// Open-or-focus, the one path every opener takes: an open item's tab is focused, never
+    /// given a second thread.
     fn open_tab(&mut self, wi: WorkspaceItem) -> Result<(), String> {
+        if let Some(pos) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == wi.id))
+        {
+            self.focused = pos;
+            return Ok(());
+        }
         let src = self
             .vault
             .get_src(&wi.ws_id, &wi.id)
