@@ -1,6 +1,6 @@
 # Group chat sync — permissions, workspace index, shards, ephemeral
 
-Status: **steps 0–4 built 2026-10-04 (T1–T5, T13, T16, T23a green); steps 5–11 open.** A long-horizon,
+Status: **steps 0–5 built 2026-10-04 (T1–T5, T13, T16, T23a, T8a, T10a, T15a, T20a green); steps 6–11 open.** A long-horizon,
 test-first plan driven by `demo_apps/chat`: §0 lists the end-to-end tests that prove it done;
 they are written first, then §7's steps make them pass. Branch `sync-hardening`. The general
 permission model is [`app-permissions.md`](app-permissions.md); this plan builds the slice
@@ -213,9 +213,25 @@ and gets a fresh `pi -p` review with the matching expert checklist before the us
 4. **Manifest parse.** ✓ (before 3) A small `manifest` crate (pure, no Loro, no Lua): grammar of §3,
    errors with line numbers, `resolve(doc_name) → (decl, vars)`, plus `can_grant`/`satisfies`
    over the transitive grant cone (osvauld1's `ManifestAuthorizer`). Unit tests only.
-5. **Declarative enforcement** (§4): roles, DID variables, `members(doc)` for read and
+5. **Declarative enforcement** (§4). ✓ Roles, DID variables, `members(doc)` for read and
    write; `Scope::Resource` tokens reaching single docs. T8 (node half), T10 and T20
-   (direct-request half), T15.
+   (direct-request half), T15. As built:
+   - `courier::access` gives the verdict; `node_accept_sync` takes it. Read is needed for a
+     doc the node holds with content; write for any change. A doc the node lacks, or holds
+     empty (opening syncs before writing), needs only write to create.
+   - Fan-out re-checks read for every subscriber on every push; subscribe checks
+     membership only, since read inputs change after it.
+   - An item whose source the node lacks has no rules yet. An app with no `doc` lines stays
+     membership-only.
+   - Doc names are paths under one rule (`workspace::valid_doc_name`: segments
+     `[A-Za-z0-9_:-]`, short enough that every doc has an address); an unaddressable name
+     is refused, never widened to the item. Reviewed by the sharded-datasets agent
+     2026-10-04 (their shards: `dataset/meta`, `dataset/directory/<page>`,
+     `dataset/shards/<id>`, proposed). Chat moved to
+     `channel/<cid>`. Its manifest declares no `validate`, `uses` or channels until steps
+     7, 8 and 10 build them.
+   - T8a/T10a/T15a/T20a are the node halves; rollback (6) and the index (8) finish
+     T8/T10/T15/T20.
 6. **Rejection and rollback** (§5). T8 green.
 7. **Node Lua validation** (§5) with the helper library, `ctx.doc`, `ctx.rate`. T9, T17,
    T18, T19, T22, T24. Decide here whether the sandbox moves out of `app_host` into a crate

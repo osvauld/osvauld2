@@ -26,7 +26,8 @@ pub enum Scope {
 
 impl Scope {
     /// Whether a role held at this scope reaches `other`. Levels nest downward and never
-    /// sideways; an app scope stops there, because its namespaces are bound at install.
+    /// sideways. An app is an item, so it reaches the addresses of its own docs,
+    /// `ws/<ws>/<app>/…`, and no other.
     pub fn contains(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Node, _) => true,
@@ -42,7 +43,15 @@ impl Scope {
                     app: o_app,
                 },
             ) => ws == o_ws && app == o_app,
-            // An app token does not reach into addresses: its namespaces are bound at install.
+            (Self::App { ws, app }, Self::Resource(scope)) => {
+                let item = format!("ws/{ws}/{app}");
+                ResourceScope::parse(scope).is_ok_and(|scope| {
+                    let base = match &scope {
+                        ResourceScope::Exact(a) | ResourceScope::Subtree(a) => a.as_str(),
+                    };
+                    base == item || base.strip_prefix(&item).is_some_and(|r| r.starts_with('/'))
+                })
+            }
             (Self::Resource(scope), Self::Resource(other)) => {
                 match (ResourceScope::parse(scope), ResourceScope::parse(other)) {
                     (Ok(scope), Ok(other)) => scope.contains(&other),

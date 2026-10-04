@@ -19,6 +19,7 @@ use loro::{ExportMode, LoroDoc, VersionVector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::access::{Access, doc_address};
 use crate::policy;
 use crate::token::{Scope, Token};
 use crate::{CourierError, Result, nonce};
@@ -103,15 +104,56 @@ pub fn item_scope(ws_id: &str, item_id: &str) -> Scope {
     }
 }
 
+/// Whether a grant held at `scope` reaches this layer: a doc through its item or its own
+/// address; the source through the item, or any address inside it (a guest on one doc still
+/// needs the app to open it).
+pub fn reaches(scope: &Scope, ws_id: &str, item_id: &str, layer: &SyncLayer) -> bool {
+    let item = item_scope(ws_id, item_id);
+    match layer {
+        SyncLayer::Doc(name) => doc_scope(ws_id, item_id, name).is_some_and(|d| scope.contains(&d)),
+        SyncLayer::Src => {
+            scope.contains(&item) || (matches!(scope, Scope::Resource(_)) && item.contains(scope))
+        }
+    }
+}
+
+/// A doc's own address as a scope. `None` for a name that isn't a doc name: such a doc reaches
+/// no one, rather than falling back to the item.
+fn doc_scope(ws_id: &str, item_id: &str, name: &str) -> Option<Scope> {
+    doc_address(ws_id, item_id, name).map(Scope::Resource)
+}
+
+/// The scope the presented token must reach for this layer — see [`reaches`].
+pub fn layer_target(token: &Token, ws_id: &str, item_id: &str, layer: &SyncLayer) -> Result<Scope> {
+    Ok(match layer {
+        SyncLayer::Doc(name) => doc_scope(ws_id, item_id, name).ok_or(CourierError::BadScope)?,
+        SyncLayer::Src => {
+            let held = token.claims()?.scope;
+            if matches!(held, Scope::Resource(_)) && reaches(&held, ws_id, item_id, layer) {
+                held
+            } else {
+                item_scope(ws_id, item_id)
+            }
+        }
+    })
+}
+
 /// Authorize, merge, and diff back. `current_snapshot` is the node's own stored snapshot for
 /// this item/layer (`None` the first time this layer is ever synced), read by the caller
 /// before this call; on success the second element is the new snapshot for the caller to
-/// persist in its place. Authorization is membership over the item ([`item_scope`]) only,
-/// not a platform capability — see the module doc.
+/// persist in its place.
+///
+/// The presented token proves membership over the layer ([`layer_target`]). `access` is the
+/// manifest's verdict for this caller on this doc (`crate::access`), decided by the node from
+/// its records before the call; the source layer passes [`Access::OPEN`]. Reading is needed
+/// for any sync of a doc the node holds with content; one it doesn't (or holds empty)
+/// discloses nothing, so its creator needs only write. Writing is needed for anything that
+/// changes the node's copy. A doc name with no address is refused (`BadScope`).
 pub fn node_accept_sync(
     hello: &SyncHello,
     node_did: &str,
     current_snapshot: Option<&[u8]>,
+    access: Access,
     now: u64,
     revoked: &HashSet<[u8; 32]>,
 ) -> Result<(SyncAck, Vec<u8>)> {
@@ -119,23 +161,30 @@ pub fn node_accept_sync(
         &hello.token,
         node_did,
         &hello.desktop_did,
-        &item_scope(&hello.ws_id, &hello.item_id),
+        &layer_target(&hello.token, &hello.ws_id, &hello.item_id, &hello.layer)?,
         now,
         revoked,
     )?;
-
     let doc = LoroDoc::new();
     if let Some(bytes) = current_snapshot {
         doc.import(bytes).map_err(|_| CourierError::Decode)?;
     }
     let before = doc.oplog_vv();
+    // Opening a doc syncs it before anything is written, so the node may hold an empty copy.
+    if !before.is_empty() && !access.read {
+        return Err(CourierError::NoRead);
+    }
     if !hello.update.is_empty() {
         doc.import(&hello.update)
             .map_err(|_| CourierError::Decode)?;
     }
     // An app's source carries its manifest — its roles and rules — so changing it is
     // installing the app, not using it. Pulling it stays open to every member.
-    if hello.layer == SyncLayer::Src && doc.oplog_vv() != before {
+    let changed = doc.oplog_vv() != before;
+    if changed && !access.write {
+        return Err(CourierError::NoWrite);
+    }
+    if hello.layer == SyncLayer::Src && changed {
         policy::authorize(
             &hello.token,
             node_did,

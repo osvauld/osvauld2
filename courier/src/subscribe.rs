@@ -48,6 +48,9 @@ pub fn desktop_start_subscribe(
 /// Prove `hello` is a legitimate request to (un)subscribe. Which action it is is the caller's
 /// business, not this function's — a subscribe and an unsubscribe from the same holder for the
 /// same layer are equally authorized, so there is nothing here for the two to differ on.
+///
+/// Membership only, not the manifest's read rule: a read rule's inputs change after the
+/// subscription is made (a group gains or loses a member), so fan-out checks it on every push.
 pub fn node_accept_subscription(
     hello: &SubscribeHello,
     node_did: &str,
@@ -58,7 +61,7 @@ pub fn node_accept_subscription(
         &hello.token,
         node_did,
         &hello.desktop_did,
-        &crate::sync::item_scope(&hello.ws_id, &hello.item_id),
+        &crate::sync::layer_target(&hello.token, &hello.ws_id, &hello.item_id, &hello.layer)?,
         now,
         revoked,
     )?;

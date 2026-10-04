@@ -18,11 +18,12 @@ use std::collections::HashSet;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::CourierError;
+use courier::access::{Access, doc_access, members_in, roles_at};
 use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelcome};
 use courier::publish::{PublishAck, PublishHello};
 use courier::role::{Grant, RoleRequest};
 use courier::subscribe::SubscribeHello;
-use courier::sync::{SyncAck, SyncHello, SyncLayer, item_scope};
+use courier::sync::{SyncAck, SyncHello, SyncLayer, item_scope, reaches};
 use courier::token::{Scope, Token};
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
 use manifest::{Manifest, OWNER};
@@ -209,6 +210,9 @@ impl Admin {
     /// it first means a rejected push never touches storage. `None` the first time this layer
     /// is synced — courier treats that as an empty document, not an error.
     ///
+    /// A doc sync is judged by the app's manifest first (`courier::access`): the caller's roles
+    /// from its grants on record, `members(...)` from the node's own copies.
+    ///
     /// Fans the new snapshot out to every other subscriber on this layer once it's stored.
     /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
     /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
@@ -220,17 +224,57 @@ impl Admin {
         pusher: &impl Pusher,
     ) -> Result<SyncAck, NodeError> {
         let node_did = node::did(&self.vault)?;
+        let revoked = self.revoked()?;
+        let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
+        let grants = self.grants_given(&hello.desktop_did, now, &revoked)?;
+        let access = self.access(rules.as_ref(), &hello, &hello.desktop_did, &grants)?;
         let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
         let (ack, snapshot) = courier::sync::node_accept_sync(
             &hello,
             &node_did,
             current.as_deref(),
+            access,
             now,
-            &self.revoked()?,
+            &revoked,
         )?;
         self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
-        self.fan_out(&hello, &snapshot, now, pusher)?;
+        self.fan_out(&hello, &snapshot, rules.as_ref(), now, pusher)?;
         Ok(ack)
+    }
+
+    /// The manifest a doc layer is judged by; `None` for the source layer, which has its own
+    /// gate. An item whose source the node doesn't hold has declared nothing yet.
+    fn rules(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+    ) -> Result<Option<Manifest>, NodeError> {
+        if *layer == SyncLayer::Src {
+            return Ok(None);
+        }
+        match self.manifest(&item_scope(ws_id, item_id)) {
+            Err(NodeError::NoManifest(_)) => Ok(Some(Manifest::default())),
+            other => other.map(Some),
+        }
+    }
+
+    /// `did`'s access to `hello`'s doc under `rules`, holding `grants`.
+    fn access(
+        &self,
+        rules: Option<&Manifest>,
+        hello: &SyncHello,
+        did: &str,
+        grants: &[Grant],
+    ) -> Result<Access, NodeError> {
+        let (Some(rules), SyncLayer::Doc(name)) = (rules, &hello.layer) else {
+            return Ok(Access::OPEN);
+        };
+        let (ws, item) = (&hello.ws_id, &hello.item_id);
+        let roles = roles_at(grants, ws, item, name);
+        doc_access(rules, name, did, &roles, &mut |doc: &str| {
+            Ok::<_, NodeError>(members_in(self.vault.get_doc(ws, item, doc)?.as_deref())?)
+        })
     }
 
     /// Full snapshot, not a diff against each subscriber's own progress: no subscription tracks
@@ -240,11 +284,13 @@ impl Admin {
     /// subscriber who already has all of it simply merges a no-op.
     ///
     /// Each subscriber is re-checked against its live grants: a subscription outlives the
-    /// grant that allowed it, and a revoked member must stop receiving.
+    /// grant that allowed it, and a revoked member must stop receiving. So is the manifest's read rule, whose inputs (a
+    /// group's member list) change after the subscription was made.
     fn fan_out(
         &self,
         hello: &SyncHello,
         snapshot: &[u8],
+        rules: Option<&Manifest>,
         now: u64,
         pusher: &impl Pusher,
     ) -> Result<(), NodeError> {
@@ -254,7 +300,6 @@ impl Admin {
             layer: hello.layer.clone(),
             snapshot: snapshot.to_vec(),
         };
-        let target = item_scope(&hello.ws_id, &hello.item_id);
         let revoked = self.revoked()?;
         for subscriber in self.subscribers_for(&hello.ws_id, &hello.item_id, &hello.layer)? {
             if subscriber == hello.desktop_did {
@@ -263,7 +308,10 @@ impl Admin {
             // Cost: one index scan per subscriber per push. Fine at chat scale; a live
             // grant index is the fix when it is not.
             let grants = self.grants_given(&subscriber, now, &revoked)?;
-            if grants.iter().any(|g| g.scope.contains(&target)) {
+            let reached = grants
+                .iter()
+                .any(|g| reaches(&g.scope, &hello.ws_id, &hello.item_id, &hello.layer));
+            if reached && self.access(rules, hello, &subscriber, &grants)?.read {
                 pusher.push(&subscriber, &update);
             }
         }
@@ -672,3 +720,5 @@ mod tests;
 
 #[cfg(test)]
 mod roles_tests;
+#[cfg(test)]
+mod access_tests;

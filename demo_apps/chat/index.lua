@@ -3,7 +3,7 @@
 --
 -- The author is indexed as the id it is, not a display name: a rename then re-indexes nothing.
 return {
-	doc = "channel:*",
+	doc = "channel/*",
 	each = { "messages" },
 	key = function(m)
 		return m.id

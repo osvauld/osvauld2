@@ -127,6 +127,17 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
     pull it.
   - App-scoped tokens sync, subscribe and listen. Pushes skip revoked subscribers.
   - `demo_apps/chat` declares `admin`/`moderator`/`member`.
+- declared read/write rules (T8a, T10a, T15a, T20a — the node halves; rollback is step 6):
+  - an app whose `manifest.osv` declares docs has every doc sync judged by them
+    (`courier::access`): a role in the cone, a DID path variable, or `members(doc)` read from
+    the node's copy. Undeclared docs are refused.
+  - pushes re-check read per subscriber; a group's member list decides who gets it now.
+  - `Scope::Resource` tokens reach one doc (`ws/<ws>/<item>/<doc>`) and the app's source.
+  - doc names are paths (`group/g1/meta`) under one rule, `workspace::valid_doc_name`,
+    shared by storage, the manifest and resource addresses; a name with no address is refused.
+    Compatibility break: names with `.`, spaces or non-ASCII are refused by `put_doc` and
+    `get_doc` (no demo app used one). Chat's channels are `channel/<cid>`.
+  - not built: rejection/rollback on the writer's desktop, Lua `validate`, the index.
 
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a

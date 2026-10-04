@@ -1,6 +1,6 @@
 # App permissions — tokens, membership docs, manifest, rules
 
-Status: **design, agreed 2026-10-04. Built 2026-10-04: the §3 parser (`manifest` crate) and §2 role assignment with cascade; doc read/write rules are not enforced yet.** The first slice is built by
+Status: **design, agreed 2026-10-04. Built 2026-10-04: the §3 parser (`manifest` crate), §2 role assignment with cascade, and the §3 read/write rules on the node (roles, DID variables, `members(doc)`). `validate` (§5), the index (§4) and channels are not built yet.** The first slice is built by
 [`group-chat-sync.md`](group-chat-sync.md) (chat needs §3–§6). This doc is the general model;
 that plan is the first app proven against it. Extends — does not replace —
 [`workspace-permissions-sync.md`](workspace-permissions-sync.md) §4 (decided 2026-09-17/18),
@@ -104,8 +104,10 @@ app "chat" {
 | `sim "<file>" { tick N }` | node-authoritative simulation (games); later |
 
 Parser rules, as built 2026-10-04:
-- A doc name segment is 1–128 bytes of `[A-Za-z0-9._:-]` and never `.` or `..`. Anything
-  else matches nothing.
+- A doc name is `workspace::valid_doc_name`: segments of 1–128 bytes of `[A-Za-z0-9_:-]`,
+  short enough to fit a resource address. Anything else matches nothing.
+  *Revised 2026-10-04 (step 5):* `.` was allowed; dropped so every doc name is also a resource
+  address.
 - Where two patterns match a name, the one with a literal at the first differing position
   wins.
 - `{day}`/`{month}` match only real dates.
@@ -241,8 +243,9 @@ Found by reading, to be pinned by tests when the step that fixes each lands:
 - An invite with no recorded inviter, or redeemed after its inviter's grant was revoked,
   is refused.
 
-Still open: a `Scope::Resource` token reaches no sync, because sync targets the whole item.
-It needs per-doc addresses (step 5).
+*Fixed 2026-10-04 (step 5):* a doc's address is `ws/<ws>/<item>/<doc>`; sync and subscribe
+target it, an app scope contains its own docs' addresses, and a `Scope::Resource` token reaches
+the docs it covers (plus the app's source, to run it).
 
 ## 11. Open
 

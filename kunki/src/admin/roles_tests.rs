@@ -16,24 +16,24 @@ use super::*;
 use crate::node;
 use crate::push::MockPusher;
 
-const NOW: u64 = 10;
+pub(super) const NOW: u64 = 10;
 
 const CHAT: &str = r#"app "chat" {
   roles admin, moderator, member
   role admin { grant moderator, member }
 }"#;
 
-struct Fixture {
+pub(super) struct Fixture {
     _tmp: TempDir,
-    vault: Vault,
-    admin: Admin,
-    ws: String,
-    item: String,
-    alice: Identity,
-    alice_token: Token,
+    pub(super) vault: Vault,
+    pub(super) admin: Admin,
+    pub(super) ws: String,
+    pub(super) item: String,
+    pub(super) alice: Identity,
+    pub(super) alice_token: Token,
 }
 
-fn minted(byte: char) -> String {
+pub(super) fn minted(byte: char) -> String {
     std::iter::repeat_n(byte, 32).collect()
 }
 
@@ -47,8 +47,12 @@ fn src_with_manifest(manifest: &str) -> Vec<u8> {
     doc.export(loro::ExportMode::Snapshot).unwrap()
 }
 
-/// Alice claims a fresh node (owner at node scope) and the chat app's source is on it.
 fn fixture() -> Fixture {
+    fixture_with(CHAT)
+}
+
+/// Alice claims a fresh node (owner at node scope) and an app with `manifest` is on it.
+pub(super) fn fixture_with(manifest: &str) -> Fixture {
     let tmp = TempDir::new().unwrap();
     let (vault, _) = node::open(tmp.path().to_path_buf(), "pw").unwrap();
     let admin = Admin::new(vault.clone());
@@ -60,7 +64,7 @@ fn fixture() -> Fixture {
     let hello = courier::desktop_start_claim(ticket, &alice, NOW).unwrap();
     let alice_token = admin.accept_claim(hello, NOW).unwrap().token;
     let (ws, item) = (minted('a'), minted('b'));
-    vault.put_src(&ws, &item, &src_with_manifest(CHAT)).unwrap();
+    vault.put_src(&ws, &item, &src_with_manifest(manifest)).unwrap();
     Fixture {
         _tmp: tmp,
         vault,
@@ -73,12 +77,12 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn app(&self) -> Scope {
+    pub(super) fn app(&self) -> Scope {
         item_scope(&self.ws, &self.item)
     }
 
     /// A platform member at node scope, invited by alice.
-    fn member(&self) -> (Identity, Token) {
+    pub(super) fn member(&self) -> (Identity, Token) {
         let who = identity::generate().0;
         let request = InviteRequest {
             desktop_did: self.alice.did().to_string(),
@@ -117,7 +121,7 @@ impl Fixture {
     }
 }
 
-fn refused(result: Result<impl std::fmt::Debug, NodeError>, want: CourierError) {
+pub(super) fn refused(result: Result<impl std::fmt::Debug, NodeError>, want: CourierError) {
     match result {
         Err(NodeError::Courier(e)) => assert_eq!(e, want),
         other => panic!("expected {want:?}, got {other:?}"),

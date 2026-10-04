@@ -259,7 +259,20 @@ fn a_name_with_an_unsafe_segment_resolves_to_nothing() {
         assert!(m.resolve(bad).is_none(), "{bad:?}");
     }
     assert!(m.resolve(&format!("user/{}", "a".repeat(129))).is_none());
-    assert!(m.resolve("user/did:key:z6Mk-a_b.c").is_some());
+    assert!(m.resolve("user/did:key:z6Mk-a_b").is_some());
+    assert!(m.resolve("user/a.b").is_none());
+}
+
+#[test]
+fn a_name_longer_than_any_address_resolves_to_nothing() {
+    let m = Manifest::parse(
+        "app \"c\" {\n  roles member\n  doc {a}/{b}/{c}/{d}/{e}/{f}/{g}/{h} { read member }\n}\n",
+    )
+    .unwrap();
+    let name = |len| vec!["c".repeat(len); 8].join("/");
+    let fits = name((workspace::MAX_DOC_NAME_LEN - 7) / 8);
+    assert!(m.resolve(&fits).is_some());
+    assert!(m.resolve(&name(128)).is_none());
 }
 
 #[test]

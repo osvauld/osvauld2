@@ -357,7 +357,9 @@ impl Vault {
         self.put_sealed(&item::src_key(ws_id, item_id), snapshot)
     }
 
-    /// Same check as [`get_src`](Self::get_src), for the same reason.
+    /// Same check as [`get_src`](Self::get_src), for the same reason. `name` must be a doc name
+    /// (`workspace::valid_doc_name`) here too: a name nothing could have stored is refused, not
+    /// looked up.
     pub fn get_doc(
         &self,
         ws_id: &str,
@@ -366,6 +368,9 @@ impl Vault {
     ) -> Result<Option<Vec<u8>>, VaultError> {
         if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
             return Err(VaultError::BadItemId(item_id.to_string()));
+        }
+        if !::workspace::valid_doc_name(name) {
+            return Err(VaultError::InvalidName(name.to_string()));
         }
         self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
@@ -389,8 +394,7 @@ impl Vault {
         Ok(names)
     }
 
-    /// Same check as [`get_src`](Self::get_src), for the same reason, plus the `name` check
-    /// this already had.
+    /// Same checks as [`get_doc`](Self::get_doc).
     pub fn put_doc(
         &self,
         ws_id: &str,
@@ -401,7 +405,7 @@ impl Vault {
         if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
             return Err(VaultError::BadItemId(item_id.to_string()));
         }
-        if name.is_empty() || name.contains('/') {
+        if !::workspace::valid_doc_name(name) {
             return Err(VaultError::InvalidName(name.to_string()));
         };
         self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)

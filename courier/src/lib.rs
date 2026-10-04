@@ -20,6 +20,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod access;
 pub mod invite;
 pub mod policy;
 pub mod proof;
@@ -102,6 +103,12 @@ pub enum CourierError {
     RoleNotInvitable,
     #[error("invite ticket already redeemed")]
     InviteAlreadyRedeemed,
+    #[error("the app's manifest does not declare that doc")]
+    Undeclared,
+    #[error("may not read that doc")]
+    NoRead,
+    #[error("may not write that doc")]
+    NoWrite,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

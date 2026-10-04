@@ -3980,6 +3980,7 @@ name = "manifest"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.18",
+ "workspace",
 ]
 
 [[package]]
@@ -7719,6 +7720,7 @@ dependencies = [
  "storage",
  "tempfile",
  "thiserror 2.0.18",
+ "workspace",
 ]
 
 [[package]]

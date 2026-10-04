@@ -45,7 +45,7 @@ def messages(p, item, channel="general") -> list[dict]:
     in doc-name then list order."""
     out = []
     for name, d in sorted(data(p, item).items()):
-        if name.startswith(f"channel/{channel}/") or name == f"channel:{channel}":
+        if name.startswith(f"channel/{channel}/") or name == f"channel/{channel}":
             out += (d or {}).get("messages") or []
     return out
 
@@ -553,8 +553,88 @@ def t25(net):
     shots("T25-mention", i, b)
 
 
+# ── step 5: the node halves of T8, T10, T15, T20 ─────────────────────────────
+# Rollback (step 6) and the index (step 8) finish them; these prove the node refuses.
+
+DAY1 = "2026-10-04"
+
+
+def t8a(net):
+    """T8's node half: a member's channel never reaches the admin."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    # A set, not an insert: module code runs on every load.
+    run_once(b, i, 'M.chat:set({ "channels" }, doc.list({ doc.map({ id = "general", name = "general" }), '
+                   'doc.map({ id = "bobs-room", name = "bobs-room" }) }))')
+    wait_until(lambda: any(c["id"] == "bobs-room" for c in data(b, i)["chat"]["channels"]),
+               PUSH, "bob's local channel")
+    send(a, i, "alice still syncs")
+    sees(b, i, "alice still syncs")
+    never_sees(a, i, "bobs-room")
+    shots("T8a", i, a, b)
+
+
+def t10a(net):
+    """T10's direct-request half: an A–B DM never reaches C, asked for by name or pushed."""
+    a, b = net.peer("alice"), net.peer("bob")
+    ws, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    c = net.peer("carol")
+    net.join(a, c, ws, item)
+    dm = f"dm/{_did(a, i)}/{_did(b, i)}/{DAY1}"
+    run_once(a, i, f'doc:open("{dm}"):set({{"messages"}}, doc.list({{ doc.map({{ text = "just between us" }}) }}))')
+    run_once(b, i, f'doc:open("{dm}")')
+    wait_until(lambda: "just between us" in json.dumps(data(b, i)), PUSH, "bob to get the DM")
+    run_once(c, i, f'doc:open("{dm}")')
+    never_sees(c, i, "just between us")
+    run_once(b, i, f'doc:open("{dm}"):insert({{"messages"}}, doc.map({{ text = "second secret" }}))')
+    wait_until(lambda: "second secret" in json.dumps(data(a, i)), PUSH, "alice to get bob's reply")
+    never_sees(c, i, "second secret")
+    shots("T10a", i, a, b, c)
+
+
+def t15a(net):
+    """T15's node half: B's write under A's DID never reaches A."""
+    a, b = net.peer("alice"), net.peer("bob")
+    _, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    alice = _did(a, i)
+    run_once(a, i, f'doc:open("user/{alice}"):set({{"me"}}, doc.map({{ name = "alice" }}))')
+    wait_until(lambda: "alice" in json.dumps(data(a, i).get(f"user/{alice}")), PUSH, "alice's own doc")
+    run_once(b, i, f'doc:open("user/{alice}"):set({{"me"}}, doc.map({{ name = "mallory" }}))')
+    never_sees(a, i, "mallory")
+    shots("T15a", i, a, b)
+
+
+def t20a(net):
+    """T20's direct-request half: a private group of A and B never reaches C."""
+    a, b = net.peer("alice"), net.peer("bob")
+    ws, item = net.share_app(a, [b], CHAT)
+    i = item["id"]
+    c = net.peer("carol")
+    net.join(a, c, ws, item)
+    alice, bob = _did(a, i), _did(b, i)
+    meta, day = "group/g1/meta", f"group/g1/{DAY1}"
+    create = f'doc:open("{meta}"):set({{"members"}}, doc.map({{ ["{alice}"] = true, ["{bob}"] = true }}))'
+    run_once(a, i, create)
+    run_once(b, i, f'doc:open("{meta}")')
+    wait_until(lambda: alice in json.dumps(data(b, i).get(meta)), PUSH, "bob to get the group")
+    run_once(a, i, f'doc:open("{day}"):set({{"messages"}}, doc.list({{ doc.map({{ text = "for bob only" }}) }}))')
+    run_once(b, i, f'doc:open("{day}")')
+    wait_until(lambda: "for bob only" in json.dumps(data(b, i)), PUSH, "bob to get the group message")
+    run_once(c, i, f'doc:open("{meta}")\ndoc:open("{day}")')
+    never_sees(c, i, "for bob only")
+    assert bob not in json.dumps(data(c, i)), "carol read the member list"
+    run_once(b, i, f'doc:open("{day}"):insert({{"messages"}}, doc.map({{ text = "second secret" }}))')
+    wait_until(lambda: "second secret" in json.dumps(data(a, i)), PUSH, "alice to get bob's reply")
+    never_sees(c, i, "second secret")
+    shots("T20a", i, a, b, c)
+
+
 TESTS = {f"t{n}": globals()[f"t{n}"] for n in range(1, 26) if n != 16}
 TESTS["t23a"] = t23a
+TESTS.update(t8a=t8a, t10a=t10a, t15a=t15a, t20a=t20a)
 
 
 def main() -> int:

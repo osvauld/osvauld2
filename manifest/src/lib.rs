@@ -201,10 +201,10 @@ impl Manifest {
     /// with a literal at the first position they differ wins (`group/{gid}/meta` over
     /// `group/{gid}/{day}`).
     pub fn resolve(&self, doc: &str) -> Option<(&DocDecl, Vars)> {
-        let parts: Vec<&str> = doc.split('/').collect();
-        if !parts.iter().all(|p| valid_segment(p)) {
+        if !workspace::valid_doc_name(doc) {
             return None;
         }
+        let parts: Vec<&str> = doc.split('/').collect();
         let mut best: Option<(&DocDecl, Vars)> = None;
         for decl in &self.docs {
             let Some(vars) = decl.matches(&parts) else {
@@ -317,14 +317,10 @@ impl DocDecl {
     }
 }
 
-/// What a doc name segment may be: short, plain ASCII, never `.` or `..`. Names reach storage
-/// keys and rule variables, so anything else is refused before it is matched.
-pub fn valid_segment(s: &str) -> bool {
-    (1..=128).contains(&s.len())
-        && s != "."
-        && s != ".."
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+/// A doc name segment: the address grammar (`workspace::valid_id`), so every doc a manifest
+/// matches can be stored and addressed.
+fn valid_segment(s: &str) -> bool {
+    workspace::valid_id(s)
 }
 
 fn is_ident(s: &str) -> bool {
