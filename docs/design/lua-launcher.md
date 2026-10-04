@@ -81,5 +81,21 @@ Rust-owned regardless of this marker. Focused acceptance: `scripts/check_launche
 (pointer Back, narrow title layout, legacy fallback and runtime-error recovery); native folder
 picker acceptance remains manual.
 
-Auth UI, tab layout/tiling and persisted session layouts are later work. The account-owned source
+## Thread integration — revision 2026-10-04
+
+The `lua-shell` worktree integrates `dev`'s thread-owned apps while keeping the launcher on the
+chrome thread. Launcher commands remain copied metadata and queued plain data; Rust opens or
+focuses an app thread. Launcher senses remain Home-only, separate from threaded app requests.
+
+The launcher configures the shared RAII budget instead of installing a second interrupt hook:
+32 MiB heap, 20,000 interrupts, 100 ms load and 10 ms execution CPU limits. On Unix these use
+thread CPU time; other platforms currently fall back to wall time. State export/import and
+trial view/sweep are armed, independently of handler permission. No native-call preemption or
+hard wall watchdog is implied. Source candidates also isolate the 3D host from the live solver.
+
+`check_launcher_threads.py` proves split/Home routing, retained app instances during launcher
+edits, and an activated launcher view looping after its successful trial: Rust navigation/import
+fallback and pointer reset remain available. Full smokes and combined reviews remain deferred.
+
+Lua-owned auth UI, tab layout/tiling and persisted session layouts are later work. The account-owned source
 is shared across platforms; Android-specific input/lifecycle remains with the Android workstream.

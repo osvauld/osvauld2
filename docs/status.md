@@ -132,7 +132,30 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
   passed. No app-thread integration changes; final reviews/full smokes remain deferred.
 
-### Chrome VM limits (2026-10-04)
+### Lua shell/thread integration (2026-10-04, validated in worktree; not landed on dev)
+- Merged `dev` checkpoint `cbf0458` into the `lua-shell` working tree. Apps keep thread-owned
+  VM/docs/index/Tile; Home keeps its own launcher VM and scoped plain-data command queue.
+  Open-or-focus, transactional customization/editor, Home senses and Rust reset are preserved.
+- One shared interrupt hook now serves app and launcher policies. Launcher setup configures
+  32 MiB, 20,000 interrupts and 100/10 ms load/execution thread-CPU limits without replacing
+  that hook. RAII covers load, view/update and staged state export/import/trial view/sweep;
+  handler permission is independent. Non-Unix retains the wall-time fallback. This supersedes
+  the wall-deadline contention caveat in the initial limits section below.
+- Transactional source validation has an independent 3D host, avoiding a candidate commit into
+  the live solver. Ordinary reload preserves its existing staged retained-world behavior.
+- Frame timings now identify each thread; the summarizer groups by log/thread rather than
+  mixing chrome and app frames. Repeated resize view/layout passes accumulate. Preparation
+  and layout can include offscreen tile barriers: elapsed stages, not summed CPU or latency.
+- `check_launcher_threads.py`, registered in SMOKES, passed real-socket split/Home scoping,
+  pointer opens retaining both app instances, editing and active hot-loop Rust fallback/reset.
+  Open-or-focus, bundled launcher, limits, editor (320/900pt), persistence/restart, navigation
+  and viewer/kanban interaction focused checks passed against the integrated binary. Viewer
+  screenshot shows the 3D tile; native picker/IME and full smokes/final reviews remain deferred.
+- Workspace check passed. Suites: app-host 251 (two ignored), runtime 152 (three ignored),
+  shell 69 (one ignored), RPC six. The combined command timed out during shell; its separate
+  bounded-concurrency run completed. Logs: `/tmp/lua-dev-integration-*.log`.
+
+### Chrome VM limits (2026-10-04, initial wall-time policy; superseded above)
 - Launcher-only policy: 32 MiB Lua heap, 20,000 Luau interrupts per execution, cooperative
   deadlines of 100 ms for source load and 10 ms for view/handlers. Trusted setup installs
   `HostContext::set_limits` in each fresh/staged VM; ordinary apps retain their existing policy.
@@ -228,6 +251,34 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   showcase. Smoke: `smoke_demo_record.py` (S1–S5).
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
+
+### App threads (2026-10-04, steps 0–3 and 9) — [design](design/app-threads.md)
+- `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
+  `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
+- `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
+  interrupt count, a limit of 1 s of the thread's CPU time that runs only while app Lua is
+  entered (`view`, `update`, module load, tests, index calls). `OSVAULD_APP_BUDGET_MS` /
+  `_MEMORY_MB` override; trusted launcher setup configures its stricter limits on the same budget.
+  Was wall
+  time until 2026-10-04: valid loads failed under build contention.
+- `runtime::Tile`: a windowless runtime whose frame is a `Scene` the host shows with the
+  `tile` element; `.on_tile` forwards pointer/wheel/keys as `TileInput`. No threads yet.
+- Every open app runs on its own thread (`shell2/src/app_thread.rs`): VM, docs, index and
+  `Tile` live there; the shell shows its latest frame in a `tile` slot. Hidden apps still
+  answer the bridge, import pushes and save. The bridge serves connections concurrently.
+  Offscreen, each shell paint waits for shown tiles (smokes stay exact). Green: T1, T2.
+- Split: `SplitWith { item_id }` shows an open app beside the focused one, `Unsplit` goes
+  back; both paint, in parallel, and input goes to the tile under the pointer. A stand-in
+  until the Lua chrome owns layout. Green: T7.
+- A Lua test's wall clock pauses while `t.step`/`t.click_at`/… drive the app
+  (`Budget::pause`): those frames are the app's time. Under load they spent the test's 1 s.
+- 3D in a tile: `TileFrame` carries the tile's 3D viewport (`SceneView3d`), which the host
+  moves to the slot and cuts to it; still one 3D viewport per frame, the first placed wins.
+  3D physics steps on the app thread; a hidden app's worlds pause, and its first frame back
+  skips the hidden time. `smoke_mesh_math` now checks 3D pixels — picking alone passed with
+  none drawn.
+- not built: stuck-thread badge (T4), background view on push (T5, a decision), own windows
+  (T10), the Lua chrome's guards (T11), two 3D apps on screen at once (one viewport a frame).
 
 ## Not built
 
@@ -715,9 +766,29 @@ dump lists them); a goal now shows for 1.5 s with the puck caught in the net. It
 panic: a body removed inside a sensor, then a frame with no time in it, left Rapier a stale pair.
 **Hits:** `on_hit { id, who, speed }` — a loose thing's new contact, at the speed it closed
 along the normal; hockey's puck squashes on each, harder for a harder hit, and the smoke reads
-the squash from the dump. The Lua ↔ world contract is three kinds of call: describe (`view`),
-command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`); moving things give Rapier their
-velocity, so a paddle hits rather than shoves; controller acceleration; a `follow` controller.
+the squash from the dump. **Strikes (2026-10-03, replaces chunk 2's pushing):** a walker no
+longer stops at loose things and shoves them with character impulses; it is moved with
+`set_next_kinematic_translation`, so Rapier knows its velocity and its contact strikes — a paddle
+at 400 sends a puck off at up to 800, not 230. It wakes a sleeping loose thing in its path (Rapier
+lets a walker through a sleeper). Cost: a walker's zone moments come a tick later, as a loose
+thing's already did. **Spin:** `loose = { grip }` unlocks a loose thing's rotation and gives its
+surface grip at contacts, so a glancing hit spins it (combined as the larger of two, so walls need
+none); `friction` damps the spin too; without `grip` it never turns. The drawing turns about the
+collider's centre (`Transform::pivot`), so `pos` holds still; a new body starts upright.
+`set { spin }` in degrees a second; the dump has `rot` and `spin`. Hockey's puck has a mark to see
+it turn, and the smoke has red strike it glancing and reads the spin. No curve from spin yet (that
+would be our own per-frame force). The Lua ↔ world contract is three kinds of call: describe
+(`view`), command (`set`, `after`), and questions. **Questions:** `world(id):ray(from, to,
+{ skip })` → nil or `{ id, at, normal, dist, tick }` (zones do not stop it), and `:at(point)` →
+the sorted ids of colliders and zones there, with `tick`; allowed in `view` as well as handlers;
+as of the last step, which the world now counts (`tick` in the dump). The answer envelope is
+agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. **Fixed step:**
+the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STEPS`), as 3D;
+leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
+ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
+Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
+body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
+bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
@@ -730,6 +801,80 @@ and `t.world()` snapshots. Soft bodies (rope, cape)
 are the assets session's own verlet solver, not Rapier joints.
 
 ### Environment — composable 3D interfaces and worlds
+
+**2026-10-01 implementation, branch `3d-math`, pending user acceptance:** mathematical
+Lua-authored geometry precedes Blender import, aiming toward a procedural marble machine. The
+[math-first plan](design/3d-math.md) separates geometry/materials/inspection from retained physics.
+- Adopted the committed `3d-mesh-data` validator (`c1d4eb7`), not its uncommitted follow-up:
+  finite bounded positions/normals, triangle indices/counts, nondegenerate triangles and bounds.
+- Immutable shared native meshes and strict Lua `gfx.mesh({vertices, indices})`; vertex records
+  contain position/normal, indices are dense 1-based triangles. Generated resources are capped
+  at 128 and 32 MiB per VM, including payloads still retained by native scenes. Cube remains a
+  shorthand; no specific demo geometry is embedded in Rust.
+- Scene objects reference actual meshes. Unique mesh payload is limited to 16 MiB per scene,
+  with 131,072 triangles counted across instances. GPU resources are cached by native identity;
+  adjacent shared instances batch without reordering. Absent resources leave the next rendered
+  snapshot; rendering a non-3D frame clears the cache. No mutable native handle registry ships.
+- Picking uses actual triangles with back-face culling and camera near/far clipping. Partial
+  viewport clipping now preserves full camera projection and screen rays using a crop matrix.
+  Lighting uses inverse-transpose normal direction for positive nonuniform scales.
+- `DumpTree` adds process-local mesh identity, local bounds, counts and payload bytes; it does
+  not yet expose recipes, world bounds, raw buffer reads or general spatial query RPCs.
+- `demo_apps/mesh_math` calculates a sinusoidal heightfield and analytic normals in Lua, shares
+  it between two objects, regenerates/rotates geometry and supports orbit/zoom/triangle picking.
+  Registered `smoke_mesh_math.py` proves raw inspection, shared identity, real pointer picking,
+  regeneration, revision-checked source editing and live/custom captures with a clean console
+  (`shots/mesh-math.png`, `shots/mesh-math-custom.png`).
+Higher-level curves/tubes/revolve, spatial gradients, Blender import and Lua 3D physics remain unbuilt.
+One viewport, cube-only text surfaces and incorrect foreground Vello composition remain limits.
+
+**2026-10-01 Marble Gates groundwork, pending user acceptance:** integrated the committed
+`world-engine` foundation through `e23660b`, preserving mesh work and registering both sets of
+smokes. Its 2D commands, timers, sensors and contact events are reused infrastructure, not a
+new 3D API. Added a private native Rapier3D backend in `world/src/physics3d.rs`: metre-scale
+sphere/full-size-box colliders, Y-up gravity, fixed 1/120-second solver steps, observational
+pose/velocity/sleep inspection, reset clearing motion/forces, and body removal. Native regression
+tests target fall/bounce/settle/sleep, reset, determinism, validation and contact teardown.
+**Retained-body/clock slices added:** `world::world3d::World3d` keeps at most 256 bodies by
+stable author ID, with ECS/Rapier handles private. Reconciliation validates the whole batch
+before mutation and preserves live pose; authored positions update reset targets. Collider/body
+type changes reject until that ID is removed. Native time planning uses 120 Hz steps, eight-step
+catch-up maximum with dropped-time reporting, pause/resume without hidden-time catch-up, and
+quiet-world suspension. Inspection sorts IDs and separates authored recipes from resolved poses.
+`resolved_scene` applies simulated poses by matching object IDs without stepping, changing the
+authored scene or duplicating mesh resources; camera/scale/appearance remain presentation data.
+**Runner hook added:** `App::advance_simulation(elapsed)` runs before normal-frame `view`,
+skips live/custom captures, and can request the next redraw. Targeted runtime tests verify
+ordering and capture exclusion; an explicitly run GPU test verifies real live/custom readback.
+A real `World3d` through `Headless` proves native gravity/settling, pre-view resolved poses,
+reset through ordinary pointer input, and pause/resume without hidden-time catch-up. Those
+initial proofs were Rust fixtures; the later Lua binding and visible proof below extend them.
+**Reload preflight groundwork added:** `World3d::validate_reconcile` is observational;
+app-local `Worlds3d` validates all world recipes before updating reset targets, reconciling
+bodies or dropping omitted worlds. At most eight worlds, each with a nonempty ID of at most
+128 bytes. Tests cover failed-batch nonmutation, accepted-batch pose/clock retention, removal,
+invalid new recipes, budgets and isolation between app-local collections.
+**Lua drop/reset proof added:** module-scope `gfx.world3d({id,scene,bodies})`, `game:scene(camera)`
+and input-handler `game:reset(id)` now connect app-local worlds to Runner through the shell.
+Recipes commit only after accepted staged loads/trial-view calls. View omission and inactive tabs
+pause; source omission and app teardown release worlds. Frame/hover handlers cannot reset them.
+`DumpTree.worlds3d` exposes authored/resolved bodies, velocities, sleeping, tick and dropped time.
+`demo_apps/marble_gates` has a Lua-generated sphere, platform, orbit/zoom, Reset and hide/resume;
+its registered smoke proves fall/settle/reset, pause, reload rejection and live/custom capture
+nonmutation. Falling and settled screenshots were inspected. Rotated ramps, 3D sensors and goal
+rules remain unbuilt. Ordinary offscreen RPCs now repaint without advancing the virtual clock;
+frame/advance and pointer drivers move time explicitly. A 2D regression fix preserves controller
+velocity through zero-time observations, so contact events retain their closing speed; hockey's
+approach smoke now drives its previously implicit inspection-time frames explicitly.
+The [math-first plan](design/3d-math.md) moves this game ahead of curves and spatial gradients.
+Earlier validation: 76 targeted `world` tests passed;
+`cargo check -p app_host -p shell2` passes with existing warnings; all eight registered smokes
+pass after integrating the 2D and mesh foundations and again after the Runner hook.
+Latest validation: `cargo check --workspace` passes with existing warnings; 84 `world` tests
+and 197 `app_host` tests pass (two host tests ignored), including kanban round-trip. Targeted
+runtime simulation tests and the explicitly run real-pixel capture test pass. All nine registered
+smokes pass with the Lua marble proof and zero-time 2D regression fix. The full workspace test
+suite was not rerun.
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,

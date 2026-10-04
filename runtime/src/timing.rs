@@ -33,7 +33,7 @@ impl FrameTiming {
 
     fn mark_at(&mut self, phase: usize, now: Instant) {
         if let Some(last) = self.last {
-            self.phases[phase] = now.duration_since(last).as_secs_f64() * 1000.0;
+            self.phases[phase] += now.duration_since(last).as_secs_f64() * 1000.0;
             self.last = Some(now);
         }
     }
@@ -42,8 +42,9 @@ impl FrameTiming {
         if let Some(start) = self.start {
             let [prepare, view, layout, reconcile, paint, present] = self.phases;
             eprintln!(
-                "OSVAULD_FRAME prepare_ms={prepare:.3} view_ms={view:.3} layout_ms={layout:.3} reconcile_ms={reconcile:.3} paint_ms={paint:.3} present_capture_ms={present:.3} total_ms={:.3} capture={capture}",
-                start.elapsed().as_secs_f64() * 1000.0
+                "OSVAULD_FRAME prepare_ms={prepare:.3} view_ms={view:.3} layout_ms={layout:.3} reconcile_ms={reconcile:.3} paint_ms={paint:.3} present_capture_ms={present:.3} total_ms={:.3} capture={capture} thread={:?}",
+                start.elapsed().as_secs_f64() * 1000.0,
+                std::thread::current().id()
             );
         }
     }

@@ -2,15 +2,15 @@
 
 import json
 
-from osvauld.session import Session
+from osvauld.session import Session, shell_binary
 
 for width in (320, 900):
-    with Session(offscreen=(width, 700)) as s:
+    with Session(shell_binary=shell_binary(), offscreen=(width, 700)) as s:
         rpc = s.rpc
         rpc.signup("launcher", "passphrase")
         ws = rpc.create_workspace("Home")
         rpc.click_at(*rpc.centre_of(ws["id"]))
-        assert rpc.centre_of("add_item")
+        assert rpc.centre_of("launcher:add-item")
         assert not any(r["id"].startswith("launcher:item:") for r in rpc.rects())
 
         item = rpc.create_item(ws["id"], "Counter", "app")

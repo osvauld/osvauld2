@@ -3,10 +3,10 @@
 import json
 
 from osvauld.client import BridgeError
-from osvauld.session import Session
+from osvauld.session import Session, shell_binary
 
 
-with Session() as s:
+with Session(shell_binary=shell_binary()) as s:
     rpc = s.rpc
     rpc.signup("tabs", "passphrase")
     ws = rpc.create_workspace("workspace")

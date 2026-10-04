@@ -58,20 +58,23 @@ const WALKER: KinematicCharacterController = KinematicCharacterController {
     normal_nudge_factor: 1.0e-4,
 };
 
-/// What a body Rapier moves is made of. It does not spin — the drawing stays upright.
+/// What a body Rapier moves is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
     /// The share of speed it keeps off what it hits: 0 dead, 1 as fast as it came.
     pub bounce: f64,
     /// How fast the floor slows it, as speed lost per second: 0 never slows; 6 stops a walker's
-    /// pace in about half a second.
+    /// pace in about half a second. It slows a spin the same.
     pub friction: f64,
+    /// How much its surface catches at a contact: a glancing hit sets it turning. Without, it
+    /// never turns — the drawing stays upright.
+    pub grip: Option<f64>,
 }
 
 impl Default for Material {
     /// A let-go chest's: a modest bounce, at rest in about half a second.
     fn default() -> Self {
-        Self { bounce: 0.5, friction: 6.0 }
+        Self { bounce: 0.5, friction: 6.0, grip: None }
     }
 }
 
@@ -83,13 +86,12 @@ impl Material {
         if !(self.friction.is_finite() && self.friction >= 0.0) {
             return Err(format!("friction must be 0 or more, got {}", self.friction));
         }
+        if let Some(g) = self.grip.filter(|g| !(g.is_finite() && *g >= 0.0)) {
+            return Err(format!("grip must be 0 or more, got {g}"));
+        }
         Ok(())
     }
 }
-
-/// A walker's mass in a push: far heavier than anything loose, so what it walks into moves at
-/// its pace rather than stopping it.
-const PUSHER: f32 = 1.0e6;
 
 /// Slower than this, in drawing units a second, a sliding body has come to rest.
 const AT_REST: f32 = 4.0;
@@ -148,15 +150,18 @@ impl Physics {
         let body = match kind {
             Body::Fixed => RigidBodyBuilder::fixed(),
             Body::Moved => RigidBodyBuilder::kinematic_position_based(),
-            Body::Dynamic((vx, vy), m) => RigidBodyBuilder::dynamic()
-                .linvel(Vector::new(vx as f32, vy as f32))
-                .linear_damping(m.friction as f32)
-                .lock_rotations(),
+            Body::Dynamic((vx, vy), m) => {
+                let b = RigidBodyBuilder::dynamic()
+                    .linvel(Vector::new(vx as f32, vy as f32))
+                    .linear_damping(m.friction as f32)
+                    .angular_damping(m.friction as f32);
+                if m.grip.is_some() { b } else { b.lock_rotations() }
+            }
         };
         // Walls and walkers keep nothing; a bounce is the moving body's own (the larger of two).
-        let bounce = match kind {
-            Body::Dynamic(_, m) => m.bounce as f32,
-            _ => 0.0,
+        let (bounce, grip) = match kind {
+            Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32),
+            _ => (0.0, 0.0),
         };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
@@ -164,7 +169,8 @@ impl Physics {
             let solid = shape(c, anchor)
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
-                .friction(0.0)
+                .friction(grip)
+                .friction_combine_rule(CoefficientCombineRule::Max)
                 .collision_groups(InteractionGroups::new(
                     Group::from_bits_retain(groups.0),
                     Group::from_bits_retain(groups.1),
@@ -226,6 +232,36 @@ impl Physics {
             .collect()
     }
 
+    /// The first solid collider on the line from `from` to `to`, not `skip`'s: its owner, where
+    /// the line met it, the surface's normal there and how far along. Sensors do not stop a ray;
+    /// a line starting inside a collider meets it at once. As of the last step.
+    pub(crate) fn ray(
+        &self,
+        from: (f64, f64),
+        to: (f64, f64),
+        skip: Option<RigidBodyHandle>,
+    ) -> Option<(u64, (f64, f64), (f64, f64), f64)> {
+        let filter = QueryFilter::default().exclude_sensors();
+        let filter = match skip {
+            Some(body) => filter.exclude_rigid_body(body),
+            None => filter,
+        };
+        let queries = self.world.query_pipeline_with_filter(filter);
+        let (o, d) = (Vector::new(from.0 as f32, from.1 as f32), Vector::new((to.0 - from.0) as f32, (to.1 - from.1) as f32));
+        let (c, hit) = queries.cast_ray_and_get_normal(&Ray::new(o, d), 1.0, true)?;
+        let (at, n) = (o + d * hit.time_of_impact, hit.normal);
+        let owner = self.world.colliders.get(c)?.user_data as u64;
+        let dist = hit.time_of_impact as f64 * (d.length() as f64);
+        Some((owner, (at.x as f64, at.y as f64), (n.x as f64, n.y as f64), dist))
+    }
+
+    /// The owners of every collider, solid or sensor, that covers `point`, as of the last step.
+    pub(crate) fn at(&self, point: (f64, f64)) -> Vec<u64> {
+        let queries = self.world.query_pipeline_with_filter(QueryFilter::default());
+        let point = Vector::new(point.0 as f32, point.1 as f32);
+        queries.intersect_point(point).map(|(_, c)| c.user_data as u64).collect()
+    }
+
     /// Where Rapier has a body now: its shape's centre.
     pub(crate) fn centre_of(&self, body: RigidBodyHandle) -> (f64, f64) {
         let at = self.world.bodies[body].translation();
@@ -244,9 +280,19 @@ impl Physics {
         }
     }
 
-    /// Puts a body's centre at `at` and sets its velocity, each if given, and wakes it.
-    pub(crate) fn set(&mut self, body: RigidBodyHandle, at: Option<(f64, f64)>, v: Option<(f64, f64)>) {
+    /// Puts a body's centre at `at` and sets its velocity and spin (degrees a second), each if
+    /// given, and wakes it.
+    pub(crate) fn set(
+        &mut self,
+        body: RigidBodyHandle,
+        at: Option<(f64, f64)>,
+        v: Option<(f64, f64)>,
+        spin: Option<f64>,
+    ) {
         let rb = &mut self.world.bodies[body];
+        if let Some(spin) = spin {
+            rb.set_angvel(spin.to_radians() as f32, true);
+        }
         if let Some((x, y)) = at {
             rb.set_translation(Vector::new(x as f32, y as f32), true);
         }
@@ -258,6 +304,12 @@ impl Physics {
 
     pub(crate) fn asleep(&self, body: RigidBodyHandle) -> bool {
         self.world.bodies[body].is_sleeping()
+    }
+
+    /// How far a body has turned and how fast it turns, in degrees and degrees a second.
+    pub(crate) fn turn(&self, body: RigidBodyHandle) -> (f64, f64) {
+        let rb = &self.world.bodies[body];
+        ((rb.rotation().angle() as f64).to_degrees(), (rb.angvel() as f64).to_degrees())
     }
 
     pub(crate) fn velocity(&self, body: RigidBodyHandle) -> (f64, f64) {
@@ -302,7 +354,8 @@ impl Physics {
     }
 
     /// Moves `body` as far along `wanted` as the other colliders allow, sliding along what it
-    /// meets, and says how far that was. What it walks into that Rapier moves, it pushes.
+    /// meets, and says how far that was. What Rapier moves it does not stop at: Rapier's step
+    /// meets those with the walker's velocity, so it strikes them rather than shoving.
     pub(crate) fn slide(
         &mut self,
         body: RigidBodyHandle,
@@ -312,24 +365,24 @@ impl Physics {
         let rb = &self.world.bodies[body];
         let solid = &self.world.colliders[rb.colliders()[0]];
         let (pose, shape, groups) = (*rb.position(), solid.shared_shape().clone(), solid.collision_groups());
-        let filter = || {
-            let filter = QueryFilter::default().exclude_rigid_body(body).exclude_sensors();
+        let filter = |only: QueryFilterFlags| {
+            let filter = QueryFilter::from(only).exclude_rigid_body(body).exclude_sensors();
             filter.groups(groups)
         };
-        let queries = self.world.query_pipeline_with_filter(filter());
         let wanted = Vector::new(wanted.0 as f32, wanted.1 as f32);
-        let mut hits = vec![];
-        let moved = WALKER.move_shape(dt as f32, &queries, &*shape, &pose, wanted, |c| hits.push(c));
-        let w = &mut self.world;
-        let mut queries = w.broad_phase.as_query_pipeline_mut(
-            w.narrow_phase.query_dispatcher(),
-            &mut w.bodies,
-            &mut w.colliders,
-            filter(),
-        );
-        WALKER.solve_character_collision_impulses(dt as f32, &mut queries, &*shape, PUSHER, &hits);
+        // A loose thing at rest is asleep, and Rapier lets a moving walker through a sleeper.
+        let loose = self.world.query_pipeline_with_filter(filter(QueryFilterFlags::ONLY_DYNAMIC));
+        let mut met = vec![];
+        WALKER.move_shape(dt as f32, &loose, &*shape, &pose, wanted, |c| met.push(c.handle));
+        for c in met {
+            let parent = self.world.colliders.get(c).and_then(|c| c.parent());
+            parent.and_then(|b| self.world.bodies.get_mut(b)).map(|b| b.wake_up(true));
+        }
+        let queries = self.world.query_pipeline_with_filter(filter(QueryFilterFlags::EXCLUDE_DYNAMIC));
+        let moved = WALKER.move_shape(dt as f32, &queries, &*shape, &pose, wanted, |_| {});
+        // Where it will be after the step, so Rapier knows its velocity.
         let to = pose.translation + moved.translation;
-        self.world.bodies[body].set_translation(to, true);
+        self.world.bodies[body].set_next_kinematic_translation(to);
         (moved.translation.x as f64, moved.translation.y as f64)
     }
 

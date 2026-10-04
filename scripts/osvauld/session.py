@@ -65,23 +65,29 @@ def shell_binary(release: bool = False) -> Path:
 class Session:
     def __init__(
         self,
-        shell_binary: Path = DEFAULT_SHELL_BINARY,
+        shell_binary: Path | None = None,
         startup_timeout: float = 15.0,
         data_dir: str | None = None,
         socket_path: str | None = None,
         show_shell_output: bool = False,
         offscreen: tuple[int, int] | None = None,
+        stdout_path: str | None = None,
     ):
         self.tmp = tempfile.mkdtemp(prefix="osvauld-test-")
         self.data_dir = data_dir or os.path.join(self.tmp, "data")
         self.socket_path = socket_path or os.path.join(self.tmp, "bridge.sock")
-        self.shell_binary = shell_binary
+        self.shell_binary = shell_binary or Path(
+            os.environ.get("OSVAULD_SHELL_BINARY") or DEFAULT_SHELL_BINARY
+        )
         self.startup_timeout = startup_timeout
         self.show_shell_output = show_shell_output
         # (w, h) runs the shell with no window: same layout, same pixels, but a virtual clock that
         # only advances per request. Still needs a DISPLAY — winit will not build a loop without
         # one — so this hides the window, it does not remove the display dependency.
         self.offscreen = offscreen if offscreen is not None else offscreen_default()
+        # Where the shell's stdout goes (Lua `print` lands there), for a test that reads it back.
+        self.stdout_path = stdout_path
+        self._stdout = None
         self.process: subprocess.Popen | None = None
         self.rpc = Bridge(self.socket_path)
 
@@ -101,9 +107,11 @@ class Session:
         argv = [str(self.shell_binary)]
         if self.offscreen:
             argv += ["--offscreen", "%dx%d" % self.offscreen]
+        if self.stdout_path:
+            self._stdout = open(self.stdout_path, "ab")
         self.process = subprocess.Popen(
             argv, env=env,
-            stdout=None if self.show_shell_output else subprocess.DEVNULL,
+            stdout=self._stdout or (None if self.show_shell_output else subprocess.DEVNULL),
             stderr=None if self.show_shell_output else subprocess.DEVNULL,
         )
         deadline = time.monotonic() + self.startup_timeout
@@ -128,4 +136,7 @@ class Session:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
+        if self._stdout:
+            self._stdout.close()
+            self._stdout = None
         shutil.rmtree(self.tmp, ignore_errors=True)

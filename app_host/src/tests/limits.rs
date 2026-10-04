@@ -112,7 +112,7 @@ fn view_and_handler_deadlines_start_fresh_after_load() {
     assert!(
         app.console(512)
             .iter()
-            .any(|s| s.contains("execution deadline exceeded"))
+            .any(|s| s.contains("CPU-time budget exceeded"))
     );
     let mut app = open(
         "return function() return ui.button({id='go', 'go', on_click=function() while true do end end}) end",
@@ -135,7 +135,7 @@ fn view_and_handler_deadlines_start_fresh_after_load() {
         app.console(512)
             .last()
             .unwrap()
-            .contains("execution deadline exceeded")
+            .contains("CPU-time budget exceeded")
     );
 }
 
@@ -162,6 +162,47 @@ fn deadline_is_separate_from_interrupt_ceiling() {
     assert!(
         app.console(512)
             .iter()
-            .any(|s| s.contains("execution deadline exceeded"))
+            .any(|s| s.contains("CPU-time budget exceeded"))
     );
+}
+
+#[test]
+fn host_policy_uses_cpu_time_and_disarms_between_entries() {
+    let setup: VmSetup = Rc::new(|vm, context| {
+        let nap = vm.create_function(|_, ()| {
+            std::thread::sleep(Duration::from_millis(40));
+            Ok(())
+        })?;
+        vm.globals().set("nap", nap)?;
+        context.set_limits(vm, VmLimits {
+            time: Duration::from_millis(10),
+            load_time: Duration::from_millis(100),
+            interrupts: 20_000,
+            ..limits()
+        })
+    });
+    let app = LuaApp::open_with_setup(
+        source("nap(); return function() nap(); return ui.text({'working'}) end"),
+        Rc::new(|_| Ok(None)), noop_wake(), identity(), Some(setup),
+    ).unwrap();
+    assert_eq!(app.view().info().text.as_deref(), Some("working"));
+    let cpu = crate::budget::cpu_now();
+    while crate::budget::cpu_now() - cpu < 20_000_000 {
+        std::hint::spin_loop();
+    }
+    assert_eq!(app.vm.load("return 42").eval::<u32>().unwrap(), 42);
+    assert_eq!(app.view().info().text.as_deref(), Some("working"));
+}
+
+#[test]
+fn staged_state_export_is_bounded_without_replacing_working_vm() {
+    let app = open(
+        "_dump_state=function() while true do end end; return function() return ui.text({'working'}) end",
+        limits(),
+    );
+    let error = app.stage_source(source(
+        "return function() return ui.text({'candidate'}) end",
+    )).err().unwrap();
+    assert!(error.contains("interrupt budget exceeded"), "{error}");
+    assert_eq!(app.view().info().text.as_deref(), Some("working"));
 }

@@ -2,20 +2,12 @@
 //! Command bindings must check the VM-local handler context before producing side effects.
 
 use mlua::Lua;
-use std::{
-    cell::Cell,
-    rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
 pub type VmSetup = Rc<dyn Fn(&Lua, HostContext) -> mlua::Result<()>>;
 
-/// Trusted host policy; counts Luau interrupts, not instructions. The deadline is cooperative
-/// and the heap limit covers Lua allocations, not Rust resources referenced by userdata.
+/// Trusted host policy; counts Luau interrupts, not instructions. CPU limits are cooperative;
+/// the heap limit covers Lua allocations, not Rust resources referenced by userdata.
 #[derive(Clone, Copy)]
 pub struct VmLimits {
     pub memory_bytes: usize,
@@ -27,55 +19,28 @@ pub struct VmLimits {
 #[derive(Clone, Default)]
 pub struct HostContext {
     handling: Rc<Cell<bool>>,
-    fires: Arc<AtomicU64>,
-    time: Rc<Cell<Option<Duration>>>,
-    load_time: Rc<Cell<Option<Duration>>>,
-    deadline: Rc<Cell<Option<(Instant, Duration)>>>,
+    budget: Option<Arc<crate::Budget>>,
 }
 
 impl HostContext {
-    pub(crate) fn new(fires: Arc<AtomicU64>) -> Self {
+    pub(crate) fn new(budget: Arc<crate::Budget>) -> Self {
         Self {
-            fires,
-            ..Self::default()
+            handling: Rc::new(Cell::new(false)),
+            budget: Some(budget),
         }
     }
 
     pub fn set_limits(&self, vm: &Lua, limits: VmLimits) -> mlua::Result<()> {
-        if limits.memory_bytes == 0 || limits.interrupts == 0 {
-            return Err(mlua::Error::runtime("VM limits must be nonzero"));
-        }
-        vm.set_memory_limit(limits.memory_bytes)?;
-        self.time.set(Some(limits.time));
-        self.load_time.set(Some(limits.load_time));
-        let fires = self.fires.clone();
-        let deadline = self.deadline.clone();
-        vm.set_interrupt(move |_| {
-            if deadline
-                .get()
-                .is_some_and(|(start, limit)| start.elapsed() >= limit)
-            {
-                return Err(mlua::Error::runtime("execution deadline exceeded"));
-            }
-            if fires.fetch_add(1, Ordering::Relaxed) >= limits.interrupts {
-                return Err(mlua::Error::runtime("interrupt budget exceeded"));
-            }
-            Ok(mlua::VmState::Continue)
-        });
-        self.reset_budget();
-        Ok(())
-    }
-
-    pub(crate) fn reset_budget(&self) {
-        self.fires.store(0, Ordering::Relaxed);
-        self.deadline
-            .set(self.time.get().map(|limit| (Instant::now(), limit)));
-    }
-
-    pub(crate) fn reset_load_budget(&self) {
-        self.fires.store(0, Ordering::Relaxed);
-        self.deadline
-            .set(self.load_time.get().map(|limit| (Instant::now(), limit)));
+        self.budget
+            .as_ref()
+            .ok_or_else(|| mlua::Error::runtime("host context is not attached to a VM"))?
+            .configure(
+                vm,
+                limits.memory_bytes,
+                limits.interrupts,
+                limits.time,
+                limits.load_time,
+            )
     }
 
     pub fn require_handler(&self) -> mlua::Result<()> {

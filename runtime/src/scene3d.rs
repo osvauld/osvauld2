@@ -10,10 +10,13 @@ use thiserror::Error;
 mod glyph_mesh;
 mod glyph_outline;
 mod gpu;
+pub mod mesh;
 mod text_mesh;
 pub(crate) use gpu::SceneRenderer;
 
 const MAX_OBJECTS: usize = 256;
+const MAX_SCENE_MESH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCENE_TRIANGLES: usize = 131_072;
 pub(crate) const MAX_TEXT_SURFACES: usize = 8;
 const MAX_ID_BYTES: usize = 128;
 const MAX_SURFACE_TEXT_BYTES: usize = 1024;
@@ -29,8 +32,9 @@ pub struct Camera3d {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuiltinMesh {
+pub enum MeshKind {
     Cube,
+    Triangles,
 }
 
 #[derive(Clone, Debug)]
@@ -44,13 +48,19 @@ pub struct TextSurface {
 #[derive(Clone, Debug)]
 pub struct Object3d {
     pub id: Arc<str>,
-    pub mesh: BuiltinMesh,
+    pub mesh: Arc<mesh::MeshData>,
     pub position: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
     pub color: [f32; 4],
     /// A GPU-rendered text panel attached to the cube's local +Z face.
     pub surface: Option<Arc<TextSurface>>,
+}
+
+impl Object3d {
+    pub(super) fn mesh_data(&self) -> Arc<mesh::MeshData> {
+        self.mesh.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -62,7 +72,12 @@ pub struct Scene3d {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectInspection {
     pub id: Arc<str>,
-    pub mesh: BuiltinMesh,
+    pub mesh: MeshKind,
+    pub mesh_resource: u64,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    pub mesh_bytes: usize,
+    pub local_bounds: ([f32; 3], [f32; 3]),
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
@@ -93,6 +108,8 @@ pub struct SceneInspection {
 pub enum SceneError {
     #[error("scene has more than {MAX_OBJECTS} objects")]
     TooManyObjects,
+    #[error("scene mesh budget exceeded (16 MiB unique payload or 131072 instanced triangles)")]
+    MeshBudget,
     #[error("camera is invalid")]
     InvalidCamera,
     #[error("object id is empty, too long, or duplicated: {0}")]
@@ -131,7 +148,17 @@ impl Scene3d {
         {
             return Err(SceneError::TooManyTextSurfaces);
         }
+        let mut meshes = HashSet::new();
+        let mut mesh_bytes = 0;
+        let mut triangles = 0;
         for object in &objects {
+            if meshes.insert(object.mesh.resource_id()) {
+                mesh_bytes += object.mesh.payload_bytes();
+            }
+            triangles += object.mesh.triangle_count();
+            if mesh_bytes > MAX_SCENE_MESH_BYTES || triangles > MAX_SCENE_TRIANGLES {
+                return Err(SceneError::MeshBudget);
+            }
             if object.id.is_empty()
                 || object.id.len() > MAX_ID_BYTES
                 || !ids.insert(object.id.clone())
@@ -147,6 +174,7 @@ impl Scene3d {
                     .color
                     .iter()
                     .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                || (object.surface.is_some() && !Arc::ptr_eq(&object.mesh, &mesh::MeshData::cube()))
                 || object.surface.as_ref().is_some_and(|surface| {
                     surface.text.len() > MAX_SURFACE_TEXT_BYTES
                         || !surface.font_size.is_finite()
@@ -176,7 +204,13 @@ impl Scene3d {
 
     pub fn raycast(&self, viewport: (f32, f32), point: (f32, f32)) -> Option<SceneHit> {
         let (width, height) = viewport;
-        if width <= 0.0 || height <= 0.0 {
+        if !width.is_finite()
+            || !height.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+            || !point.0.is_finite()
+            || !point.1.is_finite()
+        {
             return None;
         }
         let ndc = Vec3::new(
@@ -194,6 +228,17 @@ impl Scene3d {
         );
         let direction =
             ((projection * view).inverse().project_point3(ndc) - camera.eye).normalize();
+        let forward = (camera.target - camera.eye).normalize();
+        let along = direction.dot(forward);
+        if !along.is_finite() || along <= 0.0 {
+            return None;
+        }
+        let near_t = camera.near / along;
+        let far_t = camera.far / along;
+        if !near_t.is_finite() || !far_t.is_finite() {
+            return None;
+        }
+        let ray_origin = camera.eye + direction * near_t;
         self.objects
             .iter()
             .filter_map(|object| {
@@ -203,9 +248,13 @@ impl Scene3d {
                     object.position,
                 );
                 let inverse = model.inverse();
-                let origin = inverse.transform_point3(camera.eye);
+                let origin = inverse.transform_point3(ray_origin);
                 let local_direction = inverse.transform_vector3(direction);
-                let (distance, local_normal) = cube_hit(origin, local_direction)?;
+                let (t, local_normal) = object.mesh_data().raycast(origin, local_direction)?;
+                let distance = t + near_t;
+                if distance > far_t {
+                    return None;
+                }
                 Some(SceneHit {
                     id: object.id.clone(),
                     distance,
@@ -230,7 +279,19 @@ impl Scene3d {
                 .iter()
                 .map(|object| ObjectInspection {
                     id: object.id.clone(),
-                    mesh: object.mesh,
+                    mesh: if Arc::ptr_eq(&object.mesh, &mesh::MeshData::cube()) {
+                        MeshKind::Cube
+                    } else {
+                        MeshKind::Triangles
+                    },
+                    mesh_resource: object.mesh.resource_id(),
+                    vertex_count: object.mesh.vertex_count(),
+                    triangle_count: object.mesh.triangle_count(),
+                    mesh_bytes: object.mesh.payload_bytes(),
+                    local_bounds: (
+                        object.mesh.bounds().0.to_array(),
+                        object.mesh.bounds().1.to_array(),
+                    ),
                     position: object.position.to_array(),
                     rotation: object.rotation.to_array(),
                     scale: object.scale.to_array(),
@@ -239,48 +300,6 @@ impl Scene3d {
                 })
                 .collect(),
         }
-    }
-}
-
-fn cube_hit(origin: Vec3, direction: Vec3) -> Option<(f32, Vec3)> {
-    let mut near = f32::NEG_INFINITY;
-    let mut far = f32::INFINITY;
-    let mut near_normal = Vec3::ZERO;
-    let mut far_normal = Vec3::ZERO;
-    for (axis, normal) in [(0, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
-        let o = origin[axis];
-        let d = direction[axis];
-        if d.abs() < 1e-7 {
-            if !(-0.5..=0.5).contains(&o) {
-                return None;
-            }
-            continue;
-        }
-        let mut a = (-0.5 - o) / d;
-        let mut b = (0.5 - o) / d;
-        let (mut a_normal, mut b_normal) = (-normal, normal);
-        if a > b {
-            std::mem::swap(&mut a, &mut b);
-            std::mem::swap(&mut a_normal, &mut b_normal);
-        }
-        if a > near {
-            near = a;
-            near_normal = a_normal;
-        }
-        if b < far {
-            far = b;
-            far_normal = b_normal;
-        }
-        if near > far {
-            return None;
-        }
-    }
-    if near >= 0.0 {
-        Some((near, near_normal))
-    } else if far >= 0.0 {
-        Some((far, far_normal))
-    } else {
-        None
     }
 }
 

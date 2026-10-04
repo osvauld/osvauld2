@@ -206,9 +206,17 @@ fn render_vello(
         .map_err(|e| format!("vello render: {e}"))
 }
 
-pub(crate) struct SceneView3d {
-    pub scene: Arc<Scene3d>,
-    pub rect: Rect,
+/// A frame's one 3D viewport: what to draw, where (logical points), and what of it shows.
+#[derive(Clone)]
+pub struct SceneView3d {
+    pub(crate) scene: Arc<Scene3d>,
+    pub(crate) rect: Rect,
+    pub(crate) clip: Rect,
+}
+
+fn physical_rect(rect: Rect, scale: f32) -> [f32; 4] {
+    [rect.x0 as f32, rect.y0 as f32, rect.width() as f32, rect.height() as f32]
+        .map(|v| v * scale)
 }
 
 fn physical_viewport(rect: Rect, scale: f32, width: u32, height: u32) -> [u32; 4] {
@@ -445,12 +453,15 @@ impl Render {
                 &self.scene_targets.depth,
                 &view.scene,
                 physical_viewport(
-                    view.rect,
+                    view.clip,
                     (self.scale * SUPERSAMPLE as f64) as f32,
                     self.config.width * SUPERSAMPLE,
                     self.config.height * SUPERSAMPLE,
                 ),
+                physical_rect(view.rect, (self.scale * SUPERSAMPLE as f64) as f32),
             );
+        } else {
+            self.scene_renderer.clear();
         }
 
         // Blit the compute-rendered target onto the (non-storage) surface texture, then present.
@@ -525,6 +536,9 @@ impl Render {
             width,
             height,
         )?;
+        if scene3d.is_none() {
+            self.scene_renderer.clear();
+        }
         if let Some(scene_view) = scene3d {
             self.scene_renderer.render(
                 &self.device,
@@ -533,7 +547,8 @@ impl Render {
                 &scene_targets.resolve,
                 &scene_targets.depth,
                 &scene_view.scene,
-                physical_viewport(scene_view.rect, scale, width, height),
+                physical_viewport(scene_view.clip, scale, width, height),
+                physical_rect(scene_view.rect, scale),
             );
             let mut encoder = self
                 .device

@@ -157,6 +157,13 @@ pub enum Request {
     OpenItem {
         item_id: String,
     },
+    /// Show an open item's app beside the focused one, both live. A stand-in for the chrome's
+    /// own layout until the Lua chrome owns tiling.
+    SplitWith {
+        item_id: String,
+    },
+    /// Back to the focused app alone. The other one keeps running, unseen.
+    Unsplit,
 
     // ── node (kunki) ────────────────────────────────────────────────────────────
     /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told

@@ -23,10 +23,12 @@ Read the diff cold. Output `BLOCKER` / `SHOULD` / `NOTE`; you advise, the user j
    `main.lua` required; name from `manifest.osv`'s `app "<name>"` else folder name; errors
    rendered, not swallowed. Source becomes a Loro `files` map — plain-bytes keys are not a
    thing.
-5. **DocChanged stays payload-free** — any user event repaints; `view()` learns staleness
-   from the doc counters, not from the message.
-6. **When the bridge lands** (status item 1): the bridge thread is *pure transport* — every
-   request executes on the UI thread inside `update` via `Msg::Rpc(req, reply_tx)`. Vault
-   mutation on the bridge thread is the sthalam pattern and a BLOCKER.
+5. **An app thread's wake is payload-free** — `In::Wake` / `Msg::TileDirty` say only "paint";
+   `view()` learns staleness from the doc counters. (Was `Msg::DocChanged`, removed 2026-10-04.)
+6. **The bridge thread is *pure transport*** — every request reaches `update` via
+   `Msg::Rpc(req, reply_tx)`; a request for an open app is then forwarded to *that app's
+   thread*, which owns its docs and replies itself (2026-10-04). Vault mutation on the
+   bridge thread is the sthalam pattern and a BLOCKER; on an app thread, for its own item,
+   it is the design.
 7. Screens are `runtime::El<Msg>` descriptions — no direct winit/wgpu calls here, no
    `custom()` scene hacks where a prop exists.
