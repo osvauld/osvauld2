@@ -1,6 +1,6 @@
 # Group chat sync — permissions, workspace index, shards, ephemeral
 
-Status: **steps 0–2 and 4 built 2026-10-04 (T1–T5, T13, T16 green); steps 3, 5–11 open.** A long-horizon,
+Status: **steps 0–4 built 2026-10-04 (T1–T5, T13, T16, T23a green); steps 5–11 open.** A long-horizon,
 test-first plan driven by `demo_apps/chat`: §0 lists the end-to-end tests that prove it done;
 they are written first, then §7's steps make them pass. Branch `sync-hardening`. The general
 permission model is [`app-permissions.md`](app-permissions.md); this plan builds the slice
@@ -198,15 +198,24 @@ and gets a fresh `pi -p` review with the matching expert checklist before the us
    failed subscribes, sync generation.
 2. **Proven caller** (§2). ✓ `courier::proof`; the kunki bridge wraps every request in an
    `Envelope` and its `Gate` checks it before dispatch; shell2 signs as the vault account.
-3. **App roles and scopes.** `role.assign` with the grant cone; invites carrying an app role
-   at `Scope::App`; sync/subscribe/listen accept `App`/`Resource` scopes against the target
-   (fixes `app-permissions.md` §10); `Cause::Under` recorded so revocation cascades; roles
-   computed from the node's grant records. T23.
+3. **App roles and scopes.** ✓ `role.assign` with the grant cone; invites carrying an app role
+   at `Scope::App`; sync/subscribe/listen accept `App` scopes against the target (`Resource`
+   moved to step 5); `Cause::Under` recorded so revocation cascades (fixes
+   `app-permissions.md` §10); roles computed from the node's grant records. T23.
+   As built:
+   - The caller's authority is `Admin::grants` (live issues on record). The presented token
+     only proves membership.
+   - The node reads the cone from the `manifest.osv` in the item source it holds.
+   - Invites remember their inviter by nonce (`invite-causes/`).
+   - Fan-out re-checks each subscriber.
+   - Bridge verbs `AssignRole`/`RevokeRole`.
+   - T23a (the role half) is green. `Resource` scope waits for step 5.
 4. **Manifest parse.** ✓ (before 3) A small `manifest` crate (pure, no Loro, no Lua): grammar of §3,
    errors with line numbers, `resolve(doc_name) → (decl, vars)`, plus `can_grant`/`satisfies`
    over the transitive grant cone (osvauld1's `ManifestAuthorizer`). Unit tests only.
 5. **Declarative enforcement** (§4): roles, DID variables, `members(doc)` for read and
-   write. T8 (node half), T10 and T20 (direct-request half), T15.
+   write; `Scope::Resource` tokens reaching single docs. T8 (node half), T10 and T20
+   (direct-request half), T15.
 6. **Rejection and rollback** (§5). T8 green.
 7. **Node Lua validation** (§5) with the helper library, `ctx.doc`, `ctx.rate`. T9, T17,
    T18, T19, T22, T24. Decide here whether the sandbox moves out of `app_host` into a crate

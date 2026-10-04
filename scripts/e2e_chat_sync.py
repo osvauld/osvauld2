@@ -468,21 +468,48 @@ def t22(net):
     assert msg(a, i, mid)["at"] != 1, "bob rewrote at"
 
 
-def t23(net):
-    """role.assign within the cone; a member can't assign; revoking cascades."""
+def node_refuses(p, verb, why="does not carry that capability", **kw):
+    """`verb` through `p`'s bridge must be refused for reason `why` — not merely fail."""
+    try:
+        p.rpc.request(verb, **kw)
+    except Exception as e:  # noqa: BLE001 — the client raises on `Response::Err`
+        assert why in str(e), f"{verb} failed for the wrong reason: {e}"
+        return
+    raise AssertionError(f"{verb} {kw} was accepted")
+
+
+def _t23_roles(net):
     a, b = net.peer("alice"), net.peer("bob")
     ws, item = net.share_app(a, [b], CHAT)
     i = item["id"]
     c = net.peer("carol")
     net.join(a, c, ws, item)
     bob, carol = _did(b, i), _did(c, i)
-    try:
-        c.rpc.request("AssignRole", item_id=i, did=bob, role="moderator")
-        raise AssertionError("a member assigned a role")
-    except Exception as e:  # noqa: BLE001
-        assert "AssertionError" not in type(e).__name__, e
+    node_refuses(c, "AssignRole", item_id=i, did=bob, role="moderator")
+    node_refuses(b, "AssignRole", item_id=i, did=carol, role="moderator")
     a.rpc.request("AssignRole", item_id=i, did=bob, role="admin")
+    node_refuses(b, "AssignRole", item_id=i, did=carol, role="admin")
     b.rpc.request("AssignRole", item_id=i, did=carol, role="moderator")
+    return a, b, c, i, bob, carol
+
+
+def t23a(net):
+    """The role half of T23: assign within the cone, refuse outside it, revoke cascades."""
+    a, b, c, i, bob, carol = _t23_roles(net)
+    node_refuses(c, "RevokeRole", item_id=i, did=bob, role="admin")
+    a.rpc.request("RevokeRole", item_id=i, did=bob, role="admin")
+    node_refuses(b, "AssignRole", item_id=i, did=carol, role="member")
+    # Carol's moderator came from bob's admin: revoking it again finds nothing, but bob — no
+    # longer admin — may not even ask.
+    node_refuses(b, "RevokeRole", item_id=i, did=carol, role="moderator")
+    a.rpc.request("RevokeRole", item_id=i, did=carol, role="moderator")
+    send(c, i, "carol is still a member")
+    sees(a, i, "carol is still a member")
+
+
+def t23(net):
+    """role.assign within the cone; a member can't assign; revoking cascades."""
+    a, b, c, i, bob, carol = _t23_roles(net)
     send(a, i, "carol may remove this")
     mid = msg_id(c, i, "carol may remove this")
     c.rpc.click(i, f"remove:{mid}")
@@ -527,6 +554,7 @@ def t25(net):
 
 
 TESTS = {f"t{n}": globals()[f"t{n}"] for n in range(1, 26) if n != 16}
+TESTS["t23a"] = t23a
 
 
 def main() -> int:

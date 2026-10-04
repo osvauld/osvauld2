@@ -986,6 +986,44 @@ impl Shell {
         }
     }
 
+    /// `AssignRole`/`RevokeRole`: off-thread, answered through `NodeRpcDone`.
+    fn change_role(
+        &self,
+        item_id: &str,
+        did: String,
+        role: String,
+        revoke: bool,
+        tx: std::sync::mpsc::Sender<Response>,
+    ) {
+        let (record, wi) = match (self.node.clone(), find_item(&self.vault, item_id)) {
+            (Some(record), Ok(wi)) => (record, wi),
+            (None, _) => {
+                let _ = tx.send(Response::err("no node claimed"));
+                return;
+            }
+            (_, Err(e)) => {
+                let _ = tx.send(Response::err(e));
+                return;
+            }
+        };
+        let vault = self.vault.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let socket = kunki::bridge::socket_path();
+            let result = node::change_role(
+                &socket,
+                &vault,
+                record.token,
+                &wi.ws_id,
+                &wi.id,
+                &did,
+                &role,
+                revoke,
+            );
+            let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
+        });
+    }
+
     fn gen_(&self) -> u64 {
         self.sync_gen.load(Ordering::SeqCst)
     }
@@ -1724,6 +1762,14 @@ impl App for Shell {
                         let _ = tx.send(Response::err("no node claimed"));
                     }
                 }
+                None
+            }
+            Msg::Rpc(Request::AssignRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, false, tx);
+                None
+            }
+            Msg::Rpc(Request::RevokeRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, true, tx);
                 None
             }
             Msg::Rpc(Request::PushSrc { item_id }, tx) => {

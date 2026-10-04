@@ -236,7 +236,13 @@ fn a_second_sync_sends_only_what_changed_since_the_first() {
 }
 
 fn member(node: &Identity, desktop: &Identity) -> Token {
-    ws_token(node, desktop, "member", Scope::Workspace("ws1".to_string()), 1)
+    ws_token(
+        node,
+        desktop,
+        "member",
+        Scope::Workspace("ws1".to_string()),
+        1,
+    )
 }
 
 fn hello_since(desktop: &Identity, token: Token, doc: &LoroDoc, since: &[u8]) -> SyncHello {
@@ -264,7 +270,10 @@ fn a_diff_since_the_acked_vv_carries_only_new_edits_and_converges() {
     doc.get_text("t").insert(3, " two").unwrap();
     let full = doc.export(ExportMode::all_updates()).unwrap();
     let next = hello_since(&desktop, member(&node, &desktop), &doc, &ack.vv);
-    assert!(next.update.len() < full.len(), "since did not shrink the push");
+    assert!(
+        next.update.len() < full.len(),
+        "since did not shrink the push"
+    );
 
     let (ack, snapshot) =
         node_accept_sync(&next, &node.did(), Some(&snapshot), 3, &HashSet::new()).unwrap();
@@ -285,4 +294,90 @@ fn a_since_the_node_never_reached_is_flagged_missing() {
     let hello = hello_since(&desktop, member(&node, &desktop), &doc, &early);
     let (ack, _) = node_accept_sync(&hello, &node.did(), None, 2, &HashSet::new()).unwrap();
     assert!(ack.missing);
+}
+
+/// An app-role grant (`role.assign`, or an invite at app scope) reaches its own item's docs
+/// and no other: until 2026-10-04 sync checked `Scope::Workspace`, which no app scope contains.
+#[test]
+fn an_app_scoped_token_syncs_its_own_item_only() {
+    let (node, desktop) = ids();
+    let app = |item: &str| Scope::App {
+        ws: "ws1".to_string(),
+        app: item.to_string(),
+    };
+    let token = issue_root(
+        &node,
+        &desktop.did(),
+        "moderator",
+        app("item1"),
+        false,
+        1,
+        1000,
+    )
+    .unwrap();
+
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "hi").unwrap();
+    let own = hello(&desktop.did(), token.clone(), "ws1", &doc);
+    node_accept_sync(&own, &node.did(), None, 2, &HashSet::new()).unwrap();
+
+    let other = desktop_start_sync(
+        &desktop.did(),
+        token,
+        "ws1",
+        "item2",
+        SyncLayer::Doc("board".to_string()),
+        &doc,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        node_accept_sync(&other, &node.did(), None, 2, &HashSet::new()).unwrap_err(),
+        CourierError::OutOfScope
+    );
+}
+
+fn src_hello(desktop: &Identity, token: Token, doc: &LoroDoc) -> SyncHello {
+    desktop_start_sync(
+        desktop.did(),
+        token,
+        "ws1",
+        "item1",
+        SyncLayer::Src,
+        doc,
+        None,
+    )
+    .unwrap()
+}
+
+/// The source holds `manifest.osv`; a member who could rewrite it could grant itself roles.
+#[test]
+fn only_an_installer_may_change_an_apps_source_but_any_member_may_pull_it() {
+    let (node, owner) = ids();
+    let (_, member) = ids();
+    let ws = || Scope::Workspace("ws1".into());
+    let owner_token = ws_token(&node, &owner, "owner", ws(), 1);
+    let member_token = ws_token(&node, &member, "member", ws(), 1);
+
+    let src = LoroDoc::new();
+    src.get_text("manifest.osv")
+        .insert(0, "app \"x\" {}")
+        .unwrap();
+    let push = src_hello(&owner, owner_token, &src);
+    let (_, stored) = node_accept_sync(&push, &node.did(), None, 2, &HashSet::new()).unwrap();
+
+    let pull = src_hello(&member, member_token.clone(), &LoroDoc::new());
+    node_accept_sync(&pull, &node.did(), Some(&stored), 2, &HashSet::new()).unwrap();
+
+    let forged = LoroDoc::new();
+    forged.import(&stored).unwrap();
+    forged
+        .get_text("manifest.osv")
+        .insert(0, "-- mine\n")
+        .unwrap();
+    let forge = src_hello(&member, member_token, &forged);
+    assert_eq!(
+        node_accept_sync(&forge, &node.did(), Some(&stored), 2, &HashSet::new()).unwrap_err(),
+        CourierError::NotPermitted
+    );
 }

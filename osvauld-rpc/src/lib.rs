@@ -168,6 +168,19 @@ pub enum Request {
     Whoami,
     /// Run the reconciliation pass `SyncTick` runs, now — so a test never waits on its timer.
     SyncNow,
+    /// Give `did` an app role (declared in the item's manifest) on that item, as the unlocked
+    /// account. The node refuses a role outside this account's grant cone.
+    AssignRole {
+        item_id: String,
+        did: String,
+        role: String,
+    },
+    /// Take an app role back; whatever it was used to grant goes with it.
+    RevokeRole {
+        item_id: String,
+        did: String,
+        role: String,
+    },
     /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told
     /// apart by their text prefix the same way the shell's own paste box does. Answers with
     /// the joined node's did.

@@ -1,3 +1,4 @@
 app "chat" {
-
-  }
+  roles admin, moderator, member
+  role admin { grant moderator, member }
+}

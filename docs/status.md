@@ -116,7 +116,17 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - `manifest` crate: parses `manifest.osv` with line-numbered errors; `resolve(doc)` picks the
   governing declaration (literal beats variable, day/month shards only match dates);
   `can_grant`/`satisfies` follow the transitive grant cone with `owner` as root. Every
-  `demo_apps` manifest parses. Not yet read by the node.
+  `demo_apps` manifest parses.
+- app roles (T23a): bridge `AssignRole`/`RevokeRole {item_id, did, role}`.
+  - The node reads the item's `manifest.osv` from the source it holds and decides from the
+    caller's grants on record (`courier::role`).
+  - Assigned, invited and reconnect-reissued tokens record the grant that allowed them, and
+    revoking cascades. An invite with no recorded inviter (minted before this), or whose
+    inviter's grant is no longer live, is refused.
+  - Changing an app's source (and so its manifest) needs `AppInstall`. Members may still
+    pull it.
+  - App-scoped tokens sync, subscribe and listen. Pushes skip revoked subscribers.
+  - `demo_apps/chat` declares `admin`/`moderator`/`member`.
 
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a

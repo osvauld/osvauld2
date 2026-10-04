@@ -1,6 +1,6 @@
 # App permissions — tokens, membership docs, manifest, rules
 
-Status: **design, agreed 2026-10-04. Built: the §3 parser (`manifest` crate, 2026-10-04); nothing enforces it yet.** The first slice is built by
+Status: **design, agreed 2026-10-04. Built 2026-10-04: the §3 parser (`manifest` crate) and §2 role assignment with cascade; doc read/write rules are not enforced yet.** The first slice is built by
 [`group-chat-sync.md`](group-chat-sync.md) (chat needs §3–§6). This doc is the general model;
 that plan is the first app proven against it. Extends — does not replace —
 [`workspace-permissions-sync.md`](workspace-permissions-sync.md) §4 (decided 2026-09-17/18),
@@ -227,6 +227,22 @@ Found by reading, to be pinned by tests when the step that fixes each lands:
   leaves everyone they invited in place.
 - **No app roles can be handed out.** `role.assign` is unbuilt and delegation cannot change a
   role.
+
+*Fixed 2026-10-04 (group-chat-sync step 3):*
+- Sync and subscribe target `Scope::App { ws, app: item }`, so node, workspace and that
+  app's grants reach it. `Listen` accepts any live chain this node rooted.
+- `role.assign`/revoke exist (`courier::role`, `Admin::assign_role`/`revoke_role`).
+- Assigned and invited tokens are recorded `Cause::Under` the grant that allowed them, and
+  `Admin::revoke` follows that lineage.
+- Fan-out skips a subscriber with no live grant over the item.
+- Found in review: a member could sync an edited source, rewrite `manifest.osv` and widen
+  its own cone. A source sync that changes anything now needs `AppInstall`.
+- Reconnect reissues record `Cause::Under` the token they replace.
+- An invite with no recorded inviter, or redeemed after its inviter's grant was revoked,
+  is refused.
+
+Still open: a `Scope::Resource` token reaches no sync, because sync targets the whole item.
+It needs per-doc addresses (step 5).
 
 ## 11. Open
 

@@ -8,8 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use courier::invite::{InviteRequest, InviteTicket, InviteWelcome, desktop_start_invite_claim};
 use courier::publish::{PublishAck, PublishedItem, PublishedWorkspace, desktop_publish};
+use courier::role::RoleRequest;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncAck, SyncHello, SyncLayer, desktop_start_sync};
+use courier::sync::{SyncAck, SyncHello, SyncLayer, desktop_start_sync, item_scope};
 use courier::token::{Scope, Token};
 use courier::{ClaimWelcome, ConnectionTicket, DesktopNodeRecord};
 use kunki::bridge::{Envelope, Request};
@@ -343,6 +344,40 @@ pub fn unsubscribe(
 ) -> Result<(), String> {
     let hello = desktop_start_subscribe(desktop_did, token, ws_id, item_id, layer);
     unpack(call_as(socket, vault, &Request::Unsubscribe(hello))?)
+}
+
+/// Give `to` an app role on one item, or with `revoke` take it back. The node decides from
+/// this account's grants on record; `token` only proves membership.
+#[allow(clippy::too_many_arguments)]
+pub fn change_role(
+    socket: &Path,
+    vault: &Vault,
+    token: Token,
+    ws_id: &str,
+    item_id: &str,
+    to: &str,
+    role: &str,
+    revoke: bool,
+) -> Result<(), String> {
+    let desktop_did = vault
+        .with_signer(|d| d.did().to_string())
+        .ok_or("account is locked")?;
+    let req = RoleRequest {
+        desktop_did,
+        token,
+        to: to.to_string(),
+        role: role.to_string(),
+        scope: item_scope(ws_id, item_id),
+    };
+    let req = if revoke {
+        Request::RevokeRole(req)
+    } else {
+        Request::AssignRole(req)
+    };
+    match call_as(socket, vault, &req)? {
+        Response::Ok { .. } => Ok(()),
+        Response::Err { message } => Err(message),
+    }
 }
 
 /// Open the channel pushes travel on and wait for the node's ack. Deliberately not a loop

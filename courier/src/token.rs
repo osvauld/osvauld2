@@ -101,6 +101,19 @@ impl Token {
     pub fn claims(&self) -> Result<Claims> {
         bincode::deserialize(&self.payload).map_err(|_| CourierError::Decode)
     }
+
+    /// The last link of the chain: the token its root authority issued. Unverified — call
+    /// after [`verify_chain`].
+    pub fn root(&self) -> Result<Token> {
+        let mut token = self.clone();
+        for _ in 0..MAX_CHAIN {
+            match token.claims()?.prf {
+                Some(parent) => token = parent,
+                None => return Ok(token),
+            }
+        }
+        Err(CourierError::ChainTooLong)
+    }
 }
 
 pub fn issue_root(

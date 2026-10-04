@@ -24,6 +24,7 @@ pub mod invite;
 pub mod policy;
 pub mod proof;
 pub mod publish;
+pub mod role;
 pub mod subscribe;
 pub mod sync;
 pub mod token;
@@ -44,7 +45,7 @@ const CLAIM_ROLE: &str = "owner";
 /// How long the node's grant to a claimant lives. Reconnect reissues, so this is also the
 /// ceiling on how long a revocation takes to bite. The permit this replaced had no expiry
 /// at all and no id to revoke, so it was valid forever by construction.
-const CLAIM_TTL: u64 = 60 * 60 * 24 * 30;
+pub(crate) const CLAIM_TTL: u64 = 60 * 60 * 24 * 30;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CourierError {

@@ -94,10 +94,19 @@ pub fn desktop_start_sync(
     })
 }
 
+/// What a sync or subscription acts on: the item as an app instance. Node and workspace
+/// grants contain it; an app grant contains only its own item.
+pub fn item_scope(ws_id: &str, item_id: &str) -> Scope {
+    Scope::App {
+        ws: ws_id.to_string(),
+        app: item_id.to_string(),
+    }
+}
+
 /// Authorize, merge, and diff back. `current_snapshot` is the node's own stored snapshot for
 /// this item/layer (`None` the first time this layer is ever synced), read by the caller
 /// before this call; on success the second element is the new snapshot for the caller to
-/// persist in its place. Authorization is workspace membership only ([`policy::membership`]),
+/// persist in its place. Authorization is membership over the item ([`item_scope`]) only,
 /// not a platform capability — see the module doc.
 pub fn node_accept_sync(
     hello: &SyncHello,
@@ -110,7 +119,7 @@ pub fn node_accept_sync(
         &hello.token,
         node_did,
         &hello.desktop_did,
-        &Scope::Workspace(hello.ws_id.clone()),
+        &item_scope(&hello.ws_id, &hello.item_id),
         now,
         revoked,
     )?;
@@ -119,9 +128,23 @@ pub fn node_accept_sync(
     if let Some(bytes) = current_snapshot {
         doc.import(bytes).map_err(|_| CourierError::Decode)?;
     }
+    let before = doc.oplog_vv();
     if !hello.update.is_empty() {
         doc.import(&hello.update)
             .map_err(|_| CourierError::Decode)?;
+    }
+    // An app's source carries its manifest — its roles and rules — so changing it is
+    // installing the app, not using it. Pulling it stays open to every member.
+    if hello.layer == SyncLayer::Src && doc.oplog_vv() != before {
+        policy::authorize(
+            &hello.token,
+            node_did,
+            &hello.desktop_did,
+            policy::Capability::AppInstall,
+            &item_scope(&hello.ws_id, &hello.item_id),
+            now,
+            revoked,
+        )?;
     }
 
     let their_vv = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;

@@ -20,6 +20,7 @@ use courier::ClaimHello;
 use courier::invite::{InviteClaimHello, InviteRequest};
 use courier::proof::{self, Proof, Replay};
 use courier::publish::PublishHello;
+use courier::role::RoleRequest;
 use courier::subscribe::SubscribeHello;
 use courier::sync::SyncHello;
 use courier::token::Token;
@@ -70,6 +71,10 @@ pub enum Request {
     /// A desktop declaring interest in an item's layer, for a future push.
     Subscribe(SubscribeHello),
     Unsubscribe(SubscribeHello),
+    /// Hand out an app role (`courier::role`); the caller's authority is its grants on record.
+    AssignRole(RoleRequest),
+    /// Take one back, with everything issued under it.
+    RevokeRole(RoleRequest),
     /// Open the channel pushes actually travel on. Unlike every other request here, this one
     /// does not get one reply and close — after the ack, the connection is held open and every
     /// `Push` the desktop is subscribed to is relayed down it until it disconnects. See
@@ -92,6 +97,7 @@ impl Request {
             Request::Invite(r) => Some(&r.desktop_did),
             Request::Sync(h) => Some(&h.desktop_did),
             Request::Subscribe(h) | Request::Unsubscribe(h) => Some(&h.desktop_did),
+            Request::AssignRole(r) | Request::RevokeRole(r) => Some(&r.desktop_did),
             Request::Listen { desktop_did, .. } => Some(desktop_did),
         }
     }
@@ -344,6 +350,14 @@ fn dispatch(req: Request, vault: &Vault, pusher: &impl Pusher) -> Response {
                 Err(e) => Response::err(e.to_string()),
             }
         }
+        Request::AssignRole(req) => match Admin::new(vault.clone()).assign_role(req, now_secs()) {
+            Ok(_) => Response::ok(()),
+            Err(e) => Response::err(e.to_string()),
+        },
+        Request::RevokeRole(req) => match Admin::new(vault.clone()).revoke_role(req, now_secs()) {
+            Ok(n) => Response::ok(n),
+            Err(e) => Response::err(e.to_string()),
+        },
         // `serve`'s accept loop intercepts this before it ever reaches `dispatch` — reachable
         // here only if something calls `handle`/`respond` directly with one, which is a caller
         // bug, not a request this function itself knows how to answer.
