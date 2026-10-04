@@ -639,8 +639,17 @@ collider's centre (`Transform::pivot`), so `pos` holds still; a new body starts 
 `set { spin }` in degrees a second; the dump has `rot` and `spin`. Hockey's puck has a mark to see
 it turn, and the smoke has red strike it glancing and reads the spin. No curve from spin yet (that
 would be our own per-frame force). The Lua ↔ world contract is three kinds of call: describe
-(`view`), command (`set`, `after`), and questions. Next, in order: questions (`ray`, `at`);
-controller acceleration; a `follow` controller.
+(`view`), command (`set`, `after`), and questions. **Questions:** `world(id):ray(from, to,
+{ skip })` → nil or `{ id, at, normal, dist, tick }` (zones do not stop it), and `:at(point)` →
+the sorted ids of colliders and zones there, with `tick`; allowed in `view` as well as handlers;
+as of the last step, which the world now counts (`tick` in the dump). The answer envelope is
+agreed with the 3D session. 1000 rays over 500 things: ~4 ms in a debug build. **Fixed step:**
+the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STEPS`), as 3D;
+leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
+ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
+Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
+body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
+bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
@@ -677,7 +686,8 @@ Lua-authored geometry precedes Blender import, aiming toward a procedural marble
   Registered `smoke_mesh_math.py` proves raw inspection, shared identity, real pointer picking,
   regeneration, revision-checked source editing and live/custom captures with a clean console
   (`shots/mesh-math.png`, `shots/mesh-math-custom.png`).
-Higher-level curves/tubes/revolve, spatial gradients, Blender import and Lua 3D physics remain unbuilt.
+Higher-level curves/tubes/revolve, spatial gradients and Blender import remain unbuilt.
+The later experimental Lua 3D physics proof is recorded below.
 One viewport, cube-only text surfaces and incorrect foreground Vello composition remain limits.
 
 **2026-10-01 Marble Gates groundwork, pending user acceptance:** integrated the committed
@@ -727,6 +737,78 @@ and 197 `app_host` tests pass (two host tests ignored), including kanban round-t
 runtime simulation tests and the explicitly run real-pixel capture test pass. All nine registered
 smokes pass with the Lua marble proof and zero-time 2D regression fix. The full workspace test
 suite was not rerun.
+
+**Marble Gates continuation checkpoint:** [test-first plan](design/marble-gates.md), steps 1–2.
+Body recipes accept bounded quaternions; physics normalizes them, render snapshots match,
+and retained edits update reset targets without teleporting live bodies. The demo has a visible
+Lua-authored tilted-ramp mode sharing meshes with the drop level; the inactive level stays paused.
+Fixed `sensor = true` sphere/box bodies are nonblocking zones. A retained scene leaf's `on_zone`
+receives deterministic enter/leave moments with sensor/body IDs and physics ticks before view;
+zone handlers may reset, while view/frame/hover guards remain. Entity inspection includes sorted
+`zones` and authored sensor flags. The 4096-moment queue reports newest-overflow loss through
+`dropped_zone_events`; native membership stays authoritative. Removed sensors emit leave for
+surviving bodies, removed bodies clear quietly, and fixed resets request an overlap-refresh step
+including over sleeping bodies. The live smoke now proves an authored goal's enter/leave, raw
+membership and observational captures; it failed first on unsupported rotation/sensor fields.
+Native coverage includes nonblocking motion, sorted events, removal, pause, overflow and sleeping
+refresh; host tests pin callback dispatch, tick stamps and command-guard restoration on error.
+Final validation: `cargo check --workspace` passes with existing warnings; all 100 `world`
+tests and 227 host tests pass (two host tests ignored), including 36 native 3D tests, six host
+3D tests and kanban round-trip. All 12 registered smokes pass. Ramp and zone screenshots were
+inspected. The full workspace test suite was not rerun. At that checkpoint live adjustment
+and Lua rules were next; they are now implemented below. Camera-follow stays deferred.
+
+**Playable Lua level checkpoint, plan steps 3–4:** generic `game:set(id, {pos, rotation,
+velocity, spin})` validates the whole command before changing one body. Spin is a 3D vector in
+degrees/second, while native `angular_velocity` inspection stays radians/second. Commands preserve
+identity, clock and authored reset targets; fixed-solid edits wake dynamics, sensor edits do not.
+Input/zone scope, numeric types, unknown fields, invalid values and fixed-body motion fields are
+covered. `game:scene(camera, {running=false})` renders actual resolved poses without stepping;
+resume ignores paused time. New flags enforce boolean types rather than Luau truthiness.
+`demo_apps/marble_gates/level.lua` describes the ramp, green gate and red fall zone, with all
+Ready/Playing/Won/Lost, tilt, Release, attempts and Retry logic in Lua. No game-specific Rust was
+added. The original drop/ramp lab modes remain; **Play gates** selects the complete level.
+Registered `smoke_marble_play.py` drives real pointer controls through win, loss, retry and a
+subsequent win, verifying raw overlaps, actual frozen poses and live/custom capture nonmutation.
+Final validation: workspace check passes with existing warnings, all 104 world tests and 229
+host tests pass (two host tests ignored), including 40 native/eight host 3D tests and kanban
+round-trip. All 13 individual registered smokes pass: the full sweep hit its 360-second cap
+after 12 completed, and the final playable smoke passed separately. Its batched frame driver
+then passed in 29.6 seconds without skipping per-frame event/view dispatch. Ready/won/lost
+screenshots were inspected; the full workspace test suite was not rerun. Status/attempt locals reset on successful reload,
+while native poses stay until explicit Release/Retry. Independent agent-from-guide authorability
+and a second game without new Rust remain an unproven acceptance gate, not a completed test.
+
+**Tilt Maze authoring checkpoint:** a fresh agent built `demo_apps/tilt_maze` using the public
+Lua guide, without reading Marble Gates or changing Rust. The game has directional tray tilt,
+two blocking walls, checkpoint progression, goal/hazard/fall zones, win/loss and checkpoint Retry.
+The bridge proof exercised those controls/outcomes, moving pause/resume and accepted surgical
+reload retaining native poses. Full acceptance remains **blocked**, not green: a three-body
+reproduction reports native ticks 67→69 during repeated `DumpTree` with virtual time unchanged
+at 0.614666666666667. Root cause is not diagnosed; this contradicts the observation contract.
+Run `OSVAULD_OFFSCREEN=900x700 CARGO_TARGET_DIR=target/build python3 scripts/smoke_tilt_maze.py
+--capture-repro` for the minimal case, or select `smoke_tilt_maze.py` through the smoke wrapper
+for full acceptance. It is intentionally not in the default passing `SMOKES` list until fixed.
+Existing 13 registered smokes remain the last green suite; the new failing probe is preserved.
+
+**Dev integration checkpoint:** merged the 3D continuation alongside app threads and the newer
+2D world work. Zone callback batches now arm the existing per-VM CPU/interrupt budget rather
+than accessing the superseded interrupt counter. Workspace check and 40 native/eight host 3D
+tests pass. All 13 registered smokes passed on the merged binary across the sweep and a targeted
+rerun: three older scripts initially could not find the temporary worktree's `target/debug`
+binary; providing its usual debug-path symlink resolved that harness setup issue. Tilt Maze
+acceptance remains blocked and deliberately unregistered; no observation-bug fix is claimed.
+
+**3D smoke pixel gates:** mesh, marble drop/play and Tilt Maze now use the shared
+`scripts/osvauld/scene3d.py` probe. It projects inspected object centres through the camera into
+resolved viewport rectangles and requires live screenshot RGB contrast against an empty corner;
+inspection/picking alone cannot satisfy it. Both marble smokes check the ball and platform.
+Two Python unit controls prove empty pixels fail despite valid scene metadata and scaled
+projected pixels pass. Mesh and both marble smokes pass on the app-thread build; Tilt Maze's
+`--pixels-only` path passes, without claiming its still-blocked gameplay acceptance. Its passive
+viewport is made inspectable through a no-op click handler in the uploaded test copy only.
+Multiple 3D views per frame remain unimplemented; this change is test coverage, not a renderer
+extension. The previous dev integration exercised all 13 registered smokes across sweep/rerun.
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,

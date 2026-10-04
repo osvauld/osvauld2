@@ -112,6 +112,22 @@ pub struct TimerInspection {
 pub struct WorldInspection {
     pub entities: Vec<EntityInspection>,
     pub timers: Vec<TimerInspection>,
+    /// Steps taken: the frame the dump and every question's answer are as of.
+    pub tick: u64,
+    /// Seconds stalls have cost: frame time past `MAX_STEPS` steps, never run.
+    pub dropped: f64,
+}
+
+/// What a ray met first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RayHit {
+    pub id: String,
+    /// Where the line met its collider, in world units.
+    pub at: (f64, f64),
+    /// The surface's direction there, a unit vector pointing out of it.
+    pub normal: (f64, f64),
+    /// From the ray's start to `at`.
+    pub dist: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,6 +173,11 @@ pub enum WorldEvent {
     /// units a second along the contact normal. Each of two such things gets its own.
     Hit { id: String, who: String, speed: f64 },
 }
+
+/// The world moves in steps of this, whatever the frame rate: as the 3D world does.
+pub const STEP: f64 = 1.0 / 120.0;
+/// The most steps one frame runs; more time than this, after a stall, is dropped.
+pub const MAX_STEPS: u32 = 8;
 
 /// A moment Lua asked for. Counted from the world's next frame: a handler has no clock of its
 /// own, and the world's is its last frame's — stale if it was idle.
@@ -252,6 +273,12 @@ struct Animator {
 pub struct World2d {
     ecs: World,
     clock: f64,
+    /// Fixed steps taken since the world began.
+    steps: u64,
+    /// Frame time not yet a whole step, run on a later frame.
+    carry: f64,
+    /// Frame time beyond `MAX_STEPS` steps, after a stall: dropped, never replayed.
+    dropped: f64,
     ticking: bool,
     controlled: bool,
     held: HashSet<String>,
@@ -292,6 +319,9 @@ pub enum WorldError {
     Set(String, String),
     #[error("timer {0:?}: seconds must be a finite number, zero or more")]
     Timer(String),
+    /// A question asked wrongly, as `"ray: why"`.
+    #[error("{0}")]
+    Ask(String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -712,15 +742,48 @@ impl World2d {
         Ok(Frame::new(width, height, None, items)?.clipped())
     }
 
-    /// One frame: `elapsed` is the runtime's frame clock, which clips play against; `dt` is the
-    /// step controllers move by (the runtime caps it after a stall).
+    /// One frame: `elapsed` is the runtime's frame clock, which clips and timers go by; `dt` the
+    /// time since the last frame, run as whole fixed steps. What is short of a step waits for the
+    /// next frame; past `MAX_STEPS`, after a stall, the world runs slower rather than jump.
     pub fn tick(&mut self, elapsed: f64, dt: f64) {
         self.clock = elapsed;
         for t in self.timers.iter_mut().filter(|t| t.due.is_none()) {
             t.due = Some(elapsed + t.secs);
         }
+        let available = self.carry + dt.max(0.0);
+        let window = available.min(STEP * MAX_STEPS as f64);
+        let steps = ((window / STEP + 1e-9).floor() as u32).min(MAX_STEPS);
+        self.carry = (window - steps as f64 * STEP).max(0.0);
+        self.dropped += available - window;
+        for _ in 0..steps {
+            self.step(STEP);
+        }
+        // A body taken away leaves its zones even on a frame too short for a step.
+        self.sense();
+        self.follow();
+        for &entity in &self.order {
+            let e = self.ecs.entity(entity);
+            let ended = e
+                .get::<Animator>()
+                .is_some_and(|a| !a.ended && a.clip.done(elapsed - a.started));
+            if ended {
+                let id = e.get::<Name>().expect("every entity has a Name").0.clone();
+                self.ecs.get_mut::<Animator>(entity).expect("checked above").ended = true;
+                self.events.push(WorldEvent::ClipEnd(id));
+            }
+        }
+        let (mut due, left) = (std::mem::take(&mut self.timers).into_iter())
+            .partition::<Vec<_>, _>(|t| t.due.is_some_and(|d| d <= elapsed));
+        self.timers = left;
+        due.sort_by(|a, b| a.due.partial_cmp(&b.due).expect("finite").then(a.name.cmp(&b.name)));
+        self.events.extend(due.into_iter().map(|t| WorldEvent::Timer(t.name)));
+    }
+
+    /// One fixed step: bodies, then zones and hits, then walkers.
+    fn step(&mut self, dt: f64) {
         let before = self.velocities();
         self.physics.step(dt);
+        self.steps += 1;
         self.slide_thrown();
         self.sense();
         self.hits(&before);
@@ -738,9 +801,7 @@ impl World2d {
                 self.events.push(WorldEvent::Move { id, dx, dy });
             }
             e.insert(heading);
-            if length > 0.0 && dt > 0.0 {
-                // A zero-time observation must not overwrite the last real movement velocity.
-                // Contacts on the next solver step use it to report the closing speed.
+            if length > 0.0 {
                 // A solid entity goes only as far as the others let it.
                 let wanted = (dx / length * step, dy / length * step);
                 let (mx, my) = match e.get::<Solid>() {
@@ -760,23 +821,6 @@ impl World2d {
                 e.insert(Velocity::default());
             }
         }
-        self.follow();
-        for &entity in &self.order {
-            let e = self.ecs.entity(entity);
-            let ended = e
-                .get::<Animator>()
-                .is_some_and(|a| !a.ended && a.clip.done(elapsed - a.started));
-            if ended {
-                let id = e.get::<Name>().expect("every entity has a Name").0.clone();
-                self.ecs.get_mut::<Animator>(entity).expect("checked above").ended = true;
-                self.events.push(WorldEvent::ClipEnd(id));
-            }
-        }
-        let (mut due, left) = (std::mem::take(&mut self.timers).into_iter())
-            .partition::<Vec<_>, _>(|t| t.due.is_some_and(|d| d <= elapsed));
-        self.timers = left;
-        due.sort_by(|a, b| a.due.partial_cmp(&b.due).expect("finite").then(a.name.cmp(&b.name)));
-        self.events.extend(due.into_iter().map(|t| WorldEvent::Timer(t.name)));
     }
 
     /// Fires `Timer(name)` once `secs` have passed; the same name again starts it over.
@@ -914,6 +958,48 @@ impl World2d {
             self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding |= loose;
         }
         Ok(())
+    }
+
+    /// Lua's question: the first solid thing on the line from `from` to `to`, leaving out
+    /// `skip` — a looker's own body. As of the last step: a `set` since shows at the next.
+    pub fn ray(&self, from: (f64, f64), to: (f64, f64), skip: Option<&str>) -> Result<Option<RayHit>, WorldError> {
+        let err = |why: &str| WorldError::Ask(format!("ray: {why}"));
+        if ![from.0, from.1, to.0, to.1].iter().all(|v| v.is_finite()) {
+            return Err(err("from and to must be finite numbers"));
+        }
+        if from == to {
+            return Err(err("from and to are the same point: a ray needs a direction"));
+        }
+        let skip = match skip {
+            Some(id) => Some(*self.by_id.get(id).ok_or_else(|| err("skip: there is no such entity"))?),
+            None => None,
+        };
+        let skip = skip.and_then(|e| self.ecs.get::<Solid>(e)).map(|s| s.body);
+        let name = |owner| self.ecs.get::<Name>(Entity::from_bits(owner)).map(|n| n.0.clone());
+        Ok(self.physics.ray(from, to, skip).and_then(|(owner, at, normal, dist)| {
+            Some(RayHit { id: name(owner)?, at, normal, dist })
+        }))
+    }
+
+    /// Lua's question: the ids of everything whose collider or zone covers `point`, sorted.
+    pub fn at(&self, point: (f64, f64)) -> Result<Vec<String>, WorldError> {
+        if !(point.0.is_finite() && point.1.is_finite()) {
+            return Err(WorldError::Ask("at: the point must be finite numbers".into()));
+        }
+        let name = |owner| self.ecs.get::<Name>(Entity::from_bits(owner)).map(|n| n.0.clone());
+        let mut ids: Vec<String> = self.physics.at(point).into_iter().filter_map(name).collect();
+        ids.sort();
+        ids.dedup(); // a collider and a zone of one entity
+        Ok(ids)
+    }
+
+    pub fn steps(&self) -> u64 {
+        self.steps
+    }
+
+    /// Seconds a stall cost: the world ran slower rather than jump.
+    pub fn dropped(&self) -> f64 {
+        self.dropped
     }
 
     pub fn transform(&self, id: &str) -> Option<Transform> {

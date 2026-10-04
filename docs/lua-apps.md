@@ -290,9 +290,12 @@ local wasd = {
 
 - Key names are physical codes, the same as `on_key`'s `e.code`. A misspelt code (`"W"` for
   `"KeyW"`) is not caught — it simply never matches.
-- Both keys of an axis held cancel; a diagonal is no faster than a straight line. Movement uses the
-  runtime's frame `dt`, capped at 0.1s after a stall, so `rpc.frame(n)` is the exact way to drive
-  it offscreen — `rpc.advance` moves by at most one capped step.
+- Both keys of an axis held cancel; a diagonal is no faster than a straight line.
+- **The world moves in fixed steps of 1/120 s**, whatever the frame rate: two a frame at 60 fps,
+  one at 120. A frame's time short of a step waits for the next frame, so a second is the same
+  120 steps at 30, 60 or 144 fps — the same hits, bounces and paths. After a stall a frame runs
+  at most 8 steps and the rest is dropped (the game slows rather than jumps); the dump's
+  `dropped` says how many seconds. `rpc.frame(n)` is the exact way to drive it offscreen.
 - A world with a controller or actions takes keyboard input itself (it attaches `on_key`, and
   releases every key on blur), so `on_key` on a `ui.world` is an error. A world with neither
   leaves keys alone.
@@ -366,6 +369,30 @@ on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   --
 - A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
   lists them as `timers = { { name, left } }` beside `entities`.
 
+### Questions — `world(id):ray` and `:at`
+
+Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
+is in front of the player when they press E, what did the click land on:
+
+```lua
+local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
+-- nil, or { id = "wall", at = { x, y }, normal = { nx, ny }, dist = 280, tick = 1042 }
+if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
+
+local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+```
+
+- `ray` answers the first solid thing on the line from one point to the other: `at` where the line
+  met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop
+  it. A line starting inside something meets it at once — `skip` leaves out one entity, a
+  looker's own body. Only `skip` may be given; `from` and `to` must differ.
+- `at` answers the ids of everything whose collider or zone covers the point, sorted, each once.
+- Answers are plain tables of ids and numbers: look your own data up by id, as handlers do.
+- Both are as of the last step — the world's `tick` (steps so far, 120 a second), also in the
+  dump. A `set` or a spawn shows in answers from the next frame on.
+- Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
+  five hundred things take a few milliseconds; a ray per guard per frame is fine.
+
 ### Facing and gait — decided in Lua
 
 The world reports a change of direction; Lua picks what the entity shows. A top-down character is
@@ -433,36 +460,94 @@ that renders.
 Create `gfx.world3d({ id, scene, bodies })` at module scope. `scene` is a compiled
 `gfx.scene3d`; `bodies` is a dense list of `{ id, position = {x,y,z}, sphere = radius }`
 or `{ id, position = {x,y,z}, box = {width,height,depth} }`, optionally `dynamic = true`
-(default fixed). Exactly one shape is required; unknown fields are errors. Dimensions and
-positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
+(default fixed). Optional `rotation = {x,y,z,w}` supplies initial orientation, default identity.
+Quaternion components must be finite and bounded to 10,000, with length at least 0.001;
+physics normalizes them. Exactly one shape is required; unknown fields are errors. Dimensions
+and positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
 At most eight worlds per app and 256 bodies per world; IDs are nonempty and at most 128 bytes.
+`sensor = true` makes the body's sphere/box a nonblocking zone. Sensors are fixed-only initially:
+combining `sensor` and `dynamic` is an error. No separate collider or offset sensor is built yet.
 
 `ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
 visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
-are independent: scale does not resize a collider. Initial body orientation is identity;
-bound visuals must have identity authored rotation. Invisible bodies and unbound decoration
-are allowed. `demo_apps/marble_gates` generates its sphere in Lua and demonstrates the first
-native drop, bounce, sleep and reset.
+are independent: scale does not resize a collider. Bound visuals must have identity authored
+rotation; initial physical orientation belongs in the body recipe, and resolved snapshots rotate
+the visual with the body. Invisible bodies and unbound decoration are allowed.
+`demo_apps/marble_gates` generates its sphere in Lua and offers drop and tilted-ramp modes,
+sharing visual meshes between independent worlds; the inactive level stays paused. Its
+**Play gates** mode is a complete Lua-authored level with Release, live tilt, goal/fall zones,
+win/loss and Retry. Geometry, level descriptions and rules live in `level.lua`, not Rust.
 
 The native solver runs at 120 Hz before normal-frame view construction, with at most eight
 catch-up steps. No Lua runs per physics tick. `game:reset("marble")` restores the latest
-authored position and clears motion/forces, waking the body. Reset is allowed only in input
-handlers, never module initialization, `view`, `on_frame`, hover or animation-completion
-handlers. Scene handles resolve current poses when walked; they do not step the world.
+authored position and orientation and clears motion/forces, waking the body. Reset is allowed only in input
+handlers or retained-scene `on_zone`, never module initialization, `view`, `on_frame`, hover
+or animation-completion handlers. Scene handles resolve current poses when walked; they do not step the world.
 
 A world survives successful reload; existing IDs keep their simulated poses and new authored
-positions become reset targets. Collider/type changes on retained IDs reject: remove the body
+positions and rotations become reset targets, not live pose edits. Collider/type changes on retained IDs reject: remove the body
 in one accepted source revision before recreating it. All staged recipes validate before any
-live world changes; failed load or trial-view calls leave native state untouched. Worlds omitted
+live world changes; failed load or trial-view calls leave native state untouched. Sensor-role
+changes on retained IDs also require removal/recreation. Worlds omitted
 from an accepted source are dropped. Omitting a viewport pauses its world on the next simulation
 hook without deleting it; inactive tabs pause too, with no hidden-time catch-up on resume. Closing
-the app drops its worlds. Both screenshot paths skip native simulation; legacy `on_frame`
-callbacks retain their existing behavior, but cannot reset native bodies.
+the app drops its worlds. `game:scene(camera, {running=false})` still renders actual resolved
+poses but does not request simulation; resuming uses `{running=true}` (the default), without
+catch-up. `camera` may be nil; unknown options and non-boolean `running` are errors. Do not
+also draw a running snapshot of the same world while expecting it paused. Both screenshot paths
+skip native simulation; legacy `on_frame` callbacks retain their existing behavior, but cannot
+reset or command native bodies.
+
+A retained `ui.scene3d` leaf may declare `on_zone(e)`, with its required element `id`.
+`e.phase` is `"enter"` or `"leave"`, `e.id` is the sensor body ID, `e.who` the dynamic body ID,
+and `e.tick` the physics tick at detection (accepted sensor removals use the current tick).
+Events are delivered before the
+next normal view, after the frame's bounded native steps; they are not per-step Lua callbacks.
+Static solids do not count. Only one leaf per world can own `on_zone`; a plain render scene
+cannot. Missing handlers discard moments. At each tick leaves precede enters, each sorted by
+sensor/body ID. Removing a sensor emits leave for surviving bodies; removing a body clears its
+memberships quietly. Pause, inspection and captures produce no new events.
 
 `DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `tick`,
 `dropped_seconds` and ID-sorted `entities`. Each entity separates `authored` (shape, position,
-dynamic) from `resolved` (position, quaternion rotation, linear/angular velocity and sleeping).
-3D sensors, adjustable rotated ramps, goal rules and spatial-query RPCs remain unbuilt.
+quaternion rotation, dynamic, sensor) from `resolved` (position, quaternion rotation,
+linear/angular velocity and sleeping). Entity `zones` are sorted sensor IDs sampled on the last
+physics tick, with removed IDs pruned immediately (a reset refreshes overlaps on the next step).
+Each world buffers at most 4096 moments;
+newest overflow is discarded and counted by `dropped_zone_events`. Raw membership remains
+accurate despite event overflow. Fixed-pose resets and membership changes request a refresh tick
+even if dynamic bodies sleep. Spatial-query RPCs remain unbuilt.
+
+### 3D commands and Lua game rules
+
+`game:set(id, {pos, rotation, velocity, spin})` changes one retained body at a moment; any field
+may be omitted. `pos` is its metre-scale centre, `rotation` supplies an x/y/z/w quaternion
+normalized by physics,
+`velocity` is a three-component metre-per-second vector, and `spin` is a three-component
+**degrees-per-second** vector about world axes (the dump's `angular_velocity` remains radians).
+Components must be finite numbers bounded to 10,000; quaternions use the recipe's length limit.
+Velocity/spin require a dynamic body. Unknown fields, sparse/wrong-size arrays, numeric strings,
+invalid values and fixed-body motion fields reject **before any field changes**. An empty command
+is a no-op. Set shares reset's input/zone-handler permission guard.
+
+```lua
+-- In an input handler:
+game:set("ramp", { rotation = {0, 0, math.sin(angle/2), math.cos(angle/2)} }) -- angle in radians
+game:set("ball", { pos = {0,3,0}, velocity = {2,0,0}, spin = {0,90,0} })
+```
+
+Commands preserve native identity, clock and authored reset targets; unspecified live fields
+remain unchanged. Render snapshots and pose inspection update immediately; collision/zone
+membership refreshes on the next fixed step. Moving/rotating a fixed solid wakes dynamic bodies
+in that world so sleepers cannot ignore new contacts; sensor edits request a refresh without
+waking sleepers. Reset clears motion/forces; setting a pose alone does not.
+
+In `marble_gates/level.lua`, `on_zone` sets Lua status to Won for the goal and Lost for a fall
+zone. View publishes `running = status == "Playing"`, freezing actual poses for Ready/Won/Lost.
+Release/Retry and tilt are input handlers; no `on_frame` loop or Rust game-specific rule is needed.
+Status/attempt counters are module-local and reset on successful reload; native poses remain
+untouched until the next explicit Release/Retry. High-speed continuous sensor sweeps are not
+implemented: sensor membership is sampled at fixed-step intersections.
 
 ## Layout
 

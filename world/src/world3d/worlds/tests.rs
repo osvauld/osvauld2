@@ -6,7 +6,9 @@ fn recipe(height: f32) -> Vec<EntitySpec3d> {
         id: "marble".into(),
         shape: Shape3d::Sphere(0.25),
         position: [0.0, height, 0.0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         dynamic: true,
+        sensor: false,
     }]
 }
 

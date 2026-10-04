@@ -804,14 +804,16 @@ fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value 
         };
         serde_json::json!({
             "authored": { "id": e.authored.id, "shape": shape,
-                "position": e.authored.position, "dynamic": e.authored.dynamic },
+                "position": e.authored.position, "rotation": e.authored.rotation,
+                "dynamic": e.authored.dynamic, "sensor": e.authored.sensor },
+            "zones": e.zones,
             "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
                 "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
                 "sleeping": e.resolved.sleeping },
         })
     }).collect();
     serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
-        "entities": entities })
+        "dropped_zone_events": world.dropped_zone_events, "entities": entities })
 }
 
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
@@ -827,7 +829,8 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
-    serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>() })
+    serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
+        "tick": world.tick, "dropped": world.dropped })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.

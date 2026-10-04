@@ -232,6 +232,36 @@ impl Physics {
             .collect()
     }
 
+    /// The first solid collider on the line from `from` to `to`, not `skip`'s: its owner, where
+    /// the line met it, the surface's normal there and how far along. Sensors do not stop a ray;
+    /// a line starting inside a collider meets it at once. As of the last step.
+    pub(crate) fn ray(
+        &self,
+        from: (f64, f64),
+        to: (f64, f64),
+        skip: Option<RigidBodyHandle>,
+    ) -> Option<(u64, (f64, f64), (f64, f64), f64)> {
+        let filter = QueryFilter::default().exclude_sensors();
+        let filter = match skip {
+            Some(body) => filter.exclude_rigid_body(body),
+            None => filter,
+        };
+        let queries = self.world.query_pipeline_with_filter(filter);
+        let (o, d) = (Vector::new(from.0 as f32, from.1 as f32), Vector::new((to.0 - from.0) as f32, (to.1 - from.1) as f32));
+        let (c, hit) = queries.cast_ray_and_get_normal(&Ray::new(o, d), 1.0, true)?;
+        let (at, n) = (o + d * hit.time_of_impact, hit.normal);
+        let owner = self.world.colliders.get(c)?.user_data as u64;
+        let dist = hit.time_of_impact as f64 * (d.length() as f64);
+        Some((owner, (at.x as f64, at.y as f64), (n.x as f64, n.y as f64), dist))
+    }
+
+    /// The owners of every collider, solid or sensor, that covers `point`, as of the last step.
+    pub(crate) fn at(&self, point: (f64, f64)) -> Vec<u64> {
+        let queries = self.world.query_pipeline_with_filter(QueryFilter::default());
+        let point = Vector::new(point.0 as f32, point.1 as f32);
+        queries.intersect_point(point).map(|(_, c)| c.user_data as u64).collect()
+    }
+
     /// Where Rapier has a body now: its shape's centre.
     pub(crate) fn centre_of(&self, body: RigidBodyHandle) -> (f64, f64) {
         let at = self.world.bodies[body].translation();
