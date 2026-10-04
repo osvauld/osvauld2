@@ -859,7 +859,27 @@ impl<M: 'static> LuaApp<M> {
 
     pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
         match self.worlds3d.advance(elapsed, active) {
-            Ok(ticking) => ticking,
+            Ok(ticking) => {
+                let _armed = self.budget.arm();
+                for (id, event) in self.worlds3d.zone_events(active) {
+                    self.worlds3d.commanding.set(true);
+                    let result = (|| {
+                        let table = self.vm.create_table()?;
+                        table.set("id", event.id)?;
+                        table.set("who", event.who)?;
+                        table.set("tick", event.tick)?;
+                        table.set("phase", match event.phase {
+                            world::world3d::ZonePhase3d::Enter => "enter",
+                            world::world3d::ZonePhase3d::Leave => "leave",
+                        })?;
+                        let handler = self.handlers.borrow().get(&Key::new(&id, "on_zone")).cloned();
+                        handler.map_or(Ok(()), |h| h.call::<()>(table))
+                    })();
+                    self.worlds3d.commanding.set(false);
+                    if let Err(e) = result { self.log(format!("handler error: {e}")); }
+                }
+                ticking
+            },
             Err(e) => {
                 self.log(format!("3D simulation error: {e}"));
                 false
@@ -1823,10 +1843,20 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             }
             let handle = node.get::<AnyUserData>("scene")?;
             if handle.is::<gfx::world3d::SceneHandle>() {
-                let (scene, ticking) = handle.borrow::<gfx::world3d::SceneHandle>()?.resolve()?;
+                let retained = handle.borrow::<gfx::world3d::SceneHandle>()?;
+                if let Some(f) = node.get::<Option<Function>>("on_zone")? {
+                    let id: String = node.get::<Option<String>>("id")?
+                        .ok_or_else(|| Error::runtime("scene3d on_zone needs an id"))?;
+                    register(context.handlers, &id, "on_zone", f)?;
+                    retained.route_zone(id)?;
+                }
+                let (scene, ticking) = retained.resolve()?;
                 let el = scene3d_el(scene);
                 if ticking { el.repaint() } else { el }
             } else {
+                if node.contains_key("on_zone")? {
+                    return Err(Error::runtime("scene3d on_zone needs a retained 3D world"));
+                }
                 scene3d_el(handle.borrow::<gfx::LuaScene3d>()?.0.clone())
             }
         }
@@ -1873,7 +1903,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
     }
     let consumed: &[&str] = match tag {
         "frame" => &["visual"],
-        "scene3d" => &["scene"],
+        "scene3d" => &["scene", "on_zone"],
         "world" => &[
             "width",
             "height",
