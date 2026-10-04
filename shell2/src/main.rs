@@ -493,6 +493,13 @@ fn serve(h: &mut app_thread::Hosted, req: Request, vault: &Vault) -> Response {
                 .map(|(id, w)| (id.as_str(), world_json(w)))
                 .collect();
             add_worlds(&mut tree, &worlds);
+            let worlds3d = h.app.inspect_worlds3d();
+            if !worlds3d.is_empty() {
+                tree["worlds3d"] = worlds3d
+                    .iter()
+                    .map(|(id, w)| (id.clone(), world3d_json(w)))
+                    .collect();
+            }
             Response::ok(tree)
         }
         Request::Click { el_id, .. } => fire(h, &el_id, Action::Click),
@@ -733,7 +740,15 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
         .map(|object| {
             serde_json::json!({
                 "id": object.id,
-                "mesh": match object.mesh { runtime::scene3d::BuiltinMesh::Cube => "cube" },
+                "mesh": match object.mesh {
+                    runtime::scene3d::MeshKind::Cube => "cube",
+                    runtime::scene3d::MeshKind::Triangles => "triangles",
+                },
+                "mesh_resource": object.mesh_resource,
+                "vertices": object.vertex_count,
+                "triangles": object.triangle_count,
+                "mesh_bytes": object.mesh_bytes,
+                "local_bounds": { "min": object.local_bounds.0, "max": object.local_bounds.1 },
                 "position": object.position,
                 "rotation": object.rotation,
                 "scale": object.scale,
@@ -780,6 +795,25 @@ fn worlds_json(
     )
 }
 
+fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value {
+    use world::world3d::Shape3d;
+    let entities: Vec<_> = world.entities.iter().map(|e| {
+        let shape = match e.authored.shape {
+            Shape3d::Sphere(radius) => serde_json::json!({ "sphere": radius }),
+            Shape3d::Box(size) => serde_json::json!({ "box": size }),
+        };
+        serde_json::json!({
+            "authored": { "id": e.authored.id, "shape": shape,
+                "position": e.authored.position, "dynamic": e.authored.dynamic },
+            "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
+                "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
+                "sleeping": e.resolved.sleeping },
+        })
+    }).collect();
+    serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
+        "entities": entities })
+}
+
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
     let entities = world.entities.iter().map(|e| {
         let clip = e.clip.as_ref().map(|c| {
@@ -788,7 +822,7 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
-            "velocity": [e.velocity.0, e.velocity.1],
+            "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
             "attached": attached, "zones": e.zones, "clip": clip,
         })
     });

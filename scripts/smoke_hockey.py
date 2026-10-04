@@ -63,7 +63,8 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     # Frame by frame, to catch the squash the puck plays when blue hits it (on_hit, 0.15 s).
     s.rpc.keyboard("KeyD", "KeyD", True)
     squashed = False
-    for _ in range(40):
+    # Inspection no longer spends a frame of virtual time: drive the full approach explicitly.
+    for _ in range(80):
         s.rpc.frame(1)
         clip = look()[0]["puck"]["clip"]
         squashed = squashed or (clip is not None and abs(clip["length"] - 0.15) < 1e-6)
@@ -73,8 +74,12 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     seen, _ = look()
     assert abs(seen["blue"]["pos"][0] + 56 - 448) < 2, ("blue stopped at the line", seen["blue"])
     assert seen["puck"]["pos"][0] > 450, ("the puck crossed it", seen["puck"])
-    s.rpc.frame(90)
-    seen, said = look()
+    # Struck, it is fast: watch for the goal rather than wait a guess at how long it takes.
+    for _ in range(90):
+        s.rpc.frame(1)
+        seen, said = look()
+        if any(t.startswith("GOAL") for t in said):
+            break
     assert "1  :  0" in said and "GOAL! Blue scores" in said, said
     # The puck sits in the net while the goal shows; Rust holds the faceoff timer.
     timers = s.rpc.dump_tree(item)
@@ -95,6 +100,27 @@ with Session(shell_binary=shell_binary(), offscreen=(1100, 760)) as s:
     s.rpc.frame(60)
     seen, _ = look()
     assert seen["puck"]["pos"][0] >= seen["blue"]["pos"][0] + 56 - 1, ("pushed out of blue", seen)
+    assert seen["puck"]["spin"] == 0 and seen["puck"]["rot"] == 0, ("a new puck is upright", seen["puck"])
+
+    # Red, up at the boards, comes down until its middle is a little above the puck's, then runs
+    # at it: a glancing hit, and the puck's grip sets it turning.
+    def middle(e, r):
+        return seen[e]["pos"][1] + r
+    s.rpc.keyboard("ArrowDown", "ArrowDown", True)
+    for _ in range(120):
+        seen, _ = look()
+        if middle("red", 28) >= middle("puck", 16) - 20:
+            break
+        s.rpc.frame(1)
+    s.rpc.keyboard("ArrowDown", "ArrowDown", False)
+    s.rpc.keyboard("ArrowLeft", "ArrowLeft", True)
+    for _ in range(90):
+        s.rpc.frame(1)
+        seen, _ = look()
+        if seen["puck"]["spin"] != 0:
+            break
+    s.rpc.keyboard("ArrowLeft", "ArrowLeft", False)
+    assert abs(seen["puck"]["spin"]) > 10, ("red's glancing hit set the puck spinning", seen["puck"])
     if len(sys.argv) > 1:
         s.rpc.save_screenshot(item, sys.argv[1])
-    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a hit squashed it, a goal scored and the puck back on the spot")
+    print("hockey: faceoff, a paddle stopped at the centre line, the puck across it, a hit squashed it, a goal scored and the puck back on the spot, a glancing hit spun it")

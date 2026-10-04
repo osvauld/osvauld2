@@ -62,6 +62,7 @@ fn what_crosses_is_send() {
     fn send<T: Send + 'static>() {}
     send::<Scene>();
     send::<TileInput>();
+    send::<TileFrame>();
 }
 
 /// The whole loop by hand: the host's events, replayed into a tile, click the tile's button.
@@ -198,6 +199,7 @@ fn a_tile_painted_on_another_thread_shows_in_its_slot() {
                 tile(TileFrame {
                     scene: self.0.clone(),
                     rects: Arc::new([]),
+                    view3d: None,
                 })
                 .size(150.0, 100.0),
             )
@@ -282,6 +284,7 @@ impl App for Rects {
             tile(TileFrame {
                 scene: Arc::new(Scene::new()),
                 rects: self.rects.clone(),
+                view3d: None,
             })
             .size(200.0, 100.0)
             .on_tile("t", |e| e.input),
@@ -384,4 +387,65 @@ fn keys_reach_a_tile_without_a_press() {
         "{:?}",
         host.app().got
     );
+}
+
+/// A tile's 3D view reaches the host's frame: moved to where the slot is, cut to the slot. Its
+/// 3D is drawn by its own GPU pass, not in the Scene, so without this it shows as a hole.
+#[test]
+fn a_tiles_3d_view_lands_in_its_slot() {
+    use crate::scene3d::{Camera3d, Object3d, Scene3d, mesh::MeshData};
+    use glam::{Quat, Vec3};
+
+    struct Viewer(Arc<Scene3d>);
+    impl App for Viewer {
+        type Msg = ();
+        fn view(&self) -> El<()> {
+            col()
+                .pad(20.0)
+                .child(crate::scene3d(self.0.clone()).w(200.0).h(60.0))
+        }
+        fn update(&mut self, _: ()) {}
+    }
+    struct Shows(TileFrame);
+    impl App for Shows {
+        type Msg = ();
+        fn view(&self) -> El<()> {
+            row()
+                .child(col().w(100.0).h(100.0))
+                .child(tile(self.0.clone()).size(150.0, 100.0))
+        }
+        fn update(&mut self, _: ()) {}
+    }
+
+    let camera = Camera3d {
+        eye: Vec3::new(0.0, 0.0, 5.0),
+        target: Vec3::ZERO,
+        up: Vec3::Y,
+        fov_y_radians: 0.8,
+        near: 0.1,
+        far: 100.0,
+    };
+    let cube = Object3d {
+        id: "cube".into(),
+        mesh: MeshData::cube(),
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [1.0; 4],
+        surface: None,
+    };
+    let mut guest = Tile::new(Viewer(Scene3d::new(camera, vec![cube]).unwrap()), (300.0, 100.0));
+    let frame = TileFrame {
+        scene: Arc::new(guest.frame()),
+        rects: Arc::new([]),
+        view3d: guest.view3d(),
+    };
+    let mut host = Tile::new(Shows(frame), (300.0, 100.0));
+    host.frame();
+    let view = host.view3d().expect("the tile's 3D view reached the host");
+    assert_eq!(
+        (view.rect.x0, view.rect.y0, view.rect.x1, view.rect.y1),
+        (120.0, 20.0, 320.0, 80.0)
+    );
+    assert_eq!((view.clip.x0, view.clip.x1), (120.0, 250.0), "cut at the slot's edge");
 }

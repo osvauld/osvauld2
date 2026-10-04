@@ -196,6 +196,15 @@ Each leaves `cargo test` and the smokes green.
    same in the launcher). A call blocked off the CPU is the stuck watchdog's (step 8), not
    the budget's. `budget::install(vm, Policy)` is public so the launcher sets its own limits
    on the one interrupt hook. Unix reads `CLOCK_THREAD_CPUTIME_ID`; elsewhere it is still wall.
+
+   *Merged main 2026-10-04 (3D):* `TileFrame.view3d` carries a tile's one 3D viewport, moved
+   into the host's frame at the slot and cut to it — the 3D pass is not in the Scene, so the
+   tile showed a hole while `smoke_mesh_math` and `smoke_marble_gates` still passed (they
+   inspect and pick, both of which run on the app's own runtime). The mesh smoke now samples
+   the drawn wave against the empty viewport; it failed before the fix. `advance_simulation`
+   moved from the shell into `Hosted`: only shown tiles frame, and the first frame back pauses
+   instead of stepping, so hidden time is skipped as main's tab pause did. Still one 3D
+   viewport a frame: two 3D apps split side by side show one.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.

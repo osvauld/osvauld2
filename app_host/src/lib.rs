@@ -409,6 +409,7 @@ pub struct LuaApp<M> {
     /// the log: the console, like the cores, outlives the VM it reports on.
     console: Rc<RefCell<VecDeque<String>>>,
     worlds: Worlds,
+    worlds3d: gfx::world3d::Host,
     /// While `view` runs: `world(id):set` refuses then, since a description only describes.
     viewing: Rc<Cell<bool>>,
     resolve: Resolve,
@@ -537,7 +538,12 @@ impl<M: 'static> LuaApp<M> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
-        let app = Self::build(src, cores, resolve, wake, to_msg, search, Worlds::default())?;
+        let mut app = Self::build(src, cores, resolve, wake, to_msg, search, Worlds::default(), gfx::world3d::Host::default())?;
+        if app.error.is_none() {
+            if let Err(e) = app.worlds3d.commit() {
+                app.error = Some(e.to_string());
+            }
+        }
         // A source that never loaded is rendered by every view; log it once, here.
         if let Some(e) = &app.error {
             app.log(e.clone());
@@ -558,6 +564,7 @@ impl<M: 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
         worlds: Worlds,
+        worlds3d: gfx::world3d::Host,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -579,6 +586,7 @@ impl<M: 'static> LuaApp<M> {
         index::install_query(&vm, search.clone())?;
         let viewing = Rc::new(Cell::new(false));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
+        worlds3d.install(&vm, viewing.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
@@ -606,6 +614,7 @@ impl<M: 'static> LuaApp<M> {
             search,
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds,
+            worlds3d,
             viewing,
         })
     }
@@ -633,6 +642,7 @@ impl<M: 'static> LuaApp<M> {
             self.to_msg.clone(),
             self.search.clone(),
             self.worlds.clone(),
+            self.worlds3d.staged(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -675,6 +685,11 @@ impl<M: 'static> LuaApp<M> {
         // The trial frame filled the staged app's handler table with closures nothing will ever
         // dispatch to; clear it so the first real frame starts from an empty one.
         staged.handlers.borrow_mut().clear();
+        if let Err(e) = staged.worlds3d.commit() {
+            let e = e.to_string();
+            self.log(format!("reload error: {e}"));
+            return Err(e);
+        }
         // The console reports on VMs; it must not be reset by swapping to a new one.
         staged.console = self.console.clone();
         *self = staged;
@@ -790,6 +805,10 @@ impl<M: 'static> LuaApp<M> {
         worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
     }
 
+    pub fn inspect_worlds3d(&self) -> std::collections::BTreeMap<String, world::world3d::WorldInspection3d> {
+        self.worlds3d.inspect()
+    }
+
     /// The last `last` console lines, newest last.
     pub fn console(&self, last: usize) -> Vec<String> {
         self.console
@@ -838,6 +857,16 @@ impl<M: 'static> LuaApp<M> {
         self.cores.borrow().get(name).map(|core| f(&core.doc))
     }
 
+    pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
+        match self.worlds3d.advance(elapsed, active) {
+            Ok(ticking) => ticking,
+            Err(e) => {
+                self.log(format!("3D simulation error: {e}"));
+                false
+            }
+        }
+    }
+
     pub fn view(&self) -> El<M> {
         let _armed = self.budget.arm();
         let body = self.body();
@@ -862,6 +891,7 @@ impl<M: 'static> LuaApp<M> {
     }
 
     fn body(&self) -> El<M> {
+        self.worlds3d.begin_view();
         if let Some(e) = &self.error {
             return text(format!("reload error\n{e}"));
         }
@@ -1100,6 +1130,8 @@ impl<M: 'static> LuaApp<M> {
         let Some(h) = handlers.get(key) else {
             return;
         };
+        self.worlds3d.commanding.set(matches!(key.name,
+            "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key"));
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -1109,6 +1141,7 @@ impl<M: 'static> LuaApp<M> {
                 Err(e) => Err(e),
             },
         };
+        self.worlds3d.commanding.set(false);
         if let Err(e) = result {
             eprintln!("handler error: {e}");
             self.log(format!("handler error: {e}"));
@@ -1788,12 +1821,14 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
             }
-            let scene = node
-                .get::<AnyUserData>("scene")?
-                .borrow::<gfx::LuaScene3d>()?
-                .0
-                .clone();
-            scene3d_el(scene)
+            let handle = node.get::<AnyUserData>("scene")?;
+            if handle.is::<gfx::world3d::SceneHandle>() {
+                let (scene, ticking) = handle.borrow::<gfx::world3d::SceneHandle>()?.resolve()?;
+                let el = scene3d_el(scene);
+                if ticking { el.repaint() } else { el }
+            } else {
+                scene3d_el(handle.borrow::<gfx::LuaScene3d>()?.0.clone())
+            }
         }
         "input" | "text_area" => {
             if max_index(&node) > 0 {

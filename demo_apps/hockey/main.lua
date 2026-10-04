@@ -49,9 +49,12 @@ local function paddle(id, x, color, keys)
 		controller = { speed = 420, axis_x = { neg = keys[1], pos = keys[2] },
 			axis_y = { neg = keys[3], pos = keys[4] } } }
 end
--- The puck scales about its centre as it drops onto the spot.
+-- The puck scales about its centre as it drops onto the spot. A mark from the centre to the
+-- rim shows it turn.
+local mark = { path = { {"move",PUCK-2,3}, {"line",PUCK+2,3}, {"line",PUCK+2,PUCK}, {"line",PUCK-2,PUCK},
+	{"close"} }, fill = C.muted }
 local puck_drawing = gfx.drawing({ size = { 2 * PUCK, 2 * PUCK }, parts = {
-	{ id = "it", pivot = { PUCK, PUCK }, shapes = { disc(PUCK, C.puck) } },
+	{ id = "it", pivot = { PUCK, PUCK }, shapes = { disc(PUCK, C.puck), mark } },
 } })
 -- The faceoff: a second of the puck landing, during which it has no body and nothing can hit it.
 local drop = gfx.clip({ length = 1, tracks = {
@@ -148,7 +151,7 @@ return function()
 			not winner and { id = "puck", pos = SPOT,
 				drawing = puck_drawing, clip = not live and drop or bumped,
 				collider = live and { circle = PUCK, at = { PUCK, PUCK } } or nil,
-				loose = live and { bounce = 0.95, friction = 0.2 } or nil },
+				loose = live and { bounce = 0.95, friction = 0.2, grip = 0.3 } or nil },
 		}),
 		ui.text({ winner and (winner .. " wins! First to " .. WIN) or banner or " ", color = C.text,
 			font_size = 16, no_wrap = true }),

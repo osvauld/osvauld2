@@ -1,6 +1,9 @@
 use super::*;
+
+mod simulation;
+
 use crate::frame::{Brush, Frame, Item, Path};
-use crate::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d};
+use crate::scene3d::{Camera3d, Object3d, Scene3d, mesh::MeshData};
 use glam::{Quat, Vec3};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -206,7 +209,7 @@ fn scene_click_picks_the_visible_object_through_normal_routing() {
     };
     let object = Object3d {
         id: "cube".into(),
-        mesh: BuiltinMesh::Cube,
+        mesh: MeshData::cube(),
         position: Vec3::ZERO,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
@@ -890,14 +893,15 @@ impl App for Ambient {
 
 /// Offscreen time is what the driver asked for and nothing else: a wake from a wall-clock timer
 /// still paints, so the app notices it, but it does not move the clock — or a recording would
-/// shift by a frame whenever a sync timer happened to fire mid-take.
+/// shift by a frame whenever a sync timer happened to fire mid-take. Since 2026-10-04 no ordinary
+/// message moves it either (the 3D merge): only `frame`/`advance` and pointer drivers do.
 #[test]
-fn an_ambient_message_paints_but_does_not_move_offscreen_time() {
+fn a_message_paints_but_does_not_move_offscreen_time() {
     let mut r = Runner::new(Ambient { seen: Vec::new() }, Some((100.0, 100.0)));
     r.deliver(true);
     assert_eq!(r.clock, 0.0);
     r.deliver(false);
-    assert_eq!(r.clock, FRAME);
+    assert_eq!(r.clock, 0.0);
     assert_eq!(r.app.seen, [true, false]);
 }
 

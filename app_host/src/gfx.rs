@@ -1,6 +1,9 @@
 //! Lua declarations for immutable runtime Frame resources. This module validates and compiles
 //! aggregate values; it never renders or retains VM callbacks.
 
+mod mesh;
+pub(crate) mod world3d;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -13,7 +16,7 @@ use runtime::frame::{
     Brush, Extend, Frame, GradientStop, Item, MAX_GRADIENT_STOPS, MAX_PATH_COMMANDS,
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
 };
-use runtime::scene3d::{BuiltinMesh, Camera3d, Object3d, Scene3d, TextSurface};
+use runtime::scene3d::{Camera3d, Object3d, Scene3d, TextSurface, mesh::MeshData};
 use runtime::vello::kurbo::{Affine, PathEl, Point};
 use runtime::vello::peniko::Fill;
 use world::clip::{Clip, Easing, Key, Prop, Track};
@@ -78,6 +81,7 @@ impl UserData for LuaTextSurface {}
 
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
+    mesh::install(lua, &gfx)?;
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
@@ -175,29 +179,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, spec: Table| {
             named_fields(&spec, "scene3d", &["camera", "objects"])?;
             let camera_spec: Table = need(&spec, "scene3d", "camera")?;
-            named_fields(
-                &camera_spec,
-                "scene3d.camera",
-                &["eye", "target", "up", "fov_y", "near", "far"],
-            )?;
-            let camera = Camera3d {
-                eye: vec3(need(&camera_spec, "scene3d.camera", "eye")?, "camera.eye")?,
-                target: vec3(
-                    need(&camera_spec, "scene3d.camera", "target")?,
-                    "camera.target",
-                )?,
-                up: camera_spec
-                    .get::<Option<Table>>("up")?
-                    .map(|v| vec3(v, "camera.up"))
-                    .transpose()?
-                    .unwrap_or(Vec3::Y),
-                fov_y_radians: camera_spec
-                    .get::<Option<f32>>("fov_y")?
-                    .unwrap_or(45.0)
-                    .to_radians(),
-                near: camera_spec.get::<Option<f32>>("near")?.unwrap_or(0.1),
-                far: camera_spec.get::<Option<f32>>("far")?.unwrap_or(100.0),
-            };
+            let camera = camera3d(&camera_spec)?;
             let objects_spec: Table = need(&spec, "scene3d", "objects")?;
             let len = positional_len(&objects_spec, "scene3d.objects")?;
             let mut objects = Vec::with_capacity(len);
@@ -235,6 +217,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     .exec()
 }
 
+fn camera3d(spec: &Table) -> mlua::Result<Camera3d> {
+    named_fields(spec, "scene3d.camera", &["eye", "target", "up", "fov_y", "near", "far"])?;
+    Ok(Camera3d {
+        eye: vec3(need(spec, "scene3d.camera", "eye")?, "camera.eye")?,
+        target: vec3(need(spec, "scene3d.camera", "target")?, "camera.target")?,
+        up: spec.get::<Option<Table>>("up")?.map(|v| vec3(v, "camera.up"))
+            .transpose()?.unwrap_or(Vec3::Y),
+        fov_y_radians: spec.get::<Option<f32>>("fov_y")?.unwrap_or(45.0).to_radians(),
+        near: spec.get::<Option<f32>>("near")?.unwrap_or(0.1),
+        far: spec.get::<Option<f32>>("far")?.unwrap_or(100.0),
+    })
+}
+
 fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
     named_fields(
         &spec,
@@ -243,9 +238,12 @@ fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
             "id", "mesh", "position", "rotation", "scale", "color", "surface",
         ],
     )?;
-    let mesh = match spec.get::<Option<String>>("mesh")?.as_deref() {
-        None | Some("cube") => BuiltinMesh::Cube,
-        Some(mesh) => return Err(Error::runtime(format!("unknown 3D mesh {mesh:?}"))),
+    let mesh = match spec.get::<Value>("mesh")? {
+        Value::Nil => MeshData::cube(),
+        Value::String(name) if name.to_str()?.as_ref() == "cube" => MeshData::cube(),
+        Value::UserData(handle) => handle.borrow::<mesh::LuaMesh>()
+            .map_err(|_| Error::runtime("object.mesh must be a gfx.mesh"))?.0.clone(),
+        _ => return Err(Error::runtime("object.mesh must be a gfx.mesh or 'cube'")),
     };
     let rotation = spec
         .get::<Option<Table>>("rotation")?
@@ -373,15 +371,17 @@ impl WorldHandle {
 
 impl UserData for WorldHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy } })`; either may be left out.
+        // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy }, spin = degrees_a_second })`;
+        // any may be left out.
         methods.add_method("set", |_, this, (entity, fields): (String, Table)| {
             let owner = format!("world {:?}:set {entity:?}", this.id);
-            named_fields(&fields, &owner, &["pos", "velocity"])?;
+            named_fields(&fields, &owner, &["pos", "velocity", "spin"])?;
             let pair = |field| match maybe_table(&fields, &owner, field)? {
                 Some(t) => point(t, &format!("{owner}.{field}")).map(|p| Some((p.x, p.y))),
                 None => Ok(None),
             };
-            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")? };
+            let spin = maybe_number(&fields, &owner, "spin")?;
+            let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")?, spin };
             this.command(&owner, |w| w.set(&entity, to))
         });
         // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
@@ -490,8 +490,22 @@ fn name(value: Value, owner: &str) -> mlua::Result<String> {
     }
 }
 
-/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n }` with either left
-/// to its default; `false` or absent, it is not loose. The world checks the ranges.
+/// `table.field` as a number, if there; an integer is one too.
+fn maybe_number(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<f64>> {
+    match table.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::Integer(n) => Ok(Some(n as f64)),
+        Value::Number(n) => Ok(Some(n)),
+        other => {
+            let what = other.type_name();
+            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
+        }
+    }
+}
+
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n }` with any
+/// left to its default (no grip: it never turns); `false` or absent, it is not loose. The world
+/// checks the ranges.
 fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
     let m = match spec.get::<Value>("loose")? {
         Value::Nil | Value::Boolean(false) => return Ok(None),
@@ -503,20 +517,13 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip"])?;
     let d = world::Material::default();
-    let number = |field: &str, or: f64| match m.get::<Value>(field)? {
-        Value::Nil => Ok(or),
-        Value::Integer(n) => Ok(n as f64),
-        Value::Number(n) => Ok(n),
-        other => {
-            let what = other.type_name();
-            Err(Error::runtime(format!("{owner}.{field} must be a number, got {what}")))
-        }
-    };
+    let number = |field: &str| maybe_number(&m, &owner, field);
     Ok(Some(world::Material {
-        bounce: number("bounce", d.bounce)?,
-        friction: number("friction", d.friction)?,
+        bounce: number("bounce")?.unwrap_or(d.bounce),
+        friction: number("friction")?.unwrap_or(d.friction),
+        grip: number("grip")?,
     }))
 }
 

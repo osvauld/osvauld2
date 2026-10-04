@@ -12,14 +12,16 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::ModifiersState;
 
-use crate::{App, ElRect, KeyInput, Runner};
+use crate::{App, ElRect, KeyInput, Runner, SceneView3d};
 
-/// One frame of a tile, as its host shows it: the paint, and where its elements are — the
-/// latter only when asked for, since only a driven (offscreen) host reads it.
+/// One frame of a tile, as its host shows it: the paint, its 3D viewport (drawn by its own GPU
+/// pass, so not in the Scene), and where its elements are — the latter only when asked for,
+/// since only a driven (offscreen) host reads it.
 #[derive(Clone)]
 pub struct TileFrame {
     pub scene: Arc<Scene>,
     pub rects: Arc<[ElRect]>,
+    pub view3d: Option<SceneView3d>,
 }
 
 impl Default for TileFrame {
@@ -27,6 +29,7 @@ impl Default for TileFrame {
         Self {
             scene: Arc::new(Scene::new()),
             rects: Arc::new([]),
+            view3d: None,
         }
     }
 }
@@ -130,6 +133,11 @@ impl<A: App> Tile<A> {
     pub fn frame(&mut self) -> Scene {
         self.runner.frame();
         std::mem::take(&mut self.runner.scene)
+    }
+
+    /// The last frame's 3D viewport, in tile coordinates.
+    pub fn view3d(&self) -> Option<SceneView3d> {
+        self.runner.view3d.clone()
     }
 
     /// Where every reachable element is, as of the last frame — tile coordinates.

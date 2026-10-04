@@ -9,6 +9,7 @@ mod require;
 mod round_trip;
 mod scratch;
 mod source_edit;
+mod world3d;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
 fn identity() -> Rc<dyn Fn(LuaMsg) -> LuaMsg> {
@@ -4542,6 +4543,8 @@ fn a_handler_sets_an_entity_through_world_and_is_checked_strictly() {
                try({{ pos = {{ 30, 5 }} }}) \
                try({{ velocity = {{ 1, 0 }} }}) \
                try({{ speed = 1 }}) \
+               try({{ spin = 90 }}) \
+               try({{ spin = 'fast' }}) \
                try({{ pos = {{ 1 }} }}) \
                try({{ pos = {{ 0, 0 }} }}, 'ghost') end, \
              {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }} }}) }}) end"
@@ -4558,6 +4561,8 @@ fn a_handler_sets_an_entity_through_world_and_is_checked_strictly() {
     let heard = app.view().info().children[0].text.clone().unwrap();
     for wanted in [
         "velocity needs a loose thing",
+        "spin needs a loose thing with grip",
+        "world \"room\":set \"hero\".spin must be a number, got string",
         "world \"room\":set \"hero\": unknown field speed",
         "world \"room\":set \"hero\".pos needs x and y",
         "entity \"ghost\": there is no such entity",
@@ -4652,4 +4657,33 @@ fn on_hit_hears_a_loose_thing_strike_a_wall() {
     assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
     let heard = app.view().info().children[0].text.clone();
     assert_eq!(heard.as_deref(), Some("ball>wall@300"));
+}
+
+#[test]
+fn a_loose_thing_with_grip_is_set_spinning() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           actions = {{ go = 'Space' }}, \
+           on_action = function() world('room'):set('ball', {{ spin = 90 }}) end, \
+           {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+             loose = {{ friction = 0, grip = 0.5 }} }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let ball = &app.inspect_worlds()["room"].entities[0];
+    assert!((ball.spin - 90.0).abs() < 1.0 && (ball.rot - 90.0).abs() < 2.0, "{} {}", ball.spin, ball.rot);
+    assert_eq!(ball.pos, (0.0, 0.0), "it turns in place");
 }

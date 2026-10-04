@@ -37,6 +37,8 @@ pub struct Hosted {
     pub index: Option<indexer::Shared>,
     pub ws_id: String,
     pub item_id: Arc<str>,
+    /// Just shown again: a hidden thread does not frame, so its 3D clocks never heard the pause.
+    resumed: bool,
 }
 
 impl App for Hosted {
@@ -47,6 +49,15 @@ impl App for Hosted {
     }
     fn update(&mut self, msg: LuaMsg) {
         self.app.update(msg);
+    }
+    /// Only shown tiles frame, so this runs only while shown — except the first frame back,
+    /// which pauses instead, so the hidden time is skipped rather than caught up as debt.
+    fn advance_simulation(&mut self, elapsed: f64) -> bool {
+        if std::mem::take(&mut self.resumed) {
+            self.app.advance_simulation(elapsed, false);
+            return true;
+        }
+        self.app.advance_simulation(elapsed, true)
     }
 }
 
@@ -276,6 +287,7 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
         index,
         ws_id: open.ws_id,
         item_id: open.item_id,
+        resumed: false,
     })
 }
 
@@ -319,6 +331,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 In::Shown(s) => {
                     shown = s;
                     if s {
+                        tile.app_mut().resumed = true;
                         tile.invalidate();
                     }
                 }
@@ -336,6 +349,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                     let frame = tile.wants_frame().then(|| TileFrame {
                         scene: Arc::new(tile.frame()),
                         rects: tile.rects().into(),
+                        view3d: tile.view3d(),
                     });
                     let _ = reply.send(frame);
                 }
@@ -350,6 +364,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
             let frame = TileFrame {
                 scene: Arc::new(tile.frame()),
                 rects: Arc::new([]),
+                view3d: tile.view3d(),
             };
             *ctx.latest.lock().unwrap() = Some(frame);
             let _ = ctx.proxy.send_event(Msg::TileDirty(ctx.id.clone()));
