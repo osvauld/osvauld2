@@ -75,7 +75,7 @@ impl SignupForm {
             .color(theme::fg_3());
         let label_input = text_input(&self.label, "label", |s| Msg::Signup(SignupMsg::Label(s)))
             .h(40.0)
-            .w(PANEL_W)
+            .w_full()
             .px(12.0)
             .fill(theme::bg_1())
             .color(theme::fg_1())
@@ -92,7 +92,7 @@ impl SignupForm {
         let password_input =
             text_input(&self.pass, "password", |s| Msg::Signup(SignupMsg::Pass(s)))
                 .h(40.0)
-                .w(PANEL_W)
+                .w_full()
                 .color(theme::fg_1())
                 .px(12.0)
                 .fill(theme::bg_1())
@@ -141,9 +141,9 @@ impl SignupForm {
             submit_button,
             error_panel,
         ];
-        let panel = col().gap(16.0).children(panel_children);
+        let panel = col().w_full().max_w(PANEL_W).gap(16.0).children(panel_children);
 
-        col().full().child(panel).center()
+        col().full().px(16.0).child(panel).center()
     }
     pub fn update(
         &mut self,

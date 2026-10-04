@@ -11,6 +11,58 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 ## Built
 
 ### M0 — runtime plumbing (done, W1)
+- Android startup seam: Android-only `run_android_with(AndroidApp, build)` configures
+  Winit's NativeActivity backend and enters the shared Runner. Desktop windowed and
+  offscreen entry points remain unchanged; ARM64 Android compilation is verified.
+- `android_app` packages that runtime as an ARM64 NativeActivity APK with a bundled-font
+  text/vector probe, Android API 28 minimum and API 35 target. Debug APK build, signature
+  and packaged entry point are verified. An explicit x86_64 build has launched on the API 35
+  emulator and rendered real text/vectors (`shots/android-first-launch.png`). Release packaging and
+  a reproducible 16KB alignment guarantee remain open.
+  `cargo-apk` is prototype tooling (deprecated upstream), not a release-tooling decision.
+- Android lifecycle: Runner drops rendering resources on suspend while retaining app,
+  text and keyed state, rebuilding rendering on resume. `App::ready` runs once per Runner;
+  logger initialization tolerates activity recreation and IME follows focused editors.
+  Three background/resume cycles on the API 35 x86_64 emulator preserved the process,
+  rebuilt surfaces and restored the probe (`shots/android-resumed.png`), with IME hidden.
+- Single-finger touch routes Winit touch positions through existing logical pointer,
+  field-focus, drag-slop and click handling. Extra fingers are ignored; cancellation and
+  suspension discard capture without click/drop/drag-end commits. Mouse events do not
+  interfere while touch owns capture. Emulator taps focused signup fields and ADB-injected
+  text reached the existing handlers. Android Enter/control characters are normalized to
+  named editing keys, restoring workspace creation. Signup, restart/unlock and creation of
+  an `Android` workspace were exercised against app-private storage. This does not prove
+  soft-keyboard IME: NativeActivity lacks text-state/editor-info support, and Winit 0.30
+  ignores Android text-state events. A proper Android text-input adapter remains unbuilt.
+  Pinch and finger-scroll gestures remain unbuilt.
+- Android debug content-area probe reads `AndroidApp::content_rect()` and native surface
+  dimensions at `about_to_wait`, logging changed geometry and fresh samples after external
+  event wakes. It is Android/debug-only, changes no layout or control flow, and resets on
+  suspend. On the API 35 edge-to-edge emulator, an IME-visible/hidden cycle reported a
+  126px IME bar then no IME area in Android's inset state, while native content and surface
+  stayed `[0,0,1080,2400]` / `1080x2400`. The full keyboard from `upload.png` was not reproduced
+  in that run. Polling the native getter therefore does not supply even that IME bar's inset
+  in this configuration. At the time of this probe, direct Android `WindowInsets` access
+  and event forwarding were unbuilt. The probe itself is not a keyboard-avoidance fix;
+  the adapter below supersedes that limitation as of **2026-10-03**.
+- Android inset adapter (**2026-10-03**): `scripts/build_android.py` packages the Java
+  UI-thread listener with NativeActivity, enabling `has_code` and adding DEX before alignment
+  and signing. Install `osvauld.apk`; `osvauld-native.apk` is an intermediate artifact.
+  JNI callbacks publish physical-pixel insets through per-installation tokens and wake Winit;
+  suspend invalidates the token and resume reinstalls the listener.
+  Shared layout, paint and hit geometry use the unobscured area while the GPU surface stays
+  full-sized. Inset refreshes preserve field identity, so autofocus does not undo blur.
+  Android hides IME unconditionally on blur, with a fresh field tap reasserting the existing
+  show policy even if Rust focus did not change. Desktop IME handling is unchanged. On the API 35 x86_64
+  emulator, disabling `hw.keyboard` reproduced the full 883px virtual keyboard; the
+  passphrase field and Login button stayed above it. Three native IME-visibility cycles
+  passed: tap away hides, field tap opens, Back hides, same-field tap reopens. These checks
+  also passed with the toolbar-only 126px IME; full-keyboard consistency remains open.
+  Cold-boot verification later exposed an Activity-relaunch hang (below). Headless tests cover inset
+  scaling/clipping, touch coordinates and blur surviving inset changes; login's account
+  list yields height without squeezing the form. API 28/29's legacy system-window inset
+  fallback may not expose the keyboard in every window mode; avoidance on those APIs,
+  advanced IME composition, physical devices and landscape remain unverified.
 - ids + keyed state store (`get_or`, register-by-frame, sweep)
 - scroll containers with hit-testing that respects clip
 - drag gesture: phases + pointer capture; current experimental callback separates screen ghost
@@ -53,6 +105,40 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   workspaces + items screens, app upload (folder picker → `files` LoroMap → `main.lua`
   entry point), tabs (one running instance per item, retained ids namespaced `tab:<id>`),
   theme
+- Shell folder import is gated by the default-on `folder-picker` feature; disabling it
+  removes `rfd` and the upload button. Android excludes both even with default features.
+  The shell state/screens now live in `shell2/src/lib.rs`, shared by the thin desktop
+  `main.rs` and Android. `android_app` opens the vault in Android's app-private files
+  directory and runs `Shell::new`; its signup screen is verified on the x86_64 API 35
+  emulator (`shots/android-signup.png`). Android does not start the desktop UDS bridge
+  or reconciliation timer in non-debug Android builds. Debug APKs opt into `adb-debug`:
+  the bridge binds private `files/shell.sock` at 0600 and node connections use private
+  `files/kunki.sock`. Startup config is process-local, idempotent across activity recreation,
+  and never mutates environment variables. Emulator transport uses ADB forward/reverse
+  between filesystem UDS endpoints, not TCP. Root-enabled emulator ADB is required to bind
+  the reverse endpoint inside private storage; the harness must restrict it to the app UID,
+  chmod 0600 and restore its SELinux label before use. Independent-device transport remains
+  unbuilt. Signup/unlock and persisted-account recovery have been exercised with touch
+  and ADB text injection.
+- `scripts/demo_android_sync.py` is the real desktop/node/Android round trip: desktop uploads
+  and publishes scratch, Android creates a separate throwaway account, redeems an invite,
+  joins the published item and opens the unchanged Lua app; both directions of live note
+  delivery are asserted. Existing Android accounts are not erased. The `osvauld.android`
+  harness sets up private UDS mappings and removes only its own on exit. The demo supplies
+  workspace/item IDs explicitly because node discovery is still unbuilt. The opt-in
+  `smoke_android_sync.py` is registered in `SMOKES`; `OSVAULD_ANDROID_SMOKE=1` requires a
+  booted root-enabled emulator and installed debug APK. This proves ADB-carried sync,
+  not independent network transport or production Android IME.
+- Shared-shell narrow-width layout: login/signup and the empty-workspace field fill the
+  available width with 16pt side gutters, capped at their existing desktop widths
+  (460/360/420pt). Workspace header controls wrap; add-workspace and node-ticket popovers
+  use 90% of viewport width capped at their existing 320/360pt desktop widths. Headless
+  geometry tests cover 320/360/393/900pt; `smoke_shell_layout.py` is registered in `SMOKES`
+  and drives real-shell auth/workspace setup plus pointer-opened popovers at 320/393/900pt.
+  The installed API 35 x86_64 APK was checked with actual touch and injected hardware keys:
+  signup, existing-account unlock and workspace creation passed. Screenshots are in
+  `shots/android-responsive-*.png`. This does not cover recovery-phrase layout, Android
+  system-bar insets, soft-keyboard IME or short/landscape viewports.
 - **`lua_tree`**: full-moon/Luau parse → 22-kind schema → printer; round-trip and
   strong-spike suites (printed source runs and produces an identical element tree); the
   every-table-constructor-on-its-own-line printer rule (two rules, pinned by test)
@@ -62,6 +148,20 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
 ## Not built
+
+### Android support — shell and physical-device validation remain
+
+Lua has no drag cancellation event yet: clearing runtime capture does not clear app-owned
+drag scratch. Remaining shell platform gates, physical-device GPU validation and reproducible
+release packaging remain unbuilt. **2026-10-03:** API 35 cold boot exposed an Activity-relaunch
+hang after a resource configuration change: the Java main thread waited in NativeActivity's
+`onDestroy`, while the Rust loop remained polling; Winit 0.30 ignores `MainEvent::Destroy`.
+Background/resume token refresh works, but Activity recreation/shutdown remains a blocker.
+Full-keyboard appearance/avoidance and focus-driven IME visibility were exercised separately;
+warm starts also showed only the IME toolbar. Proper text-state/composition support and
+consistent full-keyboard activation still need a platform adapter.
+Single-finger touch is built; multi-touch,
+scroll-gesture arbitration and app-visible drag cancellation remain open.
 
 ### Workspace permissions, sync, and sovereign node — design baseline
 

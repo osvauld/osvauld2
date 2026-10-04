@@ -1,0 +1,32 @@
+[package]
+name = "android_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+runtime = { path = "../runtime" }
+shell2 = { path = "../shell2", default-features = false, features = ["adb-debug"] }
+vault = { path = "../vault" }
+
+[package.metadata.android]
+package = "com.osvauld.android"
+apk_name = "osvauld-native"
+build_targets = ["aarch64-linux-android"]
+strip = "strip"
+
+[package.metadata.android.sdk]
+min_sdk_version = 28
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Osvauld"
+has_code = true
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vulkan.level"
+required = true
+version = 1

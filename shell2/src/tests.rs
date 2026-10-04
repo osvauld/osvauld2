@@ -19,6 +19,104 @@ fn noop_wake() -> Wake {
 }
 
 #[test]
+fn folder_import_button_follows_build_capability() {
+    fn has_upload(node: &runtime::ElInfo) -> bool {
+        node.id.as_deref() == Some("add_item") || node.children.iter().any(has_upload)
+    }
+    let tmp = TempDir::new().unwrap();
+    let vault = Vault::open(tmp.path().to_path_buf()).unwrap();
+    let mut screen = crate::item::ItemsScreen::new(&vault, WorkspaceMeta {
+        id: "0123456789abcdef0123456789abcdef".into(),
+        name: "test".into(), created: 0,
+    });
+    assert_eq!(has_upload(&screen.view().info()),
+        cfg!(all(feature = "folder-picker", not(target_os = "android"))));
+    #[cfg(not(all(feature = "folder-picker", not(target_os = "android"))))]
+    assert_eq!(screen.upload(&vault).unwrap_err(), "folder import is unavailable in this build");
+    // The mutable binding is used only in builds without a picker.
+    let _ = &mut screen;
+}
+
+pub(super) fn screen_rects(view: impl Fn() -> runtime::El<crate::Msg>, width: f32) -> Vec<runtime::ElRect> {
+    screen_rects_at(view, (width, 720.0))
+}
+
+fn screen_rects_at(view: impl Fn() -> runtime::El<crate::Msg>, viewport: (f32, f32)) -> Vec<runtime::ElRect> {
+    struct ScreenView<F>(F);
+    impl<F: Fn() -> runtime::El<crate::Msg>> runtime::App for ScreenView<F> {
+        type Msg = crate::Msg;
+        fn view(&self) -> runtime::El<Self::Msg> { (self.0)() }
+        fn update(&mut self, _: Self::Msg) {}
+    }
+    runtime::Headless::new(ScreenView(view), viewport).rects()
+}
+
+pub(super) fn assert_fits(rect: &runtime::ElRect, width: f32) {
+    assert!(rect.w > 0.0 && rect.h > 0.0, "{rect:?}");
+    assert!(rect.x >= -0.1 && rect.x + rect.w <= width + 0.1, "{rect:?}, viewport {width}");
+    assert!(rect.y >= -0.1 && rect.y + rect.h <= 720.1, "{rect:?}");
+}
+
+#[test]
+fn auth_and_empty_workspace_panels_fit_phones_and_keep_desktop_widths() {
+    let (vault, _tmp, _, _) = fresh();
+    let login = crate::login::LoginScreen::new(&vault);
+    let signup = crate::signup::SignupForm::default();
+    let empty = TempDir::new().unwrap();
+    let empty_vault = Vault::open(empty.path().to_path_buf()).unwrap();
+    let spaces = crate::space::SpaceScreen::new(&empty_vault);
+    for width in [320.0_f32, 360.0, 393.0, 900.0] {
+        for (rects, fields, cap) in [
+            (screen_rects(|| login.view(), width), vec!["passphrase", "login"], 460.0),
+            (screen_rects(|| signup.view(), width), vec!["label", "password", "submit"], 360.0),
+            (screen_rects(|| spaces.view(), width), vec!["workspace_name"], 420.0),
+        ] {
+            for id in fields {
+                let rect = rects.iter().find(|r| r.id == id).unwrap();
+                assert_fits(rect, width);
+                assert!((rect.w - (width - 32.0).min(cap)).abs() < 0.1, "{rect:?}");
+                assert!(rect.x >= 15.9);
+            }
+        }
+    }
+}
+
+#[test]
+fn login_account_list_yields_height_without_squeezing_the_form() {
+    let (vault, _tmp, _, _) = fresh();
+    let login = crate::login::LoginScreen::new(&vault);
+    for height in [320.0, 450.0, 500.0, 720.0] {
+        let rects = screen_rects_at(|| login.view(), (393.0, height));
+        for (id, expected) in [("passphrase", 40.0), ("login", 44.0), ("add_account", 32.0)] {
+            let rect = rects.iter().find(|r| r.id == id).unwrap();
+            assert!(rect.y >= 0.0 && rect.y + rect.h <= height, "{rect:?} at {height}");
+            assert!((rect.h - expected).abs() < 0.1, "{rect:?}");
+        }
+    }
+}
+
+#[test]
+fn workspace_header_wraps_without_squeezing_controls_or_cards() {
+    let (vault, _tmp, ws_id, _) = fresh();
+    let spaces = crate::space::SpaceScreen::new(&vault);
+    for width in [320.0, 360.0, 393.0, 900.0] {
+        let rects = screen_rects(|| spaces.view(), width);
+        for id in ["claim_node", "add_space", &ws_id] {
+            assert_fits(rects.iter().find(|r| r.id == id).unwrap(), width);
+        }
+        let card = rects.iter().find(|r| r.id == ws_id).unwrap();
+        assert!((card.w - 240.0).abs() < 0.1, "{card:?}");
+        let add = rects.iter().find(|r| r.id == "add_space").unwrap();
+        let claim = rects.iter().find(|r| r.id == "claim_node").unwrap();
+        if width == 320.0 {
+            assert!(add.y >= claim.y + claim.h, "header should wrap: {rects:?}");
+        } else if width == 900.0 {
+            assert_eq!(add.y, claim.y);
+        }
+    }
+}
+
+#[test]
 fn screenshot_dimensions_are_bounded_and_paired() {
     assert_eq!(screenshot_spec(None, None, None), Ok((None, None)));
     assert_eq!(

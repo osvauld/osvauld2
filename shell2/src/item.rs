@@ -2,6 +2,7 @@
 //! the workspaces themselves. List-only for now: app upload/creation is the next design
 //! discussion, so an empty workspace just says so.
 
+#[cfg(all(feature = "folder-picker", not(target_os = "android")))]
 use crate::app_src::{app_name, read_app_folder, snapshot};
 use crate::space::SpaceScreen;
 use crate::{Msg, Screen, theme};
@@ -37,6 +38,7 @@ impl ItemsScreen {
     }
 
     pub fn view(&self) -> El<Msg> {
+        #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
         let upload_btn = row()
             .h(36.0)
             .px(14.0)
@@ -74,8 +76,9 @@ impl ItemsScreen {
             .align_center()
             .child(back)
             .child(text(&self.ws.name).font_size(15.0).color(theme::fg_1()))
-            .child(col().grow())
-            .child(upload_btn);
+            .child(col().grow());
+        #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
+        let header = header.child(upload_btn);
 
         let body = if self.items.is_empty() {
             col().grow().center().child(
@@ -133,6 +136,12 @@ impl ItemsScreen {
         }
     }
 
+    #[cfg(not(all(feature = "folder-picker", not(target_os = "android"))))]
+    pub fn upload(&mut self, _vault: &Vault) -> Result<(), String> {
+        Err("folder import is unavailable in this build".into())
+    }
+
+    #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
     pub fn upload(&mut self, vault: &Vault) -> Result<(), String> {
         let Some(root) = rfd::FileDialog::new().pick_folder() else {
             return Ok(());

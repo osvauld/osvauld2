@@ -42,7 +42,10 @@ fn socket_path() -> PathBuf {
 /// still run without a bridge. Binding itself — staged, locked to 0600, atomically renamed
 /// into place — is `osvauld_rpc::bind_uds`, shared with kunki's bridge.
 pub fn spawn(proxy: EventLoopProxy<Msg>) {
-    let path = socket_path();
+    spawn_at(proxy, socket_path());
+}
+
+pub(super) fn spawn_at(proxy: EventLoopProxy<Msg>, path: PathBuf) {
     match osvauld_rpc::bind_uds(&path) {
         Ok(listener) => {
             std::thread::spawn(move || serve(listener, proxy));

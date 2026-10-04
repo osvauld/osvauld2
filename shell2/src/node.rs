@@ -18,6 +18,15 @@ use loro::{ExportMode, LoroDoc};
 use osvauld_rpc::Response;
 use vault::{Vault, WorkspaceItem, WorkspaceMeta};
 
+fn connect(socket: &Path) -> Result<UnixStream, String> {
+    // The Android debug process has no desktop environment variables; ADB supplies this endpoint.
+    #[cfg(all(target_os = "android", debug_assertions, feature = "adb-debug"))]
+    let android_socket = crate::android_debug_dir().join("kunki.sock");
+    #[cfg(all(target_os = "android", debug_assertions, feature = "adb-debug"))]
+    let socket = android_socket.as_path();
+    UnixStream::connect(socket).map_err(|e| e.to_string())
+}
+
 /// Same convention as `kunki::bridge`'s own `now_secs`, independently, because this side has
 /// no `Admin` to hang it on.
 pub fn now_secs() -> u64 {
@@ -52,7 +61,7 @@ pub fn load_relationship(vault: &Vault) -> Result<Option<DesktopNodeRecord>, Str
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn call(socket: &Path, req: &Request) -> Result<Response, String> {
-    let mut conn = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let mut conn = connect(socket)?;
     conn.set_read_timeout(Some(READ_TIMEOUT))
         .map_err(|e| e.to_string())?;
     let payload = serde_json::to_vec(req).map_err(|e| e.to_string())?;
@@ -289,7 +298,7 @@ pub fn unsubscribe(
 /// a loop on its own thread, so establishing the connection (with its own retry-on-drop
 /// policy) and consuming it stay two separate concerns.
 pub fn listen(socket: &Path, desktop_did: &str, token: Token) -> Result<UnixStream, String> {
-    let mut conn = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let mut conn = connect(socket)?;
     let req = Request::Listen {
         desktop_did: desktop_did.to_string(),
         token,
