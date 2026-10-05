@@ -875,8 +875,13 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
+    let camera = world.camera.as_ref().map(|c| serde_json::json!({
+        "at": [c.at.0, c.at.1], "follow": c.follow, "lost": c.lost, "ease": c.ease,
+        "bounds": c.bounds.map(|(x, y, w, h)| [x, y, w, h]), "view": [c.view.0, c.view.1],
+        "drawn": c.drawn,
+    }));
     serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
-        "tick": world.tick, "dropped": world.dropped })
+        "tick": world.tick, "dropped": world.dropped, "camera": camera })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.
@@ -2501,6 +2506,11 @@ impl App for Shell {
                 None
             }
             Msg::DriverDone(reply, result) => {
+                // Frame paints before advancing its clock. Settle shown tiles at the reported
+                // instant before replying, not during the caller's next observation.
+                if let Ok(report) = &result {
+                    self.before_frame(report.clock);
+                }
                 match reply {
                     DriverReply::Test(tx) => {
                         let _ = tx.send(result);

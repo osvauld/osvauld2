@@ -528,18 +528,16 @@ fn gradient_rejects_bad_stops_and_geometry() {
 }
 
 #[test]
-fn frame_budgets_expanded_items_and_path_commands() {
+fn a_frame_counts_but_does_not_cap_its_items_and_path_commands() {
+    // A big world is many small things. One path is capped (`Path::new`); a frame's total is
+    // counted for inspection, not refused.
     let item = fill(dot(1));
-    assert_eq!(
-        Frame::new(1.0, 1.0, None, vec![item; MAX_FRAME_ITEMS + 1]).unwrap_err(),
-        FrameError::TooManyItems
-    );
+    let frame = Frame::new(1.0, 1.0, None, vec![item; 20_000]).unwrap();
+    assert_eq!(frame.stats().expanded_items, 20_000);
 
     let path = dot(MAX_PATH_COMMANDS / 2 + 1);
-    assert_eq!(
-        Frame::new(1.0, 1.0, None, vec![fill(path.clone()), fill(path)]).unwrap_err(),
-        FrameError::TooManyPathCommands
-    );
+    let frame = Frame::new(1.0, 1.0, None, vec![fill(path.clone()), fill(path)]).unwrap();
+    assert_eq!(frame.stats().expanded_path_commands, 2 * (MAX_PATH_COMMANDS / 2 + 1));
 }
 
 #[test]
@@ -555,21 +553,11 @@ fn frame_rejects_excessive_group_depth() {
 }
 
 #[test]
-fn repeated_instances_cannot_bypass_expanded_budgets() {
+fn repeated_instances_count_at_their_full_expanded_cost() {
     let leaf = Arc::new(Frame::new(1.0, 1.0, None, vec![fill(dot(1))]).unwrap());
     let instance = Item::instance(Affine::IDENTITY, leaf).unwrap();
-    assert_eq!(
-        Frame::new(1.0, 1.0, None, vec![instance; MAX_FRAME_ITEMS / 2 + 1]).unwrap_err(),
-        FrameError::TooManyItems
-    );
-
-    let costly =
-        Arc::new(Frame::new(1.0, 1.0, None, vec![fill(dot(MAX_PATH_COMMANDS / 2 + 1))]).unwrap());
-    let instance = Item::instance(Affine::IDENTITY, costly).unwrap();
-    assert_eq!(
-        Frame::new(1.0, 1.0, None, vec![instance.clone(), instance]).unwrap_err(),
-        FrameError::TooManyPathCommands
-    );
+    let frame = Frame::new(1.0, 1.0, None, vec![instance; 20_000]).unwrap();
+    assert_eq!(frame.stats().expanded_path_commands, 20_000, "each instance's commands count");
 }
 
 #[test]
@@ -633,4 +621,40 @@ fn renderer_emits_fills_for_nested_groups_and_instances() {
             Affine::translate((7.0, 8.0)) * Affine::scale(2.0),
         ]
     );
+}
+
+/// Times `f` over `runs` runs after one to warm up, and prints `BENCH <name> <µs>` for
+/// `scripts/bench.py`, which builds release.
+fn bench(name: &str, runs: u32, mut f: impl FnMut()) {
+    f();
+    let started = std::time::Instant::now();
+    for _ in 0..runs {
+        f();
+    }
+    let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(runs);
+    let debug = if cfg!(debug_assertions) { " debug" } else { "" };
+    println!("BENCH {name} {us:.1}{debug}");
+}
+
+/// The CPU half of painting a big world: `n` placed instances of a three-shape sprite, encoded
+/// into a vello scene.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_frame_encode() {
+    let shapes = vec![fill(dot(4)), fill(dot(4)), fill(dot(4))];
+    let sprite = Arc::new(Frame::new(8.0, 8.0, None, shapes).unwrap());
+    for n in [5_000, 20_000] {
+        let items = (0..n)
+            .map(|i| {
+                let at = Affine::translate(((i % 200) as f64 * 6.0, (i / 200) as f64 * 6.0));
+                Item::instance(at, sprite.clone()).unwrap()
+            })
+            .collect();
+        let frame = Frame::new(1280.0, 720.0, None, items).unwrap();
+        let mut scene = Scene::new();
+        bench(&format!("frame_encode_{n}"), 20, || {
+            scene.reset();
+            frame.draw(&mut scene, Affine::IDENTITY, 1.0);
+        });
+    }
 }

@@ -705,8 +705,27 @@ the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STE
 leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
 ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
 Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
-body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
-bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
+body taken away still leaves. No interpolation between steps yet. **Thousands of small things:** a frame no longer caps its items or its path commands (one path
+still caps at 65,536); 20000 entities build their frame. The numbers live in the **benchmark
+suite** — `python3 scripts/bench.py` builds release, runs every `bench_*` test, and fails past a
+budget in `scripts/bench_budgets.json` ([design/perf-benchmarks.md](design/perf-benchmarks.md)).
+So the camera culls for speed, not to get under a cap, and **signals** ([design/signals.md](design/signals.md))
+let a part of the description re-run only when what it read changed. Step 1:
+`signal(value, name)` — a frozen value read as a plain table, changed only by `set`/`update` in a
+handler; writes that skip them error. Step 2: `ui.group(id, fn)` among a world's entities runs
+again only when a signal it read changed; the world keeps a clean group's entities untouched
+(`World2d::reconcile_parts`). 5000 coins: walking costs no coin work (~1 ms a frame with view, 20 ms
+without groups); a pickup costs ~24 ms as one group, ~1.4 ms as 50 chunked groups. **Camera** ([design/camera.md](design/camera.md)):
+`camera = { follow, at, ease, bounds }` on `ui.world` shows part of a map bigger than the box;
+it follows on the fixed step (`ease` per second), stops at explicit `bounds = { x, y, w, h }`
+(revised from the 3D agreement's `bounds = true`), holds when its target is gone (`lost`), and
+survives reload. `world(id):set_camera({ at } | { follow })` in handlers; `to_world`/`to_screen`
+anywhere. Every world now draws only what meets its box (half an entity's size of margin): 20000
+entities through a 1280 × 720 camera build in ~0.9 ms against ~4.3 ms all drawn; walking past
+20000 grouped coins is ~1.9 ms a frame (target 2 ms, met with no room — a spatial grid is the lever).
+`smoke_camera.py` checks it in pixels, rects and the dump. Next, in order: a `follow`
+controller; acceleration; then the RPG. Signals steps 3–6 (UI-tree groups, `view` as root
+group, inspection and the dev check, docs as signals).
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
@@ -866,6 +885,23 @@ projected pixels pass. Mesh and both marble smokes pass on the app-thread build;
 viewport is made inspectable through a no-op click handler in the uploaded test copy only.
 Multiple 3D views per frame remain unimplemented; this change is test coverage, not a renderer
 extension. The previous dev integration exercised all 13 registered smokes across sweep/rerun.
+
+**Observation boundary repaired — 2026-10-05:** the old Tilt Maze blocker above is resolved.
+The last Frame tick paints before advancing the shell clock; the successful driver reply now
+settles shown app tiles at its reported final clock before answering. Previously the next dump
+could see that outstanding interval consumed after its first snapshot (ticks 67→69 at unchanged
+reported time). No body/game rule or new time increment was added; hidden apps remain excluded.
+Test-first `smoke_world3d_observation.py` failed on repeated dump ticks 22→24, then passed
+Frame/Advance, zero-time senses and both capture paths. The original minimal repro now stays
+stable. Tilt Maze's full win/loss, blocking walls, checkpoint Retry, moving pause/resume,
+captures and surgical reload all pass. Its remaining reload assertion typo excluded `mesh`
+instead of process-local `mesh_resource`; the corrected assertion still compares geometry/poses.
+Both new smokes are registered. This clears the second-game authoring gate: a fresh agent wrote
+a different game from the guide without new game-specific Rust; the generic scheduling defect
+it exposed was fixed afterward. Won/lost/reloaded screenshots were inspected.
+Final validation: all **15 registered smokes pass in one sweep**, workspace check passes with
+existing warnings, 50 shell tests pass (one ignored), and 148 runtime tests pass (three ignored).
+The full workspace test suite was not rerun. Multiple views/foreground composition remain next.
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,

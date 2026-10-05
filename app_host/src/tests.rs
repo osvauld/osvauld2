@@ -3,6 +3,7 @@ use mlua::{FromLua, Table};
 use runtime::HoverPhase;
 use std::rc::Rc;
 
+mod camera;
 mod index;
 mod reload;
 mod require;
@@ -4736,6 +4737,456 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
     ] {
         assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
     }
+}
+
+/// An app whose `main.lua` is `src`, viewed once.
+fn app_of(src_lua: &str) -> LuaApp<LuaMsg> {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, src_lua).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let _ = app.view();
+    app
+}
+
+/// Runs `code` in the app's VM as a handler would, answering what it returns or why it failed.
+fn said(app: &LuaApp<LuaMsg>, code: &str) -> String {
+    let run = format!("local ok, e = pcall(function() {code} end) return ok and tostring(e) or tostring(e)");
+    app.vm.load(&run).eval::<String>().unwrap()
+}
+
+#[test]
+fn a_signal_holds_a_frozen_value_that_only_set_and_update_change() {
+    let app = app_of(
+        "coins = signal({ { x = 1 }, { x = 2 } }, 'coins') \
+         count = signal(0, 'count') \
+         return function() return ui.text({ tostring(#coins()) }) end",
+    );
+    // Read: a plain table, at full speed, with every ordinary read.
+    assert_eq!(said(&app, "local n = 0 for _, c in ipairs(coins()) do n += c.x end return n .. '/' .. #coins()"), "3/2");
+    // Every write that skips set and update is refused, nested ones too.
+    for write in [
+        "coins()[1].x = 5",
+        "table.insert(coins(), { x = 3 })",
+        "table.remove(coins(), 1)",
+        "table.sort(coins(), function(a, b) return a.x > b.x end)",
+        "coins()[3] = { x = 3 }",
+    ] {
+        assert!(said(&app, write).contains("readonly"), "{write}: {}", said(&app, write));
+    }
+    // update hands a writable copy; what it inserts is frozen too, and the old value is untouched.
+    assert_eq!(said(&app, "local old = coins() \
+        coins:update(function(list) table.insert(list, { x = 3 }) end) \
+        return #old .. '/' .. #coins()"), "2/3");
+    assert!(said(&app, "coins()[3].x = 9").contains("readonly"));
+    // A number (anything not a table) is updated by returning the new value.
+    assert_eq!(said(&app, "count:update(function(n) return n + 1 end) return count()"), "1");
+    let forgot = said(&app, "count:update(function(n) n = n + 1 end)");
+    assert!(forgot.contains("signal \"count\": update's function must return the new value"), "{forgot}");
+    assert_eq!(said(&app, "return count()"), "1", "unchanged by the failed update");
+    // set replaces, and freezes what it is given.
+    assert_eq!(said(&app, "coins:set({ { x = 9 } }) return coins()[1].x"), "9");
+    assert!(said(&app, "coins()[1].x = 1").contains("readonly"));
+    // A failing update leaves the value as it was.
+    assert!(said(&app, "coins:update(function(list) error('nope') end)").contains("nope"));
+    assert_eq!(said(&app, "return #coins()"), "1");
+}
+
+#[test]
+fn a_signal_needs_a_name_and_is_not_written_while_view_describes() {
+    let app = app_of(
+        "hero = signal({ hp = 10 }, 'hero') \
+         heard = '' \
+         return function() \
+           local ok, e = pcall(function() hero:set({ hp = 9 }) end) \
+           local ok2, e2 = pcall(function() hero:update(function(h) end) end) \
+           heard = tostring(e) .. ' | ' .. tostring(e2) \
+           return ui.text({ tostring(hero().hp) }) end",
+    );
+    let heard = said(&app, "return heard");
+    assert!(heard.contains("signal \"hero\": set only in a handler; view describes"), "{heard}");
+    assert!(heard.contains("signal \"hero\": update only in a handler; view describes"), "{heard}");
+    assert_eq!(said(&app, "return hero().hp"), "10");
+    assert!(said(&app, "signal({})").contains("signal needs a name"), "{}", said(&app, "signal({})"));
+}
+
+/// How many times the global signal `name` has changed.
+fn version(app: &LuaApp<LuaMsg>, name: &str) -> u64 {
+    let s: mlua::AnyUserData = app.vm.globals().get(name).unwrap();
+    crate::signal::version(&s).unwrap()
+}
+
+#[test]
+fn a_click_updates_a_signal_and_the_next_view_shows_it() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, "score = signal(0, 'score') \
+         return function() return ui.button({ id = 'add', \
+           on_click = function() score:update(function(n) return n + 1 end) end, \
+           ui.text({ 'score ' .. score() }) }) end").unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    let click = app.view().trigger("add", runtime::Action::Click).unwrap();
+    app.update(click.clone());
+    app.update(click);
+    let info = app.view().info();
+    assert_eq!(info.children[0].text.as_deref(), Some("score 2"));
+}
+
+#[test]
+fn setting_the_value_a_signal_holds_changes_nothing() {
+    let app = app_of("hero = signal({ hp = 10 }, 'hero') n = signal(3, 'n') \
+                      return function() return ui.text({ '' }) end");
+    said(&app, "hero:set(hero()) n:set(3)");
+    assert_eq!((version(&app, "hero"), version(&app, "n")), (0, 0), "same table, same number");
+    said(&app, "hero:set({ hp = 10 }) n:set(4)");
+    assert_eq!((version(&app, "hero"), version(&app, "n")), (1, 1), "an equal new table is a change");
+    said(&app, "hero:update(function(h) end)");
+    assert_eq!(version(&app, "hero"), 2, "an update is a change: it cannot tell");
+    said(&app, "n:update(function(v) error('no') end)");
+    assert_eq!(version(&app, "n"), 1, "a failed update is not");
+}
+
+#[test]
+fn a_signal_is_not_updated_from_inside_its_own_update() {
+    let app = app_of("coins = signal({}, 'coins') other = signal(0, 'other') \
+                      return function() return ui.text({ '' }) end");
+    let nested = said(&app, "coins:update(function(list) \
+        coins:update(function(l) table.insert(l, 'inner') end) \
+        table.insert(list, 'outer') end)");
+    assert!(nested.contains("signal \"coins\": update inside its own update"), "{nested}");
+    assert_eq!(said(&app, "return #coins()"), "0", "neither change landed");
+    // Another signal may change from inside, and reading this one gives the value before.
+    assert_eq!(said(&app, "coins:update(function(list) \
+        other:update(function(n) return n + 1 end) \
+        table.insert(list, #coins()) end) return other() .. '/' .. coins()[1]"), "1/0");
+    assert_eq!(said(&app, "coins:update(function(l) end) return 'again'"), "again", "the guard is released");
+}
+
+#[test]
+fn freezing_stops_at_cycles_keys_and_things_that_belong_elsewhere() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    // A table holding itself, and a table used as a key: both frozen, no endless walk.
+    assert_eq!(said(&app, "local t = {} t.me = t local k = {} t[k] = 1 \
+        local s = signal(t, 'loop') \
+        local a = pcall(function() s().me.x = 1 end) local b = pcall(function() k.x = 1 end) \
+        return tostring(a) .. tostring(b)"), "falsefalse");
+    // A drawing (userdata) inside a signal still draws; a table with a metatable is left alone.
+    assert_eq!(said(&app, "local tagged = doc.map({ a = 1 }) \
+        local s = signal({ look = gfx.frame({ width = 4, height = 4 }), tagged = tagged }, 'mixed') \
+        tagged.b = 2 return s().look.width .. '/' .. s().tagged.b"), "4/2");
+}
+
+#[test]
+fn a_doc_mirror_kept_in_a_signal_still_follows_the_doc() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, "local board = doc:open('board') \
+         held = signal({ board = board }, 'held') \
+         function rename(s) board:set({ 'meta', 'title' }, s) end \
+         return function() return ui.text({ tostring(held().board.meta.title) }) end").unwrap();
+    src.commit();
+    let resolve = serving("board", snapshot_of(&board(&["a"])));
+    let app = LuaApp::open(src, resolve, noop_wake(), identity()).unwrap();
+    assert_eq!(app.view().info().text.as_deref(), Some("Todo"));
+    let rename: Function = app.vm.globals().get("rename").unwrap();
+    rename.call::<()>("todo").unwrap();
+    let _ = app.view();
+    assert_eq!(app.view().info().text.as_deref(), Some("todo"), "the mirror inside the signal was patched");
+}
+
+#[test]
+fn update_works_on_maps_and_takes_a_returned_table_or_any_value() {
+    let app = app_of("m = signal({ a = 1, b = 2 }, 'm') v = signal(nil, 'v') \
+                      return function() return ui.text({ '' }) end");
+    assert_eq!(said(&app, "m:update(function(t) t.a = nil t.c = 3 end) \
+        return tostring(m().a) .. m().b .. m().c"), "nil23");
+    assert_eq!(said(&app, "m:update(function(t) return { z = 1 } end) return tostring(m().b) .. m().z"), "nil1");
+    assert!(said(&app, "m().z = 2").contains("readonly"), "a returned table is frozen too");
+    assert_eq!(said(&app, "v:set(true) v:update(function(b) return not b end) \
+        local a = v() v:set('word') return tostring(a) .. ' ' .. v()"), "false word");
+    assert_eq!(said(&app, "v:set(nil) return tostring(v())"), "nil");
+    assert_eq!(said(&app, "return tostring(m)"), "signal \"m\"");
+}
+
+#[test]
+fn updating_a_five_thousand_item_list_freezes_what_it_added() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    said(&app, "local list = {} for i = 1, 5000 do list[i] = { id = i, x = i, y = i } end \
+                big = signal(list, 'big')");
+    said(&app, "for i = 1, 10 do big:update(function(l) table.insert(l, { id = 0, x = 0, y = 0 }) end) end");
+    assert_eq!(said(&app, "return #big()"), "5010");
+    assert!(said(&app, "big()[5010].x = 1").contains("readonly"));
+}
+
+/// A world of three groups — coins and trees from signals, rocks from plain state — counting
+/// how often each group's function runs.
+fn grouped_world() -> LuaApp<LuaMsg> {
+    app_of(&format!(
+        "{HERO} coins = signal({{ 1, 2, 3 }}, 'coins') trees = signal({{ 1, 2 }}, 'trees') \
+         rocks = 1 runs = {{ coins = 0, trees = 0, rocks = 0 }} heard = '' \
+         local function row(name, list, y) \
+           local out = {{}} \
+           for i, _ in list do out[i] = {{ id = name .. i, pos = {{ i * 10, y }}, drawing = hero }} end \
+           return out end \
+         return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }}, \
+           ui.group('coins', function() runs.coins += 1 return row('coin', coins(), 10) end), \
+           ui.group('trees', function() runs.trees += 1 return row('tree', trees(), 40) end), \
+           ui.group('rocks', function() runs.rocks += 1 \
+             local out = {{}} for i = 1, rocks do out[i] = {{ id = 'rock' .. i, pos = {{ i * 10, 70 }}, drawing = hero }} end \
+             return out end), \
+         }}) end"
+    ))
+}
+
+fn runs(app: &LuaApp<LuaMsg>) -> String {
+    said(app, "return runs.coins .. ' ' .. runs.trees .. ' ' .. runs.rocks")
+}
+
+fn entity_ids(app: &LuaApp<LuaMsg>, world: &str) -> Vec<String> {
+    app.worlds.borrow()[world].inspect().into_iter().map(|e| e.id).collect()
+}
+
+#[test]
+fn a_group_re_runs_only_when_a_signal_it_read_has_changed() {
+    let app = grouped_world();
+    assert_eq!(runs(&app), "1 1 1", "every group runs the first time");
+    let _ = app.view();
+    assert_eq!(runs(&app), "1 1 2", "signals unchanged: only the group reading none ran again");
+    said(&app, "coins:update(function(l) table.insert(l, 4) end)");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 1 3", "coins changed: the coins group ran, the trees group did not");
+    assert_eq!(
+        entity_ids(&app, "room"),
+        ["hero", "coin1", "coin2", "coin3", "coin4", "tree1", "tree2", "rock1"],
+        "a kept group keeps its entities, in their place"
+    );
+    said(&app, "coins:set(coins())");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 1 4", "set to the same value is no change");
+    said(&app, "trees:set({})");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 2 5");
+    assert_eq!(entity_ids(&app, "room"), ["hero", "coin1", "coin2", "coin3", "coin4", "rock1"]);
+}
+
+#[test]
+fn a_group_that_reads_no_signal_follows_plain_state_every_view() {
+    let app = grouped_world();
+    said(&app, "rocks = 3");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room").iter().filter(|id| id.starts_with("rock")).count(), 3);
+}
+
+#[test]
+fn a_group_does_not_change_signals_and_its_errors_keep_the_last_good_world() {
+    let app = app_of(&format!(
+        "{HERO} coins = signal({{ 1 }}, 'coins') heard = '' broken = false \
+         return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           ui.group('coins', function() \
+             local ok, e = pcall(function() coins:set({{}}) end) heard = tostring(e) \
+             if broken then error('no coins today') end \
+             local out = {{}} for i, _ in coins() do out[i] = {{ id = 'coin' .. i, pos = {{ 0, 0 }}, drawing = hero }} end \
+             return out end) }}) end"
+    ));
+    let heard = said(&app, "return heard");
+    assert!(heard.contains("signal \"coins\": set only in a handler; view describes"), "{heard}");
+    said(&app, "broken = true coins:set({ 1, 2 })");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room"), ["coin1"], "the last good world");
+    let console = app.console(5).join("\n");
+    assert!(console.contains("group \"coins\"") && console.contains("no coins today"), "{console}");
+    said(&app, "broken = false");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room"), ["coin1", "coin2"], "a failed group runs again, not kept as failed");
+}
+
+#[test]
+fn a_group_is_checked_strictly() {
+    let app = app_of(&format!(
+        "{HERO} errs = {{}} \
+         local function try(f) local ok, e = pcall(f) table.insert(errs, tostring(e)) end \
+         try(function() ui.group(nil, function() end) end) \
+         try(function() ui.group('g') end) \
+         mode = 'ok' \
+         return function() \
+           if mode == 'nested' then return ui.world({{ id = 'w', width = 9, height = 9, \
+             ui.group('a', function() return {{ ui.group('b', function() return {{}} end) }} end) }}) end \
+           if mode == 'twice' then return ui.world({{ id = 'w', width = 9, height = 9, \
+             ui.group('a', function() return {{}} end), ui.group('a', function() return {{}} end) }}) end \
+           if mode == 'ui' then return ui.col({{ ui.group('a', function() return {{}} end) }}) end \
+           return ui.text({{ 'ok' }}) end"
+    ));
+    let errs = said(&app, "return table.concat(errs, ' | ')");
+    assert!(errs.contains("ui.group needs an id"), "{errs}");
+    assert!(errs.contains("ui.group \"g\" needs a function that describes it"), "{errs}");
+    for (mode, wanted) in [
+        ("nested", "group \"a\": a group inside a group"),
+        ("twice", "two groups share the id \"a\""),
+        ("ui", "ui.group goes among a world's entities"),
+    ] {
+        said(&app, &format!("mode = '{mode}'"));
+        let _ = app.view();
+        let console = app.console(3).join("\n");
+        assert!(console.contains(wanted), "{mode}: wanted {wanted:?} in {console}");
+    }
+}
+
+#[test]
+fn a_world_shown_again_runs_its_groups_again() {
+    let app = app_of(&format!(
+        "{HERO} coins = signal({{ 1 }}, 'coins') runs = 0 shown = true \
+         return function() if not shown then return ui.text({{ 'away' }}) end \
+           return ui.world({{ id = 'room', width = 200, height = 100, \
+           ui.group('coins', function() runs += 1 \
+             return {{ {{ id = 'coin1', pos = {{ 0, 0 }}, drawing = hero }} }} end) }}) end"
+    ));
+    said(&app, "shown = false");
+    let _ = app.view();
+    said(&app, "shown = true");
+    let _ = app.view();
+    assert_eq!(said(&app, "return runs"), "2", "the world was dropped with its groups: described again");
+    assert_eq!(entity_ids(&app, "room"), ["coin1"]);
+}
+
+/// A hero walking right past `chunks × per` coins, each chunk one signal. `grouped`: each chunk
+/// is a `ui.group`; otherwise every coin is described every view, as without signals.
+/// `runs[c]` counts how often chunk `c` was described.
+fn coin_map(chunks: usize, per: usize, grouped: bool) -> LuaApp<LuaMsg> {
+    coin_map_in(chunks, per, grouped, "width = 400, height = 300")
+}
+
+/// The same, with the world's box (and camera) given as Lua fields.
+fn coin_map_in(chunks: usize, per: usize, grouped: bool, seen: &str) -> LuaApp<LuaMsg> {
+    app_of(&format!(
+        "{HERO} chunks = {{}} runs = {{}} \
+         for c = 1, {chunks} do local list = {{}} \
+           for i = 1, {per} do local n = (c - 1) * {per} + i \
+             list[i] = {{ id = 'coin' .. n, x = (n % 100) * 20, y = (n // 100) * 20 }} end \
+           chunks[c] = signal(list, 'coins' .. c) runs[c] = 0 end \
+         local function describe(c) runs[c] += 1 local out = {{}} \
+           for i, coin in chunks[c]() do out[i] = {{ id = coin.id, pos = {{ coin.x, coin.y }}, drawing = hero }} end \
+           return out end \
+         return function() local world = {{ id = 'map', {seen}, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, \
+                controller = {{ speed = 100, axis_x = {{ neg = 'KeyA', pos = 'KeyD' }} }} }} }} \
+           for c = 1, {chunks} do \
+             if {grouped} then world[#world + 1] = ui.group('coins' .. c, function() return describe(c) end) \
+             else for _, e in describe(c) do world[#world + 1] = e end end end \
+           return ui.world(world) end"
+    ))
+}
+
+fn walk_right(app: &mut LuaApp<LuaMsg>) {
+    app.update(LuaMsg::KeyWorld("map".into(), runtime::KeyInput {
+        code: Some("KeyD".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+}
+
+fn described(app: &LuaApp<LuaMsg>) -> String {
+    said(app, "local all = 0 for _, n in runs do all += n end return all")
+}
+
+/// T6: 5000 coins and a hero. Walking re-runs neither the coins' function nor their diff;
+/// picking one re-runs the coins group alone. Costs: `bench_app_*`.
+#[test]
+fn five_thousand_coins_cost_no_coin_work_while_the_hero_walks() {
+    let mut app = coin_map(1, 5000, true);
+    walk_right(&mut app);
+    for i in 1..=10 {
+        app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    }
+    assert_eq!(described(&app), "1", "walking: the coins group never ran again");
+    assert!(app.worlds.borrow()["map"].transform("hero").unwrap().x > 10.0);
+    said(&app, "chunks[1]:update(function(l) table.remove(l, 1) end)");
+    let _ = app.view();
+    assert_eq!(described(&app), "2", "a pickup: the coins group ran once");
+    assert_eq!(app.worlds.borrow()["map"].inspect().len(), 5000);
+}
+
+/// The pattern for a big list: one signal and one group per chunk, so a pickup re-describes
+/// a hundred coins, not five thousand.
+#[test]
+fn chunked_coins_re_describe_one_chunk_per_pickup() {
+    let app = coin_map(50, 100, true);
+    said(&app, "chunks[7]:update(function(l) table.remove(l, 1) end)");
+    let _ = app.view();
+    assert_eq!(said(&app, "return runs[7]"), "2");
+    assert_eq!(described(&app), "51", "the other 49 chunks were kept");
+    assert_eq!(app.worlds.borrow()["map"].inspect().len(), 5000);
+}
+
+/// Times `f` over `runs` runs after one to warm up, and prints `BENCH <name> <µs>` for
+/// `scripts/bench.py`, which builds release.
+fn bench(name: &str, runs: u32, mut f: impl FnMut()) {
+    f();
+    let started = Instant::now();
+    for _ in 0..runs {
+        f();
+    }
+    let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(runs);
+    let debug = if cfg!(debug_assertions) { " debug" } else { "" };
+    println!("BENCH {name} {us:.1}{debug}");
+}
+
+/// A frame of walking: the world's tick and the view after it.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_walk() {
+    for (name, grouped) in [("app_walk_5000_grouped", true), ("app_walk_5000_plain", false)] {
+        let mut app = coin_map(50, 100, grouped);
+        walk_right(&mut app);
+        let mut i = 0;
+        bench(name, 30, || {
+            i += 1;
+            app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+            let _ = app.view();
+        });
+    }
+}
+
+/// B7: a frame of walking past 20000 coins (a 2000 × 4000 field) through a 1280 × 720 camera
+/// following the hero: tick, view and the frame of what is on screen.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_walk_camera() {
+    let mut app = coin_map_in(200, 100, true, "width = 1280, height = 720, camera = { follow = 'hero' }");
+    walk_right(&mut app);
+    let mut i = 0;
+    bench("app_walk_20000_camera", 30, || {
+        i += 1;
+        app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    });
+}
+
+/// A coin picked up: the signal's update and the view after it.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_pickup() {
+    for (name, chunks, per) in [("app_pickup_5000_one_group", 1, 5000), ("app_pickup_5000_chunked", 50, 100)] {
+        let app = coin_map(chunks, per, true);
+        bench(name, 20, || {
+            said(&app, "chunks[1]:update(function(l) table.remove(l, 1) end)");
+            let _ = app.view();
+        });
+    }
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_signal_update() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    said(&app, "local list = {} for i = 1, 5000 do list[i] = { id = i, x = i, y = i } end \
+                big = signal(list, 'big')");
+    bench("signal_update_5000", 50, || {
+        said(&app, "big:update(function(l) table.insert(l, { id = 0, x = 0, y = 0 }) end)");
+    });
 }
 
 // ── replacing a doc: a refused sync's rollback (group-chat-sync.md §5) ────────

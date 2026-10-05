@@ -340,7 +340,9 @@ prevents reference cycles because an existing value cannot later acquire an ance
 
 Initial named limits are deliberately conservative and revisable from measurements: group depth
 32, 4,096 expanded items, 65,536 expanded path commands, and finite dimensions/coordinates/matrix
-coefficients within named runtime constants. Empty zero-sized Frames are valid; width/height are
+coefficients within named runtime constants. *Revised 2026-10-04:* the item limit is removed — it
+refused any 2D world past 4096 entities; items are still counted, path commands still capped
+([perf benchmarks](perf-benchmarks.md) §2). Empty zero-sized Frames are valid; width/height are
 non-negative; a present baseline is within `[0, height]`. Limits apply both to each compiled value
 and to expansion across every Frame El in one app view, so many individually valid values cannot
 bypass the frame budget. The first Path slice provisionally caps coordinate magnitude at 10,000,000

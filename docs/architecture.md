@@ -133,7 +133,9 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
   only through `AppThread` — input, sizes, and `Send` closures that reply on a channel — and
   shows its latest frame with a `tile` element. Saving and indexing run on that thread after
   every batch it handles. Offscreen, every shell paint waits for its shown tiles at the same
-  virtual clock, so driven runs stay exact; with a window the shell never waits.
+  virtual clock, so driven runs stay exact; with a window the shell never waits. Successful
+  offscreen driver replies also settle shown tiles at their reported final clock before answering,
+  so later observations cannot expose catch-up owed by the preceding driver.
 - **Reload stages a whole second VM and swaps** (Lua can't unload a chunk); doc cores and
   per-viewer scratch outlive the VM; a failed reload leaves the running app untouched.
 - **Reads and writes to docs are different paths**: reads are plain Lua tables (the mirror,
