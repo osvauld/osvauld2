@@ -46,7 +46,7 @@ use app_host::{
 };
 use base64::Engine as _;
 use courier::DesktopNodeRecord;
-use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
+use courier::sync::{Rejected, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync};
 use courier::token::{Scope, Token};
 use kunki::push::Push;
 use loro::{Container, LoroDoc, ValueOrContainer, VersionVector};
@@ -138,7 +138,7 @@ pub enum Msg {
     /// Every node-worker message carries the [`Shell::sync_gen`] it started under; one from an
     /// earlier generation (another account, a lock, a re-claim) is dropped. The import
     /// happens here, on the UI thread, because the doc it targets is not `Send`.
-    SyncDone(u64, Arc<str>, String, Result<SyncAck, String>),
+    SyncDone(u64, Arc<str>, String, Result<SyncReply, String>),
     /// A node RPC (`ClaimNode`/`Invite`/`PublishAll`) finished on its worker thread — same
     /// shape as `AuthDone`, and for the same reason: these do socket I/O, so `answer_mut`'s
     /// inline-on-the-UI-thread family is the wrong place for them.
@@ -1516,6 +1516,32 @@ impl Shell {
         }
     }
 
+    /// The node refused a write: put the doc back to the node's copy on the app's thread, and
+    /// say why in the app's console. Everything the node lacked goes, including edits made
+    /// after the refused push was sent; the next flush saves the result and syncs it.
+    fn roll_back(&mut self, item_id: &Arc<str>, name: String, rejected: Rejected) {
+        let key = (item_id.clone(), name.clone());
+        let since = self.node_vv.get(&key).cloned();
+        if let Some(state) = &rejected.state {
+            self.node_vv.insert(key, state.vv.clone());
+        }
+        let Some(a) = self.apps.get(item_id) else { return };
+        let id = item_id.clone();
+        a.call(move |h| {
+            let back = h
+                .app
+                .with_doc(&name, |doc| desktop_roll_back(doc, since.as_deref(), &rejected));
+            match back {
+                Some(Ok(doc)) => {
+                    h.app.replace_doc(&name, doc);
+                    h.app.note(format!("sync: {name} rejected: {}", rejected.reason));
+                }
+                Some(Err(e)) => eprintln!("sync: rolling back {id}/{name} failed: {e}"),
+                None => {}
+            }
+        });
+    }
+
     /// Bytes from the node into an open app's doc, on its thread. `ws` is checked when given.
     fn import(&self, id: &Arc<str>, ws: Option<&str>, name: String, bytes: Vec<u8>) {
         let Some(a) = self.apps.get(id) else { return };
@@ -2453,7 +2479,8 @@ impl App for Shell {
             Msg::SyncDone(_, item_id, name, result) => {
                 let key = (item_id.clone(), name.clone());
                 match result {
-                    Ok(ack) => {
+                    Ok(SyncReply::Rejected(r)) => self.roll_back(&item_id, name, r),
+                    Ok(SyncReply::Ack(ack)) => {
                         if self.apps.contains_key(&item_id) {
                             self.import(&item_id, None, name.clone(), ack.update);
                             if ack.missing {

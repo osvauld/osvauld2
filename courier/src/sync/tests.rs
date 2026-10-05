@@ -520,3 +520,157 @@ fn a_doc_name_with_no_address_is_refused_not_widened_to_the_item() {
         ));
     }
 }
+
+// ── step 6: rejection and rollback ───────────────────────────────────────────
+
+const NO_ACCESS: Access = Access {
+    read: false,
+    write: false,
+};
+
+/// What a node would answer: the refusal `node_accept_sync` raises, turned into a rejection.
+fn refuse(hello: &SyncHello, node: &Identity, held: Option<&[u8]>, access: Access) -> Rejected {
+    let why = node_accept_sync(hello, &node.did(), held, access, 2, &HashSet::new()).unwrap_err();
+    node_reject(hello, &why, held, access)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{why:?} earned no rejection"))
+}
+
+fn text_of(doc: &LoroDoc) -> String {
+    doc.get_text("t").to_string()
+}
+
+#[test]
+fn a_refused_write_rolls_back_to_the_nodes_copy() {
+    let (node, desktop) = ids();
+    let on_node = LoroDoc::new();
+    on_node.get_text("t").insert(0, "admin's").unwrap();
+    let stored = held(&on_node);
+
+    let mine = LoroDoc::new();
+    mine.import(&stored).unwrap();
+    let since = mine.oplog_vv().encode();
+    mine.get_text("t").insert(0, "member's ").unwrap();
+    let push = hello_since(&desktop, member(&node, &desktop), &mine, &since);
+    let rejected = refuse(&push, &node, Some(&stored), READ_ONLY);
+
+    assert_eq!(rejected.request_id, push.request_id);
+    assert!(rejected.reason.contains("may not write"), "{}", rejected.reason);
+    let back = desktop_roll_back(&mine, Some(&since), &rejected).unwrap();
+    assert_eq!(text_of(&back), "admin's");
+    assert_eq!(back.oplog_vv(), on_node.oplog_vv());
+}
+
+/// Only the refused batch is lost: what the writer already shared with the node stays, and
+/// what others wrote meanwhile arrives.
+#[test]
+fn rollback_drops_only_the_refused_batch() {
+    let (node, desktop) = ids();
+    let on_node = LoroDoc::new();
+    on_node.get_text("t").insert(0, "base").unwrap();
+    let mine = LoroDoc::new();
+    mine.import(&held(&on_node)).unwrap();
+
+    // A third party's edit reaches both; another reaches only the node.
+    let other = LoroDoc::new();
+    other.import(&held(&on_node)).unwrap();
+    other.get_text("t").insert(4, " seen").unwrap();
+    on_node.import(&held(&other)).unwrap();
+    mine.import(&held(&other)).unwrap();
+    let since = mine.oplog_vv().encode();
+    other.get_text("t").insert(9, " unseen").unwrap();
+    on_node.import(&held(&other)).unwrap();
+
+    mine.get_text("t").insert(0, "refused ").unwrap();
+    let push = hello_since(&desktop, member(&node, &desktop), &mine, &since);
+    let rejected = refuse(&push, &node, Some(&held(&on_node)), READ_ONLY);
+    let back = desktop_roll_back(&mine, Some(&since), &rejected).unwrap();
+    assert_eq!(text_of(&back), "base seen unseen");
+    assert_eq!(back.oplog_vv(), on_node.oplog_vv());
+}
+
+/// The rolled-back doc syncs on as normal: its next push is a diff the node accepts.
+#[test]
+fn a_rolled_back_doc_syncs_on() {
+    let (node, desktop) = ids();
+    let on_node = LoroDoc::new();
+    on_node.get_text("t").insert(0, "admin's").unwrap();
+    let stored = held(&on_node);
+    let mine = LoroDoc::new();
+    mine.import(&stored).unwrap();
+    let since = mine.oplog_vv().encode();
+    mine.get_text("t").insert(0, "member's ").unwrap();
+    let push = hello_since(&desktop, member(&node, &desktop), &mine, &since);
+    let rejected = refuse(&push, &node, Some(&stored), READ_ONLY);
+    let back = desktop_roll_back(&mine, Some(&since), &rejected).unwrap();
+
+    back.get_text("t").insert(7, "!").unwrap();
+    let vv = rejected.state.as_ref().unwrap().vv.clone();
+    let next = hello_since(&desktop, member(&node, &desktop), &back, &vv);
+    let (ack, snapshot) =
+        node_accept_sync(&next, &node.did(), Some(&stored), Access::OPEN, 2, &HashSet::new()).unwrap();
+    assert!(!ack.missing);
+    let landed = LoroDoc::new();
+    landed.import(&snapshot).unwrap();
+    assert_eq!(text_of(&landed), "admin's!");
+}
+
+/// A writer who may not read gets no state; it rolls back to what the node last acked.
+#[test]
+fn without_read_a_rejection_discloses_nothing_and_rolls_back_to_the_last_ack() {
+    let (node, desktop) = ids();
+    let on_node = LoroDoc::new();
+    on_node.get_text("t").insert(0, "alice's").unwrap();
+    let stored = held(&on_node);
+
+    let mine = LoroDoc::new();
+    mine.get_text("t").insert(0, "mine").unwrap();
+    let since = mine.oplog_vv().encode();
+    mine.get_text("t").insert(4, " and mallory's").unwrap();
+    let push = hello_since(&desktop, member(&node, &desktop), &mine, &since);
+    let rejected = refuse(&push, &node, Some(&stored), NO_ACCESS);
+    assert_eq!(rejected.state, None);
+    assert_eq!(text_of(&desktop_roll_back(&mine, Some(&since), &rejected).unwrap()), "mine");
+    // Never acked: nothing of it is the node's.
+    assert_eq!(text_of(&desktop_roll_back(&mine, None, &rejected).unwrap()), "");
+}
+
+#[test]
+fn a_refused_source_change_rolls_back() {
+    let (node, owner) = ids();
+    let (_, member) = ids();
+    let ws = || Scope::Workspace("ws1".into());
+    let src = LoroDoc::new();
+    src.get_text("manifest.osv").insert(0, "app \"x\" {}").unwrap();
+    let push = src_hello(&owner, ws_token(&node, &owner, "owner", ws(), 1), &src);
+    let (_, stored) =
+        node_accept_sync(&push, &node.did(), None, Access::OPEN, 2, &HashSet::new()).unwrap();
+
+    let forged = LoroDoc::new();
+    forged.import(&stored).unwrap();
+    let since = forged.oplog_vv().encode();
+    forged.get_text("manifest.osv").insert(0, "-- mine\n").unwrap();
+    let forge = src_hello(&member, ws_token(&node, &member, "member", ws(), 1), &forged);
+    let rejected = refuse(&forge, &node, Some(&stored), Access::OPEN);
+    let back = desktop_roll_back(&forged, Some(&since), &rejected).unwrap();
+    assert_eq!(back.get_text("manifest.osv").to_string(), "app \"x\" {}");
+}
+
+/// Nothing to roll back: a refused pull, and a refusal of the caller rather than the write.
+#[test]
+fn a_refused_pull_or_caller_earns_no_rejection() {
+    let (node, desktop) = ids();
+    let on_node = LoroDoc::new();
+    on_node.get_text("t").insert(0, "secret").unwrap();
+    let stored = held(&on_node);
+
+    let pull = doc_hello(&desktop, member(&node, &desktop), "dm", &LoroDoc::new());
+    assert_eq!(node_reject(&pull, &CourierError::NoRead, Some(&stored), NO_ACCESS).unwrap(), None);
+
+    let mine = LoroDoc::new();
+    mine.get_text("t").insert(0, "x").unwrap();
+    let push = doc_hello(&desktop, member(&node, &desktop), "dm", &mine);
+    for why in [CourierError::Revoked, CourierError::OutOfScope, CourierError::Expired, CourierError::Decode] {
+        assert_eq!(node_reject(&push, &why, Some(&stored), Access::OPEN).unwrap(), None, "{why:?}");
+    }
+}

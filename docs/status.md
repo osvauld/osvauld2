@@ -127,7 +127,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
     pull it.
   - App-scoped tokens sync, subscribe and listen. Pushes skip revoked subscribers.
   - `demo_apps/chat` declares `admin`/`moderator`/`member`.
-- declared read/write rules (T8a, T10a, T15a, T20a — the node halves; rollback is step 6):
+- declared read/write rules (T8, T15, and the node halves T8a, T10a, T15a, T20a):
   - an app whose `manifest.osv` declares docs has every doc sync judged by them
     (`courier::access`): a role in the cone, a DID path variable, or `members(doc)` read from
     the node's copy. Undeclared docs are refused.
@@ -137,7 +137,11 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
     shared by storage, the manifest and resource addresses; a name with no address is refused.
     Compatibility break: names with `.`, spaces or non-ASCII are refused by `put_doc` and
     `get_doc` (no demo app used one). Chat's channels are `channel/<cid>`.
-  - not built: rejection/rollback on the writer's desktop, Lua `validate`, the index.
+  - a refused write is answered `Rejected` (2026-10-05, step 6): the node stores and pushes
+    nothing, and the writer's desktop rolls that doc back to the node's copy, saves it and
+    logs `sync: <doc> rejected: <reason>` in the app's console. A writer who may not read
+    the doc rolls back to what the node last acked. A refused pull stays an error.
+  - not built: Lua `validate`, the index, size budgets on sync.
 
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a

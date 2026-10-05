@@ -8,6 +8,10 @@
 //! Merge only, never replace. The node's copy is authoritative by construction — it is the
 //! workspace's home node — so unlike the old implementation there is no "divergence" that
 //! needs a destructive fallback: every import is an ordinary CRDT merge, in both directions.
+//! The one replace is the writer's own, after a refusal (2026-10-05, step 6): the node merges
+//! nothing and answers [`Rejected`], and the writer cuts its copy back to what both sides hold
+//! ([`desktop_roll_back`]) rather than the node merging a compensating revert, which would
+//! carry the refused content in history to every reader.
 //!
 //! `courier` holds the Loro dependency, not `vault` (which stays Loro-free by design) or
 //! `kunki` — this stays the pure-message-transition layer publish/invite already are, just
@@ -60,6 +64,115 @@ pub struct SyncAck {
     /// of what the node really holds (a restored node, a causally incomplete diff). The desktop
     /// answers by pushing full history.
     pub missing: bool,
+}
+
+/// What the node answers a sync with: merged, or refused with what the writer rolls back to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncReply {
+    Ack(SyncAck),
+    Rejected(Rejected),
+}
+
+/// A refused write (`group-chat-sync.md` §5): the node merged nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rejected {
+    pub request_id: String,
+    /// For the app's console.
+    pub reason: String,
+    /// The node's copy, `None` when the writer may not read it.
+    pub state: Option<NodeState>,
+}
+
+/// The node's copy of a doc as a diff against the writer's own version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeState {
+    pub vv: Vec<u8>,
+    pub update: Vec<u8>,
+}
+
+/// The rejection `why` earns `hello`, if it earns one: a refused write the writer must roll
+/// back. A refused pull, or a refusal of the caller rather than of the write, is still an
+/// error. `current` and `access` are what the refusal was judged on.
+pub fn node_reject(
+    hello: &SyncHello,
+    why: &CourierError,
+    current: Option<&[u8]>,
+    access: Access,
+) -> Result<Option<Rejected>> {
+    let refuses_the_write = matches!(
+        why,
+        CourierError::NoRead
+            | CourierError::NoWrite
+            | CourierError::Undeclared
+            | CourierError::NotPermitted
+    );
+    // An empty doc still exports a header, so a pull is told apart by what the blob holds.
+    let writes = !hello.update.is_empty()
+        && LoroDoc::decode_import_blob_meta(&hello.update, false)
+            .map_err(|_| CourierError::Decode)?
+            .change_num
+            > 0;
+    if !refuses_the_write || !writes {
+        return Ok(None);
+    }
+    let state = if access.read && *why != CourierError::Undeclared {
+        let doc = LoroDoc::new();
+        if let Some(bytes) = current {
+            doc.import(bytes).map_err(|_| CourierError::Decode)?;
+        }
+        let theirs = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;
+        Some(NodeState {
+            vv: doc.oplog_vv().encode(),
+            update: doc
+                .export(ExportMode::updates(&theirs))
+                .map_err(|_| CourierError::Decode)?,
+        })
+    } else {
+        None
+    };
+    Ok(Some(Rejected {
+        request_id: hello.request_id.clone(),
+        reason: why.to_string(),
+        state,
+    }))
+}
+
+/// `local` as the node holds it: the writer's refused batch dropped, the node's changes
+/// added. `since` is the node version the writer last had acked — the base when the
+/// rejection carries no state.
+///
+/// The base is what both sides hold: a refused batch is exactly the writer's changes the node
+/// lacks, so cutting `local` back to the shared version drops it and nothing else.
+pub fn desktop_roll_back(
+    local: &LoroDoc,
+    since: Option<&[u8]>,
+    rejected: &Rejected,
+) -> Result<LoroDoc> {
+    let decode = |bytes: &[u8]| VersionVector::decode(bytes).map_err(|_| CourierError::Decode);
+    let node = match (&rejected.state, since) {
+        (Some(state), _) => decode(&state.vv)?,
+        (None, Some(since)) => decode(since)?,
+        (None, None) => VersionVector::default(),
+    };
+    let base = shared(&local.oplog_vv(), &node);
+    let doc = local
+        .fork_at(&local.vv_to_frontiers(&base))
+        .map_err(|_| CourierError::Decode)?;
+    if let Some(state) = &rejected.state {
+        doc.import(&state.update).map_err(|_| CourierError::Decode)?;
+    }
+    Ok(doc)
+}
+
+/// The version both `a` and `b` include. Each is causally closed, so their meet is too.
+fn shared(a: &VersionVector, b: &VersionVector) -> VersionVector {
+    let mut out = VersionVector::default();
+    for (peer, &end) in a.iter() {
+        if let Some(&other) = b.get(peer) {
+            out.insert(*peer, end.min(other));
+        }
+    }
+    out
 }
 
 /// Build the desktop's half: commit pending edits, then export only what changed since `since`

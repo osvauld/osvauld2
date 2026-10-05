@@ -5,7 +5,7 @@ use courier::CourierError;
 use courier::invite::{InviteRequest, desktop_start_invite_claim};
 use courier::role::RoleRequest;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncLayer, desktop_start_sync, item_scope};
+use courier::sync::{Rejected, SyncAck, SyncLayer, SyncReply, desktop_start_sync, item_scope};
 use courier::token::{Scope, Token};
 use identity::Identity;
 use loro::{LoroDoc, LoroText};
@@ -125,6 +125,21 @@ pub(super) fn refused(result: Result<impl std::fmt::Debug, NodeError>, want: Cou
     match result {
         Err(NodeError::Courier(e)) => assert_eq!(e, want),
         other => panic!("expected {want:?}, got {other:?}"),
+    }
+}
+
+/// A write the node refused and the writer rolls back (step 6): `why` is in its reason.
+pub(super) fn rejected(result: Result<SyncReply, NodeError>, why: &str) -> Rejected {
+    match result {
+        Ok(SyncReply::Rejected(r)) if r.reason.contains(why) => r,
+        other => panic!("expected a rejection for {why:?}, got {other:?}"),
+    }
+}
+
+pub(super) fn acked(result: Result<SyncReply, NodeError>) -> SyncAck {
+    match result {
+        Ok(SyncReply::Ack(ack)) => ack,
+        other => panic!("expected an ack, got {other:?}"),
     }
 }
 
@@ -368,9 +383,9 @@ fn a_member_cannot_rewrite_the_manifest_to_widen_its_own_cone() {
         None,
     )
     .unwrap();
-    refused(
+    rejected(
         f.admin.accept_sync(hello, NOW, &MockPusher::new()),
-        CourierError::NotPermitted,
+        &CourierError::NotPermitted.to_string(),
     );
     assert!(
         !f.admin
