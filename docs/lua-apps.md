@@ -776,8 +776,8 @@ The rules that bite, once each:
 
 A **signal** is app state whose value is frozen: reading it is plain and fast, and the only way
 to change it is `set` or `update`, in a handler. A write that skips them errors at once instead
-of going unseen. (Signals will let parts of `view` re-run only when what they read changed —
-`docs/design/signals.md`; today they are the value half.)
+of going unseen. A **group** in a world (below) re-runs only when a signal it read changed
+(`docs/design/signals.md`).
 
 ```lua
 local coins = signal({ { id = "c1", x = 40, y = 80 } }, "coins")   -- the name is for errors
@@ -808,6 +808,39 @@ coins:set({})                                  -- replace outright
   signal from inside is fine.
 - A table with a metatable inside the value (a doc mirror, a `doc.map{}`) is left unfrozen: it
   belongs to something else.
+
+### Groups — `ui.group` among a world's entities
+
+A world re-describes every entity on every view. For thousands of things that is the cost — a
+coin pickup re-describes 4000 blades of grass. A group is a part of the world that describes
+itself, and runs again only when a signal it read has changed; otherwise the world keeps its
+entities exactly as they were, without building, checking or diffing them.
+
+```lua
+ui.world({ id = "map", width = 720, height = 400,
+  player(hero()),                              -- outside groups: described every view
+  ui.group("coins", function()                 -- runs again only when `coins` changes
+    local out = {}
+    for i, c in coins() do out[i] = { id = c.id, pos = { c.x, c.y }, drawing = coin } end
+    return out
+  end),
+})
+```
+
+- The function returns a list of entities, like a world's children (`false` entries skipped).
+  Ids are unique across the whole world, groups included. A group's id is unique in its world.
+- **What re-runs a group is the signals it read** (`coins()` inside it). A group that reads no
+  signal runs every view, as if it were not a group — so plain state still works, it just saves
+  nothing. A group that reads a signal *and* plain state will not notice the plain state change:
+  put everything it shows in signals.
+- **The grain is the signal.** One changed signal re-runs every group that read it, whole. For a
+  big list, split it: one signal and one group per chunk (by map area, say). Measured, release
+  (`scripts/bench.py`): a pickup among 5000 coins in one group costs ~24 ms; as 50 groups of
+  100, ~1.4 ms. Walking past them costs no coin work at all.
+- Inside a group's function, as in `view`, signals cannot be written. An error in it names the
+  group and keeps the last good world; the group runs again next view.
+- A group inside a group is an error, and so is `ui.group` outside a world (UI-tree groups are not
+  built yet).
 
 ## Search
 

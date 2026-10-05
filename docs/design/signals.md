@@ -1,7 +1,7 @@
 # Signals — re-describe only what changed
 
-Status: **design draft, 2026-10-04.** Step 1 (`signal`: T1, T2, T7 for `view`) landed
-2026-10-04; groups are not built. Talked through in conversation; the two
+Status: **design draft, 2026-10-04.** Step 1 (`signal`) and step 2 (`ui.group` in worlds) landed
+2026-10-04; UI-tree groups, `view` as the root group and inspection are not built. Talked through in conversation; the two
 probes behind it (§8) ran in a release build on the apps' Luau VM. `docs/status.md` says what is
 real.
 
@@ -27,15 +27,28 @@ safety only** — a missed write is an error, not a stale screen. No re-describi
 until T6. Cost: an `update` of a 5000-item list is ~0.45 ms in release, nearly all of it the
 freeze looking at each entry for new ones (`table.clone` alone: 0.06 ms).
 
+Step 2 (2026-10-04): `World2d::reconcile_parts` takes the description as parts — fresh specs or a
+group kept as it was — and a kept group's entities are not checked, posed or diffed. Measured,
+release: 5000 entities kept cost 0.03 ms to describe again against 3.4 ms afresh. In an app
+(`app_host`, T6 at 4000 coins: the frame's 4096-item paint cap bites at 5000 until the camera
+culls): a frame of walking with its view costs 0.74 ms and runs no coin code. **But a pickup in
+one 4000-coin group costs 16 ms** — the per-signal grain re-describes the whole group, and
+building, converting (`gfx::entity`) and diffing 4000 entities is slow. Split into 40 groups of
+100, a pickup costs 1.2 ms for the whole view (`chunked_coins_re_describe_one_chunk_per_pickup`).
+So chunking is the guide's advice; per-item signals stay an open question (§9). Also pinned:
+groups re-run after their world was dropped and shown again, after an error (not kept as failed),
+and on reload (a new VM forgets what groups read); an attach reaches across parts, and a kept
+rider whose carrier is gone is refused; an entity moving between parts keeps its state.
+
 | # | test | proves | status |
 |---|---|---|---|
 | T1 | `signal(v, name)` freezes `v` deeply; `s()` returns it; `s()[1].x = 5`, `table.insert(s(), …)`, `table.sort(s(), …)` each error ("attempt to modify a readonly table" — Luau's own message, which cannot name the signal) | a missed write is loud, never silent | ✅ step 1 |
 | T2 | `s:update(fn)` hands `fn` a writable shallow copy, freezes the result and stores it; `s:set(v)` replaces it; an unchanged `set` (same table) is a no-op | the two ways to write | ✅ step 1 |
-| T3 | Two groups read different signals; a handler updates one; the next view calls only that group's function (a counter per group) | only dirty groups re-run | step 2 |
-| T4 | A group that reads no signal re-runs every view | today's apps keep working unchanged | step 2 |
+| T3 | Two groups read different signals; a handler updates one; the next view calls only that group's function (a counter per group) | only dirty groups re-run | ✅ step 2 |
+| T4 | A group that reads no signal re-runs every view | today's apps keep working unchanged | ✅ step 2 |
 | T5 | A clean group's output is reused: same UI nodes and handlers, clicks inside it still land | reuse is safe for interaction | step 3 |
-| T6 | A world with `ui.group("coins", …)` of 5000 entities and a hero: moving the hero re-runs neither the coins function nor their reconcile; picking a coin re-runs the coins group only | the world case, measured: describe cost with one coin picked < 1 ms in release | step 2 |
-| T7 | Writing a signal inside `view` or a group function is an error naming it | describing never changes state | ✅ `view` (step 1); groups step 2 |
+| T6 | A world with `ui.group("coins", …)` of 5000 entities and a hero: moving the hero re-runs neither the coins function nor their reconcile; picking a coin re-runs the coins group only | the world case, measured: describe cost with one coin picked < 1 ms in release | ✅ step 2 for walking; a pickup meets it only chunked (below) |
+| T7 | Writing a signal inside `view` or a group function is an error naming it | describing never changes state | ✅ steps 1–2 |
 | T8 | Nothing a view reads changed (a hover elsewhere): `view` is not called at all | `view` is the root group | step 4 |
 | T9 | Dev check: a clean group is re-run on a sampled frame; if its output differs, the console says which group and which plain value it seems to depend on | state outside signals is caught, not silently stale | step 5 |
 | T10 | `DumpTree` lists groups: id, the signals each read, runs, last run tick | an agent can see why something did or did not update | step 5 |

@@ -1587,8 +1587,8 @@ fn the_world_counts_its_steps_and_a_frame_with_no_time_is_not_one() {
     assert_eq!(world.steps(), 4);
 }
 
-#[test]
-fn a_thousand_rays_over_five_hundred_things_are_cheap() {
+/// 500 crates in a 25×20 grid, stepped once so Rapier answers from them.
+fn crates() -> World2d {
     let d = drawing();
     let crates = (0..500).map(|i| {
         let (x, y) = ((i % 25) as f64 * 40.0, (i / 25) as f64 * 40.0);
@@ -1597,17 +1597,23 @@ fn a_thousand_rays_over_five_hundred_things_are_cheap() {
     let mut world = World2d::default();
     world.reconcile(crates.collect()).unwrap();
     world.tick(1.0 / 60.0, 1.0 / 60.0);
-    let started = std::time::Instant::now();
-    let mut hits = 0;
-    for i in 0..1000 {
-        let y = (i % 800) as f64 + 0.5;
-        hits += world.ray((-10.0, y), (1100.0, y + 37.0), None).unwrap().is_some() as usize;
-    }
-    let took = started.elapsed();
-    eprintln!("1000 rays over 500 things: {took:?} ({hits} hit)");
+    world
+}
+
+/// A thousand slanted rays across the crates: how many hit.
+fn thousand_rays(world: &World2d) -> usize {
+    (0..1000)
+        .filter(|i| {
+            let y = (i % 800) as f64 + 0.5;
+            world.ray((-10.0, y), (1100.0, y + 37.0), None).unwrap().is_some()
+        })
+        .count()
+}
+
+#[test]
+fn slanted_rays_across_a_grid_of_crates_mostly_meet_one() {
+    let hits = thousand_rays(&crates());
     assert!(hits > 100, "most rays meet a crate: {hits}");
-    // Generous for a debug build; the printed number is the measurement.
-    assert!(took.as_millis() < 500, "{took:?}");
 }
 
 /// A walker held right and a puck thrown at a wall, run for a second and a half-step at `fps`:
@@ -1671,9 +1677,9 @@ fn time_short_of_a_step_carries_to_the_next_frame() {
     assert_eq!(world.dropped(), 0.0);
 }
 
-/// 5000 small things on a 4000×4000 map: 4000 drawings alone (grass, coins), 800 fixed solids
-/// (rocks), 200 loose balls thrown about inside four walls.
-fn crowd(d: &Arc<Drawing>) -> Vec<EntitySpec> {
+/// `grass + 1000` small things on a 4000×4000 map: `grass` drawings alone (grass, coins), 800
+/// fixed solids (rocks), 200 loose balls inside four walls.
+fn crowd(d: &Arc<Drawing>, grass: usize) -> Vec<EntitySpec> {
     let d = d.clone();
     let mut specs = vec![];
     let wall = |id: &str, pos, w, h| solid(id, pos, Shape::Rect(w, h), (0.0, 0.0), &d);
@@ -1681,8 +1687,10 @@ fn crowd(d: &Arc<Drawing>) -> Vec<EntitySpec> {
     specs.push(wall("south", (0.0, 4000.0), 4000.0, 10.0));
     specs.push(wall("west", (-10.0, 0.0), 10.0, 4000.0));
     specs.push(wall("east", (4000.0, 0.0), 10.0, 4000.0));
-    for i in 0..4000 {
-        let at = ((i % 64) as f64 * 62.0 + 3.0, (i / 64) as f64 * 62.0 + 3.0);
+    let across = (grass as f64).sqrt().ceil().max(1.0) as usize;
+    for i in 0..grass {
+        let step = 4000.0 / across as f64;
+        let at = ((i % across) as f64 * step + 3.0, (i / across) as f64 * step + 3.0);
         specs.push(spec(&format!("grass{i}"), at, &d));
     }
     for i in 0..800 {
@@ -1699,49 +1707,177 @@ fn crowd(d: &Arc<Drawing>) -> Vec<EntitySpec> {
     specs
 }
 
-/// Average time of `f` over `n` runs.
-fn timed(n: u32, mut f: impl FnMut()) -> std::time::Duration {
+/// Times `f` over `runs` runs after one to warm up, and prints `BENCH <name> <µs>` for
+/// `scripts/bench.py`. Benchmarks are `#[ignore]`d `bench_*` tests; run them through the script,
+/// which builds release (debug is 10–30× off and says so).
+fn bench(name: &str, runs: u32, mut f: impl FnMut()) {
+    f();
     let started = std::time::Instant::now();
-    for _ in 0..n {
+    for _ in 0..runs {
         f();
     }
-    started.elapsed() / n
+    let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(runs);
+    let debug = if cfg!(debug_assertions) { " debug" } else { "" };
+    println!("BENCH {name} {us:.1}{debug}");
 }
 
-/// The measurement before a camera and culling: what 5000 things cost the world each frame.
-/// `cargo test --release -p world --lib -- --ignored five_thousand --nocapture`
+/// `n` coins in a row, for groups.
+fn coins(n: usize, d: &Arc<Drawing>) -> Vec<EntitySpec> {
+    (0..n).map(|i| spec(&format!("coin{i}"), (i as f64 * 10.0, 50.0), d)).collect()
+}
+
 #[test]
-#[ignore = "a measurement: run in release with --ignored --nocapture"]
-fn five_thousand_small_things_cost_this_much() {
+fn a_kept_group_stays_as_it_was_while_the_rest_is_described_afresh() {
     let d = drawing();
     let mut world = World2d::default();
-    let spawn = timed(1, || world.reconcile(crowd(&d)).unwrap());
+    world.reconcile_parts(vec![
+        Part::Specs(vec![controlled(&d, wasd(100.0))]),
+        Part::Group("coins".into(), Some(coins(3, &d))),
+        Part::Specs(vec![spec("tree", (0.0, 90.0), &d)]),
+    ]).unwrap();
+    assert_eq!(ids(&world), ["hero", "coin0", "coin1", "coin2", "tree"], "parts in order");
+    world.key("KeyD", true);
+    frames(&mut world, 0.1, 0.1);
+    // The coins are kept; the hero and the tree are described again, the tree moved on.
+    world.reconcile_parts(vec![
+        Part::Specs(vec![controlled(&d, wasd(100.0))]),
+        Part::Group("coins".into(), None),
+    ]).unwrap();
+    assert_eq!(ids(&world), ["hero", "coin0", "coin1", "coin2"], "the tree went; the coins stayed");
+    assert!(world.transform("hero").unwrap().x > 9.0, "the hero kept walking");
+    assert!(world.needs_ticks(), "a kept group does not hide the hero's controller");
+    // Described afresh without a coin: that coin goes.
+    world.reconcile_parts(vec![
+        Part::Specs(vec![controlled(&d, wasd(100.0))]),
+        Part::Group("coins".into(), Some(coins(2, &d))),
+    ]).unwrap();
+    assert_eq!(ids(&world), ["hero", "coin0", "coin1"]);
+    // A group not described at all goes, with all its entities.
+    world.reconcile_parts(vec![Part::Specs(vec![controlled(&d, wasd(100.0))])]).unwrap();
+    assert_eq!(ids(&world), ["hero"]);
+}
+
+#[test]
+fn an_entity_moving_between_parts_is_the_same_entity() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let clip = slide();
+    let chest = || EntitySpec { clip: Some(clip.clone()), ..spec("chest", (0.0, 0.0), &d) };
+    world.reconcile_parts(vec![Part::Group("loot".into(), Some(vec![chest()]))]).unwrap();
+    world.tick(0.5, 0.0);
+    world.reconcile_parts(vec![Part::Specs(vec![chest()]), Part::Group("loot".into(), Some(vec![]))]).unwrap();
+    world.tick(0.5, 0.0);
+    assert_eq!(at(&world, 56.0).as_deref(), Some("chest"), "its clip kept playing from where it was");
+}
+
+#[test]
+fn parts_are_checked_together() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile_parts(vec![Part::Group("coins".into(), Some(coins(2, &d)))]).unwrap();
+    let err = |w: &mut World2d, parts| w.reconcile_parts(parts).unwrap_err().to_string();
+    // An id in a kept group cannot also be described elsewhere.
+    let dup = err(&mut world, vec![Part::Specs(vec![spec("coin1", (0.0, 0.0), &d)]), Part::Group("coins".into(), None)]);
+    assert!(dup.contains("duplicate entity id \"coin1\""), "{dup}");
+    // Kept, it must have been described before; and a group appears once.
+    let unknown = err(&mut world, vec![Part::Group("gems".into(), None)]);
+    assert!(unknown.contains("group \"gems\" is kept but was never described"), "{unknown}");
+    let twice = err(&mut world, vec![Part::Group("coins".into(), None), Part::Group("coins".into(), None)]);
+    assert!(twice.contains("two groups share the id \"coins\""), "{twice}");
+    // A bad entity in a fresh group leaves the whole world as it was.
+    let bad = EntitySpec { id: String::new(), ..spec("x", (0.0, 0.0), &d) };
+    assert!(world.reconcile_parts(vec![Part::Group("coins".into(), Some(vec![bad]))]).is_err());
+    assert_eq!(ids(&world), ["coin0", "coin1"]);
+}
+
+#[test]
+fn an_attach_reaches_across_parts_and_a_kept_rider_needs_its_carrier() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let hat = || carried("hero", "body", &d);
+    let hero = || spec("hero", (0.0, 0.0), &d);
+    // The hat rides in a group; its carrier is described outside it.
+    world.reconcile_parts(vec![Part::Specs(vec![hero()]), Part::Group("gear".into(), Some(vec![hat()]))]).unwrap();
+    world.reconcile_parts(vec![Part::Specs(vec![hero()]), Part::Group("gear".into(), None)]).unwrap();
+    // A fresh rider on a kept carrier.
+    world.reconcile_parts(vec![Part::Group("people".into(), Some(vec![hero()])), Part::Specs(vec![hat()])]).unwrap();
+    world.reconcile_parts(vec![Part::Group("people".into(), None), Part::Specs(vec![hat()])]).unwrap();
+    // The carrier gone while its rider's group is kept: refused, the world unchanged.
+    world.reconcile_parts(vec![Part::Specs(vec![hero()]), Part::Group("gear".into(), Some(vec![hat()]))]).unwrap();
+    let err = world.reconcile_parts(vec![Part::Group("gear".into(), None)]).unwrap_err().to_string();
+    assert!(err.contains("rides \"hero\", which the world no longer describes"), "{err}");
+    assert_eq!(ids(&world), ["hero", "chest"]);
+}
+
+
+/// A crowd of `grass + 1000`, spawned, its balls thrown, stepped once.
+fn crowded(d: &Arc<Drawing>, grass: usize) -> World2d {
+    let mut world = World2d::default();
+    world.reconcile(crowd(d, grass)).unwrap();
     world.tick(0.0, 0.0);
     for i in 0..200 {
         let v = ((i * 37 % 400) as f64 - 200.0, (i * 91 % 400) as f64 - 200.0);
         world.set(&format!("ball{i}"), Set { pos: None, velocity: Some(v), spin: None }).unwrap();
     }
-    // As a `view` does: the same handles, described afresh.
-    let describe = timed(20, || {
-        world.reconcile(crowd(&d)).unwrap();
-    });
-    let mut t = 0.0;
-    let frame_of_steps = timed(60, || {
+    world.tick(1.0 / 60.0, 1.0 / 60.0);
+    world
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_steps() {
+    let mut world = crowded(&drawing(), 4000);
+    let mut t = 1.0 / 60.0;
+    bench("world_steps_5000", 120, || {
         t += 1.0 / 60.0;
         world.tick(t, 1.0 / 60.0);
         world.drain_events();
     });
-    // Every entity goes into the frame until there is a camera to cull by: past the frame's
-    // item cap, it is refused — after the work of posing them all.
-    let mut painted = Ok(());
-    let paint = timed(20, || {
-        painted = world.frame(1280.0, 720.0).map(|_| ());
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_reconcile() {
+    let d = drawing();
+    let mut world = crowded(&d, 4000);
+    // Specs built outside the timing: this is the diff alone.
+    let mut described: Vec<_> = (0..21).map(|_| crowd(&d, 4000)).collect();
+    bench("world_reconcile_fresh_5000", 20, || world.reconcile(described.pop().unwrap()).unwrap());
+    let mut world = World2d::default();
+    let hero = || controlled(&d, wasd(100.0));
+    world.reconcile_parts(vec![Part::Specs(vec![hero()]), Part::Group("all".into(), Some(crowd(&d, 4000)))]).unwrap();
+    bench("world_reconcile_kept_5000", 200, || {
+        world.reconcile_parts(vec![Part::Specs(vec![hero()]), Part::Group("all".into(), None)]).unwrap();
     });
-    let inspect = timed(20, || {
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_frame() {
+    let d = drawing();
+    for grass in [4000, 19000] {
+        let world = crowded(&d, grass);
+        let name = format!("world_frame_{}", grass + 1000);
+        bench(&name, 20, || {
+            world.frame(1280.0, 720.0).unwrap();
+        });
+    }
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_inspect() {
+    let world = crowded(&drawing(), 4000);
+    bench("world_inspect_5000", 20, || {
         world.inspect();
     });
-    eprintln!(
-        "5000 things: spawn {spawn:?}, describe again {describe:?}, a 60 fps frame of steps \
-         {frame_of_steps:?}, paint {paint:?} ({painted:?}), inspect {inspect:?}"
-    );
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_rays() {
+    let world = crates();
+    bench("world_rays_1000", 20, || {
+        thousand_rays(&world);
+    });
 }

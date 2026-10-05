@@ -4911,15 +4911,259 @@ fn update_works_on_maps_and_takes_a_returned_table_or_any_value() {
 }
 
 #[test]
-fn updating_five_thousand_items_is_cheap() {
+fn updating_a_five_thousand_item_list_freezes_what_it_added() {
     let app = app_of("return function() return ui.text({ '' }) end");
     said(&app, "local list = {} for i = 1, 5000 do list[i] = { id = i, x = i, y = i } end \
                 big = signal(list, 'big')");
-    let started = std::time::Instant::now();
     said(&app, "for i = 1, 10 do big:update(function(l) table.insert(l, { id = 0, x = 0, y = 0 }) end) end");
-    let each = started.elapsed() / 10;
-    // Release: ~0.45 ms, nearly all of it the freeze walking 5000 entries to find the new one.
-    eprintln!("update of a 5000-item list: {each:?}");
     assert_eq!(said(&app, "return #big()"), "5010");
-    assert!(each.as_millis() < 20, "{each:?}");
+    assert!(said(&app, "big()[5010].x = 1").contains("readonly"));
+}
+
+/// A world of three groups — coins and trees from signals, rocks from plain state — counting
+/// how often each group's function runs.
+fn grouped_world() -> LuaApp<LuaMsg> {
+    app_of(&format!(
+        "{HERO} coins = signal({{ 1, 2, 3 }}, 'coins') trees = signal({{ 1, 2 }}, 'trees') \
+         rocks = 1 runs = {{ coins = 0, trees = 0, rocks = 0 }} heard = '' \
+         local function row(name, list, y) \
+           local out = {{}} \
+           for i, _ in list do out[i] = {{ id = name .. i, pos = {{ i * 10, y }}, drawing = hero }} end \
+           return out end \
+         return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }}, \
+           ui.group('coins', function() runs.coins += 1 return row('coin', coins(), 10) end), \
+           ui.group('trees', function() runs.trees += 1 return row('tree', trees(), 40) end), \
+           ui.group('rocks', function() runs.rocks += 1 \
+             local out = {{}} for i = 1, rocks do out[i] = {{ id = 'rock' .. i, pos = {{ i * 10, 70 }}, drawing = hero }} end \
+             return out end), \
+         }}) end"
+    ))
+}
+
+fn runs(app: &LuaApp<LuaMsg>) -> String {
+    said(app, "return runs.coins .. ' ' .. runs.trees .. ' ' .. runs.rocks")
+}
+
+fn entity_ids(app: &LuaApp<LuaMsg>, world: &str) -> Vec<String> {
+    app.worlds.borrow()[world].inspect().into_iter().map(|e| e.id).collect()
+}
+
+#[test]
+fn a_group_re_runs_only_when_a_signal_it_read_has_changed() {
+    let app = grouped_world();
+    assert_eq!(runs(&app), "1 1 1", "every group runs the first time");
+    let _ = app.view();
+    assert_eq!(runs(&app), "1 1 2", "signals unchanged: only the group reading none ran again");
+    said(&app, "coins:update(function(l) table.insert(l, 4) end)");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 1 3", "coins changed: the coins group ran, the trees group did not");
+    assert_eq!(
+        entity_ids(&app, "room"),
+        ["hero", "coin1", "coin2", "coin3", "coin4", "tree1", "tree2", "rock1"],
+        "a kept group keeps its entities, in their place"
+    );
+    said(&app, "coins:set(coins())");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 1 4", "set to the same value is no change");
+    said(&app, "trees:set({})");
+    let _ = app.view();
+    assert_eq!(runs(&app), "2 2 5");
+    assert_eq!(entity_ids(&app, "room"), ["hero", "coin1", "coin2", "coin3", "coin4", "rock1"]);
+}
+
+#[test]
+fn a_group_that_reads_no_signal_follows_plain_state_every_view() {
+    let app = grouped_world();
+    said(&app, "rocks = 3");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room").iter().filter(|id| id.starts_with("rock")).count(), 3);
+}
+
+#[test]
+fn a_group_does_not_change_signals_and_its_errors_keep_the_last_good_world() {
+    let app = app_of(&format!(
+        "{HERO} coins = signal({{ 1 }}, 'coins') heard = '' broken = false \
+         return function() return ui.world({{ id = 'room', width = 200, height = 100, \
+           ui.group('coins', function() \
+             local ok, e = pcall(function() coins:set({{}}) end) heard = tostring(e) \
+             if broken then error('no coins today') end \
+             local out = {{}} for i, _ in coins() do out[i] = {{ id = 'coin' .. i, pos = {{ 0, 0 }}, drawing = hero }} end \
+             return out end) }}) end"
+    ));
+    let heard = said(&app, "return heard");
+    assert!(heard.contains("signal \"coins\": set only in a handler; view describes"), "{heard}");
+    said(&app, "broken = true coins:set({ 1, 2 })");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room"), ["coin1"], "the last good world");
+    let console = app.console(5).join("\n");
+    assert!(console.contains("group \"coins\"") && console.contains("no coins today"), "{console}");
+    said(&app, "broken = false");
+    let _ = app.view();
+    assert_eq!(entity_ids(&app, "room"), ["coin1", "coin2"], "a failed group runs again, not kept as failed");
+}
+
+#[test]
+fn a_group_is_checked_strictly() {
+    let app = app_of(&format!(
+        "{HERO} errs = {{}} \
+         local function try(f) local ok, e = pcall(f) table.insert(errs, tostring(e)) end \
+         try(function() ui.group(nil, function() end) end) \
+         try(function() ui.group('g') end) \
+         mode = 'ok' \
+         return function() \
+           if mode == 'nested' then return ui.world({{ id = 'w', width = 9, height = 9, \
+             ui.group('a', function() return {{ ui.group('b', function() return {{}} end) }} end) }}) end \
+           if mode == 'twice' then return ui.world({{ id = 'w', width = 9, height = 9, \
+             ui.group('a', function() return {{}} end), ui.group('a', function() return {{}} end) }}) end \
+           if mode == 'ui' then return ui.col({{ ui.group('a', function() return {{}} end) }}) end \
+           return ui.text({{ 'ok' }}) end"
+    ));
+    let errs = said(&app, "return table.concat(errs, ' | ')");
+    assert!(errs.contains("ui.group needs an id"), "{errs}");
+    assert!(errs.contains("ui.group \"g\" needs a function that describes it"), "{errs}");
+    for (mode, wanted) in [
+        ("nested", "group \"a\": a group inside a group"),
+        ("twice", "two groups share the id \"a\""),
+        ("ui", "ui.group goes among a world's entities"),
+    ] {
+        said(&app, &format!("mode = '{mode}'"));
+        let _ = app.view();
+        let console = app.console(3).join("\n");
+        assert!(console.contains(wanted), "{mode}: wanted {wanted:?} in {console}");
+    }
+}
+
+#[test]
+fn a_world_shown_again_runs_its_groups_again() {
+    let app = app_of(&format!(
+        "{HERO} coins = signal({{ 1 }}, 'coins') runs = 0 shown = true \
+         return function() if not shown then return ui.text({{ 'away' }}) end \
+           return ui.world({{ id = 'room', width = 200, height = 100, \
+           ui.group('coins', function() runs += 1 \
+             return {{ {{ id = 'coin1', pos = {{ 0, 0 }}, drawing = hero }} }} end) }}) end"
+    ));
+    said(&app, "shown = false");
+    let _ = app.view();
+    said(&app, "shown = true");
+    let _ = app.view();
+    assert_eq!(said(&app, "return runs"), "2", "the world was dropped with its groups: described again");
+    assert_eq!(entity_ids(&app, "room"), ["coin1"]);
+}
+
+/// A hero walking right past `chunks × per` coins, each chunk one signal. `grouped`: each chunk
+/// is a `ui.group`; otherwise every coin is described every view, as without signals.
+/// `runs[c]` counts how often chunk `c` was described.
+fn coin_map(chunks: usize, per: usize, grouped: bool) -> LuaApp<LuaMsg> {
+    app_of(&format!(
+        "{HERO} chunks = {{}} runs = {{}} \
+         for c = 1, {chunks} do local list = {{}} \
+           for i = 1, {per} do local n = (c - 1) * {per} + i \
+             list[i] = {{ id = 'coin' .. n, x = (n % 100) * 20, y = (n // 100) * 20 }} end \
+           chunks[c] = signal(list, 'coins' .. c) runs[c] = 0 end \
+         local function describe(c) runs[c] += 1 local out = {{}} \
+           for i, coin in chunks[c]() do out[i] = {{ id = coin.id, pos = {{ coin.x, coin.y }}, drawing = hero }} end \
+           return out end \
+         return function() local world = {{ id = 'map', width = 400, height = 300, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, \
+                controller = {{ speed = 100, axis_x = {{ neg = 'KeyA', pos = 'KeyD' }} }} }} }} \
+           for c = 1, {chunks} do \
+             if {grouped} then world[#world + 1] = ui.group('coins' .. c, function() return describe(c) end) \
+             else for _, e in describe(c) do world[#world + 1] = e end end end \
+           return ui.world(world) end"
+    ))
+}
+
+fn walk_right(app: &mut LuaApp<LuaMsg>) {
+    app.update(LuaMsg::KeyWorld("map".into(), runtime::KeyInput {
+        code: Some("KeyD".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+}
+
+fn described(app: &LuaApp<LuaMsg>) -> String {
+    said(app, "local all = 0 for _, n in runs do all += n end return all")
+}
+
+/// T6: 5000 coins and a hero. Walking re-runs neither the coins' function nor their diff;
+/// picking one re-runs the coins group alone. Costs: `bench_app_*`.
+#[test]
+fn five_thousand_coins_cost_no_coin_work_while_the_hero_walks() {
+    let mut app = coin_map(1, 5000, true);
+    walk_right(&mut app);
+    for i in 1..=10 {
+        app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    }
+    assert_eq!(described(&app), "1", "walking: the coins group never ran again");
+    assert!(app.worlds.borrow()["map"].transform("hero").unwrap().x > 10.0);
+    said(&app, "chunks[1]:update(function(l) table.remove(l, 1) end)");
+    let _ = app.view();
+    assert_eq!(described(&app), "2", "a pickup: the coins group ran once");
+    assert_eq!(app.worlds.borrow()["map"].inspect().len(), 5000);
+}
+
+/// The pattern for a big list: one signal and one group per chunk, so a pickup re-describes
+/// a hundred coins, not five thousand.
+#[test]
+fn chunked_coins_re_describe_one_chunk_per_pickup() {
+    let app = coin_map(50, 100, true);
+    said(&app, "chunks[7]:update(function(l) table.remove(l, 1) end)");
+    let _ = app.view();
+    assert_eq!(said(&app, "return runs[7]"), "2");
+    assert_eq!(described(&app), "51", "the other 49 chunks were kept");
+    assert_eq!(app.worlds.borrow()["map"].inspect().len(), 5000);
+}
+
+/// Times `f` over `runs` runs after one to warm up, and prints `BENCH <name> <µs>` for
+/// `scripts/bench.py`, which builds release.
+fn bench(name: &str, runs: u32, mut f: impl FnMut()) {
+    f();
+    let started = Instant::now();
+    for _ in 0..runs {
+        f();
+    }
+    let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(runs);
+    let debug = if cfg!(debug_assertions) { " debug" } else { "" };
+    println!("BENCH {name} {us:.1}{debug}");
+}
+
+/// A frame of walking: the world's tick and the view after it.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_walk() {
+    for (name, grouped) in [("app_walk_5000_grouped", true), ("app_walk_5000_plain", false)] {
+        let mut app = coin_map(50, 100, grouped);
+        walk_right(&mut app);
+        let mut i = 0;
+        bench(name, 30, || {
+            i += 1;
+            app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+            let _ = app.view();
+        });
+    }
+}
+
+/// A coin picked up: the signal's update and the view after it.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_pickup() {
+    for (name, chunks, per) in [("app_pickup_5000_one_group", 1, 5000), ("app_pickup_5000_chunked", 50, 100)] {
+        let app = coin_map(chunks, per, true);
+        bench(name, 20, || {
+            said(&app, "chunks[1]:update(function(l) table.remove(l, 1) end)");
+            let _ = app.view();
+        });
+    }
+}
+
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_signal_update() {
+    let app = app_of("return function() return ui.text({ '' }) end");
+    said(&app, "local list = {} for i = 1, 5000 do list[i] = { id = i, x = i, y = i } end \
+                big = signal(list, 'big')");
+    bench("signal_update_5000", 50, || {
+        said(&app, "big:update(function(l) table.insert(l, { id = 0, x = 0, y = 0 }) end)");
+    });
 }

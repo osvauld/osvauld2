@@ -1,7 +1,7 @@
 //! `signal(value, name)`: app state whose value is frozen, so a write that skips `set` and
-//! `update` errors instead of going unseen. Groups will re-run on a signal's change
-//! (`docs/design/signals.md`); this is the value half.
-use std::cell::Cell;
+//! `update` errors instead of going unseen; and the [`Tracker`] that notes which signals a
+//! group read, so it runs again only when one of them changed (`docs/design/signals.md`).
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use mlua::{AnyUserData, Error, Function, Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
@@ -9,12 +9,48 @@ use mlua::{AnyUserData, Error, Function, Lua, MetaMethod, Table, UserData, UserD
 struct Signal {
     name: String,
     value: Value,
-    /// Bumped by every change; what a group that read it compares against.
-    version: u64,
+    /// Bumped by every change; what a group that read it compares against. Shared, so a group
+    /// can hold it without holding the signal.
+    version: Rc<Cell<u64>>,
     /// Inside this signal's own `update`: a nested one would be overwritten when it returns.
     updating: bool,
     viewing: Rc<Cell<bool>>,
     luau: Rc<Luau>,
+    tracker: Tracker,
+}
+
+/// A signal read while a group described itself, and its version then.
+pub(crate) struct Read {
+    version: Rc<Cell<u64>>,
+    seen: u64,
+}
+
+/// Notes the signals read while it is [`reading`](Tracker::reading).
+#[derive(Clone, Default)]
+pub(crate) struct Tracker(Rc<RefCell<Option<Vec<Read>>>>);
+
+impl Tracker {
+    /// Runs `f`, answering what it returned and the signals it read, each once.
+    pub(crate) fn reading<R>(&self, f: impl FnOnce() -> R) -> (R, Vec<Read>) {
+        let outer = self.0.replace(Some(Vec::new()));
+        let answer = f();
+        let reads = self.0.replace(outer).unwrap_or_default();
+        (answer, reads)
+    }
+
+    fn note(&self, version: &Rc<Cell<u64>>) {
+        let mut reading = self.0.borrow_mut();
+        let Some(reads) = reading.as_mut() else { return };
+        if !reads.iter().any(|r| Rc::ptr_eq(&r.version, version)) {
+            reads.push(Read { version: version.clone(), seen: version.get() });
+        }
+    }
+}
+
+/// Whether what a group read is all as it was. A group that read no signal follows plain state,
+/// which cannot say when it changed: never unchanged, so it runs every time.
+pub(crate) fn unchanged(reads: &[Read]) -> bool {
+    !reads.is_empty() && reads.iter().all(|r| r.version.get() == r.seen)
 }
 
 /// Copying and freezing run in Luau's own `table.clone` and `table.freeze`: walking a table
@@ -54,7 +90,10 @@ impl Signal {
 
 impl UserData for Signal {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(MetaMethod::Call, |_, this, ()| Ok(this.value.clone()));
+        methods.add_meta_method(MetaMethod::Call, |_, this, ()| {
+            this.tracker.note(&this.version);
+            Ok(this.value.clone())
+        });
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
             Ok(format!("signal {:?}", this.name))
         });
@@ -65,7 +104,7 @@ impl UserData for Signal {
             }
             this.luau.freeze.call::<()>(&value)?;
             this.value = value;
-            this.version += 1;
+            this.version.set(this.version.get() + 1);
             Ok(())
         });
         // Borrowed only around the call: `f` may read this signal.
@@ -102,19 +141,19 @@ impl UserData for Signal {
             let mut this = ud.borrow_mut::<Signal>()?;
             this.updating = false;
             this.value = new?;
-            this.version += 1;
+            this.version.set(this.version.get() + 1);
             Ok(())
         });
     }
 }
 
-/// How many times a signal has changed. Groups will compare it (signals step 2).
+/// How many times a signal has changed.
 #[cfg(test)]
 pub(crate) fn version(signal: &AnyUserData) -> mlua::Result<u64> {
-    Ok(signal.borrow::<Signal>()?.version)
+    Ok(signal.borrow::<Signal>()?.version.get())
 }
 
-pub(crate) fn install(lua: &Lua, viewing: Rc<Cell<bool>>) -> mlua::Result<()> {
+pub(crate) fn install(lua: &Lua, viewing: Rc<Cell<bool>>, tracker: Tracker) -> mlua::Result<()> {
     let tables: Table = lua.globals().get("table")?;
     let luau = Rc::new(Luau {
         freeze: lua.load(FREEZE).set_name("signal freeze").eval()?,
@@ -125,8 +164,9 @@ pub(crate) fn install(lua: &Lua, viewing: Rc<Cell<bool>>) -> mlua::Result<()> {
             .filter(|n| !n.is_empty())
             .ok_or_else(|| Error::runtime("signal needs a name: signal(value, \"coins\")"))?;
         luau.freeze.call::<()>(&value)?;
-        let (viewing, luau) = (viewing.clone(), luau.clone());
-        Ok(Signal { name, value, version: 0, updating: false, viewing, luau })
+        let (viewing, luau, tracker) = (viewing.clone(), luau.clone(), tracker.clone());
+        let version = Rc::new(Cell::new(0));
+        Ok(Signal { name, value, version, updating: false, viewing, luau, tracker })
     })?;
     lua.globals().set("signal", signal)
 }

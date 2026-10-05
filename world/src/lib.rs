@@ -269,6 +269,30 @@ struct Animator {
     ended: bool,
 }
 
+/// A part of a world's description, in order: entities described this time, or a group's —
+/// `None` when it is kept exactly as it was, because nothing it read has changed.
+pub enum Part {
+    Specs(Vec<EntitySpec>),
+    Group(String, Option<Vec<EntitySpec>>),
+}
+
+/// What is kept of each part's entities, so a kept group needs none of its specs again. Plain
+/// specs, wherever they stand in the description, are the `None` block.
+#[derive(Default)]
+struct Block {
+    entities: Vec<Entity>,
+    controlled: bool,
+    ticking: bool,
+    /// `(entity id, part)` clip tracks its drawings lack.
+    missing: Vec<(String, String)>,
+    /// `(rider id, carrier id)`: a kept rider still needs its carrier.
+    rides: Vec<(String, String)>,
+}
+
+/// Which part an entity was described in.
+#[derive(Component)]
+struct InBlock(Option<String>);
+
 #[derive(Default)]
 pub struct World2d {
     ecs: World,
@@ -287,6 +311,7 @@ pub struct World2d {
     events: Vec<WorldEvent>,
     by_id: HashMap<String, Entity>,
     order: Vec<Entity>,
+    blocks: HashMap<Option<String>, Block>,
     stacking: Order,
     physics: Physics,
     /// `(zone, who)` sensor overlaps as of the last tick, to report only changes.
@@ -319,6 +344,9 @@ pub enum WorldError {
     Set(String, String),
     #[error("timer {0:?}: seconds must be a finite number, zero or more")]
     Timer(String),
+    /// A group described wrongly.
+    #[error("{0}")]
+    Group(String),
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
@@ -356,25 +384,48 @@ impl World2d {
         Ok((member, filter))
     }
 
-    /// All-or-nothing: every check and every pose runs before the world is touched, so a bad
-    /// description leaves the last good world in place.
+    /// The whole description as one part: what an app without groups gives.
     pub fn reconcile(&mut self, specs: Vec<EntitySpec>) -> Result<(), WorldError> {
-        // A clip track for a part the drawing lacks is skipped, not refused: a drawing edited
-        // live must not stop the world. Said once, after the description is accepted.
-        let specs_missing: Vec<(String, String)> = (specs.iter())
-            .filter_map(|s| Some((s, s.clip.as_ref()?)))
-            .flat_map(|(s, clip)| {
-                let missing = clip.parts().filter(|p| !s.drawing.has_part(p));
-                missing.map(|p| (s.id.clone(), p.to_string()))
+        self.reconcile_parts(vec![Part::Specs(specs)])
+    }
+
+    /// All-or-nothing: every check and every pose runs before the world is touched, so a bad
+    /// description leaves the last good world in place. A kept group's entities are not looked
+    /// at again: not checked, posed or diffed — that is what keeping it saves.
+    pub fn reconcile_parts(&mut self, parts: Vec<Part>) -> Result<(), WorldError> {
+        let parts: Vec<(Option<String>, Option<Vec<EntitySpec>>)> = (parts.into_iter())
+            .map(|p| match p {
+                Part::Specs(specs) => (None, Some(specs)),
+                Part::Group(id, specs) => (Some(id), specs),
             })
             .collect();
+        let mut named = HashSet::new();
+        let mut kept = HashSet::new();
+        for (key, specs) in &parts {
+            let Some(id) = key else { continue };
+            if !named.insert(id.as_str()) {
+                return Err(WorldError::Group(format!("two groups share the id {id:?}")));
+            }
+            if specs.is_none() {
+                if !self.blocks.contains_key(key) {
+                    return Err(WorldError::Group(format!(
+                        "group {id:?} is kept but was never described"
+                    )));
+                }
+                kept.insert(id.clone());
+            }
+        }
+        let specs: Vec<&EntitySpec> = (parts.iter()).filter_map(|(_, s)| s.as_ref()).flatten().collect();
+        // A clip track for a part the drawing lacks is skipped, not refused: a drawing edited
+        // live must not stop the world. Said once, after the description is accepted.
         let mut seen = HashSet::with_capacity(specs.len());
         let mut all_rests = Vec::with_capacity(specs.len());
         for spec in &specs {
             if spec.id.is_empty() {
                 return Err(WorldError::EmptyId);
             }
-            if !seen.insert(spec.id.as_str()) {
+            let in_kept = self.by_id.get(&spec.id).is_some_and(|&e| self.kept(e, &kept));
+            if !seen.insert(spec.id.as_str()) || in_kept {
                 return Err(WorldError::DuplicateId(spec.id.clone()));
             }
             if let Some(c) = &spec.controller
@@ -408,145 +459,229 @@ impl World2d {
             };
             all_rests.push(rest);
         }
+        // A carrier described this time, or kept in a group.
+        let kept_carrier = |id: &String| {
+            let e = *self.by_id.get(id).filter(|&&e| self.kept(e, &kept))?;
+            let look = self.ecs.get::<Appearance>(e).expect("every entity has one");
+            Some((look.drawing.clone(), self.ecs.get::<Attached>(e).is_some()))
+        };
         for spec in &specs {
             let Some(a) = &spec.attach else { continue };
             let bad = |why: String| Err(WorldError::Attach(spec.id.clone(), why));
-            let Some(carrier) = specs.iter().find(|s| s.id == a.to) else {
-                return bad(format!("attached to {:?}, which the world does not describe", a.to));
+            let (drawing, riding) = match specs.iter().find(|s| s.id == a.to) {
+                Some(carrier) if carrier.id == spec.id => return bad("attached to itself".into()),
+                Some(carrier) => (carrier.drawing.clone(), carrier.attach.is_some()),
+                None => match kept_carrier(&a.to) {
+                    Some(found) => found,
+                    None => {
+                        return bad(format!("attached to {:?}, which the world does not describe", a.to));
+                    }
+                },
             };
-            if carrier.id == spec.id {
-                return bad("attached to itself".into());
-            }
-            if carrier.attach.is_some() {
+            if riding {
                 return bad(format!("attached to {:?}, which is itself attached", a.to));
             }
-            if !carrier.drawing.has_part(&a.part) {
+            if !drawing.has_part(&a.part) {
                 return bad(format!("{:?} has no part {:?}", a.to, a.part));
             }
             if a.turn && spec.flip {
                 return bad("turns with its carrier, which mirrors it too: drop flip".into());
             }
         }
-        self.controlled = specs.iter().any(|s| s.controller.is_some());
-        if !self.wants_keys() {
-            self.held.clear(); // key events stop arriving, so nothing can release them later
+        // A kept rider still needs its carrier, wherever that is described now.
+        for name in &kept {
+            for (rider, carrier) in &self.blocks[&Some(name.clone())].rides {
+                let bad = |why: String| Err(WorldError::Attach(rider.clone(), why));
+                match specs.iter().find(|s| &s.id == carrier) {
+                    Some(c) if c.attach.is_some() => {
+                        return bad(format!("rides {carrier:?}, which is itself attached now"));
+                    }
+                    Some(_) => {}
+                    None if kept_carrier(carrier).is_some() => {}
+                    None => {
+                        return bad(format!("rides {carrier:?}, which the world no longer describes"));
+                    }
+                }
+            }
         }
-        self.ticking = specs
-            .iter()
-            .any(|s| s.clip.is_some() || s.controller.is_some());
-        let mut next = HashMap::with_capacity(specs.len());
-        let mut order = Vec::with_capacity(specs.len());
+        let fresh: HashSet<String> = specs.iter().map(|s| s.id.clone()).collect();
+        drop(specs);
+
+        let mut old = std::mem::take(&mut self.blocks);
+        let mut blocks: HashMap<Option<String>, Block> = (kept.iter())
+            .map(|name| (Some(name.clone()), old.remove(&Some(name.clone())).expect("checked above")))
+            .collect();
+        let mut rests = all_rests.into_iter();
+        let mut order = Vec::with_capacity(self.order.len());
         let mut carried = Vec::new();
-        for (spec, rest) in specs.into_iter().zip(all_rests) {
-            let entity = match self.by_id.remove(&spec.id) {
-                Some(entity) => entity,
-                None => {
-                    let (x, y) = spec.pos;
-                    let transform = Transform {
-                        x,
-                        y,
-                        rot: 0.0,
-                        scale: 1.0,
-                        pivot: (0.0, 0.0),
-                    };
-                    let name = Name(spec.id.clone());
-                    self.ecs.spawn((transform, name)).id()
-                }
+        for (key, specs) in parts {
+            let Some(specs) = specs else {
+                order.extend(blocks[&key].entities.iter().copied());
+                continue;
             };
-            // Let go this frame: it leaves with its carrier's velocity, from its carrier's body.
-            let thrown = self.ecs.get::<Attached>(entity).map(|a| {
-                let v = self.ecs.get::<Velocity>(a.to);
-                v.map_or((0.0, 0.0), |v| (v.0, v.1))
-            });
-            let carrier = (self.ecs.get::<Attached>(entity))
-                .and_then(|a| self.ecs.get::<Solid>(a.to))
-                .map(|s| s.body);
-            let groups = self.groups_of(&spec).expect("checked above");
-            let mut e = self.ecs.entity_mut(entity);
-            let moves = spec.controller.is_some();
-            // Carried is off the floor: no body until it is put down, then one where it was let go.
-            let aloft = spec.attach.is_some();
-            let collider = spec.collider.filter(|_| !aloft);
-            let sensor = spec.sensor.filter(|_| !aloft);
-            let loose = spec.loose;
-            let kept = e.get::<Solid>().is_some_and(|s| {
-                (s.collider == collider && s.sensor == sensor && s.moves == moves)
-                    && (s.loose == loose && s.groups == groups)
-            });
-            if !kept {
-                if let Some(old) = e.take::<Solid>() {
-                    self.physics.remove(old.body);
-                    // A new body starts upright.
-                    e.get_mut::<Transform>().expect("every entity has one").rot = 0.0;
+            let mut block = blocks.remove(&key).unwrap_or_default();
+            for spec in specs {
+                block.controlled |= spec.controller.is_some();
+                block.ticking |= spec.clip.is_some() || spec.controller.is_some();
+                if let Some(clip) = &spec.clip {
+                    let missing = clip.parts().filter(|p| !spec.drawing.has_part(p));
+                    block.missing.extend(missing.map(|p| (spec.id.clone(), p.to_string())));
                 }
-                if collider.is_some() || sensor.is_some() {
-                    let t = e.get::<Transform>().expect("every entity has a Transform");
-                    let kind = match (moves, thrown, &collider, loose) {
-                        (true, ..) => Body::Moved,
-                        (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
-                        (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
-                        _ => Body::Fixed,
-                    };
-                    let dynamic = matches!(kind, Body::Dynamic(..));
-                    let dropped = thrown.is_some();
-                    let (solid, zone) = (collider.as_ref(), sensor.as_ref());
-                    let owner = entity.to_bits();
-                    let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
-                    // Loose from the start, it waits asleep; let go, it is on the move.
-                    if dynamic && !dropped {
-                        self.physics.sleep_if_clear(body);
-                    }
-                    if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
-                        self.physics.bring_in(body, from);
-                        let ((x, y), (cx, cy)) = (self.physics.centre_of(body), c.centre());
-                        let mut t = e.get_mut::<Transform>().expect("every entity has one");
-                        (t.x, t.y) = (x - cx, y - cy);
-                    }
-                    e.insert(Solid {
-                        collider,
-                        sensor,
-                        moves,
-                        body,
-                        sliding: dynamic && !self.physics.asleep(body),
-                        loose,
-                        groups,
-                    });
+                if let Some(a) = &spec.attach {
+                    block.rides.push((spec.id.clone(), a.to.clone()));
                 }
+                let rest = rests.next().expect("one rest per spec");
+                let entity = self.put(spec, rest, &key, &mut carried);
+                block.entities.push(entity);
+                order.push(entity);
             }
-            e.insert(Appearance {
-                drawing: spec.drawing,
-                flip: spec.flip,
-                rest,
-            });
-            match spec.controller {
-                Some(controller) => e.insert(controller),
-                None => e.remove::<(Controller, Heading)>(),
-            };
-            e.remove::<Attached>();
-            if let Some(a) = spec.attach {
-                carried.push((entity, a));
+            blocks.insert(key, block);
+        }
+        // What was described before and is not now goes: a whole group no longer described, or
+        // an entity left out of a part described afresh.
+        for gone in old.into_values().flat_map(|b| b.entities) {
+            let name = self.ecs.get::<Name>(gone).expect("every entity has a Name").0.clone();
+            if fresh.contains(&name) {
+                continue; // described again, in another part
             }
-            self.animate(entity, spec.clip);
-            next.insert(spec.id, entity);
-            order.push(entity);
+            if let Some(s) = self.ecs.get::<Solid>(gone) {
+                self.physics.remove(s.body);
+            }
+            self.by_id.remove(&name);
+            self.ecs.despawn(gone);
         }
         for (entity, a) in carried {
-            let (to, at) = (next[&a.to], Point::new(a.at.0, a.at.1));
+            let (to, at) = (self.by_id[&a.to], Point::new(a.at.0, a.at.1));
             let pivot = Point::new(a.pivot.0, a.pivot.1);
             let turned = a.turn.then_some(Affine::IDENTITY);
             let attached = Attached { to, part: a.part, at, pivot, turned };
             self.ecs.entity_mut(entity).insert(attached);
         }
-        for (_, gone) in self.by_id.drain() {
-            if let Some(s) = self.ecs.get::<Solid>(gone) {
-                self.physics.remove(s.body);
-            }
-            self.ecs.despawn(gone);
+        self.controlled = blocks.values().any(|b| b.controlled);
+        self.ticking = blocks.values().any(|b| b.ticking);
+        if !self.wants_keys() {
+            self.held.clear(); // key events stop arriving, so nothing can release them later
         }
-        (self.by_id, self.order) = (next, order);
-        self.note_skipped(&specs_missing);
+        let mut missing: Vec<_> = blocks.values().flat_map(|b| b.missing.iter().cloned()).collect();
+        missing.sort();
+        (self.blocks, self.order) = (blocks, order);
+        self.note_skipped(&missing);
         self.follow();
         Ok(())
+    }
+
+    /// Whether a group of this id was described and is still here to be kept.
+    pub fn has_group(&self, id: &str) -> bool {
+        self.blocks.contains_key(&Some(id.to_owned()))
+    }
+
+    /// Whether `entity` belongs to one of the `kept` groups.
+    fn kept(&self, entity: Entity, kept: &HashSet<String>) -> bool {
+        let block = self.ecs.get::<InBlock>(entity).and_then(|b| b.0.as_ref());
+        block.is_some_and(|b| kept.contains(b))
+    }
+
+    /// Spawns `spec`'s entity, or brings the one of that id up to date: its body, look,
+    /// controller and clip. Its carrier is resolved once every part is placed.
+    fn put(
+        &mut self,
+        spec: EntitySpec,
+        rest: Arc<Frame>,
+        block: &Option<String>,
+        carried: &mut Vec<(Entity, Attach)>,
+    ) -> Entity {
+        let entity = match self.by_id.get(&spec.id) {
+            Some(&entity) => entity,
+            None => {
+                let (x, y) = spec.pos;
+                let transform = Transform {
+                    x,
+                    y,
+                    rot: 0.0,
+                    scale: 1.0,
+                    pivot: (0.0, 0.0),
+                };
+                let name = Name(spec.id.clone());
+                self.ecs.spawn((transform, name)).id()
+            }
+        };
+        // Let go this frame: it leaves with its carrier's velocity, from its carrier's body.
+        let thrown = self.ecs.get::<Attached>(entity).map(|a| {
+            let v = self.ecs.get::<Velocity>(a.to);
+            v.map_or((0.0, 0.0), |v| (v.0, v.1))
+        });
+        let carrier = (self.ecs.get::<Attached>(entity))
+            .and_then(|a| self.ecs.get::<Solid>(a.to))
+            .map(|s| s.body);
+        let groups = self.groups_of(&spec).expect("checked above");
+        let mut e = self.ecs.entity_mut(entity);
+        let moves = spec.controller.is_some();
+        // Carried is off the floor: no body until it is put down, then one where it was let go.
+        let aloft = spec.attach.is_some();
+        let collider = spec.collider.filter(|_| !aloft);
+        let sensor = spec.sensor.filter(|_| !aloft);
+        let loose = spec.loose;
+        let kept = e.get::<Solid>().is_some_and(|s| {
+            (s.collider == collider && s.sensor == sensor && s.moves == moves)
+                && (s.loose == loose && s.groups == groups)
+        });
+        if !kept {
+            if let Some(old) = e.take::<Solid>() {
+                self.physics.remove(old.body);
+                // A new body starts upright.
+                e.get_mut::<Transform>().expect("every entity has one").rot = 0.0;
+            }
+            if collider.is_some() || sensor.is_some() {
+                let t = e.get::<Transform>().expect("every entity has a Transform");
+                let kind = match (moves, thrown, &collider, loose) {
+                    (true, ..) => Body::Moved,
+                    (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
+                    (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
+                    _ => Body::Fixed,
+                };
+                let dynamic = matches!(kind, Body::Dynamic(..));
+                let dropped = thrown.is_some();
+                let (solid, zone) = (collider.as_ref(), sensor.as_ref());
+                let owner = entity.to_bits();
+                let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
+                // Loose from the start, it waits asleep; let go, it is on the move.
+                if dynamic && !dropped {
+                    self.physics.sleep_if_clear(body);
+                }
+                if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
+                    self.physics.bring_in(body, from);
+                    let ((x, y), (cx, cy)) = (self.physics.centre_of(body), c.centre());
+                    let mut t = e.get_mut::<Transform>().expect("every entity has one");
+                    (t.x, t.y) = (x - cx, y - cy);
+                }
+                e.insert(Solid {
+                    collider,
+                    sensor,
+                    moves,
+                    body,
+                    sliding: dynamic && !self.physics.asleep(body),
+                    loose,
+                    groups,
+                });
+            }
+        }
+        e.insert(Appearance {
+            drawing: spec.drawing,
+            flip: spec.flip,
+            rest,
+        });
+        e.insert(InBlock(block.clone()));
+        match spec.controller {
+            Some(controller) => e.insert(controller),
+            None => e.remove::<(Controller, Heading)>(),
+        };
+        e.remove::<Attached>();
+        if let Some(a) = spec.attach {
+            carried.push((entity, a));
+        }
+        self.animate(entity, spec.clip);
+        self.by_id.insert(spec.id, entity);
+        entity
     }
 
     /// Let-go entities go where Rapier slid them, until they settle.

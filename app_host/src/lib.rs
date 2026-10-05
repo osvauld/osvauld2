@@ -10,7 +10,7 @@ mod budget;
 pub mod index;
 mod modules;
 mod props;
-mod signal;
+pub(crate) mod signal;
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
@@ -325,7 +325,16 @@ pub struct Ctx<'a, M> {
     /// Worlds this walk drew. Marked before a world's description is checked, so a bad
     /// description keeps the last good world rather than dropping it.
     pub worlds_seen: HashSet<String>,
+    pub(crate) groups: Groups,
+    /// `(world, group)` this walk described or kept; the rest are forgotten after it.
+    pub(crate) groups_seen: HashSet<(String, String)>,
+    pub(crate) tracker: signal::Tracker,
+    /// Set while a group describes itself, as while `view` does.
+    pub(crate) viewing: Rc<Cell<bool>>,
 }
+
+/// What each `(world, group)` read when it last described itself.
+pub(crate) type Groups = Rc<RefCell<HashMap<(String, String), Vec<signal::Read>>>>;
 
 /// Retained worlds by `ui.world` id. Outlives the VM, like the console: reload must not reset a
 /// game, and a hidden tab runs no view, so nothing sweeps it.
@@ -341,6 +350,10 @@ impl<'a, M> Ctx<'a, M> {
             to_msg,
             worlds: Worlds::default(),
             worlds_seen: HashSet::new(),
+            groups: Groups::default(),
+            groups_seen: HashSet::new(),
+            tracker: signal::Tracker::default(),
+            viewing: Rc::new(Cell::new(false)),
         }
     }
 }
@@ -413,6 +426,10 @@ pub struct LuaApp<M> {
     worlds3d: gfx::world3d::Host,
     /// While `view` runs: `world(id):set` refuses then, since a description only describes.
     viewing: Rc<Cell<bool>>,
+    /// What each world group read when it last described itself. Per VM: a reload's new
+    /// signals are not the old ones, so its groups all run again.
+    groups: Groups,
+    tracker: signal::Tracker,
     resolve: Resolve,
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
@@ -588,7 +605,8 @@ impl<M: 'static> LuaApp<M> {
         let viewing = Rc::new(Cell::new(false));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         worlds3d.install(&vm, viewing.clone())?;
-        signal::install(&vm, viewing.clone())?;
+        let tracker = signal::Tracker::default();
+        signal::install(&vm, viewing.clone(), tracker.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
 
@@ -618,6 +636,8 @@ impl<M: 'static> LuaApp<M> {
             worlds,
             worlds3d,
             viewing,
+            groups: Groups::default(),
+            tracker,
         })
     }
 
@@ -927,8 +947,13 @@ impl<M: 'static> LuaApp<M> {
         handlers.clear();
         let mut context = Ctx::new(&mut handlers, self.to_msg.clone());
         context.worlds = self.worlds.clone();
+        context.groups = self.groups.clone();
+        context.tracker = self.tracker.clone();
+        context.viewing = self.viewing.clone();
         let el = match walk(tree, &mut context) {
             Ok(el) => {
+                let groups_seen = &context.groups_seen;
+                self.groups.borrow_mut().retain(|key, _| groups_seen.contains(key));
                 let seen = &context.worlds_seen;
                 let mut worlds = self.worlds.borrow_mut();
                 worlds.retain(|id, _| seen.contains(id));
@@ -1338,6 +1363,18 @@ ui = {
     overlay = tagger("overlay"),
 }
 
+-- Among a world's entities: a part described by `describe`, run again only when a signal it
+-- read has changed.
+function ui.group(id, describe)
+    if type(id) ~= "string" or id == "" then
+        error("ui.group needs an id: ui.group(\"coins\", function() return { ... } end)", 2)
+    end
+    if type(describe) ~= "function" then
+        error("ui.group \"" .. id .. "\" needs a function that describes it", 2)
+    end
+    return { tag = "group", id = id, describe = describe, line = debug.info(2, "l") }
+end
+
 function ui.state(id, init) 
     _live[id] = true
     local s = _state[id]
@@ -1728,10 +1765,28 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             "a world's actions and on_action come together",
         ));
     }
+    let mut parts = Vec::new();
     let mut specs = Vec::new();
+    // What each group read this time, kept only once the world accepts the description.
+    let mut read = Vec::new();
     for index in 1..=max_index(node) {
         match node.get::<Value>(index)? {
             Value::Boolean(false) => {} // `friend or false`, the same idiom as child elements
+            Value::Table(t) if t.get::<Option<String>>("tag")?.as_deref() == Some("group") => {
+                parts.push(world::Part::Specs(std::mem::take(&mut specs)));
+                let group: String = t.get("id")?;
+                let key = (id.clone(), group.clone());
+                context.groups_seen.insert(key.clone());
+                let has = context.worlds.borrow().get(&id).is_some_and(|w| w.has_group(&group));
+                let unchanged = has && context.groups.borrow().get(&key).is_some_and(|r| signal::unchanged(r));
+                if unchanged {
+                    parts.push(world::Part::Group(group, None));
+                    continue;
+                }
+                let (specs, reads) = describe_group(&t, &group, context)?;
+                read.push((key, reads));
+                parts.push(world::Part::Group(group, Some(specs)));
+            }
             Value::Table(spec) => specs.push(gfx::entity(spec, index)?),
             other => {
                 return Err(mlua::Error::runtime(format!(
@@ -1741,9 +1796,11 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             }
         }
     }
+    parts.push(world::Part::Specs(specs));
     let mut worlds = context.worlds.borrow_mut();
     let world = worlds.entry(id.clone()).or_default();
-    world.reconcile(specs).map_err(mlua::Error::external)?;
+    world.reconcile_parts(parts).map_err(mlua::Error::external)?;
+    context.groups.borrow_mut().extend(read);
     world.set_order(order);
     world.set_actions(actions);
     let visual = world.frame(width, height).map_err(mlua::Error::external)?;
@@ -1761,6 +1818,35 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         });
     }
     Ok(el)
+}
+
+/// Runs a world group's function as `view` runs — signal writes refused — noting what it read.
+fn describe_group<M>(
+    group: &Table,
+    id: &str,
+    context: &Ctx<M>,
+) -> mlua::Result<(Vec<world::EntitySpec>, Vec<signal::Read>)> {
+    let describe: Function = group.get("describe")?;
+    let viewing = context.viewing.replace(true);
+    let (list, reads) = context.tracker.reading(|| describe.call::<Value>(()));
+    context.viewing.set(viewing);
+    let fail = |why: String| mlua::Error::runtime(format!("group {id:?}: {why}"));
+    let list = match list.map_err(|e| fail(reason(&e)))? {
+        Value::Table(list) => list,
+        other => return Err(fail(format!("its function must return a list of entities, got {}", other.type_name()))),
+    };
+    let mut specs = Vec::new();
+    for index in 1..=max_index(&list) {
+        match list.get::<Value>(index)? {
+            Value::Boolean(false) => {}
+            Value::Table(t) if t.get::<Option<String>>("tag")?.as_deref() == Some("group") => {
+                return Err(fail("a group inside a group: give each its own place in the world".into()));
+            }
+            Value::Table(spec) => specs.push(gfx::entity(spec, index).map_err(|e| fail(reason(&e)))?),
+            other => return Err(fail(format!("entity {index} must be a table or false, got {}", other.type_name()))),
+        }
+    }
+    Ok((specs, reads))
 }
 
 /// `actions = { jump = "Space" }`: action name to key code, sorted so events come in a stable
@@ -1819,6 +1905,11 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
             frame_el(visual)
         }
         "world" => build_world(&node, context)?,
+        "group" => {
+            return Err(mlua::Error::runtime(
+                "ui.group goes among a world's entities; in the UI tree it is not built yet",
+            ));
+        }
         "scene3d" => {
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
