@@ -1,81 +1,81 @@
 {
   "app_pickup_5000_chunked": {
-    "baseline_us": 1433.2,
+    "baseline_us": 755.5,
     "budget_us": 2500,
     "note": "a coin picked up, 50 groups of 100: the update and the view after it. Target: under 2.5 ms."
   },
   "app_pickup_5000_one_group": {
-    "baseline_us": 23610.6,
+    "baseline_us": 20180.9,
     "budget_us": 40000,
     "note": "reference, not a target: one group of 5000 re-describes whole. The guide says chunk instead."
   },
   "app_walk_20000_camera": {
-    "baseline_us": 2804.1,
+    "baseline_us": 1959.6,
     "budget_us": 5000,
-    "note": "walking past 20000 coins in 200 groups through a 1280x720 camera following the hero (~2300 on screen). Target: under 2 ms; the check of every entity against the view is the next lever (a spatial grid)."
+    "note": "walking past 20000 coins in 200 groups through a 1280x720 camera following the hero (~2300 on screen). Target: under 2 ms, met narrowly (1.8–2.0 ms on a quiet machine); the check of every entity against the view is the next lever (a spatial grid)."
   },
   "app_walk_5000_grouped": {
-    "baseline_us": 1001.9,
+    "baseline_us": 463.7,
     "budget_us": 2000,
     "note": "a frame of walking past 5000 coins in groups: tick and view. Target: a world's share of a 16.6 ms frame stays under 2 ms."
   },
   "app_walk_5000_plain": {
-    "baseline_us": 20313.7,
+    "baseline_us": 18615.1,
     "budget_us": 40000,
     "note": "reference, not a target: the same 5000 coins without groups, described every view."
   },
   "frame_encode_20000": {
-    "baseline_us": 2510.8,
+    "baseline_us": 2388.0,
     "budget_us": 6500,
     "note": "20000 sprite instances encoded into a vello scene: the CPU half of painting."
   },
   "frame_encode_5000": {
-    "baseline_us": 619.4,
+    "baseline_us": 615.6,
     "budget_us": 1600,
     "note": "5000 sprite instances encoded into a vello scene."
   },
   "signal_update_5000": {
-    "baseline_us": 275.0,
+    "baseline_us": 276.8,
     "budget_us": 600,
     "note": "an update of a 5000-item signal: nearly all of it the freeze checking every entry."
   },
   "world_frame_20000": {
-    "baseline_us": 4323.7,
+    "baseline_us": 3637.4,
     "budget_us": 8000,
     "note": "the same for 20000, every entity drawn. Was refused by the 4096-item cap."
   },
   "world_frame_20000_camera": {
-    "baseline_us": 897.5,
+    "baseline_us": 812.5,
     "budget_us": 1500,
     "note": "the same 20000 through a 1280x720 camera: ~6% drawn. Most of it is checking every entity against the view; a spatial grid would cut that."
   },
   "world_frame_5000": {
-    "baseline_us": 964.7,
+    "baseline_us": 861.9,
     "budget_us": 2000,
     "note": "building the frame of a 5000-entity world, every entity drawn (the box is the whole map). Includes each entity's view check."
   },
   "world_inspect_5000": {
-    "baseline_us": 289.4,
+    "baseline_us": 280.3,
     "budget_us": 700,
     "note": "the dump's world inspection of 5000 entities."
   },
   "world_rays_1000": {
-    "baseline_us": 260.4,
+    "baseline_us": 257.3,
     "budget_us": 600,
     "note": "1000 rays across 500 crates."
   },
   "world_reconcile_fresh_5000": {
-    "baseline_us": 2375.8,
+    "baseline_us": 1963.8,
     "budget_us": 4500,
     "note": "diffing 5000 specs described afresh (built outside the timing)."
   },
   "world_reconcile_kept_5000": {
-    "baseline_us": 23.3,
+    "baseline_us": 19.6,
     "budget_us": 100,
     "note": "5000 entities in a kept group described again: what groups save."
   },
   "world_steps_5000": {
-    "baseline_us": 369.2,
+    "baseline_us": 359.5,
     "budget_us": 1000,
     "note": "a 60 fps frame of steps (two) for 5000 things, 200 balls bouncing among 800 rocks."
   }

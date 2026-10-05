@@ -714,7 +714,7 @@ it follows on the fixed step (`ease` per second), stops at explicit `bounds = { 
 survives reload. `world(id):set_camera({ at } | { follow })` in handlers; `to_world`/`to_screen`
 anywhere. Every world now draws only what meets its box (half an entity's size of margin): 20000
 entities through a 1280 × 720 camera build in ~0.9 ms against ~4.3 ms all drawn; walking past
-20000 grouped coins is ~2.8 ms a frame (target 2 ms — a spatial grid is the lever).
+20000 grouped coins is ~1.9 ms a frame (target 2 ms, met with no room — a spatial grid is the lever).
 `smoke_camera.py` checks it in pixels, rects and the dump. Next, in order: a `follow`
 controller; acceleration; then the RPG. Signals steps 3–6 (UI-tree groups, `view` as root
 group, inspection and the dev check, docs as signals).

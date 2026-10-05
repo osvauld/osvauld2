@@ -91,8 +91,9 @@ local sx, sy = table.unpack(world("map"):to_screen({ wx, wy }))  -- a speech bub
 - The test that an off-screen entity is not posed is the bench, not an assertion: posing is
   internal and has no count to read.
 - Breaking the easing on purpose fails C2: the easing tests catch it.
-- Step 3: a frame of walking past 20000 grouped coins through a 1280 × 720 camera is 2.8 ms
-  (`app_walk_20000_camera`), over the 2 ms target; the per-entity view check is the lever.
+- Step 3: a frame of walking past 20000 grouped coins through a 1280 × 720 camera is 1.8–2.0 ms
+  (`app_walk_20000_camera`), at the 2 ms target with no room; the per-entity view check is the
+  lever. (A first reading of 2.8 ms was taken on a loaded machine.)
 - A question answers as of the last step, so `at(to_world(p))` finds a just-spawned collider
   only after a tick — as the guide already says for spawns.
 
