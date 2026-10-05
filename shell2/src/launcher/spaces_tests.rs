@@ -84,3 +84,28 @@ fn workspace_list_empty_and_narrow_layouts_remain_visible() {
         assert!(driver.app().0.console(10).is_empty());
     }
 }
+
+/// Times `f` over `runs` runs after one to warm up, and prints `BENCH <name> <µs>` for
+/// `scripts/bench.py`, which builds release.
+fn bench(name: &str, runs: u32, mut f: impl FnMut()) {
+    f();
+    let started = std::time::Instant::now();
+    for _ in 0..runs {
+        f();
+    }
+    let us = started.elapsed().as_secs_f64() * 1e6 / f64::from(runs);
+    let debug = if cfg!(debug_assertions) { " debug" } else { "" };
+    println!("BENCH {name} {us:.1}{debug}");
+}
+
+/// U1 (`ui-reuse.md`): a frame of the workspace list with nothing changing — view, layout,
+/// hit-testing and paint, as `Headless` runs them.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_workspace_list_idle_frame() {
+    for n in [8, 40] {
+        let rows: Vec<String> = (0..n).map(|i| format!("{{id='w{i}',name='Workspace {i}'}}")).collect();
+        let mut driver = Headless::new(mounted(&format!("{{{}}}", rows.join(","))), (1000.0, 800.0));
+        bench(&format!("workspace_list_{n}_idle_frame"), 100, || driver.frame());
+    }
+}

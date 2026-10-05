@@ -39,6 +39,16 @@
     "budget_us": 600,
     "note": "an update of a 5000-item signal: nearly all of it the freeze checking every entry."
   },
+  "workspace_list_40_idle_frame": {
+    "baseline_us": 50855.6,
+    "budget_us": 10000,
+    "note": "ui-reuse.md U1: 40 cards. 7× the 8-card cost for 5× the cards; target under 10 ms; FAILS until layout reuse lands."
+  },
+  "workspace_list_8_idle_frame": {
+    "baseline_us": 7384.9,
+    "budget_us": 3000,
+    "note": "ui-reuse.md U1: 8 workspace cards, a frame with nothing changing (view, layout, hit, paint) in Headless. Target under 3 ms; FAILS until layout reuse lands."
+  },
   "world_frame_20000": {
     "baseline_us": 3637.4,
     "budget_us": 8000,

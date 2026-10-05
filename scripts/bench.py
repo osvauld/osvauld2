@@ -19,13 +19,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUDGETS = ROOT / "scripts" / "bench_budgets.json"
-CRATES = ["world", "runtime", "app_host"]
+CRATES = ["world", "runtime", "app_host", "shell2"]
+BINS = {"shell2"}  # no lib target: its tests live in the binary
 DRIFT = 1.25
 
 
 def run(crate):
     env = {**os.environ, "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "2")}
-    cmd = ["cargo", "test", "-q", "--release", "-p", crate, "--lib", "--",
+    cmd = ["cargo", "test", "-q", "--release", "-p", crate, "--bin" if crate in BINS else "--lib", *([crate] if crate in BINS else []), "--",
            "--ignored", "bench_", "--nocapture", "--test-threads=1"]
     done = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
     out = done.stdout + done.stderr
