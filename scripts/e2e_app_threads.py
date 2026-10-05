@@ -265,16 +265,22 @@ def t5_background_push(tmp):
             seen = len(bo.views())
 
             al.rpc.click(item["id"], "add")
+
+            def with_note():  # "elsewhere" is a probe too, but always sees 0 notes
+                return [l for l in bo.views()[seen:] if l.split()[-1] != "0"]
+
             deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                fresh = bo.views()[seen:]
-                if any(l.split()[-1] != "0" for l in fresh):
-                    return
+            while not with_note() and time.monotonic() < deadline:
                 time.sleep(0.1)
-            # Data first, so a failure here means "Lua didn't run", not "sync didn't deliver".
-            # AppDataGet reads the docs without running the app.
-            assert "note:" in str(bo.rpc.read_data(item["id"])), "the push never reached bob"
-            raise AssertionError("bob has the note, but his background probe never ran its view")
+            if not with_note():
+                # Data first, so a failure here means "Lua didn't run", not "sync didn't
+                # deliver". AppDataGet reads the docs without running the app.
+                assert "note:" in str(bo.rpc.read_data(item["id"])), "the push never reached bob"
+                raise AssertionError("bob has the note, but his background probe never ran its view")
+            # Once per push, not on every tick: the signals work keeps this green as it makes
+            # the run skip what the push did not touch.
+            time.sleep(1.0)
+            assert len(with_note()) == 1, with_note()
     finally:
         node.terminate()
 

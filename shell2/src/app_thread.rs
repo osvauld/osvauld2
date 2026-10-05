@@ -458,7 +458,13 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 }
             }
         }
-        settle(&mut tile, &ctx, &mut names);
+        let changed = settle(&mut tile, &ctx, &mut names);
+        if !shown && changed {
+            // Hidden, a change (a node push, a hidden click) still runs the view, unpainted:
+            // what it shows may be a badge or a notification. Signals will skip the groups
+            // the change did not touch (`signals.md` steps 4, 6).
+            let _ = tile.app_mut().view();
+        }
         if shown && !ctx.offscreen && tile.wants_frame() {
             let frame = TileFrame {
                 scene: Arc::new(tile.frame()),
@@ -479,10 +485,10 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
 }
 
 /// After every batch, as the shell used to after every message: rebuild a stale source, save
-/// what changed, index it, and tell the shell what to sync.
-fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
+/// what changed, index it, and tell the shell what to sync. `true` when a doc changed.
+fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) -> bool {
     if ctx.closed.load(Ordering::SeqCst) {
-        return;
+        return false;
     }
     let h = tile.app_mut();
     if let Some(Err(e)) = h.app.reload_if_stale() {
@@ -510,8 +516,9 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
     // After the save, so the index never holds a record the vault does not.
     reindex(&h.index, &h.app, &dirtied);
     let now_open = h.app.open_doc_names();
-    if dirtied.is_empty() && error.is_none() && now_open == *names {
-        return;
+    let changed = !dirtied.is_empty();
+    if !changed && error.is_none() && now_open == *names {
+        return false;
     }
     *names = now_open.clone();
     let _ = ctx.proxy.send_event(Msg::AppSaved {
@@ -520,6 +527,7 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
         names: now_open,
         error,
     });
+    changed
 }
 
 #[cfg(test)]
