@@ -169,6 +169,10 @@ pub enum Request {
     },
     /// Back to the focused app alone. The other one keeps running, unseen.
     Unsplit,
+    /// The open app tabs in strip order: `[{item_id, name, focused, shown, responding}]`.
+    /// `responding` is false while the app's thread has been busy longer than the watchdog
+    /// (`OSVAULD_WATCHDOG_MS`, default 3000).
+    ListTabs,
 
     // ── node (kunki) ────────────────────────────────────────────────────────────
     /// The unlocked account: `{did, name}`.

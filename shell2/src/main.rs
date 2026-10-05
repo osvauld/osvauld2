@@ -1460,6 +1460,26 @@ impl Shell {
                 self.split = None;
                 Response::ok("unsplit")
             }
+            Request::ListTabs => Response::ok(
+                self.tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, t)| match t {
+                        Tab::App((id, name)) => Some((idx, id, name)),
+                        Tab::Home => None,
+                    })
+                    .map(|(idx, id, name)| {
+                        let app = self.apps.get(id);
+                        serde_json::json!({
+                            "item_id": id.as_ref(),
+                            "name": name,
+                            "focused": idx == self.focused,
+                            "shown": app.is_some_and(|a| a.is_shown()),
+                            "responding": app.is_some_and(|a| a.responding()),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             req => answer(&self.vault, req),
         }
     }
@@ -1584,6 +1604,11 @@ impl Shell {
         let Some(a) = self.apps.get(id.as_str()) else {
             return Some((req, tx));
         };
+        // Queued behind a hang, it would wait out the bridge's timeout.
+        if !a.responding() {
+            let _ = tx.send(Response::err("the app is not responding"));
+            return None;
+        }
         let vault = self.vault.clone();
         a.call(move |h| {
             let _ = tx.send(serve(h, req, &vault));
@@ -1694,7 +1719,7 @@ impl Shell {
     /// An app's share of the screen: its latest frame, or why there is none.
     fn app_slot(&self, id: &Arc<str>) -> El<Msg> {
         match self.apps.get(id) {
-            Some(a) if a.stuck => text("this app is not responding")
+            Some(a) if !a.responding() => text("this app is not responding")
                 .color(theme::error())
                 .grow(),
             Some(a) => {
@@ -1732,6 +1757,10 @@ impl Shell {
                 Tab::Home => ("⌂".to_string(), "tab:home".to_string(), None),
                 Tab::App((id, name)) => (name.clone(), format!("tab:{id}"), Some(id.clone())),
             };
+            let stuck = close_id
+                .as_ref()
+                .and_then(|id| self.apps.get(id))
+                .is_some_and(|a| !a.responding());
 
             let mut el = row()
                 .h(28.0)
@@ -1758,6 +1787,9 @@ impl Shell {
                 theme::fg_3()
             };
             el = el.child(text(label).font_size(13.0).color(fg));
+            if stuck {
+                el = el.child(text("not responding").font_size(11.0).color(theme::error()));
+            }
 
             // Nested click: the runtime's hit test takes the innermost match (`lib.rs:462` walks
             // the hit list in reverse), so pressing × closes without also focusing.

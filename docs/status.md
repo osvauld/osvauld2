@@ -159,7 +159,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
 
-### App threads (2026-10-04, steps 0–3 and 9) — [design](design/app-threads.md)
+### App threads (2026-10-04, steps 0–3, 8 and 9) — [design](design/app-threads.md)
 - `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
   `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
@@ -183,7 +183,15 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   3D physics steps on the app thread; a hidden app's worlds pause, and its first frame back
   skips the hidden time. `smoke_mesh_math` now checks 3D pixels — picking alone passed with
   none drawn.
-- not built: stuck-thread badge (T4), background view on push (T5, a decision), own windows
+- Stuck watchdog (2026-10-05): a thread on one batch longer than `OSVAULD_WATCHDOG_MS`
+  (default 3 s) is not responding — its tab says so, `ListTabs` reports `responding: false`,
+  bridge requests to it are refused at once, the paint no longer waits on it, and
+  `CloseItem` abandons it without the 3 s wait. Green: T4.
+- A hidden app whose docs changed (a node push, a click sent to it) runs its view once,
+  unpainted: what it shows may depend on the change. Nothing runs on a timer, so idle apps
+  stay idle (T6). Signals steps 4 and 6 (world-engine) will make that run skip what the
+  change did not touch. Green: T5.
+- not built: own windows
   (T10), the Lua chrome's guards (T11), two 3D apps on screen at once (one viewport a frame).
 
 ## Not built

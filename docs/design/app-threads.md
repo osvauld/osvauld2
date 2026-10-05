@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–3 and 9 built 2026-10-04 (T1, T2, T3, T6, T7, T8 green; T9 placeholder); steps 4–8, 10, 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–3 and 9 built 2026-10-04, step 8 2026-10-05 (T1–T8 green; T9 placeholder); steps 10, 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -179,6 +179,19 @@ Each leaves `cargo test` and the smokes green.
 7. **Search index** moves into the thread; the indexer runs there. T9 green.
 8. **Background apps live.** Unfocused tiles keep running on events; watchdog badges a
    thread that stops answering. T4, T5, T6 green.
+   *Watchdog built 2026-10-05:* no ping — each thread stamps when it takes up a batch and
+   clears it when it goes back to its channel; the shell reads the stamp, since asking a stuck
+   thread is what hangs. One watchdog thread, alive only while apps are open, wakes the shell
+   when a stamp passes `OSVAULD_WATCHDOG_MS` (default 3 s, past the 1 s CPU budget) so the tab
+   badge shows with nothing else happening; the thread's next idle takes it off. A stuck app
+   is not asked for frames, its bridge requests are refused at once, and closing it skips
+   Drop's 3 s wait (`CloseItem` from `group-chat-sync`). A request already inside the hang
+   still waits out the bridge's 30 s: its reply sender is on the stuck stack.
+   *Decided and built 2026-10-05 (T5):* a push refreshes a hidden app — after a batch that
+   changed its docs, a hidden thread runs `view` once and drops the result. The import goes
+   through the same doc version and `patch_into` as a local write, so `signals.md` steps 4
+   and 6 (view as root group, docs as signals) make the run skip what the push did not touch
+   with no API between us. T5 also pins one view per push, for that work to keep green.
 9. **Two tiles.** A minimal side-by-side split in the Rust chrome (the Lua chrome takes it over
    later). T7 green.
    *Built 2026-10-04:* `SplitWith`/`Unsplit` bridge requests; the shell shows the focused app
