@@ -1,6 +1,9 @@
 //! Metre-scale, Y-up 3D rigid bodies. Rapier handles stay inside `world`; visuals are separate.
 use rapier3d::prelude::*;
 
+mod commands;
+pub use commands::Set3d;
+
 pub(crate) const HZ: u16 = 120;
 pub(crate) const STEP: f32 = 1.0 / HZ as f32;
 const LIMIT: f32 = 10_000.0;
@@ -13,7 +16,7 @@ pub enum Shape3d {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("3D body needs finite bounded position and positive bounded dimensions")]
+#[error("3D body needs finite bounded position, nonzero rotation and positive bounded dimensions")]
 pub(crate) struct InvalidBody;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,9 +47,14 @@ impl Physics3d {
         &mut self,
         shape: Shape3d,
         position: [f32; 3],
+        rotation: [f32; 4],
         dynamic: bool,
+        sensor: bool,
     ) -> Result<RigidBodyHandle, InvalidBody> {
-        Self::validate(shape, position)?;
+        Self::validate(shape, position, rotation)?;
+        if sensor && dynamic {
+            return Err(InvalidBody);
+        }
         let collider = match shape {
             Shape3d::Sphere(r) => ColliderBuilder::ball(r),
             Shape3d::Box(size) => {
@@ -58,31 +66,60 @@ impl Physics3d {
         } else {
             RigidBodyBuilder::fixed()
         };
-        let handle = self
-            .world
-            .insert_body(body.translation(Vector::from_array(position)));
-        self.world
-            .insert_collider(collider.restitution(0.35).friction(0.5), Some(handle));
+        let handle = self.world.insert_body(body.pose(Pose::from_parts(
+            Vector::from_array(position),
+            Rotation::from_array(rotation).normalize(),
+        )));
+        self.world.insert_collider(
+            collider.restitution(0.35).friction(0.5).sensor(sensor),
+            Some(handle),
+        );
         Ok(handle)
     }
 
-    pub fn validate(shape: Shape3d, position: [f32; 3]) -> Result<(), InvalidBody> {
+    pub fn validate(
+        shape: Shape3d,
+        position: [f32; 3],
+        rotation: [f32; 4],
+    ) -> Result<(), InvalidBody> {
         let bounded = |v: f32| v.is_finite() && v.abs() <= LIMIT;
         let dimension = |v: f32| bounded(v) && v >= 0.0001;
         let valid = match shape {
             Shape3d::Sphere(r) => dimension(r),
             Shape3d::Box(size) => size.into_iter().all(dimension),
         };
-        if valid && position.into_iter().all(bounded) {
+        if valid && position.into_iter().all(bounded) && Self::valid_rotation(rotation) {
             Ok(())
         } else {
             Err(InvalidBody)
         }
     }
 
+    fn valid_rotation(rotation: [f32; 4]) -> bool {
+        rotation
+            .into_iter()
+            .all(|v| v.is_finite() && v.abs() <= LIMIT)
+            && Rotation::from_array(rotation).length_squared() >= 1e-6
+    }
+
     pub fn step(&mut self) {
         self.world.step();
         self.tick += 1;
+    }
+
+    pub fn sensor_pairs(&self) -> impl Iterator<Item = (RigidBodyHandle, RigidBodyHandle)> + '_ {
+        self.world
+            .narrow_phase
+            .intersection_pairs()
+            .filter_map(|(a, b, intersects)| {
+                if !intersects {
+                    return None;
+                }
+                Some((
+                    self.world.colliders[a].parent()?,
+                    self.world.colliders[b].parent()?,
+                ))
+            })
     }
 
     pub fn inspect(&self, handle: RigidBodyHandle) -> BodyState {
@@ -100,16 +137,18 @@ impl Physics3d {
         &mut self,
         handle: RigidBodyHandle,
         position: [f32; 3],
+        rotation: [f32; 4],
     ) -> Result<(), InvalidBody> {
         if !position
             .into_iter()
             .all(|v| v.is_finite() && v.abs() <= LIMIT)
+            || !Self::valid_rotation(rotation)
         {
             return Err(InvalidBody);
         }
         let body = &mut self.world.bodies[handle];
         body.set_translation(Vector::from_array(position), true);
-        body.set_rotation(Rotation::IDENTITY, true);
+        body.set_rotation(Rotation::from_array(rotation).normalize(), true);
         body.set_linvel(Vector::ZERO, true);
         body.set_angvel(Vector::ZERO, true);
         body.reset_forces(true);

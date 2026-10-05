@@ -3,7 +3,10 @@
 Status: **2026-10-01 branch `3d-math`, pending user acceptance: bounded Lua triangle meshes,
 triangle picking, retained ECS/Rapier3D bodies, native fixed-step dispatch and experimental
 `gfx.world3d` drop/reset binding are built. The general Environment API, cloth, GLB, projected
-UI, rotated ramps and 3D sensor/query APIs remain unbuilt.**
+UI and general 3D query APIs remain unbuilt. Authored/reset rotation, fixed zones, atomic
+pose/motion commands and paused resolved snapshots drive a playable Lua Marble
+Gates level with tilt, release, win/loss and retry. Independent agent-as-maker acceptance remains
+open.**
 
 *Earlier status (2026-09-12, revised 2026-09-20): the first bounded built-in-mesh 3D rendering
 slice was built, but no retained World, ECS, physics binding, cloth, world picking, GLB or

@@ -1,5 +1,5 @@
 use super::*;
-use crate::gfx::{LuaScene3d, named_fields, need, need_gfx, positional_len, vec3};
+use crate::gfx::{LuaScene3d, named_fields, need, need_gfx, positional_len, quat, vec3};
 use world::world3d::{EntitySpec3d, Shape3d};
 
 pub(super) fn parse(spec: Table) -> mlua::Result<(String, Arc<Scene3d>, Vec<EntitySpec3d>)> {
@@ -18,7 +18,9 @@ pub(super) fn parse(spec: Table) -> mlua::Result<(String, Arc<Scene3d>, Vec<Enti
         named_fields(
             &body,
             "world3d body",
-            &["id", "position", "dynamic", "sphere", "box"],
+            &[
+                "id", "position", "rotation", "dynamic", "sphere", "box", "sensor",
+            ],
         )?;
         let sphere: Option<f32> = body.get("sphere")?;
         let box_size: Option<Table> = body.get("box")?;
@@ -43,8 +45,24 @@ pub(super) fn parse(spec: Table) -> mlua::Result<(String, Arc<Scene3d>, Vec<Enti
             id: body_id,
             shape,
             position: vec3(need(&body, "world3d body", "position")?, "body.position")?.to_array(),
-            dynamic: body.get::<Option<bool>>("dynamic")?.unwrap_or(false),
+            rotation: body
+                .get::<Option<Table>>("rotation")?
+                .map(|r| quat(r, "body.rotation").map(|q| q.to_array()))
+                .transpose()?
+                .unwrap_or(glam::Quat::IDENTITY.to_array()),
+            dynamic: flag(&body, "dynamic")?,
+            sensor: flag(&body, "sensor")?,
         });
     }
     Ok((id, scene, recipes))
+}
+
+fn flag(body: &Table, name: &str) -> mlua::Result<bool> {
+    match body.get::<mlua::Value>(name)? {
+        mlua::Value::Nil => Ok(false),
+        mlua::Value::Boolean(value) => Ok(value),
+        _ => Err(Error::runtime(format!(
+            "world3d body {name} must be a boolean"
+        ))),
+    }
 }

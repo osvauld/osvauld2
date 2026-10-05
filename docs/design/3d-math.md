@@ -8,7 +8,10 @@ native Rapier3D drop/reset backend, retained body IDs, bounded fixed-step clock 
 pose-to-render snapshots are implemented. Runner/shell/host dispatch, reload-safe `gfx.world3d`,
 input-handler reset, omission/tab pause and raw `worlds3d` inspection now drive the Lua-generated
 sphere/platform in `demo_apps/marble_gates`; its registered smoke checks physics and captures.
-Higher-level curves/tubes, spatial gradients, rotated ramps, sensors and goal rules remain unbuilt.**
+Authored/reset rotation, zones, atomic pose/motion commands and paused resolved snapshots now
+drive a complete Lua Marble Gates level with adjustable tilt, release, win/loss and retry in the
+[continuation checkpoint](marble-gates.md). Higher-level curves/tubes, spatial gradients,
+configurable physics, queries and independent agent-as-maker acceptance remain unbuilt.**
 Lua-authored geometry and raw agent feedback precede Blender import. API names below are
 provisional. This revises the next-step order in [model viewer](3d-model-viewer.md), not the
 owned-WGPU decision. The broader [Environment](environment-runtime.md) gates still apply.
@@ -143,5 +146,7 @@ Extend the existing `world` crate, not a second engine or renderer. Import only 
    advancing time, preventing capture/inspection from creating native catch-up debt.
 4. **Visible proof implemented:** Lua-generated sphere, platform, orbit/zoom, visibility toggle
    and Reset button, with raw authored/resolved body inspection and a registered deterministic
-   driven-time smoke. Falling and settled screenshots have been inspected. Adjustable rotated
-   ramps, sensors and game rules follow separately.
+   driven-time smoke. Falling and settled screenshots have been inspected. Authored/reset
+   rotation and a visible tilted ramp were the first step of [Marble Gates](marble-gates.md).
+   Its continuation checkpoint now includes live adjustment, sensors and Lua game rules;
+   independent agent-as-maker acceptance remains a separate gate.

@@ -74,7 +74,7 @@ Rust screen: El builders (typed M) ───────────────
 | crate | what it is |
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
-| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies, bounded fixed-step clocks, observational inspection/snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
+| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. |
 | `lua_tree` | isolated full-moon (Luau) parse → 22-kind semantic tree → printer groundwork. Semantic source storage and nids are deferred; the planned agent write path edits LoroText directly. See [`design/agent-source-editing.md`](design/agent-source-editing.md). |
@@ -143,7 +143,8 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 - **Host bindings are explicit capability grants.** Trusted Rust callers may opt into
   `LuaApp::open_with_setup`; its installer runs in each fresh VM before app source. Command
   bindings must check the supplied VM-local `HostContext::require_handler` before side effects,
-  so load, view and reload trials cannot issue commands. Ordinary `open` grants none of these
+  so load, view and reload trials cannot issue commands. Native 2D/3D world callbacks enter
+  that same handler scope, restored even on callback errors. Ordinary `open` grants none of these
   extra bindings; installers only construct bindings, never perform host actions. A trusted
   installer may also set VM-local `host::VmLimits` through `HostContext::set_limits`; launcher
   load/view/handler CPU budgets arm independently through the same RAII budget/hook used by
