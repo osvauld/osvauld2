@@ -879,6 +879,23 @@ impl<M: 'static> LuaApp<M> {
         self.cores.borrow().get(name).map(|core| f(&core.doc))
     }
 
+    /// Swap one open doc for `doc` wholesale: a refused sync rolling back to the node's copy
+    /// (`group-chat-sync.md` §5). Past both watermarks, so the mirror repatches on the next
+    /// view and the next flush saves it over what was refused. False if the doc isn't open.
+    pub fn replace_doc(&mut self, name: &str, doc: LoroDoc) -> bool {
+        let Some(old) = self.cores.borrow().get(name).cloned() else {
+            return false;
+        };
+        let version = old.version.load(Ordering::Relaxed) + 1;
+        let core = crdt::new_core(doc, self.wake.clone(), version);
+        self.cores.borrow_mut().insert(name.to_string(), core.clone());
+        if let Some(entry) = self.docs.borrow_mut().get_mut(name) {
+            entry.core = core;
+        }
+        (self.wake)();
+        true
+    }
+
     pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
         match self.worlds3d.advance(elapsed, active) {
             Ok(ticking) => {
