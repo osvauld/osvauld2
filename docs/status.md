@@ -859,6 +859,23 @@ viewport is made inspectable through a no-op click handler in the uploaded test 
 Multiple 3D views per frame remain unimplemented; this change is test coverage, not a renderer
 extension. The previous dev integration exercised all 13 registered smokes across sweep/rerun.
 
+**Observation boundary repaired — 2026-10-05:** the old Tilt Maze blocker above is resolved.
+The last Frame tick paints before advancing the shell clock; the successful driver reply now
+settles shown app tiles at its reported final clock before answering. Previously the next dump
+could see that outstanding interval consumed after its first snapshot (ticks 67→69 at unchanged
+reported time). No body/game rule or new time increment was added; hidden apps remain excluded.
+Test-first `smoke_world3d_observation.py` failed on repeated dump ticks 22→24, then passed
+Frame/Advance, zero-time senses and both capture paths. The original minimal repro now stays
+stable. Tilt Maze's full win/loss, blocking walls, checkpoint Retry, moving pause/resume,
+captures and surgical reload all pass. Its remaining reload assertion typo excluded `mesh`
+instead of process-local `mesh_resource`; the corrected assertion still compares geometry/poses.
+Both new smokes are registered. This clears the second-game authoring gate: a fresh agent wrote
+a different game from the guide without new game-specific Rust; the generic scheduling defect
+it exposed was fixed afterward. Won/lost/reloaded screenshots were inspected.
+Final validation: all **15 registered smokes pass in one sweep**, workspace check passes with
+existing warnings, 50 shell tests pass (one ignored), and 148 runtime tests pass (three ignored).
+The full workspace test suite was not rerun. Multiple views/foreground composition remain next.
+
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,
 ECS, 3D mesh/depth renderer, physics binding, PBD cloth, projected UI surface or world picking is
