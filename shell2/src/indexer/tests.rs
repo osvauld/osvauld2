@@ -104,7 +104,7 @@ impl Open {
 
     fn send(&self, channel: &str, id: &str, text: &str) {
         self.app
-            .with_doc(&format!("channel:{channel}"), |doc| {
+            .with_doc(&format!("channel/{channel}"), |doc| {
                 let list = doc.get_movable_list("messages");
                 let m = list.insert_container(list.len(), LoroMap::new()).unwrap();
                 m.insert("id", id).unwrap();
@@ -118,7 +118,7 @@ impl Open {
 
     fn message(&self, channel: &str, id: &str) -> (usize, LoroMap) {
         self.app
-            .with_doc(&format!("channel:{channel}"), |doc| {
+            .with_doc(&format!("channel/{channel}"), |doc| {
                 let list = doc.get_movable_list("messages");
                 (0..list.len())
                     .find_map(|i| {
@@ -155,13 +155,13 @@ fn a_write_an_edit_and_a_delete_each_reach_the_index() {
 
     let (_, m) = o.message("general", "m1");
     m.insert("text", "friday rollout").unwrap();
-    o.app.with_doc("channel:general", |d| d.commit());
+    o.app.with_doc("channel/general", |d| d.commit());
     o.flush(&f);
     assert!(o.find("marigold").is_empty(), "the edited-away word still matches");
     assert_eq!(o.find("friday"), ["m1"]);
 
     let (i, _) = o.message("general", "m1");
-    o.app.with_doc("channel:general", |d| {
+    o.app.with_doc("channel/general", |d| {
         d.get_movable_list("messages").delete(i, 1).unwrap();
         d.commit();
     });
@@ -178,7 +178,7 @@ fn search_query_in_the_app_reaches_the_same_index() {
     let hits = (o.app.search_fn().unwrap())("deploy", 5).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].id, "seed-1");
-    assert_eq!(hits[0].doc, "channel:general");
+    assert_eq!(hits[0].doc, "channel/general");
 }
 
 // ── T7: incremental ──────────────────────────────────────────────────────────
@@ -197,7 +197,7 @@ fn only_what_changed_re_runs_fields() {
 
     let (_, m) = o.message("general", "seed-1");
     m.insert("text", "the deploy is red").unwrap();
-    o.app.with_doc("channel:general", |d| d.commit());
+    o.app.with_doc("channel/general", |d| d.commit());
     o.flush(&f);
     assert_eq!(o.runs() - base, 2, "an edit runs fields for that message only");
 
@@ -283,7 +283,7 @@ fn a_doc_written_while_the_app_was_closed_is_indexed_when_it_opens() {
     m.insert("text", "hello from a peer").unwrap();
     peer.commit();
     f.vault
-        .put_doc(&f.ws, &f.item, &peer.export(loro::ExportMode::Snapshot).unwrap(), "channel:design")
+        .put_doc(&f.ws, &f.item, &peer.export(loro::ExportMode::Snapshot).unwrap(), "channel/design")
         .unwrap();
 
     let o = open(&f);

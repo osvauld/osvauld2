@@ -220,6 +220,42 @@ fn src_is_sealed_at_rest() {
     );
 }
 
+/// Doc names are paths (`group/g1/meta`), checked by the manifest's segment rule.
+#[test]
+fn a_doc_name_may_be_a_path_of_plain_segments() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let (ws_id, item_id) = app_item(&vault);
+    vault.put_doc(&ws_id, &item_id, STATE, "group/g1/meta").unwrap();
+    vault.put_doc(&ws_id, &item_id, STATE, "group/g1").unwrap();
+    assert_eq!(
+        vault.doc_names(&ws_id, &item_id).unwrap(),
+        ["group/g1", "group/g1/meta"]
+    );
+    assert!(vault.get_doc(&ws_id, &item_id, "group/g1/meta").unwrap().is_some());
+    for bad in ["", "/x", "x/", "a//b", "a/../b", "a/./b", "has space", "ü"] {
+        assert!(
+            matches!(
+                vault.put_doc(&ws_id, &item_id, STATE, bad),
+                Err(VaultError::InvalidName(_))
+            ),
+            "{bad:?} was stored"
+        );
+        assert!(
+            matches!(
+                vault.get_doc(&ws_id, &item_id, bad),
+                Err(VaultError::InvalidName(_))
+            ),
+            "{bad:?} was looked up"
+        );
+    }
+    let longest = vec!["c"; ::workspace::MAX_DOC_NAME_LEN / 2 + 1].join("/");
+    assert_eq!(longest.len(), ::workspace::MAX_DOC_NAME_LEN);
+    vault.put_doc(&ws_id, &item_id, STATE, &longest).unwrap();
+    let over = format!("{longest}c");
+    assert!(vault.put_doc(&ws_id, &item_id, STATE, &over).is_err());
+}
+
 /// What search's catch-up walks: every state doc an item has, opened this session or not.
 #[test]
 fn doc_names_lists_an_items_docs_and_nothing_else() {

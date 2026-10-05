@@ -18,12 +18,16 @@ use std::time::Duration;
 
 use courier::ClaimHello;
 use courier::invite::{InviteClaimHello, InviteRequest};
+use courier::proof::{self, Proof, Replay};
 use courier::publish::PublishHello;
+use courier::role::RoleRequest;
 use courier::subscribe::SubscribeHello;
 use courier::sync::SyncHello;
 use courier::token::Token;
+use identity::Signer;
 use osvauld_rpc::{Response, read_msg, write_msg};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use vault::Vault;
 
 use crate::admin::Admin;
@@ -36,11 +40,17 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// worth fast-forwarding past in a test. That changes once claim/reconnect verbs land, at
 /// which point this is what grows a `Frame`/`Advance` pair, not this file's shape.
 fn now_secs() -> u64 {
+    now_ms() / 1000
+}
+
+/// The clock request proofs are stamped and checked against (`courier::proof`). Public so the
+/// desktop stamps with the same one.
+pub fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")
-        .as_secs()
+        .as_millis() as u64
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +71,10 @@ pub enum Request {
     /// A desktop declaring interest in an item's layer, for a future push.
     Subscribe(SubscribeHello),
     Unsubscribe(SubscribeHello),
+    /// Hand out an app role (`courier::role`); the caller's authority is its grants on record.
+    AssignRole(RoleRequest),
+    /// Take one back, with everything issued under it.
+    RevokeRole(RoleRequest),
     /// Open the channel pushes actually travel on. Unlike every other request here, this one
     /// does not get one reply and close — after the ack, the connection is held open and every
     /// `Push` the desktop is subscribed to is relayed down it until it disconnects. See
@@ -70,6 +84,89 @@ pub enum Request {
         desktop_did: String,
         token: Token,
     },
+}
+
+impl Request {
+    /// The desktop a request acts for — the DID its proof must be signed by. `None` for the
+    /// requests that prove themselves another way (claims carry an attestation) or need no
+    /// caller at all.
+    pub fn caller(&self) -> Option<&str> {
+        match self {
+            Request::Ping | Request::Claim(_) | Request::ClaimInvite(_) => None,
+            Request::Publish(h) => Some(&h.desktop_did),
+            Request::Invite(r) => Some(&r.desktop_did),
+            Request::Sync(h) => Some(&h.desktop_did),
+            Request::Subscribe(h) | Request::Unsubscribe(h) => Some(&h.desktop_did),
+            Request::AssignRole(r) | Request::RevokeRole(r) => Some(&r.desktop_did),
+            Request::Listen { desktop_did, .. } => Some(desktop_did),
+        }
+    }
+}
+
+/// What crosses the socket: a request's exact bytes, and the caller's [`Proof`] over them.
+/// `body` stays raw so the node hashes the bytes that were signed, not a re-encoding.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Envelope {
+    pub body: Box<RawValue>,
+    #[serde(default)]
+    pub proof: Option<Proof>,
+}
+
+impl Envelope {
+    pub fn plain(req: &Request) -> Result<Self, String> {
+        let body = serde_json::value::to_raw_value(req).map_err(|e| e.to_string())?;
+        Ok(Self { body, proof: None })
+    }
+
+    /// Refuses a request that names someone other than `signer` — the node would.
+    pub fn signed(
+        req: &Request,
+        signer: &(impl Signer + ?Sized),
+        node_did: &str,
+        now_ms: u64,
+    ) -> Result<Self, String> {
+        if req.caller().is_some_and(|did| did != signer.did()) {
+            return Err("request names a different desktop than the signer".into());
+        }
+        let mut env = Self::plain(req)?;
+        env.proof = Some(proof::prove(
+            signer,
+            node_did,
+            env.body.get().as_bytes(),
+            now_ms,
+        ));
+        Ok(env)
+    }
+}
+
+/// The node's check on every envelope before anything acts on it.
+pub struct Gate {
+    node_did: String,
+    replay: Replay,
+}
+
+impl Gate {
+    /// `since_ms` is when this gate started — the node's boot.
+    pub fn new(node_did: String, since_ms: u64) -> Self {
+        Self {
+            node_did,
+            replay: Replay::new(since_ms),
+        }
+    }
+
+    pub fn open(&mut self, env: &Envelope, now_ms: u64) -> Result<Request, String> {
+        let body = env.body.get().as_bytes();
+        let req: Request = serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+        if let Some(caller) = req.caller() {
+            let proof = env.proof.as_ref().ok_or("unsigned request")?;
+            proof::verify(proof, caller, &self.node_did, body, now_ms)
+                .map_err(|e| e.to_string())?;
+            self.replay
+                .admit(proof, now_ms)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(req)
+    }
 }
 
 /// Public so a desktop-side client (`shell2::node`) dials the same path by the same
@@ -100,12 +197,20 @@ pub fn serve_forever(vault: Vault, registry: LiveRegistry) -> io::Result<()> {
 /// connection, not only push through one — `dispatch`/`handle` stay generic for tests that want
 /// a `NoopPusher`/`MockPusher` instead.
 pub fn serve(socket: &std::path::Path, vault: Vault, registry: LiveRegistry) -> io::Result<()> {
+    let node_did = vault
+        .with_signer(|node| node.did().to_string())
+        .ok_or_else(|| io::Error::other("node account is locked"))?;
+    let mut gate = Gate::new(node_did, now_ms());
     let listener = osvauld_rpc::bind_uds(socket)?;
     for conn in listener.incoming() {
         match conn {
             Ok(mut conn) => {
-                let req = match read_request(&mut conn) {
-                    Ok(req) => req,
+                let req = match read_request(&mut conn, &mut gate) {
+                    Ok(Ok(req)) => req,
+                    Ok(Err(refused)) => {
+                        let _ = reply(&mut conn, &Response::err(refused));
+                        continue;
+                    }
                     Err(e) => {
                         eprintln!("kunki: bad request: {e}");
                         continue;
@@ -129,10 +234,18 @@ pub fn serve(socket: &std::path::Path, vault: Vault, registry: LiveRegistry) -> 
     Ok(())
 }
 
-fn read_request(conn: &mut UnixStream) -> io::Result<Request> {
+/// Outer `Err` is the connection failing; inner is the gate refusing, which gets an answer.
+fn read_request(conn: &mut UnixStream, gate: &mut Gate) -> io::Result<Result<Request, String>> {
     conn.set_read_timeout(Some(READ_TIMEOUT))?;
-    serde_json::from_slice(&read_msg(conn)?)
-        .map_err(|e| io::Error::other(format!("bad request: {e}")))
+    let env: Envelope = serde_json::from_slice(&read_msg(conn)?)
+        .map_err(|e| io::Error::other(format!("bad envelope: {e}")))?;
+    Ok(gate.open(&env, now_ms()))
+}
+
+fn reply(conn: &mut UnixStream, resp: &Response) -> io::Result<()> {
+    let payload =
+        serde_json::to_vec(resp).map_err(|e| io::Error::other(format!("response encode: {e}")))?;
+    write_msg(conn, &payload)
 }
 
 fn respond(
@@ -141,18 +254,22 @@ fn respond(
     vault: &Vault,
     pusher: &impl Pusher,
 ) -> io::Result<()> {
-    let resp = dispatch(req, vault, pusher);
-    let payload =
-        serde_json::to_vec(&resp).map_err(|e| io::Error::other(format!("response encode: {e}")))?;
-    write_msg(&mut conn, &payload)
+    reply(&mut conn, &dispatch(req, vault, pusher))
 }
 
-/// One connection, one request, one reply — the shape every request but `Listen` keeps. Kept
-/// as its own function (not inlined at call sites) because tests reach for exactly this shape
-/// against a `NoopPusher`/`MockPusher`, same as before this file grew a second connection kind.
-fn handle(mut conn: UnixStream, vault: &Vault, pusher: &impl Pusher) -> io::Result<()> {
-    let req = read_request(&mut conn)?;
-    respond(conn, req, vault, pusher)
+/// One connection, one request, one reply — the shape every request but `Listen` keeps, which
+/// tests reach for against a `NoopPusher`/`MockPusher`.
+#[cfg(test)]
+fn handle(
+    mut conn: UnixStream,
+    vault: &Vault,
+    gate: &mut Gate,
+    pusher: &impl Pusher,
+) -> io::Result<()> {
+    match read_request(&mut conn, gate)? {
+        Ok(req) => respond(conn, req, vault, pusher),
+        Err(refused) => reply(&mut conn, &Response::err(refused)),
+    }
 }
 
 /// Authorize, ack, then hold the connection open — relaying every `Push` [`LiveRegistry`]
@@ -233,6 +350,14 @@ fn dispatch(req: Request, vault: &Vault, pusher: &impl Pusher) -> Response {
                 Err(e) => Response::err(e.to_string()),
             }
         }
+        Request::AssignRole(req) => match Admin::new(vault.clone()).assign_role(req, now_secs()) {
+            Ok(_) => Response::ok(()),
+            Err(e) => Response::err(e.to_string()),
+        },
+        Request::RevokeRole(req) => match Admin::new(vault.clone()).revoke_role(req, now_secs()) {
+            Ok(n) => Response::ok(n),
+            Err(e) => Response::err(e.to_string()),
+        },
         // `serve`'s accept loop intercepts this before it ever reaches `dispatch` — reachable
         // here only if something calls `handle`/`respond` directly with one, which is a caller
         // bug, not a request this function itself knows how to answer.

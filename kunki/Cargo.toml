@@ -8,13 +8,14 @@ license.workspace = true
 base64 = "0.22"
 courier = { path = "../courier" }
 identity = { path = "../identity" }
+loro = "1.13.9"
+manifest = { path = "../manifest" }
 osvauld-rpc = { path = "../osvauld-rpc" }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 vault = { path = "../vault" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-loro = "1.13.9"
 tempfile = "3"

@@ -238,5 +238,15 @@ fn scope_levels_nest_but_never_widen() {
     assert!(!workspace("cafe").contains(&orders));
     assert!(!app("storefront").contains(&orders));
     assert!(!app("storefront").contains(&workspace("shop")));
+
+    // An app reaches its own docs' addresses, and only those.
+    let doc = |s: &str| Scope::Resource(s.to_string());
+    assert!(app("storefront").contains(&doc("ws/shop/storefront/cart")));
+    assert!(app("storefront").contains(&doc("ws/shop/storefront/group/*")));
+    assert!(app("storefront").contains(&doc("ws/shop/storefront/*")));
+    assert!(!app("storefront").contains(&doc("ws/shop/storefront2/cart")));
+    assert!(!app("storefront").contains(&doc("ws/cafe/storefront/cart")));
+    assert!(!app("storefront").contains(&doc("ws/shop/storefront/../x")));
+    assert!(!doc("ws/shop/storefront/*").contains(&app("storefront")));
     assert!(!orders.contains(&workspace("shop")));
 }

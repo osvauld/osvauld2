@@ -1,6 +1,6 @@
 //! Retained native worlds are app-local; staged VMs collect recipes without touching the solver.
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ pub(crate) struct Host {
     worlds: Rc<RefCell<Worlds3d>>,
     recipes: Rc<RefCell<WorldRecipes3d>>,
     seen: Rc<RefCell<HashSet<String>>>,
+    routes: Rc<RefCell<BTreeMap<String, String>>>,
     ready: Rc<Cell<bool>>,
     pub(crate) commanding: Rc<Cell<bool>>,
 }
@@ -50,6 +51,27 @@ impl Host {
 
     pub(crate) fn begin_view(&self) {
         self.seen.borrow_mut().clear();
+        self.routes.borrow_mut().clear();
+    }
+
+    pub(crate) fn zone_events(&self, active: bool) -> Vec<(String, world::world3d::ZoneEvent3d)> {
+        let mut events = Vec::new();
+        if !active {
+            return events;
+        }
+        let seen = self.seen.borrow();
+        let routes = self.routes.borrow();
+        let mut worlds = self.worlds.borrow_mut();
+        for id in self.recipes.borrow().keys().filter(|id| seen.contains(*id)) {
+            if let Some(world) = worlds.get_mut(id) {
+                for event in world.drain_zone_events() {
+                    if let Some(element) = routes.get(id) {
+                        events.push((element.clone(), event));
+                    }
+                }
+            }
+        }
+        events
     }
 
     pub(crate) fn advance(&self, elapsed: f64, active: bool) -> Result<bool, String> {
@@ -111,17 +133,29 @@ pub(crate) struct SceneHandle {
     id: String,
     scene: Arc<Scene3d>,
     host: Host,
+    running: bool,
 }
 impl UserData for SceneHandle {}
 
 impl SceneHandle {
+    pub(crate) fn route_zone(&self, element: String) -> mlua::Result<()> {
+        let mut routes = self.host.routes.borrow_mut();
+        if routes.contains_key(&self.id) {
+            return Err(Error::runtime("3D world has more than one on_zone leaf"));
+        }
+        routes.insert(self.id.clone(), element);
+        Ok(())
+    }
+
     pub(crate) fn resolve(&self) -> mlua::Result<(Arc<Scene3d>, bool)> {
         let worlds = self.host.worlds.borrow();
         let world = worlds
             .get(&self.id)
             .ok_or_else(|| Error::runtime("3D world is not active"))?;
         let scene = world.resolved_scene(&self.scene).map_err(Error::external)?;
-        self.host.seen.borrow_mut().insert(self.id.clone());
-        Ok((scene, world.needs_ticks()))
+        if self.running {
+            self.host.seen.borrow_mut().insert(self.id.clone());
+        }
+        Ok((scene, self.running && world.needs_ticks()))
     }
 }

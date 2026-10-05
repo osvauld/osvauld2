@@ -128,6 +128,15 @@ def timed(f) -> float:
     return time.monotonic() - t0
 
 
+def expect_error(rpc, item: str, words: str) -> None:
+    try:
+        rpc.dump_tree(item)
+    except BridgeError as e:
+        assert words in str(e), e
+        return
+    raise AssertionError(f"DumpTree({item}) answered; expected {words!r}")
+
+
 def background(f) -> threading.Thread:
     t = threading.Thread(target=f, daemon=True)
     t.start()
@@ -197,13 +206,20 @@ def t4_stuck_thread(tmp):
     os.environ["OSVAULD_WATCHDOG_MS"] = "1000"
     with Shell(tmp, "t4") as sh:
         a, b = two_probes(sh)
-        background(lambda: sh.fast(timeout=600).click(a, "stall"))
+        def stall():
+            try:
+                sh.fast(timeout=600).click(a, "stall")
+            except ConnectionError:
+                pass  # never answers; the shell's exit drops it
+        background(stall)
         time.sleep(0.2)
         fast = sh.fast()
         fast.dump_tree(b)
         time.sleep(1.5)
         tabs = {t["item_id"]: t for t in fast.request("ListTabs")}
         assert tabs[a]["responding"] is False, tabs
+        # Refused at once, not queued behind the hang.
+        assert timed(lambda: expect_error(fast, a, "not responding")) < RESPONSIVE
         fast.request("CloseItem", item_id=a)
         assert a not in {t["item_id"] for t in fast.request("ListTabs")}
         fast.dump_tree(b)
@@ -249,16 +265,22 @@ def t5_background_push(tmp):
             seen = len(bo.views())
 
             al.rpc.click(item["id"], "add")
+
+            def with_note():  # "elsewhere" is a probe too, but always sees 0 notes
+                return [l for l in bo.views()[seen:] if l.split()[-1] != "0"]
+
             deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                fresh = bo.views()[seen:]
-                if any(l.split()[-1] != "0" for l in fresh):
-                    return
+            while not with_note() and time.monotonic() < deadline:
                 time.sleep(0.1)
-            # Data first, so a failure here means "Lua didn't run", not "sync didn't deliver".
-            # AppDataGet reads the docs without running the app.
-            assert "note:" in str(bo.rpc.read_data(item["id"])), "the push never reached bob"
-            raise AssertionError("bob has the note, but his background probe never ran its view")
+            if not with_note():
+                # Data first, so a failure here means "Lua didn't run", not "sync didn't
+                # deliver". AppDataGet reads the docs without running the app.
+                assert "note:" in str(bo.rpc.read_data(item["id"])), "the push never reached bob"
+                raise AssertionError("bob has the note, but his background probe never ran its view")
+            # Once per push, not on every tick: the signals work keeps this green as it makes
+            # the run skip what the push did not touch.
+            time.sleep(1.0)
+            assert len(with_note()) == 1, with_note()
     finally:
         node.terminate()
 

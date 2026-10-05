@@ -17,12 +17,16 @@ use std::collections::HashSet;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use courier::CourierError;
+use courier::access::{Access, doc_access, members_in, roles_at};
 use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelcome};
 use courier::publish::{PublishAck, PublishHello};
+use courier::role::{Grant, RoleRequest};
 use courier::subscribe::SubscribeHello;
-use courier::sync::{SyncAck, SyncHello, SyncLayer};
-use courier::token::Token;
+use courier::sync::{SyncAck, SyncHello, SyncLayer, item_scope, reaches};
+use courier::token::{Scope, Token};
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
+use manifest::{Manifest, OWNER};
 use serde::{Deserialize, Serialize};
 use vault::{ItemKind, Vault, WorkspaceItem, WorkspaceMeta};
 
@@ -37,6 +41,10 @@ const RELATIONSHIP: &str = "/relationship";
 /// whole fact. Its own namespace, not under `token/`, because a spent nonce is not a token: an
 /// invite ticket dies unredeemed as often as not, and this only ever holds the ones that were.
 const INVITES: &str = "invites/";
+/// `invite-causes/<nonce>` → the id of the grant whose holder asked for that invite, so the
+/// token it is redeemed for records `Cause::Under` that grant. Node-local, keyed by nonce: the
+/// signed ticket stays unchanged.
+const INVITE_CAUSES: &str = "invite-causes/";
 /// `subscriptions/<ws_id>/<item_id-b64>/<layer-b64>/<did>`, empty-valued like `revoked/<id>` —
 /// presence is the whole fact. `item_id` and the layer are base64'd before becoming key
 /// segments: unlike `ws_id` (already shape-checked by `node_accept_subscription`'s membership
@@ -202,6 +210,9 @@ impl Admin {
     /// it first means a rejected push never touches storage. `None` the first time this layer
     /// is synced — courier treats that as an empty document, not an error.
     ///
+    /// A doc sync is judged by the app's manifest first (`courier::access`): the caller's roles
+    /// from its grants on record, `members(...)` from the node's own copies.
+    ///
     /// Fans the new snapshot out to every other subscriber on this layer once it's stored.
     /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
     /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
@@ -213,17 +224,57 @@ impl Admin {
         pusher: &impl Pusher,
     ) -> Result<SyncAck, NodeError> {
         let node_did = node::did(&self.vault)?;
+        let revoked = self.revoked()?;
+        let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
+        let grants = self.grants_given(&hello.desktop_did, now, &revoked)?;
+        let access = self.access(rules.as_ref(), &hello, &hello.desktop_did, &grants)?;
         let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
         let (ack, snapshot) = courier::sync::node_accept_sync(
             &hello,
             &node_did,
             current.as_deref(),
+            access,
             now,
-            &self.revoked()?,
+            &revoked,
         )?;
         self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
-        self.fan_out(&hello, &snapshot, pusher)?;
+        self.fan_out(&hello, &snapshot, rules.as_ref(), now, pusher)?;
         Ok(ack)
+    }
+
+    /// The manifest a doc layer is judged by; `None` for the source layer, which has its own
+    /// gate. An item whose source the node doesn't hold has declared nothing yet.
+    fn rules(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+    ) -> Result<Option<Manifest>, NodeError> {
+        if *layer == SyncLayer::Src {
+            return Ok(None);
+        }
+        match self.manifest(&item_scope(ws_id, item_id)) {
+            Err(NodeError::NoManifest(_)) => Ok(Some(Manifest::default())),
+            other => other.map(Some),
+        }
+    }
+
+    /// `did`'s access to `hello`'s doc under `rules`, holding `grants`.
+    fn access(
+        &self,
+        rules: Option<&Manifest>,
+        hello: &SyncHello,
+        did: &str,
+        grants: &[Grant],
+    ) -> Result<Access, NodeError> {
+        let (Some(rules), SyncLayer::Doc(name)) = (rules, &hello.layer) else {
+            return Ok(Access::OPEN);
+        };
+        let (ws, item) = (&hello.ws_id, &hello.item_id);
+        let roles = roles_at(grants, ws, item, name);
+        doc_access(rules, name, did, &roles, &mut |doc: &str| {
+            Ok::<_, NodeError>(members_in(self.vault.get_doc(ws, item, doc)?.as_deref())?)
+        })
     }
 
     /// Full snapshot, not a diff against each subscriber's own progress: no subscription tracks
@@ -231,10 +282,16 @@ impl Admin {
     /// the exact hazard `sync.rs`'s module doc already names — a vector advanced on send rather
     /// than confirmed delivery. Loro's `import` merges a full snapshot the same as a diff, so a
     /// subscriber who already has all of it simply merges a no-op.
+    ///
+    /// Each subscriber is re-checked against its live grants: a subscription outlives the
+    /// grant that allowed it, and a revoked member must stop receiving. So is the manifest's read rule, whose inputs (a
+    /// group's member list) change after the subscription was made.
     fn fan_out(
         &self,
         hello: &SyncHello,
         snapshot: &[u8],
+        rules: Option<&Manifest>,
+        now: u64,
         pusher: &impl Pusher,
     ) -> Result<(), NodeError> {
         let update = Push {
@@ -243,10 +300,134 @@ impl Admin {
             layer: hello.layer.clone(),
             snapshot: snapshot.to_vec(),
         };
+        let revoked = self.revoked()?;
         for subscriber in self.subscribers_for(&hello.ws_id, &hello.item_id, &hello.layer)? {
-            if subscriber != hello.desktop_did {
+            if subscriber == hello.desktop_did {
+                continue;
+            }
+            // Cost: one index scan per subscriber per push. Fine at chat scale; a live
+            // grant index is the fix when it is not.
+            let grants = self.grants_given(&subscriber, now, &revoked)?;
+            let reached = grants
+                .iter()
+                .any(|g| reaches(&g.scope, &hello.ws_id, &hello.item_id, &hello.layer));
+            if reached && self.access(rules, hello, &subscriber, &grants)?.read {
                 pusher.push(&subscriber, &update);
             }
+        }
+        Ok(())
+    }
+
+    /// Whether a token this node recorded is neither revoked nor expired. An unrecorded id is
+    /// not live: nothing here can vouch for it.
+    pub fn is_live(&self, id: &[u8; 32], now: u64) -> Result<bool, NodeError> {
+        let Some(issue) = self.issue(id)? else {
+            return Ok(false);
+        };
+        Ok(!self.revoked()?.contains(id) && issue.token.claims()?.exp > now)
+    }
+
+    /// Every token the node issued `did` that still counts: not revoked, not expired. This is
+    /// the caller's authority for anything decided by role rather than by the token presented.
+    pub fn grants(&self, did: &str, now: u64) -> Result<Vec<Grant>, NodeError> {
+        self.grants_given(did, now, &self.revoked()?)
+    }
+
+    fn grants_given(
+        &self,
+        did: &str,
+        now: u64,
+        revoked: &HashSet<[u8; 32]>,
+    ) -> Result<Vec<Grant>, NodeError> {
+        let mut out = Vec::new();
+        for issue in self.issued_to(did)? {
+            let id = issue.token.id();
+            if revoked.contains(&id) || issue.token.claims()?.exp <= now {
+                continue;
+            }
+            out.push(Grant::of(&issue.token)?);
+        }
+        Ok(out)
+    }
+
+    /// The app's manifest, read from the source the node holds for `scope`'s item. A source
+    /// without `manifest.osv` is bare: it declares no roles.
+    pub fn manifest(&self, scope: &Scope) -> Result<Manifest, NodeError> {
+        let Scope::App { ws, app } = scope else {
+            return Err(CourierError::BadScope.into());
+        };
+        let name = format!("{ws}/{app}");
+        let src = self
+            .vault
+            .get_src(ws, app)?
+            .ok_or_else(|| NodeError::NoManifest(name.clone()))?;
+        let doc = loro::LoroDoc::new();
+        doc.import(&src)
+            .map_err(|_| NodeError::BadSource(name.clone()))?;
+        match doc.get_map("files").get("manifest.osv") {
+            None => Ok(Manifest::default()),
+            Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) => {
+                Ok(Manifest::parse(&text.to_string())?)
+            }
+            Some(_) => Err(NodeError::BadSource(name)),
+        }
+    }
+
+    /// Hand out an app role (`courier::role`), recorded under the grant that allowed it.
+    pub fn assign_role(&self, req: RoleRequest, now: u64) -> Result<Token, NodeError> {
+        let manifest = self.manifest(&req.scope)?;
+        let grants = self.grants(&req.desktop_did, now)?;
+        let revoked = self.revoked()?;
+        let (token, cause) = self
+            .vault
+            .with_signer(|node| {
+                courier::role::node_accept_assign(&req, node, &grants, &manifest, now, &revoked)
+            })
+            .ok_or(NodeError::Locked)??;
+        self.record(&token, Cause::Under(cause), now)?;
+        Ok(token)
+    }
+
+    /// Take back every live grant of `req.role` at `req.scope` the node issued `req.to`, and
+    /// everything issued under them. Returns how many direct grants were revoked.
+    pub fn revoke_role(&self, req: RoleRequest, now: u64) -> Result<usize, NodeError> {
+        let manifest = self.manifest(&req.scope)?;
+        let grants = self.grants(&req.desktop_did, now)?;
+        let node_did = node::did(&self.vault)?;
+        let revoked = self.revoked()?;
+        courier::role::node_accept_revoke(&req, &node_did, &grants, &manifest, now, &revoked)?;
+        let mut n = 0;
+        for g in self.grants(&req.to, now)? {
+            if g.role == req.role && g.scope == req.scope {
+                self.revoke(&g.id, now)?;
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Revoke `id` and, transitively, every token recorded `Cause::Under` it. Unknown ids are
+    /// accepted: delegations are minted between holders and the node never sees one until it
+    /// is presented, so revocation cannot require a record. Scans every
+    /// issue record once per call; a sealed parent-to-children index is the fix if that grows.
+    pub fn revoke(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
+        let mut children: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> =
+            std::collections::HashMap::new();
+        for name in self.vault.list_entries(RECORD)? {
+            let child = id_in(&name)?;
+            let issue = self.issue(&child)?.ok_or(NodeError::Damaged(name))?;
+            if let Cause::Under(parent) = issue.cause {
+                children.entry(parent).or_default().push(child);
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut stack = vec![*id];
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            self.mark_revoked(&cur, at)?;
+            stack.extend(children.get(&cur).into_iter().flatten());
         }
         Ok(())
     }
@@ -340,6 +521,14 @@ impl Admin {
         name: &str,
         now: u64,
     ) -> Result<InviteTicket, NodeError> {
+        // An app-scoped invite hands out an app role, so the role must be one the app declares.
+        if matches!(request.scope, Scope::App { .. })
+            && !self
+                .manifest(&request.scope)?
+                .can_grant(OWNER, &request.role)
+        {
+            return Err(CourierError::NotPermitted.into());
+        }
         let revoked = self.revoked()?;
         let ticket = self
             .vault
@@ -347,6 +536,9 @@ impl Admin {
                 courier::invite::issue_invite_ticket(node, request, name, now, &revoked)
             })
             .ok_or(NodeError::Locked)??;
+        let nonce = courier::invite::ticket_nonce(&ticket)?;
+        let cause = request.token.root()?.id();
+        self.vault.put_entry(&invite_cause_key(&nonce), &cause)?;
         Ok(ticket)
     }
 
@@ -371,6 +563,13 @@ impl Admin {
         now: u64,
     ) -> Result<InviteWelcome, NodeError> {
         let redeemed = self.redeemed_invites()?;
+        let cause = self.invite_cause(&hello)?;
+        // The cascade already ran for a revoked inviter; a child minted now would escape it.
+        if let Cause::Under(parent) = cause {
+            if !self.is_live(&parent, now)? {
+                return Err(CourierError::Revoked.into());
+            }
+        }
         let welcome = self
             .vault
             .with_signer(|node| courier::invite::node_accept_invite(hello, node, now, &redeemed))
@@ -378,8 +577,23 @@ impl Admin {
         if let Some(spent) = &welcome.redeemed_nonce {
             self.vault.put_entry(&invite_key(spent), &[])?;
         }
-        self.record(&welcome.token, Cause::Node, now)?;
+        self.record(&welcome.token, cause, now)?;
         Ok(welcome)
+    }
+
+    /// Under the grant of whoever asked for the invite. A ticket with no recorded inviter
+    /// predates that record and is refused: redeeming it would mint a grant no revocation of
+    /// its inviter could reach.
+    fn invite_cause(&self, hello: &InviteClaimHello) -> Result<Cause, NodeError> {
+        let nonce = courier::invite::ticket_nonce(&hello.ticket)?;
+        let key = invite_cause_key(&nonce);
+        let bytes = self
+            .vault
+            .get_entry(&key)?
+            .ok_or(NodeError::UntrackedInvite)?;
+        Ok(Cause::Under(
+            bytes.try_into().map_err(|_| NodeError::Damaged(key))?,
+        ))
     }
 
     /// Reconnect reads the admin list and the revoked set, and hands back a fresh token.
@@ -394,6 +608,7 @@ impl Admin {
     ) -> Result<Token, NodeError> {
         let admins = self.admins()?;
         let revoked = self.revoked()?;
+        let presented = hello.token.root()?.id();
         let token = self
             .vault
             .with_signer(|node| {
@@ -402,14 +617,15 @@ impl Admin {
             .ok_or(NodeError::Locked)??;
         // A reissue is an issuance, so it joins the log. That makes the log grow by one per
         // reconnect and leaves the superseded token listed as well; superseding is in the
-        // backlog, and under-reporting what is live would be the worse of the two.
-        self.record(&token, Cause::Node, now)?;
+        // backlog, and under-reporting what is live would be the worse of the two. It is
+        // recorded under the token it replaces, so revoking that one takes the reissue too.
+        self.record(&token, Cause::Under(presented), now)?;
         Ok(token)
     }
 
-    /// Unknown ids are accepted: delegations are minted between holders and the node never
-    /// sees one until it is presented, so revocation cannot require a record.
-    pub fn revoke(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
+    /// One id into the revoked set, no cascade — [`Admin::revoke`] is the only caller, so no
+    /// revocation can skip the lineage walk.
+    fn mark_revoked(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
         self.vault
             .put_entry(&revoked_key(id), &serde_json::to_vec(&Revocation { at })?)?;
         Ok(())
@@ -458,6 +674,10 @@ fn invite_key(nonce: &str) -> String {
     format!("{INVITES}{nonce}")
 }
 
+fn invite_cause_key(nonce: &str) -> String {
+    format!("{INVITE_CAUSES}{nonce}")
+}
+
 fn name_of(id: &[u8; 32]) -> String {
     URL_SAFE_NO_PAD.encode(id)
 }
@@ -497,3 +717,8 @@ fn id_in(name: &str) -> Result<[u8; 32], NodeError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod roles_tests;
+#[cfg(test)]
+mod access_tests;
