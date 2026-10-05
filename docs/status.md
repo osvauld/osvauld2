@@ -712,6 +712,10 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   field replaces one whole, `false` removes it, and `controller` comes only from the entity. Stage
   edit outlines each collider and dashes each sensor; in play the room's hero walks on WASD, stops
   at the chest and pushes a loose `crate`.
+  **UI assets as widgets** (step 2, 2026-10-05): `clip:at(t)` samples a clip as the world does,
+  and `drawing:pose` draws it on a plain `ui.frame`; `clip.length` and `clip.loop` read back.
+  `demo_apps/toggle_demo` uses the toggle asset as a switch — `on_frame` only while it moves, no
+  world.
   Not built: picking a var from a list (type `@name` for now), editing gradients, editing stage
   entity fields in the editor, reparenting and reordering, adding parts, the clip timeline,
   behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` plays the room over

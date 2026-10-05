@@ -181,7 +181,7 @@ Three kinds of motion, in build order:
 
 | kind | moves | example | state |
 |---|---|---|---|
-| clips | parts, by keyframes, the same every time | walk, jump, a lid opening | built, in `ui.world` only |
+| clips | parts, by keyframes, the same every time | walk, jump, a lid opening | built: played by `ui.world`, or posed on a frame by `clip:at(t)` (2026-10-05) |
 | springs on parts | parts, driven by a spring instead of a key | a cape swinging after a stop, a button squishing on press | not built |
 | deformation | path points, driven by a solver | a ripple across a toggle, jelly, cloth | not built; `Pose` cannot express it |
 

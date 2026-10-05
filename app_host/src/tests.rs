@@ -587,6 +587,38 @@ fn radial_and_sweep_gradients_fill_drawings_and_frames() {
     assert!(ok);
 }
 
+/// `clip:at(t)` is the world's own sampling, for a frame with no world: each part with a track
+/// gets all four fields, a once clip holds its end, a looped one wraps, and the pose it gives is
+/// one `drawing:pose` takes.
+#[test]
+fn clip_at_samples_a_clip_without_a_world() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let seen: String = lua
+        .load(
+            r##"
+            local spec = { length = 1, tracks = {
+                knob = { x = { {0, 0}, {1, 10} }, rot = { {0, 0}, {0.5, 90} } } } }
+            local once = gfx.clip(spec)
+            spec.loop = true
+            local looped = gfx.clip(spec)
+            local function say(p)
+                local k = p.knob
+                return k.x .. "," .. k.y .. "," .. k.rot .. "," .. k.scale
+            end
+            local knob = gfx.drawing({ size = { 40, 40 }, parts = { { id = "knob",
+                pivot = { 20, 20 }, shapes = { { path = { {"move",4,4}, {"line",36,4},
+                {"close"} }, fill = "#ffd166" } } } } })
+            knob:pose(once:at(0.5))
+            return table.concat({ say(once:at(0.5)), say(once:at(2)), say(looped:at(1.25)),
+                tostring(once:at(0).other), once.length .. "," .. tostring(once.loop),
+                tostring(looped.loop) }, " ")
+            "##,
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(seen, "5,0,90,1 10,0,90,1 2.5,0,45,1 nil 1,false true");
+}
+
 /// A soft shadow is a shape kind in a drawing and an item in a frame — the same fields in both.
 #[test]
 fn shadows_draw_in_drawings_and_frames() {

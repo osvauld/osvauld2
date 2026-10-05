@@ -60,4 +60,36 @@ with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     assert moved[0] < crate[0] - 10, f"the hero should push the crate: {crate} → {moved}"
     assert not s.rpc.read_console(item), s.rpc.read_console(item)
 
-    print("asset editor: a room made in the editor plays — a solid chest, a pushed crate")
+    # E2: the toggle the editor seeded, as a widget in another app — a plain frame posed by
+    # `clip:at`, no world. A click plays `to_night` (0.6 s) and rests on night; another goes back.
+    s.rpc.click(item, "asset:toggle")  # the editor seeds it, then saves it as a workspace asset
+    s.rpc.frame(3)
+    demo = s.rpc.create_item(ws["id"], "toggle demo", "app")["id"]
+    s.rpc.upload_folder(demo, Path(__file__).parent.parent / "demo_apps" / "toggle_demo")
+    s.rpc.open_item(demo)
+    s.rpc.frame(3)
+    assert not s.rpc.read_console(demo), s.rpc.read_console(demo)
+
+    def readout():
+        def walk(t):
+            text = str(t.get("text", ""))
+            if text.startswith("toggle: "):
+                return text[len("toggle: "):]
+            return next((r for r in map(walk, t.get("children", [])) if r), None)
+        return walk(s.rpc.dump_tree(demo))
+
+    def worlds(t):
+        return ("world" in t) + sum(worlds(c) for c in t.get("children", []))
+
+    assert readout() == "day", readout()
+    for to in ("night", "day"):
+        s.rpc.click(demo, "toggle")
+        s.rpc.frame(6)
+        assert readout() == "to_" + to, readout()
+        s.rpc.frame(40)
+        assert readout() == to, readout()
+    assert worlds(s.rpc.dump_tree(demo)) == 0, "the toggle should need no world"
+    assert not s.rpc.read_console(demo), s.rpc.read_console(demo)
+
+    print("asset editor: a room made in the editor plays — a solid chest, a pushed crate; "
+          "the toggle it made switches in another app, without a world")

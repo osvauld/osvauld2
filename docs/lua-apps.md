@@ -295,6 +295,12 @@ ui.world({ id = "room", width = 720, height = 400,
   errors — `events`, speed, transitions and layers are not built yet.
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
+- **Without a world**, `clip:at(t)` gives each tracked part's pose `t` seconds in — `{ knob = { x,
+  y, rot, scale }, … }`, sampled exactly as the world samples it (a looped clip wraps, a once clip
+  holds its ends) — and `drawing:pose(clip:at(t))` draws it on a plain `ui.frame`. Lua keeps `t`:
+  declare `on_frame` only while a clip moves, so a resting widget asks for no frames.
+  `clip.length` and `clip.loop` read back the spec. This is how a UI asset is a widget —
+  `demo_apps/toggle_demo/toggle.lua` plays the toggle asset's `to_night` and rests on `night`.
 
 ### Controllers
 

@@ -69,7 +69,29 @@ impl UserData for LuaDrawing {
 
 #[derive(Clone)]
 pub(crate) struct LuaClip(pub Arc<Clip>);
-impl UserData for LuaClip {}
+impl UserData for LuaClip {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("length", |_, c| Ok(c.0.length()));
+        fields.add_field_method_get("loop", |_, c| Ok(c.0.looped()));
+    }
+
+    /// `clip:at(t)`: each tracked part's pose `t` seconds in, as the world samples it — for a
+    /// frame that animates without a world, through `drawing:pose`.
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("at", |lua, this, t: f64| {
+            let poses = lua.create_table()?;
+            for (part, p) in this.0.sample(t) {
+                let pose = lua.create_table()?;
+                pose.set("x", p.x)?;
+                pose.set("y", p.y)?;
+                pose.set("rot", p.rot)?;
+                pose.set("scale", p.scale)?;
+                poses.set(part, pose)?;
+            }
+            Ok(poses)
+        });
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LuaScene3d(pub Arc<Scene3d>);

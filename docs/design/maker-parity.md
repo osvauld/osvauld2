@@ -1,6 +1,7 @@
 # Maker parity — the asset editor as a GameMaker-class sprite and room editor
 
-Status: **plan, 2026-10-04. Step 1 built 2026-10-05 (E1 green).** A test-first plan: §0 lists the end-to-end tests that
+Status: **plan, 2026-10-04. Steps 1–2 built 2026-10-05 (E1, E2 green).** E2 reads the switch's
+state from a readout in the demo, not a pose: the dump has no pose to read. A test-first plan: §0 lists the end-to-end tests that
 prove it done; they are written first, then §3's steps make them pass. Grows out of
 [Assets](assets.md) §4 (editor tools in the order they pay off) and the world session's
 directives of 2026-10-03: stage colliders, an editor smoke, the clip timeline, then tilemaps.
