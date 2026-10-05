@@ -1,6 +1,6 @@
 # Group chat sync — permissions, workspace index, shards, ephemeral
 
-Status: **steps 0–5 built 2026-10-04 (T1–T5, T13, T16, T23a, T8a, T10a, T15a, T20a green); steps 6–11 open.** A long-horizon,
+Status: **steps 0–5 built 2026-10-04, step 6 built 2026-10-05 (T1–T5, T8, T13, T15, T16, T23a, T8a, T10a, T15a, T20a green); steps 7–11 open; step 6's budgets wait on the sharded-datasets agent.** A long-horizon,
 test-first plan driven by `demo_apps/chat`: §0 lists the end-to-end tests that prove it done;
 they are written first, then §7's steps make them pass. Branch `sync-hardening`. The general
 permission model is [`app-permissions.md`](app-permissions.md); this plan builds the slice
@@ -32,14 +32,14 @@ after those images were looked at, not only the assertions.
 | T5 | B has chat closed while A sends; B opens it and the message is there in the first frames | closed items catch up on open | 1 ✓ |
 | T6 | Messages on day 1 and day 2 (virtual clock) land in separate shards; B opening chat loads only day 2; scrolling back pulls day 1 | shards + lazy load | 9 |
 | T7 | C joins the workspace late; sees every channel and shard, and the chat app itself, without hand-fed ids | discovery through the index | 8 |
-| T8 | Member B creates a channel (admin-only); node rejects; B's channel list rolls back; A never sees it | write rule + rollback | 5, 6 |
+| T8 | Member B creates a channel (admin-only); node rejects; B's channel list rolls back; A never sees it | write rule + rollback | 5, 6 ✓ |
 | T9 | B sends a message with `author = A`; node rejects; nobody sees it | node-side Lua validation | 7 |
 | T10 | A–B DM: C's index never lists it; C requesting it by name is refused | DID read rule + index privacy | 5, 8 |
 | T11 | A's presence shows on B by name; A's shell is killed; B shows A offline within 2 s; no node or desktop file holds presence | ephemeral presence | 10 |
 | T12 | A types; B shows "A is typing"; A sending faster than the manifest's rate is dropped at the node | ephemeral channel + rate | 10 |
 | T13 | Node restarted mid-session, including right after a peer joined; pushes resume without restarting the shells | Listen/subscribe recovery | 1 ✓ |
 | T14 | B writes an index entry for a doc path the manifest doesn't declare; rejected, C never sees it | index writes are validated | 8 |
-| T15 | B writes under `user/<A's did>`; rejected | DID segments bind to the caller | 2, 5 |
+| T15 | B writes under `user/<A's did>`; rejected | DID segments bind to the caller | 2, 5 ✓ |
 | T16 | A request whose `desktop_did` is A's but signed by B's key is refused; a replayed request is refused | proven caller | 2 ✓ |
 | T17 | B edits A's message; rejected and rolled back on B; A's text unchanged everywhere | `owned` | 7 |
 | T18 | B reacts 👍 on A's message: accepted. B removes A's reaction: rejected | `slot` | 7 |
@@ -152,6 +152,15 @@ batch is one flush, i.e. one user action), the app sees the reverted mirror next
 and the reason lands in the app's console. Replace, not a compensating revert op on the
 node: a revert would leave the forged content in history every reader receives.
 
+*Revised 2026-10-05 (step 6, as built):* `state` is not a snapshot but a diff,
+`NodeState { vv, update }`: the node's version and its changes beyond the writer's. The
+desktop cuts its own copy back to the version both sides hold, then imports `update`. A
+writer who may not read the doc gets `state: None` and cuts back to the node version it
+last had acked (nothing, if none). A refused *pull*, or a refusal of the caller rather than
+the write (revoked, out of scope), stays a plain error: there is nothing to roll back. What
+is lost is everything the node lacked, which also takes edits made between sending the
+refused push and its answer.
+
 `validate(ctx, change)`: shapes in `app-permissions.md` §5 — `ctx` carries `caller`,
 `roles`, `vars`, `now`, read-only `doc(path)` (the node's copy before this batch) and
 `rate`; `change` is one record-level op with record ids in its path. It runs in a sandboxed
@@ -232,7 +241,17 @@ and gets a fresh `pi -p` review with the matching expert checklist before the us
      7, 8 and 10 build them.
    - T8a/T10a/T15a/T20a are the node halves; rollback (6) and the index (8) finish
      T8/T10/T15/T20.
-6. **Rejection and rollback** (§5). T8 green.
+6. **Rejection and rollback** (§5). ✓ T8, T15 green. As built:
+   - The reply is `SyncReply::{Ack, Rejected}`. `courier::sync::node_reject` turns a refused
+     write (`NoRead`, `NoWrite`, `Undeclared`, `NotPermitted` with changes in the update)
+     into a `Rejected`; kunki stores and pushes nothing. An undeclared doc still runs
+     membership first.
+   - `courier::sync::desktop_roll_back` builds the rolled-back doc; `LuaApp::replace_doc`
+     swaps it in on the app's thread. Its mirror repatches next frame, the next flush saves
+     it over the refused write, and the app's console says `sync: <doc> rejected: <reason>`.
+   - Not built: the per-request and reply budgets, chunked catch-up and diff-based push
+     agreed in principle with the sharded-datasets agent (2026-10-05). Sizes are not
+     settled yet.
 7. **Node Lua validation** (§5) with the helper library, `ctx.doc`, `ctx.rate`. T9, T17,
    T18, T19, T22, T24. Decide here whether the sandbox moves out of `app_host` into a crate
    kunki can share or kunki builds its own minimal one.

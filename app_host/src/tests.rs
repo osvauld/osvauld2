@@ -4737,3 +4737,47 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
         assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
     }
 }
+
+// ── replacing a doc: a refused sync's rollback (group-chat-sync.md §5) ────────
+
+#[test]
+fn a_replaced_doc_is_mirrored_saved_and_written_on() {
+    let (wake, hits) = counting_wake();
+    let mut app = board_app_waking(serving("board", snapshot_of(&board(&["a"]))), wake);
+    add_card(&app, "refused");
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    puts.take();
+    let _ = app.view();
+    assert_eq!(cards_len(&app), 2);
+
+    let before = hits.load(Ordering::Relaxed);
+    assert!(app.replace_doc("board", board(&["a"])));
+    assert!(hits.load(Ordering::Relaxed) > before, "a replacement asks for a frame");
+    let _ = app.view();
+    assert_eq!(cards_len(&app), 1);
+
+    app.flush(puts.recorder()).unwrap();
+    let saved = puts.take();
+    assert_eq!(saved.len(), 1, "the replacement is saved over the refused write");
+    let restored = LoroDoc::new();
+    restored.import(&saved[0].1).unwrap();
+    assert_eq!(restored.get_movable_list("cards").len(), 1);
+
+    // Writes land in the replacement, and a reload keeps it.
+    add_card(&app, "after");
+    let _ = app.view();
+    assert_eq!(card_title(&app, 2), "after");
+    app.reload().unwrap();
+    let _ = app.view();
+    assert_eq!(cards_len(&app), 2);
+}
+
+#[test]
+fn replacing_a_doc_that_is_not_open_does_nothing() {
+    let mut app = board_app(serving("board", snapshot_of(&board(&["a"]))));
+    assert!(!app.replace_doc("elsewhere", LoroDoc::new()));
+    let puts = Puts::default();
+    app.flush(puts.recorder()).unwrap();
+    assert!(puts.take().is_empty());
+}
