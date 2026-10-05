@@ -159,7 +159,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
 
-### App threads (2026-10-04, steps 0–3, 8 and 9) — [design](design/app-threads.md)
+### App threads (2026-10-04, steps 0–3 and 8–10) — [design](design/app-threads.md)
 - `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
   `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
@@ -191,8 +191,12 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   unpainted: what it shows may depend on the change. Nothing runs on a timer, so idle apps
   stay idle (T6). Signals steps 4 and 6 (world-engine) will make that run skip what the
   change did not touch. Green: T5.
-- not built: own windows
-  (T10), the Lua chrome's guards (T11), two 3D apps on screen at once (one viewport a frame).
+- Own windows (2026-10-05): `PopOut { item_id }` shows an open app in a window of its own
+  (`App::windows` / `App::window_event` in the runtime); its tab stays, with a "bring back"
+  placeholder. `DockIn` or closing the window brings it back. `ListTabs` says `window`.
+  Offscreen a window is only a size; real windows are checked by hand. Green: T10.
+- not built: the Lua chrome's guards (T11), two 3D apps on screen at once (one viewport a
+  frame), bridge pointer/rects/screenshot for a popped-out window.
 
 ## Not built
 

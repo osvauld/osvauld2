@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–3 and 9 built 2026-10-04, step 8 2026-10-05 (T1–T8 green; T9 placeholder); steps 10, 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–3 and 9 built 2026-10-04, steps 8 and 10 2026-10-05 (T1–T8, T10 green; T9 placeholder); step 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -219,6 +219,19 @@ Each leaves `cargo test` and the smokes green.
    instead of stepping, so hidden time is skipped as main's tab pause did. Still one 3D
    viewport a frame: two 3D apps split side by side show one.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
+   *Built 2026-10-05:* the host names its windows (`App::windows`: key, title, the frame to
+   show) and the Runner opens and closes OS windows to match after every batch of events
+   (`about_to_wait`), redrawing one when its frame's scene changes. A window is a tile slot
+   the size of the window: its pointer, wheel, keys, IME and blur come back as `TileEvent`s
+   through `App::window_event`, with its size and its close. Closing docks the app rather
+   than closing it (decided with the user). The app thread cannot tell a window from a tile.
+   Each window has its own `Render` — its own wgpu device — which is simple but costs GPU
+   memory per window; share the device if many windows are wanted. A popped app's frame
+   still reaches its window through the main window's paint (`before_frame` takes it), so a
+   window's new frame repaints the main window too. Not built: `Rects`, pointer drivers and
+   `Screenshot` for a popped window (T10 drives it by element id); an app's own request for a
+   window (only the bridge and chrome pop out today). Offscreen a window is only a size, so
+   real windows were checked by hand.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.
 
