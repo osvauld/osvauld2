@@ -40,9 +40,9 @@
     "note": "an update of a 5000-item signal: nearly all of it the freeze checking every entry."
   },
   "world_frame_20000": {
-    "baseline_us": 3367.0,
+    "baseline_us": 4323.7,
     "budget_us": 8000,
-    "note": "building the frame of a 20000-entity world (pose and place each). Was refused by the 4096-item cap."
+    "note": "the same for 20000, every entity drawn. Was refused by the 4096-item cap."
   },
   "world_frame_20000_camera": {
     "baseline_us": 897.5,
@@ -50,9 +50,9 @@
     "note": "the same 20000 through a 1280x720 camera: ~6% drawn. Most of it is checking every entity against the view; a spatial grid would cut that."
   },
   "world_frame_5000": {
-    "baseline_us": 704.3,
+    "baseline_us": 964.7,
     "budget_us": 2000,
-    "note": "building the frame of a 5000-entity world."
+    "note": "building the frame of a 5000-entity world, every entity drawn (the box is the whole map). Includes each entity's view check."
   },
   "world_inspect_5000": {
     "baseline_us": 289.4,
