@@ -1,6 +1,8 @@
 //! Bundled workspace launcher VM. Owns no app instances or documents; commands leave as data.
 
-use crate::{Msg, item::ItemsScreenMsg, shell_api};
+use crate::{Msg, shell_api};
+#[cfg(test)]
+use crate::item::ItemsScreenMsg;
 use app_host::{LuaApp, LuaMsg};
 use runtime::El;
 use std::{
@@ -18,13 +20,19 @@ const VM_LIMITS: app_host::host::VmLimits = app_host::host::VmLimits {
 };
 use vault::{Vault, WorkspaceItem, WorkspaceMeta};
 
+pub(crate) mod context;
+pub(crate) mod creation;
 mod customization;
+mod spaces_api;
 pub(crate) mod navigation;
 mod rpc;
+pub(crate) mod session;
 mod source;
 mod source_api;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod spaces_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceAction {
@@ -39,6 +47,8 @@ pub enum Command {
         action: WorkspaceAction,
     },
     OpenItem(shell_api::OpenItem),
+    SelectWorkspace(String),
+    CreateWorkspace(String),
     EditSource {
         ws_id: String,
         path: String,
@@ -51,7 +61,7 @@ pub struct Launcher {
     instance: u64,
     app: LuaApp<Msg>,
     source: Rc<RefCell<source::State>>,
-    inventory: Rc<RefCell<shell_api::Snapshot>>,
+    context: context::Context,
     commands: Rc<RefCell<Vec<Command>>>,
     warning: Option<String>,
 }
@@ -62,47 +72,53 @@ impl Launcher {
         workspace: WorkspaceMeta,
         items: Vec<WorkspaceItem>,
     ) -> Result<Self, String> {
-        let saved = vault.get_entry(source::ENTRY).map_err(|e| e.to_string())?;
-        Self::open(workspace, items, saved)
+        Self::new_with_inventory(vault, Rc::new(RefCell::new(shell_api::Snapshot { workspace, items })))
     }
 
-    fn open(
-        workspace: WorkspaceMeta,
-        items: Vec<WorkspaceItem>,
-        saved: Option<Vec<u8>>,
-    ) -> Result<Self, String> {
+    pub(crate) fn new_with_inventory(vault: &Vault, inventory: session::Inventory) -> Result<Self, String> {
+        Self::new_in_context(vault, context::Context::Workspace(inventory))
+    }
+
+    pub(crate) fn new_in_context(vault: &Vault, context: context::Context) -> Result<Self, String> {
+        let saved = vault.get_entry(source::ENTRY).map_err(|e| e.to_string())?;
+        Self::open(context, saved)
+    }
+
+    fn open(context: context::Context, saved: Option<Vec<u8>>) -> Result<Self, String> {
         let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
         let src = source::bundled()?;
         let source = Rc::new(RefCell::new(source::State {
             doc: src.clone(),
             generation: 0,
         }));
-        let ws_id = workspace.id.clone();
-        let inventory = Rc::new(RefCell::new(shell_api::Snapshot { workspace, items }));
         let commands = Rc::new(RefCell::new(Vec::new()));
-        let queue = commands.clone();
-        let inventory_setup = shell_api::setup(
-            inventory.clone(),
-            Rc::new(move |item| queue.borrow_mut().push(Command::OpenItem(item))),
-        );
-        let source_setup = source_api::setup(source.clone(), ws_id.clone(), commands.clone());
-        let navigation_setup = navigation::setup(ws_id.clone(), commands.clone());
-        let mut app = LuaApp::open_with_setup(
+        let inventory_setup = context.setup(commands.clone());
+        let source_setup = match &context {
+            context::Context::Workspace(inventory) => Some(source_api::setup(
+                source.clone(), inventory.borrow().workspace.id.clone(), commands.clone(),
+            )),
+            context::Context::Spaces(_) => None,
+        };
+        let mut app = LuaApp::open_with_entry(
             src,
             Rc::new(|_| Err("launcher documents are not configured".into())),
             std::sync::Arc::new(|| {}),
-            Rc::new(move |msg| Msg::Items(ItemsScreenMsg::Launcher(ws_id.clone(), instance, msg))),
+            context.identity(instance),
             Some(Rc::new(move |vm, context| {
                 context.set_limits(vm, VM_LIMITS)?;
                 inventory_setup(vm, context.clone())?;
-                navigation_setup(vm, context.clone())?;
-                source_setup(vm, context)
+                if let Some(source_setup) = &source_setup { source_setup(vm, context)?; }
+                Ok(())
             })),
+            context.entry(),
         )
         .map_err(|e| e.to_string())?;
         let mut warning = None;
         if let Some(bytes) = saved {
             match source::import(&bytes)
+                .and_then(|src| if matches!(context, context::Context::Spaces(_)) {
+                    source::with_spaces(src)
+                } else { Ok(src) })
                 .and_then(|src| app.stage_source(src.clone()).map(|app| (src, app)))
             {
                 Ok((src, candidate)) => {
@@ -120,7 +136,7 @@ impl Launcher {
             instance,
             app,
             source,
-            inventory,
+            context,
             commands,
             warning,
         })
@@ -135,7 +151,9 @@ impl Launcher {
     }
 
     pub fn refresh(&self, items: Vec<WorkspaceItem>) {
-        self.inventory.borrow_mut().items = items;
+        if let context::Context::Workspace(inventory) = &self.context {
+            inventory.borrow_mut().items = items;
+        }
     }
 
     pub fn update(&mut self, instance: u64, msg: LuaMsg) -> Vec<Command> {

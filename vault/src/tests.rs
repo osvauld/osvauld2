@@ -8,6 +8,22 @@ fn fresh() -> (Vault, TempDir) {
 }
 
 #[test]
+fn delayed_workspace_creation_cannot_write_into_another_account() {
+    let (mut vault, _tmp) = fresh();
+    let (alice, _) = vault.signup("alice", "pw").unwrap();
+    let worker = vault.clone();
+    vault.lock();
+    assert!(worker.create_workspace_for(&alice, "locked").is_err());
+    vault.signup("bob", "pw").unwrap();
+    assert!(worker.create_workspace_for(&alice, "wrong account").is_err());
+    assert!(vault.workspaces().unwrap().is_empty());
+    vault.lock();
+    vault.login(&alice, "pw").unwrap();
+    let workspace = worker.create_workspace_for(&alice, "Alice workspace").unwrap();
+    assert_eq!(vault.workspaces().unwrap(), vec![workspace]);
+}
+
+#[test]
 fn empty_vault_has_no_accounts() {
     let (vault, _tmp) = fresh();
     assert!(vault.is_empty());

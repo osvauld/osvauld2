@@ -14,7 +14,7 @@ impl Shell {
 
     fn selected_launcher(&self) -> Result<&Launcher, String> {
         match &self.screen {
-            Screen::Items(i) => i.launcher(),
+            Screen::Items(_) | Screen::Spaces(_) => self.launcher.get(),
             _ => Err("select a workspace to inspect or edit its launcher".into()),
         }
     }
@@ -68,10 +68,10 @@ impl Shell {
     }
 
     fn fire_launcher(&mut self, id: &str, action: runtime::Action<'_>) -> Result<Value, String> {
-        let Screen::Items(screen) = &self.screen else {
+        if !matches!(self.screen, Screen::Items(_) | Screen::Spaces(_)) {
             return Err("select a workspace".into());
-        };
-        let msg = screen.launcher()?.view().trigger(id, action)?;
+        }
+        let msg = self.selected_launcher()?.view().trigger(id, action)?;
         runtime::App::update(self, msg);
         Ok(json!("fired"))
     }
@@ -95,15 +95,15 @@ impl Shell {
         if ws_id.is_some_and(|id| id != screen.ws().id) {
             return Err("launcher workspace changed".into());
         }
-        screen
-            .launcher_mut()?
+        self.launcher
+            .get_mut()?
             .edit_file(&self.vault, path, revision, edits)
     }
 
     pub(crate) fn reset_launcher(&mut self) -> Result<(), String> {
-        match &mut self.screen {
-            Screen::Items(screen) => screen.reset_launcher(&self.vault)?,
-            _ => Launcher::clear_override(&self.vault)?,
+        self.launcher.reset(&self.vault)?;
+        if let Screen::Items(screen) = &mut self.screen {
+            screen.clear_error();
         }
         self.error = None;
         self.reset_launcher_pending = false;

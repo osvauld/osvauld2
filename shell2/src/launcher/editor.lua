@@ -20,7 +20,7 @@ function M.view()
 	if not model.visible() then return {} end
 	local S = model.state()
 	local files = {}
-	for _, path in ipairs({ "theme.lua", "main.lua", "cursor.lua" }) do
+	for _, path in ipairs({ "theme.lua", "main.lua", "cursor.lua", "spaces.lua", "spaces_view.lua", "workspace_create.lua" }) do
 		files[#files + 1] = button("launcher:edit:" .. path, path, function() model.open(path) end, S.path == path)
 	end
 	return ui.col({

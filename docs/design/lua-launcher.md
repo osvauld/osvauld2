@@ -97,5 +97,54 @@ hard wall watchdog is implied. Source candidates also isolate the 3D host from t
 edits, and an activated launcher view looping after its successful trial: Rust navigation/import
 fallback and pointer reset remain available. Full smokes and combined reviews remain deferred.
 
+## Workspace list — revision 2026-10-05
+
+The shell-owned launcher session now mounts a list entry (`spaces_view.lua` → `spaces.lua`)
+while `main.lua` continues to describe a selected workspace. This supersedes the earlier
+workspace-only hosting/senses statements above without changing old workspace source semantics.
+Trusted Rust entry selection is retained on staging/reload; ordinary apps keep their root main.
+
+On the list, `shell.snapshot()` copies workspace IDs/names and `shell.select_workspace(id)`
+queues a handler-only request. Rust revalidates account membership, current list and Home, using
+its existing RPC selection path. Workspace capabilities/source editing remain workspace-scoped;
+list senses are available on Home, while creation and invitation/publishing controls remain Rust.
+The editor's file chooser includes the list scripts. Trial validation covers the current entry;
+unused-entry errors can surface on navigation and recover through fallback, not silent deletion.
+
+Missing list modules in old overrides are bundled in memory; their main/theme and stored bytes
+are unchanged. Bad saved list source uses the bundled list independently of workspace overrides.
+`launcher:workspace-list` marks a rendered list description; runtime failures/non-list descriptions
+keep native cards, and Rust reset validates a fresh candidate before deleting the saved record.
+Navigation gives a fresh instance scope and discards drafts; metadata refresh preserves the VM.
+
+Focused gate: `check_launcher_spaces.py` (320/900pt, real-pointer selection, empty state, legacy
+workspace source, saved-entry fallback and runtime failure/reset). Long names grow their cards.
+
+## Workspace creation — revision 2026-10-05
+
+Creation now mounts `workspace_create.lua` inside the list entry. The earlier Rust-only
+creation presentation statements above are superseded; authentication and networking forms
+remain later slices. Lua owns an ephemeral `ui.state` draft and Create/Cancel/pending/error
+presentation; handler-only `shell.create_workspace(name)` queues plain data. The draft is
+bounded to 256 UTF-8 bytes before trim, intentionally bounding the submitted input, not just
+the normalized stored name. Rust trims/revalidates it and allows only one pending UI job.
+
+Rust performs the sealed write on a worker through `Vault::create_workspace_for`, which checks
+the submitting DID under the same account mutex as the write. Completion wakes the main loop
+and matches active account plus a globally unique job before changing pending/error/generation.
+Accepted writes may finish in their original account after navigation. A same-account success
+from an old list updates metadata without applying its feedback to a new draft/job; stale errors
+are ignored. Cancel is disabled while pending: there is no promise of canceling an accepted write.
+No keys, vault handle, source write or draft persistence is granted to Lua.
+
+`launcher:workspace-create` opts into creation presentation independently of the list marker;
+older/custom list entries retain native creation controls. Missing helper source in old overrides
+is filled in memory; saved/custom list entries are not rewritten to force this new form.
+
+Acceptance: creation unit tests pin command scope, bounds, duplicate jobs, stale account/list
+completions and failed-draft retention/retry; `vault` pins locked/account-switch refusal. The
+real-socket `check_launcher_creation.py` drives the pointer form at 320/900pt, validation/Cancel,
+Unicode normalized names, worker wakeup, persistence after unlock and legacy fallback controls.
+
 Lua-owned auth UI, tab layout/tiling and persisted session layouts are later work. The account-owned source
 is shared across platforms; Android-specific input/lifecycle remains with the Android workstream.

@@ -1,5 +1,5 @@
 """Lua workspace header and Rust compatibility/recovery chrome, using real pointer targets."""
-from osvauld.client import BridgeError
+import json
 from osvauld.session import Session, shell_binary
 
 with Session(shell_binary=shell_binary(), offscreen=(320, 700)) as s:
@@ -13,12 +13,7 @@ with Session(shell_binary=shell_binary(), offscreen=(320, 700)) as s:
     assert "back" not in ids and "add_item" not in ids, "duplicate Rust header"
     rpc.save_shell_screenshot("/tmp/lua-workspace-header-320.png")
     rpc.click_at(*rpc.centre_of("launcher:back"))
-    try:
-        rpc.dump_launcher_tree()
-    except BridgeError:
-        pass  # Spaces has no workspace launcher.
-    else:
-        raise AssertionError("Back did not leave the workspace")
+    assert "launcher:workspace-list" in json.dumps(rpc.dump_launcher_tree()), "Back did not leave the workspace"
     rpc.select_workspace(ws["id"])
 
     # Older/custom sources without the reserved marker retain the Rust controls.

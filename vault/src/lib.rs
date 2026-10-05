@@ -215,8 +215,19 @@ impl Vault {
     /// to `ws/<id>/meta`; no registry doc is touched — the workspace exists by virtue of that
     /// key. Errs with [`VaultError::Locked`] when no account is unlocked.
     pub fn create_workspace(&self, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(None, name)
+    }
+
+    /// Workers must check their submitting account under the same lock as the write.
+    /// A lock/switch before this call rejects; a started write completes in its original account.
+    pub fn create_workspace_for(&self, did: &str, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(Some(did), name)
+    }
+
+    fn create_workspace_checked(&self, did: Option<&str>, name: &str) -> Result<WorkspaceMeta, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        if did.is_some_and(|did| did != active.did) { return Err(VaultError::Locked); }
         let meta = WorkspaceMeta {
             id: workspace::new_id(),
             name: name.to_string(),

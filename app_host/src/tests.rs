@@ -4,6 +4,7 @@ use runtime::HoverPhase;
 use std::rc::Rc;
 
 mod host;
+mod entry;
 mod limits;
 mod index;
 mod reload;

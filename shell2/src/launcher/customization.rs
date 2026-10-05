@@ -45,11 +45,7 @@ impl Launcher {
 
     pub fn reset(&mut self, vault: &Vault) -> Result<(), String> {
         // Recovery must not execute the old VM, even to export its scratch state.
-        let (workspace, items) = {
-            let inventory = self.inventory.borrow();
-            (inventory.workspace.clone(), inventory.items.clone())
-        };
-        let mut replacement = Self::open(workspace, items, None)?;
+        let mut replacement = Self::open(self.context.clone(), None)?;
         replacement.app = replacement.app.stage_source(source::bundled()?)?;
         Self::clear_override(vault)?;
         *self = replacement;

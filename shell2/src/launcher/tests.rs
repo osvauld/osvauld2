@@ -2,7 +2,7 @@ use super::*;
 use app_host::SourceEdit;
 use tempfile::TempDir;
 
-fn fresh() -> (Vault, TempDir, WorkspaceMeta) {
+pub(super) fn fresh() -> (Vault, TempDir, WorkspaceMeta) {
     let tmp = TempDir::new().unwrap();
     let mut vault = Vault::open(tmp.path().to_path_buf()).unwrap();
     vault.signup("owner", "pw").unwrap();

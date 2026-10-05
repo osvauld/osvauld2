@@ -68,6 +68,8 @@ pub enum Msg {
     Login(LoginMsg),
     Space(SpaceScreenMsg),
     Items(ItemsScreenMsg),
+    Launcher(u64, app_host::LuaMsg),
+    WorkspaceCreated { account: String, job: u64, result: Result<WorkspaceMeta, String> },
     /// Pointer, wheel or keys for an app's tile, in its coordinates — forwarded to its thread.
     TileInput(Arc<str>, TileEvent),
     /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
@@ -966,6 +968,7 @@ struct Shell {
     clock: f64,
     error: Option<String>,
     reset_launcher_pending: bool,
+    launcher: launcher::session::Session,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
     /// Mirrors whatever `SpaceScreen` last claimed — kept here too because `SyncTick` has to
@@ -1024,17 +1027,27 @@ impl Shell {
     fn reset_tabs(&mut self) {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
+        self.launcher = Default::default();
         self.reset_launcher_pending = false;
         self.focused = 0;
         self.split = None;
         self.error = None;
     }
+    fn sync_launcher(&mut self) {
+        match &self.screen {
+            Screen::Items(screen) => self.launcher.bind(&self.vault, Some(screen.inventory())),
+            Screen::Spaces(screen) => self.launcher.bind_context(&self.vault,
+                Some(launcher::context::Context::Spaces(screen.inventory()))),
+            _ => self.launcher.bind(&self.vault, None),
+        }
+    }
+
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
     /// rather than the windowless `answer`. All are fast — seal plus a local write, no
     /// KDF — so they run inline on the UI thread (the single authority) and rebuild any
     /// screen that shows what they changed.
     fn answer_mut(&mut self, req: Request) -> Response {
-        match req {
+        let response = match req {
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -1280,7 +1293,9 @@ impl Shell {
                 Response::ok("unsplit")
             }
             req => answer(&self.vault, req),
-        }
+        };
+        self.sync_launcher();
+        response
     }
 
     /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
@@ -1402,6 +1417,7 @@ impl Shell {
             clock: 0.0,
             error: None,
             reset_launcher_pending: false,
+            launcher: Default::default(),
             screenshot: None,
             driver: None,
             node: node.clone(),
@@ -1633,8 +1649,8 @@ impl App for Shell {
                 Screen::Signup(f) => f.view(),
                 Screen::Mnemonic(m) => m.view(),
                 Screen::Login(a) => a.view(),
-                Screen::Spaces(s) => s.view(),
-                Screen::Items(i) => i.view(),
+                Screen::Spaces(s) => s.view(self.launcher.get().ok(), self.launcher.warning()),
+                Screen::Items(i) => i.view(self.launcher.get().ok(), self.launcher.warning()),
             },
             Tab::App(_) => {
                 let mut tiles = row().w_full().grow();
@@ -1701,16 +1717,49 @@ impl App for Shell {
                 self.error = self.open_tab(wi).err();
                 None
             }
+            Msg::WorkspaceCreated { account, job, result } => {
+                if let Screen::Spaces(screen) = &mut self.screen {
+                    screen.finish_creation(&self.vault, &account, job, result);
+                }
+                None
+            }
+            Msg::Launcher(instance, msg) => {
+                let commands = if self.focused == 0 && self.vault.current().is_some()
+                    && matches!(self.screen, Screen::Spaces(_)) {
+                    self.launcher.get_mut().map(|launcher| launcher.update(instance, msg))
+                        .unwrap_or_default()
+                } else { Vec::new() };
+                for command in commands {
+                    match command {
+                        launcher::Command::SelectWorkspace(ws_id) => {
+                            self.error = match self.answer_mut(Request::SelectWorkspace { ws_id }) {
+                                Response::Ok { .. } => None,
+                                Response::Err { message } => Some(message),
+                            };
+                            break;
+                        }
+                        launcher::Command::CreateWorkspace(name) => {
+                            if let Screen::Spaces(screen) = &mut self.screen {
+                                self.error = screen.create_workspace(&self.vault, &self.proxy, &name).err();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
             Msg::Items(ItemsScreenMsg::Launcher(ws_id, instance, msg)) => {
                 let commands = match &mut self.screen {
                     Screen::Items(i) if self.focused == 0 && i.ws().id == ws_id => {
-                        i.update_launcher(instance, msg)
+                        self.launcher.get_mut()
+                            .map(|launcher| launcher.update(instance, msg)).unwrap_or_default()
                     }
                     _ => Vec::new(),
                 };
                 let mut next = None;
                 for command in commands {
                     self.error = match command {
+                        launcher::Command::SelectWorkspace(_) | launcher::Command::CreateWorkspace(_) => Err("focus the workspace list to select or create".into()),
                         launcher::Command::Workspace { ws_id, action } => {
                             let home_ws = match &self.screen {
                                 Screen::Items(i) => Some(i.ws().id.as_str()),
@@ -2460,6 +2509,7 @@ impl App for Shell {
         if let Some(next) = next {
             self.screen = next;
         }
+        self.sync_launcher();
     }
 
     /// Wakes on wall-clock time or from a subscriber, never a request: offscreen they must not move

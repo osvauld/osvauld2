@@ -422,6 +422,7 @@ pub struct LuaApp<M> {
     /// While `view` runs: `world(id):set` refuses then, since a description only describes.
     viewing: Rc<Cell<bool>>,
     setup: Option<host::VmSetup>,
+    entry: Rc<str>,
     host_context: host::HostContext,
     resolve: Resolve,
     wake: Wake,
@@ -556,12 +557,20 @@ impl<M: 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         setup: Option<host::VmSetup>,
     ) -> mlua::Result<Self> {
+        Self::open_with_entry(src, resolve, wake, to_msg, setup, "main.lua")
+    }
+
+    /// Trusted hosts may choose a source-map entry; ordinary apps always use main.lua.
+    pub fn open_with_entry(
+        src: LoroDoc, resolve: Resolve, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
+    ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
             src, cores, resolve, wake, to_msg, search, Worlds::default(),
-            gfx::world3d::Host::default(), setup, false,
+            gfx::world3d::Host::default(), setup, false, Rc::from(entry),
         )?;
         if app.error.is_none() {
             if let Err(e) = app.worlds3d.commit() {
@@ -591,6 +600,7 @@ impl<M: 'static> LuaApp<M> {
         worlds3d: gfx::world3d::Host,
         setup: Option<host::VmSetup>,
         strict_trial: bool,
+        entry: Rc<str>,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -598,8 +608,8 @@ impl<M: 'static> LuaApp<M> {
         let src_seen = src.version.load(Ordering::Relaxed);
         let (vm, budget) = sandboxed_vm()?;
         let map = src.doc.get_map("files");
-        let Some(ValueOrContainer::Container(Container::Text(t))) = map.get("main.lua") else {
-            return Err(Error::runtime("no main.lua in app source"));
+        let Some(ValueOrContainer::Container(Container::Text(t))) = map.get(entry.as_ref()) else {
+            return Err(Error::runtime(format!("no {entry} in app source")));
         };
         let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
         crdt::install(
@@ -623,7 +633,7 @@ impl<M: 'static> LuaApp<M> {
 
         let main_src = t.to_string();
         let armed = budget.arm_load();
-        let (view_fn, error) = match vm.load(main_src).set_name("main.lua").eval::<Function>() {
+        let (view_fn, error) = match vm.load(main_src).set_name(entry.as_ref()).eval::<Function>() {
             Ok(f) => (Some(f), None),
             Err(e) => (None, Some(e.to_string())),
         };
@@ -649,6 +659,7 @@ impl<M: 'static> LuaApp<M> {
             worlds3d,
             viewing,
             setup,
+            entry,
             host_context,
         })
     }
@@ -690,6 +701,7 @@ impl<M: 'static> LuaApp<M> {
             if validate_tree { gfx::world3d::Host::default() } else { self.worlds3d.staged() },
             self.setup.clone(),
             validate_tree,
+            self.entry.clone(),
         ) {
             Ok(s) => s,
             Err(e) => {

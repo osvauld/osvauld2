@@ -32,7 +32,7 @@ end
     def assert_one_tab():
         assert sum(r["id"] == "tab:" + item["id"] for r in rpc.rects()) == 1
 
-    click(ws["id"])
+    click("launcher:space:" + ws["id"])
     click("launcher:item:" + item["id"])
     click("inc")
     assert "local count: 1" in json.dumps(rpc.dump_tree(item["id"]))

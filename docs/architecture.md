@@ -141,7 +141,9 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
   a tree walk before the shell persists and activates it. Rust-owned reset/fallback never depends
   on customized Lua, and ordinary apps receive no launcher editing or shell capability grant.
 - **Host bindings are explicit capability grants.** Trusted Rust callers may opt into
-  `LuaApp::open_with_setup`; its installer runs in each fresh VM before app source. Command
+  `LuaApp::open_with_setup`; its installer runs in each fresh VM before app source. A trusted
+  caller may use `open_with_entry` to select a file in the same source map; that entry is carried
+  through staging/reload. Ordinary apps still require `main.lua`, with no new Lua entry grant. Command
   bindings must check the supplied VM-local `HostContext::require_handler` before side effects,
   so load, view and reload trials cannot issue commands. Native 2D/3D world callbacks enter
   that same handler scope, restored even on callback errors. Ordinary `open` grants none of these
@@ -153,7 +155,13 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
   so validation cannot commit into the running solver. Policy is reinstalled on staging. The Lua
   heap cap excludes Rust-owned resources; interrupt limits are cooperative, not a hard UI
   thread watchdog. Reset builds a fresh bundled launcher without calling the old VM or carrying
-  its scratch state.
+  its scratch state. The shell-owned launcher session takes metadata handles from workspace/list
+  screens; neither screen owns a VM. List and workspace entries have separate capability sets
+  and fresh instance scopes on navigation. Rust selects workspaces through the same validated
+  path used by RPC; listing legacy/default modules never rewrites a saved override. Creation
+  presentation is Lua, but its handler-only command submits a Rust-owned worker write. Vault
+  checks the submitting DID under the write lock; globally unique UI jobs scope completion
+  feedback, not cancellation of accepted writes. Drafts/feedback remain ephemeral.
 - **Reads and writes to docs are different paths**: reads are plain Lua tables (the mirror,
   a frame behind), writes are explicit CRDT calls addressed by **stable id, never index**.
 - **Elements are tagged tables** — only `ui.*` constructors produce them; a bare table is a

@@ -132,9 +132,92 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
   passed. No app-thread integration changes; final reviews/full smokes remain deferred.
 
+### Lua workspace creation (2026-10-05, validated working slice)
+- The workspace list now mounts `workspace_create.lua`: Lua New workspace/name/Create/Cancel,
+  pending/error feedback and ephemeral drafts. Handler-only `shell.create_workspace(name)`
+  queues plain data; the copied list snapshot includes creation pending/generation/error.
+  Submission is bounded to 256 UTF-8 bytes before trim; Rust normalizes and revalidates it.
+- Rust performs sealed creation off-thread via `Vault::create_workspace_for`. The expected DID
+  check and write hold the same account mutex; a lock/switch before the write rejects. Writes
+  already accepted may finish in their original account. Completion wakes the main loop and
+  matches account/job before updating feedback. Duplicate pending UI submissions are ignored.
+- A successful old job refreshes same-account metadata after a list rebuild/navigation without
+  altering a new draft/job's feedback; duplicate metadata and stale errors are ignored. This
+  closes the fresh review's lost-list-refresh finding. Cancel is disabled while pending,
+  failures retain the draft, and success dismisses/clears the form. The raw-draft length bound
+  is deliberate and documented, not a stored-name-only bound.
+- `launcher:workspace-create` suppresses duplicate native creation controls only when rendered;
+  older/custom list descriptions keep their native control. The helper joins Customize's file
+  chooser and is backfilled in memory for older source without replacing saved list entries.
+- Vault suite: 30 passed. Shell suite: 83 passed, one ignored. Workspace check passed after
+  rebuilding local runtime/world metadata (the shared target had reused another worktree's
+  runtime without contains_id; no source/process changes to other worktrees).
+- `check_launcher_creation.py`, registered in SMOKES, passes real-pointer validation/Cancel,
+  Unicode normalization, worker wakeup, persistence after unlock and legacy controls at
+  320/900pt. List, editor, header/navigation and threaded/Home focused checks pass too.
+  Unit gates cover load/view/trial capability refusal, bounds, pending duplication, failed
+  draft/retry, wrong-account/job completions and stale-success metadata-only refresh.
+- Fresh reviews covered shell/Lua/secure-core/architecture; findings addressed in code/contracts.
+  All 23 registered smokes passed via `python3 scripts/smoke.py` against `/tmp/lua-create-shell`;
+  final combined review and latest-dev reconciliation/landing remain separate pending gates. Native keyboard/IME
+  remains unverified (TypeLauncher drives on_input). Preview `/tmp/lua-create-{320,900}.png`;
+  logs `/tmp/lua-create-*.log`. Nothing in this slice has landed on dev.
+
+### Lua workspace list (2026-10-05, initial list checkpoint; creation superseded above)
+- The actual workspace-list screen now mounts `spaces_view.lua` → `spaces.lua`, alongside
+  Rust creation/invitation/publishing controls. Account-list and workspace views share the
+  sealed source document but have distinct entries/capabilities; the workspace entry stays
+  `main.lua`. The Customize file chooser includes both list scripts.
+- Trusted `LuaApp::open_with_entry` selects a source-map file and carries it through staging
+  and reload; ordinary apps retain `main.lua`. Copied list metadata plus handler-only
+  `shell.select_workspace(id)` queue plain data. Rust rechecks listing/Home/account membership
+  through the same selection path as RPC; no app instances, vault or filesystem enter Lua.
+- Older overrides gain missing list modules in memory without replacing main/theme or saving
+  during navigation. Invalid saved list entries fall back independently; a runtime list failure
+  keeps native cards and Rust reset reachable. Long names grow cards rather than spilling out.
+- Suites passed: app-host 257 (two ignored), shell 77 (one ignored). Workspace check passed.
+  Real-socket list tests at 320/900pt cover empty state, pointer selection, legacy workspace
+  preservation and startup/runtime list fallback/reset. Existing navigation, threaded/Home,
+  editor, persistence, limits, bundled launcher and open-or-focus gates passed. Old pointer
+  tests were updated for `launcher:space:<id>` instead of native card IDs.
+- `check_launcher_spaces.py` is registered in SMOKES. Runnable pinned binary:
+  `/tmp/lua-list-shell`; screenshots `/tmp/lua-workspaces-{320,900}.png`; logs
+  `/tmp/lua-list-*.log`. Full smokes/review and landing on dev remain deferred.
+
+### Workspace list component (2026-10-05, initial component; mounting superseded above)
+- `shell2/src/launcher/spaces.lua` is a pure themed workspace-card/list component: copied rows
+  and a selection callback in, wrapping/scrolling description out. It writes no documents and
+  grants no capabilities. The bundle contains it, but current workspace views remain unchanged.
+- Test-first component regressions cover independent card IDs/callback selection, no selection
+  during load/view, empty state and 320/900pt layout. Shell suite now passes 75 tests (one ignored).
+- Next slice: account-list metadata, a handler-only Rust-validated select command, and mounting
+  the component on the workspace-list screen with Rust fallback for older overrides/failures.
+  Creation/auth/networking UI and final merge gates remain separate.
+
+### Launcher hosting preparation (2026-10-04, validated working slice)
+- `Shell` now owns a launcher session; `ItemsScreen` supplies a shared Rust metadata snapshot,
+  not a VM. Rendering, handler dispatch, bridge editing and independent reset use that session.
+  This is hosting preparation only: workspace listing/creation remain Rust, and the launcher
+  still mounts only inside a selected workspace. No new Lua capabilities or source format.
+- Inventory updates share the existing snapshot without recreating the VM. New screen identity,
+  lock or account changes discard it; workspace/instance/Home guards remain in place. Binding
+  compares metadata handles and account DID, avoiding per-input inventory copies.
+- Four session regressions pass: refresh preserves VM/live inventory; re-entry rejects old
+  input; lock/account changes discard the VM; reset bypasses poisoned state export and keeps
+  the metadata binding with a fresh instance. Shell suite: 73 passed, one ignored. Initial direct
+  test execution used the wrong cwd for ten chat fixtures; rerunning from `shell2/` passes.
+- Workspace check and focused real-socket thread/Home, navigation/fallback, editor (320/900pt),
+  persistence/restart, limits/reset and open-or-focus checks pass. Full smokes/review remain
+  deferred; native picker/IME remain manual. This slice is not landed on dev.
+- Shared-target contention/memory pressure initially timed out builds. A binary-local low-memory
+  link (one linker thread, stripped debug info; no source/profile changes) completed. Acceptance
+  used `/tmp/lua-session-shell`, a pinned binary copy. A subsequent workspace check reused old
+  `world` metadata from another worktree; forcing local world/runtime source metadata rebuilds
+  fixes it. Other processes/worktrees were not modified. Logs: `/tmp/lua-session-*.log`.
+
 ### Lua shell/thread integration (2026-10-04, validated in worktree; not landed on dev)
-- Checkpoint `bd7f9b7` integrates `dev` baseline `cbf0458`; the follow-up merge of `dd40053`
-  is validated/staged in `lua-shell`, not landed on dev. Apps keep thread-owned VM/docs/index/Tile;
+- Checkpoint `bd7f9b7` integrates `dev` baseline `cbf0458`; checkpoint `dd4da16` completes
+  the validated follow-up merge of `dd40053` in `lua-shell`, not landed on dev. Apps keep thread-owned VM/docs/index/Tile;
   Home keeps its own launcher VM and scoped plain-data command queue. Open-or-focus,
   transactional customization/editor, Home senses and Rust reset are preserved.
 - One shared interrupt hook now serves app and launcher policies. Launcher setup configures

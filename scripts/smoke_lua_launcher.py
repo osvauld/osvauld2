@@ -9,7 +9,7 @@ for width in (320, 900):
         rpc = s.rpc
         rpc.signup("launcher", "passphrase")
         ws = rpc.create_workspace("Home")
-        rpc.click_at(*rpc.centre_of(ws["id"]))
+        rpc.click_at(*rpc.centre_of("launcher:space:" + ws["id"]))
         assert rpc.centre_of("launcher:add-item")
         assert not any(r["id"].startswith("launcher:item:") for r in rpc.rects())
 

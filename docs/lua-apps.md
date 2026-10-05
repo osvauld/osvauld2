@@ -45,13 +45,34 @@ commands and opens or focuses the existing item instance. Ordinary uploaded apps
 receive `shell`. The default workspace title/Back/Add item header is also Lua-described.
 `shell.back()` and `shell.import_item()` enqueue handler-only, workspace-scoped requests;
 Rust rechecks unlocked-account membership and Home before navigating or opening its native
-folder picker/import path. No filesystem access is granted to Lua. Workspace listing, auth and
-tabs remain Rust-side.
+folder picker/import path. No filesystem access is granted to Lua.
+
+The workspace list is also Lua-described, through `spaces_view.lua` → `spaces.lua` in the
+same sealed source document. That entry receives `shell.snapshot()` → `{workspaces = {{id,
+name}, …}}` and handler-only `shell.select_workspace(id)`. Rust rechecks Home, account membership
+and current listing before selecting; it preserves open app threads. The workspace entry remains
+`main.lua`, with its original snapshot/capabilities. No fake workspace or app VM is injected.
+Workspace creation presentation is Lua too (`workspace_create.lua`), through handler-only
+`shell.create_workspace(name)`. The submitting draft is bounded to 256 UTF-8 bytes (including
+surrounding whitespace); Rust trims it and rejects an empty name before queuing the operation.
+`shell.snapshot().creation` copies `{pending, generation, error}`: generation advances on a
+matched completion, error is absent on success. The form keeps its draft in `ui.state`, blocks
+submission/Cancel while pending, retains it on failure and dismisses after success.
+Rust owns the sealed write on a worker and wakes the loop with an account/job-scoped completion.
+Account checking and writing share the vault lock. An accepted write may finish in its original
+account after navigation; stale completions refresh same-account list metadata without changing
+another draft/job's feedback. Navigation/lock/reset discard Lua drafts, not accepted writes.
+Auth, invitations/publishing and tabs remain Rust-side in this slice.
 
 The reserved element ID `launcher:workspace-header` opts into Lua header presentation. If the
 rendered tree lacks it (older customized sources, initialization or view failure), Rust supplies
 its navigation/import header. Detection only inspects the Rust description; no handler executes.
-Rust recovery controls remain independent of this marker.
+Rust recovery controls remain independent of this marker. On the list, the corresponding marker
+is `launcher:workspace-list`: a failed/non-list description keeps Rust cards. Missing list modules
+in older overrides are filled from the bundle in memory, without replacing `main.lua`/`theme.lua`
+or writing the saved record. `launcher:workspace-create` separately opts into Lua creation UI;
+older/custom lists without it keep the native creation control. Invalid list overrides fall back independently; selecting a
+workspace still evaluates its original override.
 
 Launcher source (including `theme.lua` configuration and the reused `cursor.lua` component) is
 saved as an account-owned sealed vault entry. On Home, use `rpc.select_workspace(ws_id)`,
@@ -59,12 +80,14 @@ saved as an account-owned sealed vault entry. On Home, use `rpc.select_workspace
 Edits are staged through load/view/tree validation, persisted, then activated; a rejected edit
 or failed save changes neither the working source nor the saved override. Viewer `ui.state`
 is carried through successful reloads. `rpc.dump_launcher_tree()`, `rpc.read_launcher_console()`
-and `rpc.save_shell_screenshot(path)` provide feedback. Launcher senses/edits require Home
-focus; reset (`rpc.reset_launcher()` or the Rust strip's two-step Reset launcher button) also
+and `rpc.save_shell_screenshot(path)` provide feedback. Launcher senses require Home focus and can inspect the workspace list too. Edits/Customize
+still require selecting a workspace; candidate validation covers the current entry, so changes
+to an inactive entry can fail when next mounted (Rust fallback remains available). Reset (`rpc.reset_launcher()` or the Rust strip's two-step Reset launcher button) also
 works from the workspace listing. Invalid saved source falls back to the bundle with a warning,
 without deleting the override. Ordinary app `WriteFile`/`EditFile` never target launcher source.
 
-**Customize** opens the bundled Lua editor for `theme.lua`, `main.lua` and `cursor.lua`.
+**Customize** opens the bundled Lua editor for `theme.lua`, `main.lua`, `cursor.lua`, `spaces.lua`
+and `spaces_view.lua`, plus `workspace_create.lua`.
 Its draft lives in `ui.state`, not the vault: failed saves retain it; Save validates and persists
 before applying; Cancel or changing files discards it. Lock/navigation/restart do not preserve
 unsaved drafts. The editor uses a plain `ui.text_area`, without syntax highlighting. Tabs display
@@ -96,7 +119,8 @@ cooperative and cannot interrupt a blocked native call.*
 A runtime failure can still damage viewer scratch; Rust Reset starts a fresh bundled
 VM, discards scratch and does not execute the old VM, even to export state.
 
-The bundled custom pointer is active inside the launcher; Rust chrome keeps the native cursor.
+The bundled custom pointer is active inside the workspace launcher; the list and Rust chrome
+keep the native cursor.
 Shell-wide pointer mounting and Lua auth/tabs remain unbuilt.
 
 ## The model — Elm, in Lua

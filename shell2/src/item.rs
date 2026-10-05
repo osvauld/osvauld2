@@ -2,18 +2,19 @@
 //! Keeps the Rust grid as a fallback if the launcher cannot initialize.
 
 use crate::app_src::{app_name, read_app_folder, snapshot};
-use crate::launcher::{Command, Launcher};
+use crate::launcher::{Launcher, session::Inventory};
 use crate::space::SpaceScreen;
 use crate::{Msg, Screen, theme};
 use app_host::LuaMsg;
 use runtime::{El, EventLoopProxy, col, row, text};
+use std::{cell::RefCell, rc::Rc};
 use vault::{Vault, WorkspaceItem, WorkspaceMeta};
 
 pub struct ItemsScreen {
     ws: WorkspaceMeta,
     items: Vec<WorkspaceItem>,
     error: Option<String>,
-    launcher: Option<Launcher>,
+    inventory: Inventory,
 }
 
 #[derive(Clone)]
@@ -36,59 +37,37 @@ impl ItemsScreen {
             Ok(i) => (i, None),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
-        let launcher = Launcher::new(vault, ws.clone(), items.clone());
-        let error = error.or_else(|| launcher.as_ref().err().cloned());
+        let inventory = Rc::new(RefCell::new(crate::shell_api::Snapshot {
+            workspace: ws.clone(),
+            items: items.clone(),
+        }));
         ItemsScreen {
             ws,
             items,
             error,
-            launcher: launcher.ok(),
+            inventory,
         }
     }
 
-    pub fn update_launcher(&mut self, instance: u64, msg: LuaMsg) -> Vec<Command> {
-        self.launcher
-            .as_mut()
-            .map(|l| l.update(instance, msg))
-            .unwrap_or_default()
+    pub fn inventory(&self) -> Inventory {
+        self.inventory.clone()
     }
 
-    pub fn launcher(&self) -> Result<&Launcher, String> {
-        self.launcher
-            .as_ref()
-            .ok_or_else(|| "launcher is unavailable; reset it".into())
-    }
-
-    pub fn launcher_mut(&mut self) -> Result<&mut Launcher, String> {
-        self.launcher
-            .as_mut()
-            .ok_or_else(|| "launcher is unavailable; reset it".into())
-    }
-
-    pub fn reset_launcher(&mut self, vault: &Vault) -> Result<(), String> {
-        if let Some(launcher) = &mut self.launcher {
-            launcher.reset(vault)?;
-        } else {
-            Launcher::clear_override(vault)?;
-            self.launcher = Some(Launcher::new(vault, self.ws.clone(), self.items.clone())?);
-        }
+    pub fn clear_error(&mut self) {
         self.error = None;
-        Ok(())
     }
 
     pub fn refresh(&mut self, vault: &Vault) {
         match vault.items(&self.ws.id) {
             Ok(items) => {
                 self.items = items;
-                if let Some(launcher) = &self.launcher {
-                    launcher.refresh(self.items.clone());
-                }
+                self.inventory.borrow_mut().items = self.items.clone();
             }
             Err(e) => self.error = Some(e.to_string()),
         }
     }
 
-    pub fn view(&self) -> El<Msg> {
+    pub fn view(&self, launcher: Option<&Launcher>, warning: Option<&str>) -> El<Msg> {
         let upload_btn = row()
             .h(36.0)
             .px(14.0)
@@ -129,7 +108,7 @@ impl ItemsScreen {
             .child(col().grow())
             .child(upload_btn);
 
-        let body = if let Some(launcher) = &self.launcher {
+        let body = if let Some(launcher) = launcher {
             launcher.view()
         } else if self.items.is_empty() {
             col().grow().center().child(
@@ -170,11 +149,7 @@ impl ItemsScreen {
         }
         // Upload failures land here (no main.lua, non-utf8 file, locked vault) — without this
         // the button is a silent no-op.
-        if let Some(error) = self
-            .error
-            .as_deref()
-            .or_else(|| self.launcher.as_ref().and_then(Launcher::warning))
-        {
+        if let Some(error) = self.error.as_deref().or(warning) {
             page = page.child(text(error).font_size(12.0).color(theme::error()));
         }
         page.child(body)
@@ -210,9 +185,7 @@ impl ItemsScreen {
             .put_src(&self.ws.id, &item.id, &snapshot_bytes)
             .map_err(|e| e.to_string())?;
         self.items = vault.items(&self.ws.id).map_err(|e| e.to_string())?;
-        if let Some(launcher) = &self.launcher {
-            launcher.refresh(self.items.clone());
-        }
+        self.inventory.borrow_mut().items = self.items.clone();
         Ok(())
     }
 }
