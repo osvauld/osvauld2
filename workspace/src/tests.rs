@@ -122,3 +122,42 @@ fn scope_reports_its_workspace() {
         "shop"
     );
 }
+
+/// Every valid doc name has an address under real minted ids; one byte more has neither.
+#[test]
+fn the_longest_doc_name_still_has_an_address() {
+    let ws = "a".repeat(MINTED_ID_LEN);
+    let item = "b".repeat(MINTED_ID_LEN);
+    let address = |doc: &str| ResourceAddress::parse(&format!("ws/{ws}/{item}/{doc}"));
+
+    // Segments are capped at 128 bytes, so build the name from several.
+    let longest = |len: usize| {
+        let mut name = String::new();
+        while name.len() < len {
+            if !name.is_empty() {
+                name.push('/');
+            }
+            let take = (len - name.len()).min(MAX_SEGMENT_LEN);
+            name.push_str(&"c".repeat(take));
+        }
+        name
+    };
+    let fits = longest(MAX_DOC_NAME_LEN);
+    assert_eq!(fits.len(), MAX_DOC_NAME_LEN);
+    assert!(valid_doc_name(&fits));
+    assert!(address(&fits).is_ok());
+
+    let over = longest(MAX_DOC_NAME_LEN + 1);
+    assert!(!valid_doc_name(&over));
+    assert!(address(&over).is_err());
+}
+
+#[test]
+fn a_doc_name_is_a_path_of_address_segments() {
+    for good in ["chat", "group/g1/meta", "dm/did:key:z6MkA/did:key:z6MkB/2026-10-04"] {
+        assert!(valid_doc_name(good), "{good:?}");
+    }
+    for bad in ["", "/a", "a/", "a//b", "a/../b", "a/./b", "a.b", "a b", "é", "a\0"] {
+        assert!(!valid_doc_name(bad), "{bad:?}");
+    }
+}

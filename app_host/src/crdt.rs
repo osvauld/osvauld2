@@ -83,26 +83,7 @@ pub fn install(
                 if let Some(bytes) = resolve(&name).map_err(Error::runtime)? {
                     doc.import(&bytes).map_err(Error::external)?;
                 }
-                let version = Arc::new(AtomicU64::new(0));
-                let v = version.clone();
-                let w = wake.clone();
-                let sub = doc.subscribe_root(Arc::new(move |ev| {
-                    v.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // A local write already happened inside a frame the host asked for, and
-                    // poking from here would schedule a second one for every keystroke. An
-                    // import did not: it is a peer or the MCP bridge writing while the window
-                    // sits idle, and without this the change lands in the doc and stays
-                    // invisible until the next mouse move.
-                    if ev.triggered_by == EventTriggerKind::Import {
-                        w();
-                    }
-                }));
-                let core = Rc::new(DocCore {
-                    doc,
-                    version,
-                    saved: Cell::new(0),
-                    _sub: sub,
-                });
+                let core = new_core(doc, wake.clone(), 0);
                 cores.borrow_mut().insert(name.clone(), core.clone());
                 core
             }
@@ -127,6 +108,28 @@ pub fn install(
     install_kinds(lua, &t)?;
     lua.globals().set("doc", t)?;
     Ok(())
+}
+
+/// A doc's host-side half, its version counter starting at `version`.
+pub fn new_core(doc: LoroDoc, wake: Wake, version: u64) -> Rc<DocCore> {
+    let version = Arc::new(AtomicU64::new(version));
+    let v = version.clone();
+    let sub = doc.subscribe_root(Arc::new(move |ev| {
+        v.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A local write already happened inside a frame the host asked for, and poking from
+        // here would schedule a second one for every keystroke. An import did not: it is a
+        // peer or the MCP bridge writing while the window sits idle, and without this the
+        // change lands in the doc and stays invisible until the next mouse move.
+        if ev.triggered_by == EventTriggerKind::Import {
+            wake();
+        }
+    }));
+    Rc::new(DocCore {
+        doc,
+        version,
+        saved: Cell::new(0),
+        _sub: sub,
+    })
 }
 
 // ── container kinds ───────────────────────────────────────────────────────────

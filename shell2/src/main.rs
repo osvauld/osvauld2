@@ -26,7 +26,10 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -45,10 +48,10 @@ use app_host::{
 };
 use base64::Engine as _;
 use courier::DesktopNodeRecord;
-use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
+use courier::sync::{Rejected, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync};
 use courier::token::{Scope, Token};
 use kunki::push::Push;
-use loro::{Container, LoroDoc, ValueOrContainer};
+use loro::{Container, LoroDoc, ValueOrContainer, VersionVector};
 use osvauld_rpc::{
     AccountSummary, EditFileResult, ItemSummary, LuaTestResult, Request, Response,
     SourceActivation, VersionedFile, WorkspaceSummary,
@@ -137,9 +140,11 @@ pub enum Msg {
     /// Reads `Shell.node`, not `SpaceScreen`'s own copy: that one is dropped the moment the
     /// screen navigates away from Spaces, and sync has to keep running regardless of screen.
     SyncTick,
-    /// One item's sync round trip finished — `(item id, doc name, ack or error)`. The import
-    /// is sent on to the app's thread, which owns the doc.
-    SyncDone(Arc<str>, String, Result<SyncAck, String>),
+    /// One item's sync round trip finished — `(generation, item id, doc name, ack or error)`.
+    /// Every node-worker message carries the [`Shell::sync_gen`] it started under; one from an
+    /// earlier generation (another account, a lock, a re-claim) is dropped. The import
+    /// happens here, on the UI thread, because the doc it targets is not `Send`.
+    SyncDone(u64, Arc<str>, String, Result<SyncReply, String>),
     /// A node RPC (`ClaimNode`/`Invite`/`PublishAll`) finished on its worker thread — same
     /// shape as `AuthDone`, and for the same reason: these do socket I/O, so `answer_mut`'s
     /// inline-on-the-UI-thread family is the wrong place for them.
@@ -149,7 +154,13 @@ pub enum Msg {
     ),
     /// One `Push` arrived on the standing `Listen` connection ([`spawn_push_listener`]) —
     /// the primary delivery path now; `SyncTick` is the backstop.
-    PushReceived(Push),
+    PushReceived(u64, Push),
+    /// The `Listen` connection (re)opened. Anything pushed while it was down is lost, and a
+    /// restarted node may have missed subscribes, so every open doc is re-subscribed and
+    /// re-synced as if seen for the first time.
+    ListenUp(u64),
+    /// A subscribe never reached the node; `SyncTick` retries it.
+    SubscribeFailed(u64, Arc<str>, String),
 }
 
 #[derive(Clone)]
@@ -282,23 +293,34 @@ const LISTEN_RETRY: Duration = Duration::from_secs(2);
 /// Starts (or restarts) the connection pushes arrive on — one per claimed relationship, held
 /// for as long as the process runs. Reconnects on its own after any drop; the caller does not
 /// need to notice a disconnect and call this again.
-fn spawn_push_listener(proxy: &EventLoopProxy<Msg>, desktop_did: String, token: Token) {
+fn spawn_push_listener(
+    proxy: &EventLoopProxy<Msg>,
+    desktop_did: String,
+    token: Token,
+    current: Arc<AtomicU64>,
+    vault: Vault,
+) {
     let proxy = proxy.clone();
+    let gen_ = current.load(Ordering::SeqCst);
     std::thread::spawn(move || {
-        loop {
+        while current.load(Ordering::SeqCst) == gen_ {
             let socket = kunki::bridge::socket_path();
-            match node::listen(&socket, &desktop_did, token.clone()) {
-                Ok(mut conn) => loop {
-                    match node::next_push(&mut conn) {
-                        Ok(push) => {
-                            let _ = proxy.send_event(Msg::PushReceived(push));
-                        }
-                        Err(e) => {
-                            eprintln!("kunki listen: connection lost: {e}");
-                            break;
+            match node::listen(&socket, &vault, &desktop_did, token.clone()) {
+                Ok(mut conn) => {
+                    // Registered on the node by now, so nothing synced after this is missed.
+                    let _ = proxy.send_event(Msg::ListenUp(gen_));
+                    loop {
+                        match node::next_push(&mut conn) {
+                            Ok(push) => {
+                                let _ = proxy.send_event(Msg::PushReceived(gen_, push));
+                            }
+                            Err(e) => {
+                                eprintln!("kunki listen: connection lost: {e}");
+                                break;
+                            }
                         }
                     }
-                },
+                }
                 Err(e) => eprintln!("kunki listen: could not connect: {e}"),
             }
             std::thread::sleep(LISTEN_RETRY);
@@ -311,12 +333,15 @@ fn spawn_push_listener(proxy: &EventLoopProxy<Msg>, desktop_did: String, token: 
 /// without waiting for the next tick) both need, so it exists once rather than twice.
 fn sync_doc<M: 'static>(
     proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
     item_id: &Arc<str>,
     name: &str,
     app: &LuaApp<M>,
+    since: Option<&[u8]>,
+    gen_: u64,
 ) {
     let hello = app.with_doc(name, |doc| {
         desktop_start_sync(
@@ -326,7 +351,7 @@ fn sync_doc<M: 'static>(
             item_id,
             SyncLayer::Doc(name.to_string()),
             doc,
-            None,
+            since,
         )
     });
     match hello {
@@ -334,10 +359,11 @@ fn sync_doc<M: 'static>(
             let proxy = proxy.clone();
             let id = item_id.clone();
             let doc_name = name.to_string();
+            let vault = vault.clone();
             std::thread::spawn(move || {
                 let socket = kunki::bridge::socket_path();
-                let result = node::sync(&socket, hello);
-                let _ = proxy.send_event(Msg::SyncDone(id, doc_name, result));
+                let result = node::sync(&socket, &vault, hello);
+                let _ = proxy.send_event(Msg::SyncDone(gen_, id, doc_name, result));
             });
         }
         Some(Err(e)) => eprintln!("sync: could not build hello for {item_id}/{name}: {e}"),
@@ -345,35 +371,53 @@ fn sync_doc<M: 'static>(
     }
 }
 
+/// Whether `new` should replace `old` as the node's known version: an ack that arrives after a
+/// later one must not move `since` backwards.
+fn newer_vv(old: Option<&Vec<u8>>, new: &[u8]) -> bool {
+    let Some(old) = old else { return true };
+    match (VersionVector::decode(old), VersionVector::decode(new)) {
+        (Ok(old), Ok(new)) => new.includes_vv(&old),
+        _ => true,
+    }
+}
+
 /// Subscribes to one doc's layer the first time it's seen for this item, so a future push
 /// delivers its changes — best-effort, off-thread, same as every other node call here. A
-/// no-op if this (item, name) pair is already subscribed.
+/// no-op if this (item, name) pair is already subscribed. True on a first sighting, which the
+/// caller answers with a sync: a doc opened from local storage may be behind the node.
 fn subscribe_if_new(
+    proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
+    gen_: u64,
     subscribed: &mut HashMap<Arc<str>, std::collections::HashSet<String>>,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
     item_id: &Arc<str>,
     name: &str,
-) {
+) -> bool {
     let first_sighting = subscribed
         .entry(item_id.clone())
         .or_default()
         .insert(name.to_string());
     if !first_sighting {
-        return;
+        return false;
     }
+    let proxy = proxy.clone();
     let socket = kunki::bridge::socket_path();
     let did = desktop_did.to_string();
     let ws_id = ws_id.to_string();
     let id = item_id.clone();
     let layer = SyncLayer::Doc(name.to_string());
     let log_name = name.to_string();
+    let vault = vault.clone();
     std::thread::spawn(move || {
-        if let Err(e) = node::subscribe(&socket, &did, token, &ws_id, &id, layer) {
+        if let Err(e) = node::subscribe(&socket, &vault, &did, token, &ws_id, &id, layer) {
             eprintln!("subscribe: {id}/{log_name}: {e}");
+            let _ = proxy.send_event(Msg::SubscribeFailed(gen_, id, log_name));
         }
     });
+    true
 }
 
 /// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
@@ -838,8 +882,13 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
+    let camera = world.camera.as_ref().map(|c| serde_json::json!({
+        "at": [c.at.0, c.at.1], "follow": c.follow, "lost": c.lost, "ease": c.ease,
+        "bounds": c.bounds.map(|(x, y, w, h)| [x, y, w, h]), "view": [c.view.0, c.view.1],
+        "drawn": c.drawn,
+    }));
     serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
-        "tick": world.tick, "dropped": world.dropped })
+        "tick": world.tick, "dropped": world.dropped, "camera": camera })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.
@@ -934,6 +983,10 @@ fn answer(vault: &Vault, req: Request) -> Response {
             ),
             Err(e) => Response::err(e.to_string()),
         },
+        Request::Whoami => match vault.current() {
+            Some(a) => Response::ok(serde_json::json!({ "did": a.did, "name": a.label })),
+            None => Response::err("locked"),
+        },
         req => Response::err(format!("not wired yet: {req:?}")),
     }
 }
@@ -979,6 +1032,17 @@ struct Shell {
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
     subscribed: HashMap<Arc<str>, std::collections::HashSet<String>>,
+    /// Subscribes that never reached the node, retried by the next `SyncTick`. Not retried at
+    /// once: a node that is down would turn every failure into the next attempt.
+    failed_subs: Vec<(Arc<str>, String)>,
+    /// The node's version vector from the last ack, per (item, doc): the node provably holds
+    /// everything up to it, so the next push is a diff against it. In memory only — the first
+    /// sync after a restart pushes full history, which merges as a no-op.
+    node_vv: HashMap<(Arc<str>, String), Vec<u8>>,
+    /// Bumped by every auth transition and every (re)claim. Node workers and the push listener
+    /// tag their messages with the value they started under; stale ones are dropped, and a
+    /// listener whose generation has passed stops reconnecting.
+    sync_gen: Arc<AtomicU64>,
 }
 /// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
 /// logical points, which offscreen are also pixels. A flag rather than an env var (the other two
@@ -1024,6 +1088,168 @@ impl Shell {
     /// lock, unlock, signup — passes through here: open apps belong to the account that
     /// was active, and the post-update flush must never write their docs into another
     /// account's store. Nothing is lost: every prior update already flushed.
+    fn sync_one(&self, item_id: &Arc<str>, name: &str) {
+        let (Some(record), Some(a)) = (&self.node, self.apps.get(item_id)) else {
+            return;
+        };
+        let Some(did) = self.vault.with_signer(|d| d.did().to_string()) else {
+            return;
+        };
+        let since = self.node_vv.get(&(item_id.clone(), name.to_string())).cloned();
+        let (proxy, vault, token, ws, id, name, gen_) = (
+            self.proxy.clone(),
+            self.vault.clone(),
+            record.token.clone(),
+            a.ws_id.clone(),
+            item_id.clone(),
+            name.to_string(),
+            self.gen_(),
+        );
+        a.call(move |h| {
+            sync_doc(
+                &proxy,
+                &vault,
+                &did,
+                token,
+                &ws,
+                &id,
+                &name,
+                &h.app,
+                since.as_deref(),
+                gen_,
+            )
+        });
+    }
+
+    /// The backstop pass: retry any subscribe that failed, and sync every open doc.
+    fn reconcile(&mut self) {
+        for (id, name) in self.failed_subs.drain(..) {
+            if let Some(names) = self.subscribed.get_mut(&id) {
+                names.remove(&name);
+            }
+        }
+        let open: Vec<(Arc<str>, Vec<String>)> = self
+            .apps
+            .iter()
+            .map(|(id, a)| (id.clone(), a.doc_names.clone()))
+            .collect();
+        for (id, names) in open {
+            self.sync_open(&id, &names);
+        }
+    }
+
+    /// Tear down an item's tab and unsubscribe its docs. False if it was not open.
+    fn close_item(&mut self, id: Arc<str>) -> bool {
+        let found = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
+        let Some(pos) = found else {
+            return false;
+        };
+        self.node_vv.retain(|(item, _), _| *item != id);
+        self.tabs.remove(pos);
+        self.split = self.split.take().filter(|s| *s != id);
+        let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
+        if let (Some(record), Some(names), Some(o)) = (
+            self.node.clone(),
+            self.subscribed.remove(&id),
+            closed.as_ref(),
+        ) {
+            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+                let socket = kunki::bridge::socket_path();
+                let (did, ws_id, item_id) = (desktop_did, o.ws_id.clone(), id.to_string());
+                let vault = self.vault.clone();
+                std::thread::spawn(move || {
+                    for name in names {
+                        let layer = SyncLayer::Doc(name.clone());
+                        if let Err(e) = node::unsubscribe(
+                            &socket,
+                            &vault,
+                            &did,
+                            record.token.clone(),
+                            &ws_id,
+                            &item_id,
+                            layer,
+                        ) {
+                            eprintln!("unsubscribe: {item_id}/{name}: {e}");
+                        }
+                    }
+                });
+            }
+        }
+        // Everything after `pos` shifts down one, so a focus at or past it must
+        // follow. Closing the focused tab therefore lands on its left neighbour —
+        // always valid, since Home holds index 0 and can never be the one removed.
+        if self.focused >= pos {
+            self.focused -= 1;
+        }
+        true
+    }
+
+    /// A new sync generation: drop every piece of per-node bookkeeping and, if a node is
+    /// claimed and the vault unlocked, start this generation's listener.
+    fn start_listener(&mut self) {
+        self.sync_gen.fetch_add(1, Ordering::SeqCst);
+        self.subscribed.clear();
+        self.failed_subs.clear();
+        self.node_vv.clear();
+        if let (Some(record), Some(did)) = (
+            &self.node,
+            self.vault.with_signer(|d| d.did().to_string()),
+        ) {
+            spawn_push_listener(
+                &self.proxy,
+                did,
+                record.token.clone(),
+                self.sync_gen.clone(),
+                self.vault.clone(),
+            );
+        }
+    }
+
+    /// `AssignRole`/`RevokeRole`: off-thread, answered through `NodeRpcDone`.
+    fn change_role(
+        &self,
+        item_id: &str,
+        did: String,
+        role: String,
+        revoke: bool,
+        tx: std::sync::mpsc::Sender<Response>,
+    ) {
+        let (record, wi) = match (self.node.clone(), find_item(&self.vault, item_id)) {
+            (Some(record), Ok(wi)) => (record, wi),
+            (None, _) => {
+                let _ = tx.send(Response::err("no node claimed"));
+                return;
+            }
+            (_, Err(e)) => {
+                let _ = tx.send(Response::err(e));
+                return;
+            }
+        };
+        let vault = self.vault.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let socket = kunki::bridge::socket_path();
+            let result = node::change_role(
+                &socket,
+                &vault,
+                record.token,
+                &wi.ws_id,
+                &wi.id,
+                &did,
+                &role,
+                revoke,
+            );
+            let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
+        });
+    }
+
+    fn gen_(&self) -> u64 {
+        self.sync_gen.load(Ordering::SeqCst)
+    }
+
     fn reset_tabs(&mut self) {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
@@ -1292,6 +1518,26 @@ impl Shell {
                 self.split = None;
                 Response::ok("unsplit")
             }
+            Request::ListTabs => Response::ok(
+                self.tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, t)| match t {
+                        Tab::App((id, name)) => Some((idx, id, name)),
+                        Tab::Home => None,
+                    })
+                    .map(|(idx, id, name)| {
+                        let app = self.apps.get(id);
+                        serde_json::json!({
+                            "item_id": id.as_ref(),
+                            "name": name,
+                            "focused": idx == self.focused,
+                            "shown": app.is_some_and(|a| a.is_shown()),
+                            "responding": app.is_some_and(|a| a.responding()),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             req => answer(&self.vault, req),
         };
         self.sync_launcher();
@@ -1316,7 +1562,9 @@ impl Shell {
         }
     }
 
-    /// Subscribe to an open app's docs, and send `names` to the node. A no-op unclaimed.
+    /// Subscribe to an open app's docs, and send `names` to the node — plus any doc seen for the
+    /// first time, since one opened from local storage may be behind the node. A no-op
+    /// unclaimed.
     fn sync_open(&mut self, id: &Arc<str>, names: &[String]) {
         let (Some(record), Some(did)) = (
             self.node.clone(),
@@ -1326,8 +1574,12 @@ impl Shell {
         };
         let Some(a) = self.apps.get(id) else { return };
         let ws = a.ws_id.clone();
+        let mut send = names.to_vec();
         for name in &a.doc_names {
-            subscribe_if_new(
+            let first = subscribe_if_new(
+                &self.proxy,
+                &self.vault,
+                self.gen_(),
                 &mut self.subscribed,
                 &did,
                 record.token.clone(),
@@ -1335,17 +1587,39 @@ impl Shell {
                 id,
                 name,
             );
+            if first && !send.contains(name) {
+                send.push(name.clone());
+            }
         }
-        for name in names.iter().cloned() {
-            let (proxy, did, token, ws, id) = (
-                self.proxy.clone(),
-                did.clone(),
-                record.token.clone(),
-                ws.clone(),
-                id.clone(),
-            );
-            a.call(move |h| sync_doc(&proxy, &did, token, &ws, &id, &name, &h.app));
+        for name in send {
+            self.sync_one(id, &name);
         }
+    }
+
+    /// The node refused a write: put the doc back to the node's copy on the app's thread, and
+    /// say why in the app's console. Everything the node lacked goes, including edits made
+    /// after the refused push was sent; the next flush saves the result and syncs it.
+    fn roll_back(&mut self, item_id: &Arc<str>, name: String, rejected: Rejected) {
+        let key = (item_id.clone(), name.clone());
+        let since = self.node_vv.get(&key).cloned();
+        if let Some(state) = &rejected.state {
+            self.node_vv.insert(key, state.vv.clone());
+        }
+        let Some(a) = self.apps.get(item_id) else { return };
+        let id = item_id.clone();
+        a.call(move |h| {
+            let back = h
+                .app
+                .with_doc(&name, |doc| desktop_roll_back(doc, since.as_deref(), &rejected));
+            match back {
+                Some(Ok(doc)) => {
+                    h.app.replace_doc(&name, doc);
+                    h.app.note(format!("sync: {name} rejected: {}", rejected.reason));
+                }
+                Some(Err(e)) => eprintln!("sync: rolling back {id}/{name} failed: {e}"),
+                None => {}
+            }
+        });
     }
 
     /// Bytes from the node into an open app's doc, on its thread. `ws` is checked when given.
@@ -1390,6 +1664,11 @@ impl Shell {
         let Some(a) = self.apps.get(id.as_str()) else {
             return Some((req, tx));
         };
+        // Queued behind a hang, it would wait out the bridge's timeout.
+        if !a.responding() {
+            let _ = tx.send(Response::err("the app is not responding"));
+            return None;
+        }
         let vault = self.vault.clone();
         a.call(move |h| {
             let _ = tx.send(serve(h, req, &vault));
@@ -1405,7 +1684,7 @@ impl Shell {
         };
         let tabs = vec![Tab::Home];
         let node = node::load_relationship(&vault).ok().flatten();
-        let shell = Shell {
+        let mut shell = Shell {
             vault,
             proxy,
             screen,
@@ -1422,12 +1701,11 @@ impl Shell {
             driver: None,
             node: node.clone(),
             subscribed: HashMap::new(),
+            failed_subs: Vec::new(),
+            node_vv: HashMap::new(),
+            sync_gen: Arc::new(AtomicU64::new(0)),
         };
-        if let Some(record) = node {
-            if let Some(desktop_did) = shell.vault.with_signer(|d| d.did().to_string()) {
-                spawn_push_listener(&shell.proxy, desktop_did, record.token);
-            }
-        }
+        shell.start_listener();
         shell
     }
     /// Open-or-focus, the one path every opener takes: an open item's tab is focused, never
@@ -1503,7 +1781,7 @@ impl Shell {
     /// An app's share of the screen: its latest frame, or why there is none.
     fn app_slot(&self, id: &Arc<str>) -> El<Msg> {
         match self.apps.get(id) {
-            Some(a) if a.stuck => text("this app is not responding")
+            Some(a) if !a.responding() => text("this app is not responding")
                 .color(theme::error())
                 .grow(),
             Some(a) => {
@@ -1541,6 +1819,10 @@ impl Shell {
                 Tab::Home => ("⌂".to_string(), "tab:home".to_string(), None),
                 Tab::App((id, name)) => (name.clone(), format!("tab:{id}"), Some(id.clone())),
             };
+            let stuck = close_id
+                .as_ref()
+                .and_then(|id| self.apps.get(id))
+                .is_some_and(|a| !a.responding());
 
             let mut el = row()
                 .h(28.0)
@@ -1567,6 +1849,9 @@ impl Shell {
                 theme::fg_3()
             };
             el = el.child(text(label).font_size(13.0).color(fg));
+            if stuck {
+                el = el.child(text("not responding").font_size(11.0).color(theme::error()));
+            }
 
             // Nested click: the runtime's hit test takes the innermost match (`lib.rs:462` walks
             // the hit list in reverse), so pressing × closes without also focusing.
@@ -1695,9 +1980,7 @@ impl App for Shell {
         // not a move, so the match below still owns `msg` and dispatches it to the screen too.
         if let Msg::Space(SpaceScreenMsg::ClaimResult(Ok(record))) = &msg {
             self.node = Some(record.clone());
-            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
-            }
+            self.start_listener();
         }
         let next = match msg {
             Msg::ResetLauncher => {
@@ -1838,47 +2121,17 @@ impl App for Shell {
                 None
             }
             Msg::Close(id) => {
-                let found = self
-                    .tabs
-                    .iter()
-                    .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
-                if let Some(pos) = found {
-                    self.tabs.remove(pos);
-                    self.split = self.split.take().filter(|s| *s != id);
-                    let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
-                    if let (Some(record), Some(names), Some(o)) = (
-                        self.node.clone(),
-                        self.subscribed.remove(&id),
-                        closed.as_ref(),
-                    ) {
-                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                            let socket = kunki::bridge::socket_path();
-                            let (did, ws_id, item_id) =
-                                (desktop_did, o.ws_id.clone(), id.to_string());
-                            std::thread::spawn(move || {
-                                for name in names {
-                                    let layer = SyncLayer::Doc(name.clone());
-                                    if let Err(e) = node::unsubscribe(
-                                        &socket,
-                                        &did,
-                                        record.token.clone(),
-                                        &ws_id,
-                                        &item_id,
-                                        layer,
-                                    ) {
-                                        eprintln!("unsubscribe: {item_id}/{name}: {e}");
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    // Everything after `pos` shifts down one, so a focus at or past it must
-                    // follow. Closing the focused tab therefore lands on its left neighbour —
-                    // always valid, since Home holds index 0 and can never be the one removed.
-                    if self.focused >= pos {
-                        self.focused -= 1;
-                    }
-                }
+                self.close_item(id);
+                None
+            }
+            Msg::Rpc(Request::CloseItem { item_id }, tx) => {
+                let closed = self.close_item(item_id.as_str().into());
+                let _ = tx.send(Response::ok(if closed { "closed" } else { "not open" }));
+                None
+            }
+            Msg::Rpc(Request::SyncNow, tx) => {
+                self.reconcile();
+                let _ = tx.send(Response::ok("syncing"));
                 None
             }
             // Auth: Argon2 must not run on the UI thread, so these two do not go through
@@ -1934,6 +2187,8 @@ impl App for Shell {
                 // Apps first: closing waits for their last save, which must land in this account.
                 self.reset_tabs();
                 self.vault.lock();
+                self.node = None;
+                self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
                     _ => Screen::Signup(SignupForm::default()),
@@ -1950,11 +2205,7 @@ impl App for Shell {
                 std::thread::spawn(move || {
                     eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
                     let socket = kunki::bridge::socket_path();
-                    let claimed = node::join(&socket, &vault, &ticket, node::now_secs());
-                    let result = claimed.and_then(|record| {
-                        node::save_relationship(&vault, &record)?;
-                        Ok(record)
-                    });
+                    let result = node::join(&socket, &vault, &ticket, node::now_secs());
                     eprintln!("DBG timing: ClaimNode send_event {}", debug_now_ms());
                     let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Claimed(result)));
                 });
@@ -1980,6 +2231,14 @@ impl App for Shell {
                         let _ = tx.send(Response::err("no node claimed"));
                     }
                 }
+                None
+            }
+            Msg::Rpc(Request::AssignRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, false, tx);
+                None
+            }
+            Msg::Rpc(Request::RevokeRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, true, tx);
                 None
             }
             Msg::Rpc(Request::PushSrc { item_id }, tx) => {
@@ -2105,10 +2364,8 @@ impl App for Shell {
                 let resp = match outcome {
                     NodeRpcOutcome::Claimed(Ok(record)) => {
                         let did = record.node_did.clone();
-                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                            spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
-                        }
                         self.node = Some(record);
+                        self.start_listener();
                         Response::ok(did)
                     }
                     NodeRpcOutcome::Claimed(Err(e)) => Response::err(e),
@@ -2394,6 +2651,11 @@ impl App for Shell {
                 None
             }
             Msg::DriverDone(reply, result) => {
+                // Frame paints before advancing its clock. Settle shown tiles at the reported
+                // instant before replying, not during the caller's next observation.
+                if let Ok(report) = &result {
+                    self.before_frame(report.clock);
+                }
                 match reply {
                     DriverReply::Test(tx) => {
                         let _ = tx.send(result);
@@ -2448,12 +2710,7 @@ impl App for Shell {
                     // Refresh from the now-unlocked vault so a persisted relationship actually
                     // starts its listener, instead of sitting unused until the next claim.
                     self.node = node::load_relationship(&self.vault).ok().flatten();
-                    if let (Some(record), Some(desktop_did)) = (
-                        self.node.clone(),
-                        self.vault.with_signer(|d| d.did().to_string()),
-                    ) {
-                        spawn_push_listener(&self.proxy, desktop_did, record.token);
-                    }
+                    self.start_listener();
                 }
                 next
             }
@@ -2468,24 +2725,47 @@ impl App for Shell {
                 // Re-armed unconditionally: a node that is slow or unreachable this tick must
                 // not stop the next one from trying.
                 arm_sync_tick(&self.proxy);
-                let open: Vec<(Arc<str>, Vec<String>)> = self
-                    .apps
-                    .iter()
-                    .map(|(id, a)| (id.clone(), a.doc_names.clone()))
-                    .collect();
-                for (id, names) in open {
-                    self.sync_open(&id, &names);
-                }
+                self.reconcile();
                 None
             }
-            Msg::SyncDone(item_id, name, result) => {
+            Msg::SyncDone(gen_, _, _, _) | Msg::ListenUp(gen_) | Msg::PushReceived(gen_, _) | Msg::SubscribeFailed(gen_, _, _)
+                if gen_ != self.gen_() =>
+            {
+                None
+            }
+            Msg::SyncDone(_, item_id, name, result) => {
+                let key = (item_id.clone(), name.clone());
                 match result {
-                    Ok(ack) => self.import(&item_id, None, name, ack.update),
+                    Ok(SyncReply::Rejected(r)) => self.roll_back(&item_id, name, r),
+                    Ok(SyncReply::Ack(ack)) => {
+                        if self.apps.contains_key(&item_id) {
+                            self.import(&item_id, None, name.clone(), ack.update);
+                            if ack.missing {
+                                // Our `since` was ahead of the node: push everything.
+                                self.node_vv.remove(&key);
+                                self.sync_one(&item_id, &name);
+                            } else if newer_vv(self.node_vv.get(&key), &ack.vv) {
+                                self.node_vv.insert(key, ack.vv);
+                            }
+                        }
+                    }
                     Err(e) => eprintln!("sync: {item_id}/{name} failed: {e}"),
                 }
                 None
             }
-            Msg::PushReceived(push) => {
+            Msg::ListenUp(_) => {
+                self.subscribed.clear();
+                self.node_vv.clear();
+                // At once: subscribing rides on an app's save, and a quiet app may not save
+                // before the next tick.
+                self.reconcile();
+                None
+            }
+            Msg::SubscribeFailed(_, item_id, name) => {
+                self.failed_subs.push((item_id, name));
+                None
+            }
+            Msg::PushReceived(_, push) => {
                 if let SyncLayer::Doc(name) = &push.layer {
                     let id: Arc<str> = push.item_id.as_str().into();
                     self.import(&id, Some(&push.ws_id), name.clone(), push.snapshot);
@@ -2519,7 +2799,9 @@ impl App for Shell {
             msg,
             Msg::SyncTick
                 | Msg::SyncDone(..)
-                | Msg::PushReceived(_)
+                | Msg::PushReceived(..)
+                | Msg::ListenUp(_)
+                | Msg::SubscribeFailed(..)
                 | Msg::TileDirty(_)
                 | Msg::AppSaved { .. }
         )

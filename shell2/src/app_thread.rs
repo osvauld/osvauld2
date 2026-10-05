@@ -9,10 +9,10 @@
 //! thread, which reply through whatever channel they captured. `Send` is what keeps an `Rc`,
 //! a doc or the VM from crossing by accident.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use app_host::{LuaApp, LuaMsg};
 use courier::token::Token;
@@ -30,6 +30,93 @@ pub type Call = Box<dyn FnOnce(&mut Hosted) + Send>;
 const STUCK: Duration = Duration::from_secs(3);
 /// An animating, shown tile's frame interval with a window.
 const FRAME: Duration = Duration::from_millis(16);
+
+/// How long a thread may stay on one batch before it counts as not responding
+/// (`OSVAULD_WATCHDOG_MS`). Past the Lua budget, so a runaway is killed before it is flagged.
+fn watchdog() -> Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("OSVAULD_WATCHDOG_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000)
+    }))
+}
+
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// When the thread took up its current batch. Shared with the shell, which reads it without
+/// asking the thread — asking a stuck thread is what hangs.
+#[derive(Default)]
+struct Beat {
+    /// [`now_ms`] at the batch's start; 0 while waiting on the channel.
+    busy_since: AtomicU64,
+    /// The watchdog has told the shell; the thread's next idle tells it again.
+    flagged: AtomicBool,
+}
+
+impl Beat {
+    fn start(&self) {
+        self.busy_since.store(now_ms(), Ordering::SeqCst);
+    }
+
+    /// Back to waiting. `true` if the shell was told this thread was stuck.
+    fn end(&self) -> bool {
+        self.busy_since.store(0, Ordering::SeqCst);
+        self.flagged.swap(false, Ordering::SeqCst)
+    }
+
+    fn stuck(&self) -> bool {
+        self.stuck_after(watchdog())
+    }
+
+    fn stuck_after(&self, limit: Duration) -> bool {
+        let since = self.busy_since.load(Ordering::SeqCst);
+        since != 0 && now_ms().saturating_sub(since) >= limit.as_millis() as u64
+    }
+}
+
+struct Watched {
+    id: Arc<str>,
+    beat: Weak<Beat>,
+    proxy: EventLoopProxy<Msg>,
+}
+
+/// One thread checks every app's [`Beat`] and wakes the shell when one goes stuck, so the badge
+/// shows with nothing else happening. It runs only while an app is open.
+fn watch(w: Watched) {
+    static LIST: Mutex<(Vec<Watched>, bool)> = Mutex::new((Vec::new(), false));
+    let mut list = LIST.lock().unwrap();
+    list.0.push(w);
+    if std::mem::replace(&mut list.1, true) {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("app watchdog".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(watchdog() / 4);
+                let mut list = LIST.lock().unwrap();
+                list.0.retain(|w| w.beat.strong_count() > 0);
+                if list.0.is_empty() {
+                    list.1 = false;
+                    return;
+                }
+                for w in &list.0 {
+                    let Some(beat) = w.beat.upgrade() else {
+                        continue;
+                    };
+                    if beat.stuck() && !beat.flagged.swap(true, Ordering::SeqCst) {
+                        let _ = w.proxy.send_event(Msg::TileDirty(w.id.clone()));
+                    }
+                }
+            }
+        })
+        .expect("spawn the app watchdog");
+}
 
 /// The app as its thread holds it.
 pub struct Hosted {
@@ -99,8 +186,7 @@ pub struct AppThread {
     size: Option<(f32, f32)>,
     /// The docs the app had open at its last save — what sync subscribes to.
     pub doc_names: Vec<String>,
-    /// The thread did not answer within [`STUCK`].
-    pub stuck: bool,
+    beat: Arc<Beat>,
 }
 
 impl AppThread {
@@ -118,6 +204,12 @@ impl AppThread {
         let closed = Arc::new(AtomicBool::new(false));
         let ws_id = open.ws_id.clone();
         let size = offscreen.unwrap_or((800.0, 600.0));
+        let beat = Arc::new(Beat::default());
+        watch(Watched {
+            id: open.item_id.clone(),
+            beat: Arc::downgrade(&beat),
+            proxy: proxy.clone(),
+        });
         let ctx = Ctx {
             id: open.item_id.clone(),
             ws_id: open.ws_id.clone(),
@@ -127,6 +219,7 @@ impl AppThread {
             latest: latest.clone(),
             closed: closed.clone(),
             offscreen: offscreen.is_some(),
+            beat: beat.clone(),
         };
         let wake_tx = tx.clone();
         std::thread::Builder::new()
@@ -164,7 +257,7 @@ impl AppThread {
             shown: false,
             size: None,
             doc_names: Vec::new(),
-            stuck: false,
+            beat,
         })
     }
 
@@ -174,6 +267,11 @@ impl AppThread {
 
     pub fn is_shown(&self) -> bool {
         self.shown
+    }
+
+    /// `false` while the thread has been on one batch longer than the watchdog allows.
+    pub fn responding(&self) -> bool {
+        !self.beat.stuck()
     }
 
     pub fn input(&self, event: TileEvent) {
@@ -207,8 +305,9 @@ impl AppThread {
 
     /// `sync`'s first half: offscreen, ask for the frame at `now` without waiting for it, so
     /// several tiles can be asked before any is waited on.
+    /// A stuck thread is not asked: the shell paints its last frame rather than wait on it.
     pub fn ask(&self, now: f64) -> Option<Receiver<Option<TileFrame>>> {
-        if !self.offscreen {
+        if !self.offscreen || !self.responding() {
             return None;
         }
         let (tx, rx) = channel();
@@ -229,30 +328,25 @@ impl AppThread {
         let Some(rx) = asked else {
             return false;
         };
-        match rx.recv_timeout(STUCK) {
+        match rx.recv_timeout(STUCK.min(watchdog())) {
             Ok(Some(f)) => {
-                self.stuck = false;
                 self.frame = f;
                 true
             }
-            Ok(None) => {
-                self.stuck = false;
-                false
-            }
-            Err(_) => {
-                self.stuck = true;
-                false
-            }
+            Ok(None) | Err(_) => false,
         }
     }
 }
 
 impl Drop for AppThread {
     /// Close, and wait for the last save to land: whoever closed this may read the vault next,
-    /// or switch accounts. A stuck thread is abandoned, and writes nothing after this.
+    /// or switch accounts. A stuck thread is abandoned, and writes nothing after this — at once
+    /// if the watchdog already flagged it, so closing a hung app does not hang the shell.
     fn drop(&mut self) {
         let _ = self.tx.send(In::Close);
-        if self.done.recv_timeout(STUCK).is_err() {
+        if !self.responding() {
+            eprintln!("app thread is not responding; abandoning it");
+        } else if self.done.recv_timeout(STUCK).is_err() {
             eprintln!("app thread did not close in time; abandoning it");
         }
         self.closed.store(true, Ordering::SeqCst);
@@ -301,6 +395,7 @@ struct Ctx {
     latest: Arc<Mutex<Option<TileFrame>>>,
     closed: Arc<AtomicBool>,
     offscreen: bool,
+    beat: Arc<Beat>,
 }
 
 fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
@@ -320,6 +415,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 Err(_) => return,
             }
         };
+        ctx.beat.start();
         // Changed by the app itself (a timer, a doc subscriber) — the shell does not know to
         // paint. Not by a call: the shell paints after delivering whatever sent it, and
         // offscreen an extra paint at the same instant is a zero-length tick the app can see.
@@ -335,6 +431,9 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                         tile.invalidate();
                     }
                 }
+                // An abandoned thread that comes unstuck must not act for whoever holds the
+                // vault now. Dropping the call drops its reply sender: the waiter hears no.
+                In::Call(_) if ctx.closed.load(Ordering::SeqCst) => {}
                 In::Call(f) => {
                     f(tile.app_mut());
                     tile.invalidate();
@@ -359,7 +458,13 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 }
             }
         }
-        settle(&mut tile, &ctx, &mut names);
+        let changed = settle(&mut tile, &ctx, &mut names);
+        if !shown && changed {
+            // Hidden, a change (a node push, a hidden click) still runs the view, unpainted:
+            // what it shows may be a badge or a notification. Signals will skip the groups
+            // the change did not touch (`signals.md` steps 4, 6).
+            let _ = tile.app_mut().view();
+        }
         if shown && !ctx.offscreen && tile.wants_frame() {
             let frame = TileFrame {
                 scene: Arc::new(tile.frame()),
@@ -372,14 +477,18 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
             // Offscreen the shell's next paint fetches the frame; it only needs telling.
             let _ = ctx.proxy.send_event(Msg::TileDirty(ctx.id.clone()));
         }
+        if ctx.beat.end() && !ctx.closed.load(Ordering::SeqCst) {
+            // Unstuck: the badge comes off.
+            let _ = ctx.proxy.send_event(Msg::TileDirty(ctx.id.clone()));
+        }
     }
 }
 
 /// After every batch, as the shell used to after every message: rebuild a stale source, save
-/// what changed, index it, and tell the shell what to sync.
-fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
+/// what changed, index it, and tell the shell what to sync. `true` when a doc changed.
+fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) -> bool {
     if ctx.closed.load(Ordering::SeqCst) {
-        return;
+        return false;
     }
     let h = tile.app_mut();
     if let Some(Err(e)) = h.app.reload_if_stale() {
@@ -407,8 +516,9 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
     // After the save, so the index never holds a record the vault does not.
     reindex(&h.index, &h.app, &dirtied);
     let now_open = h.app.open_doc_names();
-    if dirtied.is_empty() && error.is_none() && now_open == *names {
-        return;
+    let changed = !dirtied.is_empty();
+    if !changed && error.is_none() && now_open == *names {
+        return false;
     }
     *names = now_open.clone();
     let _ = ctx.proxy.send_event(Msg::AppSaved {
@@ -417,4 +527,25 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) {
         names: now_open,
         error,
     });
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_beat_is_stuck_only_while_busy_past_the_limit() {
+        let beat = Beat::default();
+        let limit = Duration::from_millis(30);
+        assert!(!beat.stuck_after(limit), "idle is never stuck");
+        beat.start();
+        assert!(!beat.stuck_after(limit));
+        std::thread::sleep(limit * 2);
+        assert!(beat.stuck_after(limit));
+        beat.flagged.store(true, Ordering::SeqCst);
+        assert!(beat.end(), "the flagged thread's idle tells the shell");
+        assert!(!beat.stuck_after(limit));
+        assert!(!beat.end(), "told once");
+    }
 }

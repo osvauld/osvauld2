@@ -20,9 +20,12 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod access;
 pub mod invite;
 pub mod policy;
+pub mod proof;
 pub mod publish;
+pub mod role;
 pub mod subscribe;
 pub mod sync;
 pub mod token;
@@ -43,7 +46,7 @@ const CLAIM_ROLE: &str = "owner";
 /// How long the node's grant to a claimant lives. Reconnect reissues, so this is also the
 /// ceiling on how long a revocation takes to bite. The permit this replaced had no expiry
 /// at all and no id to revoke, so it was valid forever by construction.
-const CLAIM_TTL: u64 = 60 * 60 * 24 * 30;
+pub(crate) const CLAIM_TTL: u64 = 60 * 60 * 24 * 30;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CourierError {
@@ -69,6 +72,12 @@ pub enum CourierError {
     ChainTooLong,
     #[error("token expired")]
     Expired,
+    #[error("request timestamp outside the window")]
+    StaleRequest,
+    #[error("request replayed")]
+    Replayed,
+    #[error("node is busy")]
+    Busy,
     #[error("token revoked")]
     Revoked,
     #[error("parent token forbids delegation")]
@@ -94,6 +103,12 @@ pub enum CourierError {
     RoleNotInvitable,
     #[error("invite ticket already redeemed")]
     InviteAlreadyRedeemed,
+    #[error("the app's manifest does not declare that doc")]
+    Undeclared,
+    #[error("may not read that doc")]
+    NoRead,
+    #[error("may not write that doc")]
+    NoWrite,
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

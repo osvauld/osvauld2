@@ -158,6 +158,18 @@ impl ResourceBinding {
     }
 }
 
+/// Workspace and item ids as vault mints them: 32 hex chars.
+pub const MINTED_ID_LEN: usize = 32;
+
+/// The longest doc name whose address `ws/<ws>/<item>/<doc>` still fits, with minted ids.
+pub const MAX_DOC_NAME_LEN: usize = MAX_ADDRESS_LEN - "ws/".len() - 2 * (MINTED_ID_LEN + 1);
+
+/// A doc name: `/`-separated segments of the address grammar, short enough that every stored
+/// doc has an address. Storage, the manifest and resource scopes all use this one rule.
+pub fn valid_doc_name(name: &str) -> bool {
+    name.len() <= MAX_DOC_NAME_LEN && name.split('/').all(valid_segment)
+}
+
 /// One segment's rules, for callers that name a workspace or an app without building a whole
 /// address. Same grammar, so a name that passes here is usable inside one.
 pub fn valid_id(value: &str) -> bool {

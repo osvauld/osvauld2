@@ -132,6 +132,14 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
   passed. No app-thread integration changes; final reviews/full smokes remain deferred.
 
+### Lua shell dev integration (2026-10-05, validation in progress)
+- Checkpoint `becddb0` preserves the validated session/list/creation slices on `lua-shell`.
+  Merging dev `aa844b3` brings signals steps 1–2, cameras and the latest app-thread/sync work;
+  dev itself is unchanged. Host setup/entry scopes coexist with fresh per-VM signal tracking.
+- Both smoke lists are retained: 26 scripts. Workspace check, integrated suites, full smokes
+  and fresh merge review are pending. UI-tree groups/root-view skipping and layout reuse
+  remain unbuilt; signals alone do not remove the launcher's layout work.
+
 ### Lua workspace creation (2026-10-05, validated working slice)
 - The workspace list now mounts `workspace_create.lua`: Lua New workspace/name/Create/Cancel,
   pending/error feedback and ephemeral drafts. Handler-only `shell.create_workspace(name)`
@@ -329,6 +337,51 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: the default layer for apps without `index.lua` (plan step 6), workspace-wide
   search, indexing off the UI thread.
 
+### Group chat sync (2026-10-04, in progress) — [plan](design/group-chat-sync.md)
+- `scripts/e2e_chat_sync.py` (T1–T15) over `scripts/osvauld/net.py`: one kunki and N offscreen
+  shells per test, screenshots per peer in `target/e2e-shots/`. Green: T1–T5, T13, T16 (Rust).
+- sync pushes only what changed since the node's last acked version vector (`SyncAck.vv`); a
+  `since` the node never reached comes back `missing` and the desktop resends full history.
+- an open doc syncs on first sight (closed items and restarts catch up on open, not on the
+  20 s tick); a `Listen` reconnect re-subscribes and re-syncs everything; failed subscribes
+  retry on the tick.
+- node-worker and listener messages carry a sync generation bumped by lock/unlock/claim;
+  stale ones are dropped and an old listener stops — closes the "async completions not
+  scoped to an account generation" hazard below for sync and push (not `NodeRpcDone`).
+- bridge: `CloseItem`, `Whoami`, `SyncNow`.
+- proven caller (T16): every node request that names a desktop is signed by it
+  (`courier::proof`, kunki `Envelope`/`Gate`); a forged, unsigned, stale or replayed request is
+  refused before dispatch. `node::claim`/`claim_invite` now save the relationship themselves.
+- `manifest` crate: parses `manifest.osv` with line-numbered errors; `resolve(doc)` picks the
+  governing declaration (literal beats variable, day/month shards only match dates);
+  `can_grant`/`satisfies` follow the transitive grant cone with `owner` as root. Every
+  `demo_apps` manifest parses.
+- app roles (T23a): bridge `AssignRole`/`RevokeRole {item_id, did, role}`.
+  - The node reads the item's `manifest.osv` from the source it holds and decides from the
+    caller's grants on record (`courier::role`).
+  - Assigned, invited and reconnect-reissued tokens record the grant that allowed them, and
+    revoking cascades. An invite with no recorded inviter (minted before this), or whose
+    inviter's grant is no longer live, is refused.
+  - Changing an app's source (and so its manifest) needs `AppInstall`. Members may still
+    pull it.
+  - App-scoped tokens sync, subscribe and listen. Pushes skip revoked subscribers.
+  - `demo_apps/chat` declares `admin`/`moderator`/`member`.
+- declared read/write rules (T8, T15, and the node halves T8a, T10a, T15a, T20a):
+  - an app whose `manifest.osv` declares docs has every doc sync judged by them
+    (`courier::access`): a role in the cone, a DID path variable, or `members(doc)` read from
+    the node's copy. Undeclared docs are refused.
+  - pushes re-check read per subscriber; a group's member list decides who gets it now.
+  - `Scope::Resource` tokens reach one doc (`ws/<ws>/<item>/<doc>`) and the app's source.
+  - doc names are paths (`group/g1/meta`) under one rule, `workspace::valid_doc_name`,
+    shared by storage, the manifest and resource addresses; a name with no address is refused.
+    Compatibility break: names with `.`, spaces or non-ASCII are refused by `put_doc` and
+    `get_doc` (no demo app used one). Chat's channels are `channel/<cid>`.
+  - a refused write is answered `Rejected` (2026-10-05, step 6): the node stores and pushes
+    nothing, and the writer's desktop rolls that doc back to the node's copy, saves it and
+    logs `sync: <doc> rejected: <reason>` in the app's console. A writer who may not read
+    the doc rolls back to what the node last acked. A refused pull stays an error.
+  - not built: Lua `validate`, the index, size budgets on sync.
+
 ### Demo recorder and Lua pointer (2026-10-03) — [design](design/demo-recorder.md)
 - `on_hover` events carry `e.down` (button held) and `e.look`: the `cursor` (`"grab"` or a
   `gfx.frame`) declared by the topmost element under the pointer. A press, release or look
@@ -345,7 +398,7 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - not built: windowed lag reduction (present latency 1, `follow_pointer`); the workspace
   mounting the cursor once it is a Lua app.
 
-### App threads (2026-10-04, steps 0–3 and 9) — [design](design/app-threads.md)
+### App threads (2026-10-04, steps 0–3, 8 and 9) — [design](design/app-threads.md)
 - `scripts/e2e_app_threads.py` (T1–T11) with debug-only probe bindings `__busy`, `__stall`,
   `__log` (`OSVAULD_TEST_BINDINGS=1`). Green: T3, T6, T8; T2's kill half.
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
@@ -370,7 +423,15 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   3D physics steps on the app thread; a hidden app's worlds pause, and its first frame back
   skips the hidden time. `smoke_mesh_math` now checks 3D pixels — picking alone passed with
   none drawn.
-- not built: stuck-thread badge (T4), background view on push (T5, a decision), own windows
+- Stuck watchdog (2026-10-05): a thread on one batch longer than `OSVAULD_WATCHDOG_MS`
+  (default 3 s) is not responding — its tab says so, `ListTabs` reports `responding: false`,
+  bridge requests to it are refused at once, the paint no longer waits on it, and
+  `CloseItem` abandons it without the 3 s wait. Green: T4.
+- A hidden app whose docs changed (a node push, a click sent to it) runs its view once,
+  unpainted: what it shows may depend on the change. Nothing runs on a timer, so idle apps
+  stay idle (T6). Signals steps 4 and 6 (world-engine) will make that run skip what the
+  change did not touch. Green: T5.
+- not built: own windows
   (T10), the Lua chrome's guards (T11), two 3D apps on screen at once (one viewport a frame).
 
 ## Not built
@@ -880,8 +941,27 @@ the world moves in steps of 1/120 s (`world::STEP`), at most 8 a frame (`MAX_STE
 leftover frame time carries, a stall's excess is dropped (`dropped` in the dump), and a second
 ends identically at 30, 60, 120, 144 and 240 fps (`the_same_second_ends_the_same_at_any_frame_rate`).
 Timers and clip ends stay on the frame clock; zones are also sensed on a frame with no step, so a
-body taken away still leaves. No interpolation between steps yet. Next, in order: the camera (`camera = { follow, ease,
-bounds }`, `set_camera`, agreed with 3D); a `follow` controller; acceleration; then the RPG.
+body taken away still leaves. No interpolation between steps yet. **Thousands of small things:** a frame no longer caps its items or its path commands (one path
+still caps at 65,536); 20000 entities build their frame. The numbers live in the **benchmark
+suite** — `python3 scripts/bench.py` builds release, runs every `bench_*` test, and fails past a
+budget in `scripts/bench_budgets.json` ([design/perf-benchmarks.md](design/perf-benchmarks.md)).
+So the camera culls for speed, not to get under a cap, and **signals** ([design/signals.md](design/signals.md))
+let a part of the description re-run only when what it read changed. Step 1:
+`signal(value, name)` — a frozen value read as a plain table, changed only by `set`/`update` in a
+handler; writes that skip them error. Step 2: `ui.group(id, fn)` among a world's entities runs
+again only when a signal it read changed; the world keeps a clean group's entities untouched
+(`World2d::reconcile_parts`). 5000 coins: walking costs no coin work (~1 ms a frame with view, 20 ms
+without groups); a pickup costs ~24 ms as one group, ~1.4 ms as 50 chunked groups. **Camera** ([design/camera.md](design/camera.md)):
+`camera = { follow, at, ease, bounds }` on `ui.world` shows part of a map bigger than the box;
+it follows on the fixed step (`ease` per second), stops at explicit `bounds = { x, y, w, h }`
+(revised from the 3D agreement's `bounds = true`), holds when its target is gone (`lost`), and
+survives reload. `world(id):set_camera({ at } | { follow })` in handlers; `to_world`/`to_screen`
+anywhere. Every world now draws only what meets its box (half an entity's size of margin): 20000
+entities through a 1280 × 720 camera build in ~0.9 ms against ~4.3 ms all drawn; walking past
+20000 grouped coins is ~1.9 ms a frame (target 2 ms, met with no room — a spatial grid is the lever).
+`smoke_camera.py` checks it in pixels, rects and the dump. Next, in order: a `follow`
+controller; acceleration; then the RPG. Signals steps 3–6 (UI-tree groups, `view` as root
+group, inspection and the dev check, docs as signals).
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**
@@ -1041,6 +1121,23 @@ projected pixels pass. Mesh and both marble smokes pass on the app-thread build;
 viewport is made inspectable through a no-op click handler in the uploaded test copy only.
 Multiple 3D views per frame remain unimplemented; this change is test coverage, not a renderer
 extension. The previous dev integration exercised all 13 registered smokes across sweep/rerun.
+
+**Observation boundary repaired — 2026-10-05:** the old Tilt Maze blocker above is resolved.
+The last Frame tick paints before advancing the shell clock; the successful driver reply now
+settles shown app tiles at its reported final clock before answering. Previously the next dump
+could see that outstanding interval consumed after its first snapshot (ticks 67→69 at unchanged
+reported time). No body/game rule or new time increment was added; hidden apps remain excluded.
+Test-first `smoke_world3d_observation.py` failed on repeated dump ticks 22→24, then passed
+Frame/Advance, zero-time senses and both capture paths. The original minimal repro now stays
+stable. Tilt Maze's full win/loss, blocking walls, checkpoint Retry, moving pause/resume,
+captures and surgical reload all pass. Its remaining reload assertion typo excluded `mesh`
+instead of process-local `mesh_resource`; the corrected assertion still compares geometry/poses.
+Both new smokes are registered. This clears the second-game authoring gate: a fresh agent wrote
+a different game from the guide without new game-specific Rust; the generic scheduling defect
+it exposed was fixed afterward. Won/lost/reloaded screenshots were inspected.
+Final validation: all **15 registered smokes pass in one sweep**, workspace check passes with
+existing warnings, 50 shell tests pass (one ignored), and 148 runtime tests pass (three ignored).
+The full workspace test suite was not rerun. Multiple views/foreground composition remain next.
 
 **Planning baseline 2026-09-12:** [environment-runtime.md](design/environment-runtime.md) is the
 handover and plan of record for the newly required Lua-authored retained environment. No World,

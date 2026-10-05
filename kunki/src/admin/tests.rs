@@ -828,31 +828,33 @@ fn a_crafted_item_id_cannot_forge_a_different_subscriptions_key() {
     let real_item = "X".to_string();
     let crafted_item = "X/doc".to_string();
 
-    admin
-        .subscribe(
-            &desktop_start_subscribe(
-                alice.did(),
-                record.token.clone(),
-                &ws_id,
-                &crafted_item,
-                SyncLayer::Src,
-            ),
-            NOW,
-        )
-        .unwrap();
-
+    // Revised 2026-10-04: authorization now targets the item as `Scope::App`, whose ids must
+    // be valid segments, so a crafted id is refused before any key is built. The encoding below
+    // stays as a second guard.
+    let crafted = admin.subscribe(
+        &desktop_start_subscribe(
+            alice.did(),
+            record.token.clone(),
+            &ws_id,
+            &crafted_item,
+            SyncLayer::Src,
+        ),
+        NOW,
+    );
+    assert!(matches!(
+        crafted,
+        Err(NodeError::Courier(courier::CourierError::BadScope))
+    ));
+    assert_ne!(
+        subscription_prefix(&ws_id, &crafted_item, &SyncLayer::Src),
+        subscription_prefix(&ws_id, &real_item, &SyncLayer::Doc("src".to_string())),
+    );
     assert!(
         admin
             .subscribers_for(&ws_id, &real_item, &SyncLayer::Doc("src".to_string()))
             .unwrap()
             .is_empty(),
         "a crafted item_id must not alias a different item's layer"
-    );
-    assert_eq!(
-        admin
-            .subscribers_for(&ws_id, &crafted_item, &SyncLayer::Src)
-            .unwrap(),
-        vec![alice.did().to_string()]
     );
 }
 
