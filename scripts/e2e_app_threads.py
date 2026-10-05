@@ -128,6 +128,15 @@ def timed(f) -> float:
     return time.monotonic() - t0
 
 
+def expect_error(rpc, item: str, words: str) -> None:
+    try:
+        rpc.dump_tree(item)
+    except BridgeError as e:
+        assert words in str(e), e
+        return
+    raise AssertionError(f"DumpTree({item}) answered; expected {words!r}")
+
+
 def background(f) -> threading.Thread:
     t = threading.Thread(target=f, daemon=True)
     t.start()
@@ -197,13 +206,20 @@ def t4_stuck_thread(tmp):
     os.environ["OSVAULD_WATCHDOG_MS"] = "1000"
     with Shell(tmp, "t4") as sh:
         a, b = two_probes(sh)
-        background(lambda: sh.fast(timeout=600).click(a, "stall"))
+        def stall():
+            try:
+                sh.fast(timeout=600).click(a, "stall")
+            except ConnectionError:
+                pass  # never answers; the shell's exit drops it
+        background(stall)
         time.sleep(0.2)
         fast = sh.fast()
         fast.dump_tree(b)
         time.sleep(1.5)
         tabs = {t["item_id"]: t for t in fast.request("ListTabs")}
         assert tabs[a]["responding"] is False, tabs
+        # Refused at once, not queued behind the hang.
+        assert timed(lambda: expect_error(fast, a, "not responding")) < RESPONSIVE
         fast.request("CloseItem", item_id=a)
         assert a not in {t["item_id"] for t in fast.request("ListTabs")}
         fast.dump_tree(b)
