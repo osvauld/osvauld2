@@ -2276,7 +2276,10 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         if wanted.is_empty() && self.windows.keys().next().is_none() {
             return;
         }
-        for (key, said) in self.windows.sync(wanted, Some(event_loop), self.offscreen) {
+        let told = self
+            .windows
+            .sync(wanted, Some(event_loop), self.offscreen, self.render.as_ref());
+        for (key, said) in told {
             self.app.window_event(&key, said);
         }
     }

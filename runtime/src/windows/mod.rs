@@ -6,6 +6,7 @@
 //! Offscreen a window is only a size, reported once: nothing is created or drawn.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use vello::peniko::Color;
 use vello::Scene;
@@ -59,8 +60,12 @@ impl Windows {
         wanted: Vec<WindowFrame>,
         event_loop: Option<&ActiveEventLoop>,
         offscreen: Option<(f32, f32)>,
+        main: Option<&Render>,
     ) -> Vec<(String, WindowIn)> {
+        let t = Instant::now();
+        let before = self.open.len();
         self.open.retain(|o| wanted.iter().any(|w| w.key == o.key));
+        slow("closing a window", t, before != self.open.len());
         let mut told = Vec::new();
         for w in wanted {
             if let Some(o) = self.open.iter_mut().find(|o| o.key == w.key) {
@@ -75,9 +80,14 @@ impl Windows {
             let (render, size) = match (offscreen, event_loop) {
                 (Some(size), _) => (None, size),
                 (None, Some(el)) => {
+                    let t = Instant::now();
                     let attrs = Window::default_attributes().with_title(w.title.as_str());
                     let window = Arc::new(el.create_window(attrs).expect("create window"));
-                    let render = pollster::block_on(Render::new(window));
+                    let render = match main {
+                        Some(main) => main.beside(window),
+                        None => pollster::block_on(Render::new(window)),
+                    };
+                    slow("opening a window", t, true);
                     render.set_ime_allowed(true);
                     render.request_redraw();
                     let size = render.viewport();
@@ -175,6 +185,14 @@ impl Windows {
             o.key.clone(),
             WindowIn::Input(TileEvent { input, at, mods }),
         ))
+    }
+}
+
+/// Said only when slow: opening and closing are the costs a user waits on.
+fn slow(what: &str, since: Instant, happened: bool) {
+    let took = since.elapsed();
+    if happened && took > Duration::from_millis(100) {
+        eprintln!("runtime: {what} took {took:?}");
     }
 }
 

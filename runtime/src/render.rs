@@ -6,7 +6,7 @@
 //! so an offscreen `Render` runs the same device, renderer and target, and differs in exactly one
 //! observable way: [`Render::present`] returns false because there is nowhere to present to.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::scene3d::{Scene3d, SceneRenderer};
 use vello::kurbo::{Affine, Rect};
@@ -42,10 +42,16 @@ pub struct Render {
     /// `None` offscreen. The device, renderer and target are still real there — what is missing is
     /// only somewhere to put the finished frame.
     presenter: Option<Presenter>,
+    /// Kept for [`Self::beside`]: another window's surface comes from the same instance and is
+    /// checked against the same adapter.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    renderer: Renderer,
+    /// Shared with every window made [`Self::beside`] this one: building one costs ~0.5 s in a
+    /// debug build (its shaders), most of what opening a window would.
+    renderer: Arc<Mutex<Renderer>>,
     scale: f64,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
@@ -110,6 +116,31 @@ async fn open_device(
         .await
         .expect("request device");
     (adapter, device, queue)
+}
+
+/// Configure a window's surface for `device`: an 8-bit non-sRGB format, so vello's
+/// already-gamma-encoded pixels pass through the blit unaltered.
+fn configure(
+    surface: &wgpu::Surface<'static>,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    size: winit::dpi::PhysicalSize<u32>,
+) -> wgpu::SurfaceConfiguration {
+    let caps = surface.get_capabilities(adapter);
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+            )
+        })
+        .expect("surface supports Rgba8Unorm or Bgra8Unorm");
+    let config = surface_config(format, caps.alpha_modes[0], size.width, size.height);
+    surface.configure(device, &config);
+    config
 }
 
 fn surface_config(
@@ -239,23 +270,7 @@ impl Render {
             .create_surface(window.clone())
             .expect("create surface");
         let (adapter, device, queue) = open_device(&instance, Some(&surface)).await;
-
-        let caps = surface.get_capabilities(&adapter);
-        // 8-bit non-sRGB blit target so vello's already-gamma-encoded pixels pass through unaltered.
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| {
-                matches!(
-                    f,
-                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
-                )
-            })
-            .expect("surface supports Rgba8Unorm or Bgra8Unorm");
-        let config = surface_config(format, caps.alpha_modes[0], size.width, size.height);
-        surface.configure(&device, &config);
-
+        let config = configure(&surface, &adapter, &device, size);
         let scale = window.scale_factor();
         eprintln!(
             "shell2: scale_factor = {scale}, surface = {}x{}",
@@ -263,10 +278,33 @@ impl Render {
         );
         Self::assemble(
             Some(Presenter { window, surface }),
-            device,
-            queue,
+            (instance, adapter, device, queue),
             config,
             scale,
+            None,
+        )
+    }
+
+    /// Another window drawn with this one's device and renderer: only its surface and targets
+    /// are its own.
+    pub fn beside(&self, window: Arc<Window>) -> Self {
+        let surface = self
+            .instance
+            .create_surface(window.clone())
+            .expect("create surface");
+        let config = configure(&surface, &self.adapter, &self.device, window.inner_size());
+        let scale = window.scale_factor();
+        Self::assemble(
+            Some(Presenter { window, surface }),
+            (
+                self.instance.clone(),
+                self.adapter.clone(),
+                self.device.clone(),
+                self.queue.clone(),
+            ),
+            config,
+            scale,
+            Some(self.renderer.clone()),
         )
     }
 
@@ -278,7 +316,7 @@ impl Render {
     /// Frames still rasterize, so [`Self::capture_scene`] reads back real pixels.
     pub async fn offscreen(width: u32, height: u32) -> Self {
         let instance = wgpu::Instance::default();
-        let (_, device, queue) = open_device(&instance, None).await;
+        let (adapter, device, queue) = open_device(&instance, None).await;
         // With no surface the format is chosen rather than negotiated. Rgba8Unorm is what the vello
         // target already is, and nothing blits offscreen, so there is nothing left to disagree.
         let config = surface_config(
@@ -287,26 +325,30 @@ impl Render {
             width,
             height,
         );
-        Self::assemble(None, device, queue, config, 1.0)
+        Self::assemble(None, (instance, adapter, device, queue), config, 1.0, None)
     }
 
     /// Everything downstream of the device: the renderer, the vello target, and the blit pipeline.
     /// Identical either way — a frame is built the same with and without a window.
     fn assemble(
         presenter: Option<Presenter>,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+        (instance, adapter, device, queue): (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue),
         config: wgpu::SurfaceConfiguration,
         scale: f64,
+        renderer: Option<Arc<Mutex<Renderer>>>,
     ) -> Self {
-        let renderer = Renderer::new(
-            &device,
-            RendererOptions {
-                antialiasing_support: AaSupport::all(),
-                ..Default::default()
-            },
-        )
-        .expect("create vello renderer");
+        let renderer = renderer.unwrap_or_else(|| {
+            Arc::new(Mutex::new(
+                Renderer::new(
+                    &device,
+                    RendererOptions {
+                        antialiasing_support: AaSupport::all(),
+                        ..Default::default()
+                    },
+                )
+                .expect("create vello renderer"),
+            ))
+        });
         let target_width = config.width * SUPERSAMPLE;
         let target_height = config.height * SUPERSAMPLE;
         let (target, target_view) = create_targets(target_width, target_height, &device);
@@ -320,6 +362,8 @@ impl Render {
         let blitter = wgpu::util::TextureBlitter::new(&device, config.format);
         Self {
             presenter,
+            instance,
+            adapter,
             device,
             queue,
             config,
@@ -438,7 +482,7 @@ impl Render {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         render_vello(
-            &mut self.renderer,
+            &mut self.renderer.lock().unwrap(),
             &self.device,
             &self.queue,
             scene,
@@ -531,7 +575,7 @@ impl Render {
         let (target, view) = create_targets(width, height, &self.device);
         let scene_targets = create_scene_targets(width, height, &self.device);
         render_vello(
-            &mut self.renderer,
+            &mut self.renderer.lock().unwrap(),
             &self.device,
             &self.queue,
             scene,
