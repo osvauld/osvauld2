@@ -2436,6 +2436,11 @@ impl App for Shell {
                 None
             }
             Msg::DriverDone(reply, result) => {
+                // Frame paints before advancing its clock. Settle shown tiles at the reported
+                // instant before replying, not during the caller's next observation.
+                if let Ok(report) = &result {
+                    self.before_frame(report.clock);
+                }
                 match reply {
                     DriverReply::Test(tx) => {
                         let _ = tx.send(result);

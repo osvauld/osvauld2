@@ -218,6 +218,20 @@ Each leaves `cargo test` and the smokes green.
    moved from the shell into `Hosted`: only shown tiles frame, and the first frame back pauses
    instead of stepping, so hidden time is skipped as main's tab pause did. Still one 3D
    viewport a frame: two 3D apps split side by side show one.
+
+   *Driver completion revision 2026-10-05:* `Frame(n)` still paints before advancing and reports
+   exactly n shell frames. Before its reply (or any other successful driver reply), the shell
+   now settles shown app tiles at the reported final clock. Previously a tile could be one
+   interval behind that clock, and repeated `DumpTree` could expose ticks 67→69 at unchanged
+   virtual time as a later shell paint caught up. The driver owns that time, not the observation.
+   Hidden tiles are still excluded; Frame(0) and failed drivers spend no time. No extra shell
+   frame is added, and no physics/body-specific policy enters the shell.
+   Test-first `smoke_world3d_observation.py` failed on repeated dump ticks 22→24, then passes
+   explicit Frame/Advance and zero-time senses/live/custom captures. The original Tilt Maze
+   minimal reproduction no longer reproduces; its full acceptance now passes (including
+   checkpoint Retry and accepted reload). A separate test typo compared the generated mesh
+   resource ID despite intending to exclude it; it now excludes `mesh_resource`, retaining all
+   geometry/pose comparisons. Both smokes are registered.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.
