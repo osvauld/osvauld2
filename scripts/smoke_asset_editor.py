@@ -43,19 +43,19 @@ with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
     def part(a, pid):
         return next(p for p in a["views"]["front"]["parts"] if p["id"] == pid)
 
-    # Select arm_far, then drag the sleeve's `line` end — a dot 17 px from any other; at 1× a
-    # cubic end hides under its own controls, and the topmost dot is the one a pointer takes — by
-    # (25, 7.5) on screen: (10, 3) in the drawing, already on the 1× snap. That point moves by it
-    # (a line end carries no controls); every other number in the path stays.
+    # Select arm_far, then drag the hand's cubic end — 8 px from its controls at 1×, so this
+    # holds only because ends draw, and so hit, above controls — by (25, 7.5) on screen: (10, 3)
+    # in the drawing, already on the 1× snap. The end and the controls either side of it move by
+    # that; every other number in the path stays.
     s.rpc.click(item, "part:arm_far")
     s.rpc.frame(2)
     before = hero()
-    end = part(before, "arm_far")["shapes"][0]["path"][3][1:3]
+    end = part(before, "arm_far")["shapes"][1]["path"][1][5:7]
     s.rpc.drag(screen(*end), (screen(*end)[0] + 25, screen(*end)[1] + 7.5))
     s.rpc.frame(2)
     after = hero()
-    path0, path1 = (part(a, "arm_far")["shapes"][0]["path"] for a in (before, after))
-    moved = {(3, 1), (3, 2)}  # (command, number) pairs
+    path0, path1 = (part(a, "arm_far")["shapes"][1]["path"] for a in (before, after))
+    moved = {(1, 3), (1, 4), (1, 5), (1, 6), (2, 1), (2, 2)}  # (command, number) pairs
     for j, (was, now) in enumerate(zip(path0, path1)):
         for k in range(1, len(was)):
             d = (10 if k % 2 else 3) if (j, k) in moved else 0

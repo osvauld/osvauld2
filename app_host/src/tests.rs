@@ -5288,11 +5288,13 @@ fn asset_editor_shows_a_parts_points() {
         )
         .eval()
         .unwrap();
-    // Shape 1 is a box; shape 2's third command is a quad: its control, then its end.
+    // Controls come first — shape 2's two quads — then every end, so an end is on top for a
+    // press. Shape 1 is a box; shape 2's third command is a quad, its end after the box's.
     assert!(
         dots.starts_with(
-            "pt:guides@0,0 pt:1:1:1@152.5,410 pt:1:2:1@187.5,410 pt:1:3:1@187.5,530 \
-             pt:1:4:1@152.5,530 pt:2:1:1@145,525 pt:2:2:1@190,525 pt:2:3:1@205,525 pt:2:3:2@205,540"
+            "pt:guides@0,0 pt:2:3:1@205,525 pt:2:7:1@140,525 pt:1:1:1@152.5,410 \
+             pt:1:2:1@187.5,410 pt:1:3:1@187.5,530 pt:1:4:1@152.5,530 pt:2:1:1@145,525 \
+             pt:2:2:1@190,525 pt:2:3:2@205,540"
         ),
         "{dots}"
     );

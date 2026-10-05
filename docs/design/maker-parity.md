@@ -94,5 +94,7 @@ Each is talked through before it's written; its test comes first and every step 
 - **Overlapping dots.** At 1× a cubic's end sits 3 units from its controls, so the
   pointer takes the topmost control, not the end (found writing E3, which drags a `line` end
   instead). Ends could draw and hit above controls, or controls show only for the held point.
+  *Resolved 2026-10-05:* ends draw above every control, and E3 drags the hand's cubic end. A
+  control beside its end is taken from its far side, or zoomed in.
 - **The fixed step.** Stage-play tests passed through the 1/120 s step unchanged; E1 must still
   read positions with a tolerance and drive the world by frames, not by one long tick.

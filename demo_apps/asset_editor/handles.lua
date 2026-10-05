@@ -39,7 +39,7 @@ end
 
 -- Parts to append to the canvas drawing for `part`, at canvas scale `z`, seen at zoom `s`.
 function H.parts(part, z, s)
-	local lines, dots = {}, {}
+	local lines, controls, ends = {}, {}, {}
 	for i, shape in ipairs(part.shapes or {}) do
 		local last = nil -- the previous command's end: this one's start
 		for j, cmd in ipairs(shape.path or {}) do -- a shadow has no path
@@ -52,14 +52,20 @@ function H.parts(part, z, s)
 				if k < #pts then
 					guide(lines, k == 1 and last or stop, p, s)
 				end
-				table.insert(dots, dot("pt:" .. i .. ":" .. j .. ":" .. k, p[1], p[2], k < #pts, s))
+				local control = k < #pts
+				local d = dot("pt:" .. i .. ":" .. j .. ":" .. k, p[1], p[2], control, s)
+				table.insert(control and controls or ends, d)
 			end
 			last = stop or last
 		end
 	end
-	-- The guides go first, under the dots; a press on one is no point.
+	-- The guides go first, under the dots; a press on one is no point. Ends go last, over every
+	-- control: at 1× a cubic's end sits 3 units from its controls, and the top dot takes a press.
 	local out = #lines > 0 and { { id = "pt:guides", pivot = { 0, 0 }, shapes = lines } } or {}
-	for _, d in ipairs(dots) do
+	for _, d in ipairs(controls) do
+		table.insert(out, d)
+	end
+	for _, d in ipairs(ends) do
 		table.insert(out, d)
 	end
 	return out
