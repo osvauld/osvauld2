@@ -1072,6 +1072,7 @@ impl<A: App> Runner<A> {
             }
         }
         store.sweep();
+        text.sweep();
         focused.clear_if_gone(store);
         if !self.held_keys.is_empty()
             && (focused.get().is_some()

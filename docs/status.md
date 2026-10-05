@@ -132,6 +132,14 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
   passed. No app-thread integration changes; final reviews/full smokes remain deferred.
 
+### Text shaping cache (2026-10-05, tests green; smokes not yet run)
+- `TextEngine` remembers the parley layouts of this frame and the last (`runtime/src/text.rs`),
+  so a label that did not change is shaped once, not at measure and again at paint every frame.
+  Workspace-list idle frame, release, one quiet core: 8 cards 2.7 → 0.52 ms, 40 cards
+  13.8 → 2.4 ms. Plan and revision note: [design/ui-reuse.md](design/ui-reuse.md) §2a. Signals
+  steps 3–4 and layout reuse are re-justified only if the next measurement still shows a cost.
+  Tables will still need row virtualization; the cache does not bound 100k cells.
+
 ### Lua shell dev integration (2026-10-05, validation in progress)
 - Checkpoint `becddb0` preserves the validated session/list/creation slices on `lua-shell`.
   Merging dev `aa844b3` brings signals steps 1–2, cameras and the latest app-thread/sync work;

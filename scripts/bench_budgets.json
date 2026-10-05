@@ -40,14 +40,14 @@
     "note": "an update of a 5000-item signal: nearly all of it the freeze checking every entry."
   },
   "workspace_list_40_idle_frame": {
-    "baseline_us": 13783.3,
+    "baseline_us": 2428.0,
     "budget_us": 6000,
-    "note": "ui-reuse.md U1: 40 cards, same setup. Linear in cards (~0.35 ms each). Target under 6 ms; FAILS until layout reuse lands."
+    "note": "ui-reuse.md U1: 40 cards, same setup. 13.8 ms before the text shaping cache, 2.4 after; ~0.05 ms a card."
   },
   "workspace_list_8_idle_frame": {
-    "baseline_us": 2695.4,
+    "baseline_us": 522.7,
     "budget_us": 1500,
-    "note": "ui-reuse.md U1: 8 workspace cards, a frame with nothing changing (view, layout, hit, paint) in Headless, pinned to one core on a quiet machine. Target under 1.5 ms; FAILS until layout reuse lands."
+    "note": "ui-reuse.md U1: 8 workspace cards, a frame with nothing changing (view, layout, hit, paint) in Headless, one pinned core, quiet machine. 2.7 ms before the text shaping cache (step 1a), 0.52 after."
   },
   "world_frame_20000": {
     "baseline_us": 3637.4,
