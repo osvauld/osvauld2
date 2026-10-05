@@ -142,6 +142,8 @@ pub(crate) struct Appearance {
     pub frame: Option<Arc<Frame>>,
     pub scene3d: Option<Arc<crate::scene3d::Scene3d>>,
     pub custom: Option<CustomFn>,
+    /// Another runtime's last frame, painted at this element's rect (`crate::tile`).
+    pub tile: Option<crate::tile::TileFrame>,
     pub repaint: bool,
 }
 pub struct Overlay<M> {
@@ -313,12 +315,16 @@ pub(crate) struct Behaviour<M> {
     pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
     pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
     pub on_hover: Option<(Id, Box<dyn Fn(HoverEvent) -> M>)>,
+    pub on_tile: Option<(Id, Box<dyn Fn(crate::tile::TileEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
     pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
     pub opacity: f32,
     pub scale: f32,
     pub zoom: Option<(bool, bool)>,
+    /// The app draws its own pointer here, so the system one is hidden while over this element.
+    pub hide_cursor: bool,
+    pub cursor: Option<crate::hover::CursorLook>,
     pub slide: Option<(Binding<M>, (f32, f32))>,
     pub fade: Option<Binding<M>>,
     pub tint: Option<Binding<M>>,
@@ -357,12 +363,15 @@ impl<M> Default for Behaviour<M> {
             opacity: 1.0,
             scale: 1.0,
             zoom: None,
+            hide_cursor: false,
+            cursor: None,
             slide: None,
             fade: None,
             tint: None,
             press_scale: None,
             on_drop: None,
             on_hover: None,
+            on_tile: None,
         }
     }
 }
@@ -459,6 +468,14 @@ pub fn frame<M>(visual: Arc<Frame>) -> El<M> {
 pub fn scene3d<M>(scene: Arc<crate::scene3d::Scene3d>) -> El<M> {
     let mut e = El::new(Style::default());
     e.appearance.scene3d = Some(scene);
+    e
+}
+
+/// A leaf that shows another runtime's frame — an app running on its own thread — clipped to
+/// its rect. Pair with [`El::on_tile`] to give that runtime its input.
+pub fn tile<M>(frame: crate::tile::TileFrame) -> El<M> {
+    let mut e = El::new(Style::default());
+    e.appearance.tile = Some(frame);
     e
 }
 
@@ -732,6 +749,15 @@ impl<M> El<M> {
         self.behaviour.zoom = Some((true, true));
         self
     }
+    /// How the pointer should look over this element; reported to hover handlers as `look`.
+    pub fn cursor(mut self, look: crate::hover::CursorLook) -> Self {
+        self.behaviour.cursor = Some(look);
+        self
+    }
+    pub fn hide_system_cursor(mut self) -> Self {
+        self.behaviour.hide_cursor = true;
+        self
+    }
     pub fn zoom_x(mut self) -> Self {
         self.behaviour.zoom = Some((true, false));
         self
@@ -844,6 +870,17 @@ impl<M> El<M> {
 
     pub fn on_key(mut self, id: impl Into<Id>, map: impl Fn(KeyInput) -> M + 'static) -> Self {
         self.behaviour.on_key = Some((id.into(), Box::new(map)));
+        self
+    }
+
+    /// The pointer, wheel and keys meant for a [`tile`], in its own coordinates. A press inside
+    /// captures the pointer until release and takes the keyboard until a press elsewhere.
+    pub fn on_tile(
+        mut self,
+        id: impl Into<Id>,
+        map: impl Fn(crate::tile::TileEvent) -> M + 'static,
+    ) -> Self {
+        self.behaviour.on_tile = Some((id.into(), Box::new(map)));
         self
     }
 
@@ -1065,6 +1102,8 @@ impl<M> El<M> {
                     phase,
                     pos,
                     shape: None,
+                    down: false,
+                    look: None,
                 })),
                 None => Walk::Fired(format!("'{id}' has no on_hover")),
             },

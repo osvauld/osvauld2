@@ -35,6 +35,9 @@ pub struct InviteRequest {
     pub token: Token,
     pub role: String,
     pub scope: Scope,
+    /// Reusable by anyone until revoked — what a name on-chain points at.
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +85,10 @@ struct InviteClaim {
     scope: Scope,
     nonce: String,
     iat: u64,
+    /// Signed, so a holder can't turn a single-use ticket public. Default keeps pre-field
+    /// tickets decoding, as single-use.
+    #[serde(default)]
+    public: bool,
     node_encryption_key: String,
     device_public_key: String,
     node_id: String,
@@ -143,6 +150,7 @@ pub fn issue_invite_ticket(
         scope: request.scope.clone(),
         nonce: nonce(),
         iat: now,
+        public: request.public,
         node_encryption_key: node_encryption_key.clone(),
         device_public_key: device_public_key.clone(),
         node_id: device_public_key.clone(),
@@ -190,8 +198,9 @@ pub struct InviteWelcome {
     pub node_did: String,
     pub token: Token,
     /// What the caller must persist as spent before this redemption counts as done — the same
-    /// nonce `node_accept_invite` just checked was not already in `redeemed`.
-    pub redeemed_nonce: String,
+    /// nonce `node_accept_invite` just checked was not already in `redeemed`. `None` for a
+    /// public invite: it is never spent, only revoked by putting its nonce in `redeemed`.
+    pub redeemed_nonce: Option<String>,
 }
 
 pub fn desktop_start_invite_claim(
@@ -220,7 +229,8 @@ pub fn desktop_start_invite_claim(
     })
 }
 
-/// Redeem an invite once. `redeemed` is every nonce this node has already spent; the caller
+/// Redeem an invite — once, unless it is public. `redeemed` is every nonce this node has
+/// already spent or revoked; the caller
 /// loads it before calling and, on `Ok`, persists `InviteWelcome::redeemed_nonce` into it —
 /// the same load-before/persist-after shape `Admin::accept_claim` already uses for `admins`.
 pub fn node_accept_invite(
@@ -261,7 +271,7 @@ pub fn node_accept_invite(
     Ok(InviteWelcome {
         node_did: node.did().to_string(),
         token,
-        redeemed_nonce: claim.nonce,
+        redeemed_nonce: (!claim.public).then_some(claim.nonce),
     })
 }
 

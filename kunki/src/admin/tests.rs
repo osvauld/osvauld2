@@ -212,6 +212,7 @@ fn an_invite_is_minted_and_redeemed_for_the_role_it_names() {
         token: record.token,
         role: "member".to_string(),
         scope: Scope::Workspace(minted('a')),
+        public: false,
     };
     let ticket = admin.issue_invite(&request, "kunki", NOW).unwrap();
 
@@ -243,6 +244,7 @@ fn a_redeemed_invite_survives_a_restart_and_cannot_be_redeemed_twice() {
         token: record.token,
         role: "member".to_string(),
         scope: Scope::Workspace(minted('a')),
+        public: false,
     };
     let ticket = Admin::new(vault.clone())
         .issue_invite(&request, "kunki", NOW)
@@ -277,6 +279,7 @@ fn an_invite_for_a_role_with_real_capability_is_refused() {
         token: record.token,
         role: "maintainer".to_string(),
         scope: Scope::Workspace(minted('a')),
+        public: false,
     };
     assert!(matches!(
         admin.issue_invite(&request, "kunki", NOW),
@@ -297,6 +300,7 @@ fn an_invite_at_node_scope_cannot_grant_a_role_that_gains_capability_once_narrow
         token: record.token,
         role: "maintainer".to_string(),
         scope: Scope::Node,
+        public: false,
     };
     assert!(matches!(
         admin.issue_invite(&request, "kunki", NOW),
@@ -317,6 +321,7 @@ fn a_revoked_inviter_cannot_mint_an_invite() {
         token: record.token,
         role: "member".to_string(),
         scope: Scope::Workspace(minted('a')),
+        public: false,
     };
     assert!(matches!(
         admin.issue_invite(&request, "kunki", NOW),
@@ -565,6 +570,7 @@ fn a_locked_node_neither_mints_nor_redeems_invites() {
         token: record.token,
         role: "member".to_string(),
         scope: Scope::Workspace(minted('a')),
+        public: false,
     };
     let ticket = admin.issue_invite(&request, "kunki", NOW).unwrap();
     let hello = desktop_start_invite_claim(ticket, &bob, NOW).unwrap();
@@ -752,6 +758,7 @@ fn an_unsubscribe_removes_exactly_that_subscriber() {
         token: alice_record.token.clone(),
         role: "member".to_string(),
         scope: Scope::Workspace(ws_id.clone()),
+        public: false,
     };
     let ticket = admin.issue_invite(&invite_request, "kunki", NOW).unwrap();
     let bob_welcome = admin
@@ -868,6 +875,7 @@ fn two_desktops_converge_through_a_push_neither_one_pulled_for() {
         token: alice_record.token.clone(),
         role: "member".to_string(),
         scope: Scope::Workspace(ws_id.clone()),
+        public: false,
     };
     let ticket = admin.issue_invite(&invite_request, "kunki", NOW).unwrap();
     let bob_welcome = admin

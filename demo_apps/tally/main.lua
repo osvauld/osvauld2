@@ -57,7 +57,7 @@ return function()
 		center = true,
 		fill = C.bg,
 		gap = 18,
-		ui.text({ "TALLY", color = C.muted, font_size = 12, no_wrap = true }),
+		ui.text({ "TALLY", id = "title", color = C.muted, font_size = 12, no_wrap = true }),
 		ui.col({
 			w = 220,
 			h = 180,
@@ -65,7 +65,7 @@ return function()
 			center = true,
 			fill = C.card,
 			stroke = { 1, C.line },
-			ui.text({ tostring(n), color = C.text, font_size = 72, no_wrap = true }),
+			ui.text({ tostring(n), id = "count", color = C.text, font_size = 72, no_wrap = true }),
 		}),
 		ui.row({
 			gap = 12,

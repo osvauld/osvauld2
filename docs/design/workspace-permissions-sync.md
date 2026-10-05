@@ -608,7 +608,7 @@ must persist/stop cleanly independently of UI tab lifetime.
 ## 10. Work to do
 
 These are work packages, **not permission to implement them wholesale**. Break each into
-reviewed ~100-line code slices with tests, following the repository process.
+a test-first plan doc, following the repository process (`AGENTS.md`).
 
 1. **Permission contract through real apps.** Specify shop submission/fulfilment, booking
    acceptance, private chat, and shared board operations. Pin resource bindings, allowed

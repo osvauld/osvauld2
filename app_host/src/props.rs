@@ -212,12 +212,14 @@ impl<M: 'static> Registry<M> {
             let key = cx.register("on_hover", v)?;
             let to_msg = cx.to_msg.clone();
             Ok(el.on_hover(key.id.to_string(), move |e| {
-                to_msg(LuaMsg::CallPhase(
+                to_msg(LuaMsg::CallHover(
                     key.clone(),
                     e.phase.as_str(),
                     e.pos.0,
                     e.pos.1,
                     e.shape.clone().into(),
+                    e.down,
+                    e.look.clone(),
                 ))
             }))
         }),
@@ -295,6 +297,26 @@ impl<M: 'static> Registry<M> {
         prop!(scale, f32),
         prop!(zoomable),
         prop!(zoom_x),
+        // A name the app's cursor knows, or a `gfx.frame` the element supplies to be drawn.
+        (
+            "cursor",
+            (|el, v| {
+                let look = match v {
+                    Value::String(s) => runtime::CursorLook::Named(s.to_str()?.as_ref().into()),
+                    Value::UserData(u) => match u.borrow::<crate::gfx::LuaFrame>() {
+                        Ok(f) => runtime::CursorLook::Visual(f.0.clone()),
+                        Err(_) => return Err(want(v, "a look name or a gfx frame")),
+                    },
+                    _ => return Err(want(v, "a look name or a gfx frame")),
+                };
+                Ok(el.cursor(look))
+            }) as Apply<M>,
+        ),
+        // `false` hides the system pointer over this element; the app draws its own there.
+        (
+            "system_cursor",
+            (|el, v| Ok(if bool::from_prop(v)? { el } else { el.hide_system_cursor() })) as Apply<M>,
+        ),
         // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
         prop!(scroll_x),
         prop!(scroll_y),

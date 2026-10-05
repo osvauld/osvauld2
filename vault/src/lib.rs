@@ -370,6 +370,25 @@ impl Vault {
         self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
 
+    /// The names of an item's state docs, sorted. Names only — nothing is unsealed.
+    pub fn doc_names(&self, ws_id: &str, item_id: &str) -> Result<Vec<String>, VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        let prefix = item::doc_key(ws_id, item_id, "");
+        let mut names: Vec<String> = active
+            .store
+            .list_prefixed(&prefix)?
+            .iter()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
     /// Same check as [`get_src`](Self::get_src), for the same reason, plus the `name` check
     /// this already had.
     pub fn put_doc(

@@ -74,13 +74,13 @@ impl<A: App> Headless<A> {
     pub fn press(&mut self) {
         self.frame();
         self.runner.clock += POINTER;
-        self.runner.click();
+        self.runner.button(true);
     }
 
     pub fn release(&mut self) {
         self.frame();
         self.runner.clock += POINTER;
-        self.runner.on_cursor_release();
+        self.runner.button(false);
     }
 
     /// Press and release without travelling: a click, not a drag.

@@ -9,11 +9,14 @@ members = [
   "runtime",
   "android_app",
   "app_host",
+  "world",
   "lua_tree",
   "osvauld-rpc",
   "workspace",
   "kunki",
   "courier",
+  "voice",
+  "search",
 ]
 
 [workspace.package]

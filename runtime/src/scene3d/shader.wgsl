@@ -36,7 +36,11 @@ struct Out {
 @vertex
 fn vs_main(input: In) -> Out {
     let model = mat4x4<f32>(input.model_0, input.model_1, input.model_2, input.model_3);
-    let world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    // Cofactors give inverse-transpose normal direction after normalization (positive scales).
+    let world_normal = normalize(
+        cross(input.model_1.xyz, input.model_2.xyz) * input.normal.x
+        + cross(input.model_2.xyz, input.model_0.xyz) * input.normal.y
+        + cross(input.model_0.xyz, input.model_1.xyz) * input.normal.z);
     let light = normalize(vec3<f32>(0.4, 0.8, 0.6));
     let shade = 0.3 + 0.7 * max(dot(world_normal, light), 0.0);
     // Raw, unwarped face UV — fs_main fits the actual shaped text into it below, preserving its

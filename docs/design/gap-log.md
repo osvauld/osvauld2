@@ -54,6 +54,15 @@ is a pomodoro that quietly stops counting.
 **What it would take:** `six-apps.md` §4 — declared deadlines serviced by `ControlFlow::WaitUntil`
 (`lib.rs:1452` is a bare `Wait`). This is the entry that plan is parked behind.
 
+> **Recurred, 2026-10-03 — table hockey (`demo_apps/hockey`).** "Put the puck back after a
+> second and a half" had no wake-at-T either; the faceoff used a once clip as a timer
+> (`on_clip_end`). Worlds get `world(id):after(secs, name)` → `on_timer`: the deadline lives in
+> Rust on the world's frame clock — the `elapsed` its clips already play against — so Lua runs
+> once, at the moment, and a handler never needs to read the clock (it also sidesteps 1.1 there).
+> It is world-only: it rides the world's ticks, which run only while the world is on screen, and
+> it is not `WaitUntil`. An app-wide `after` that pomodoro could use instead of `on_frame` and
+> `S.pending` is still this entry, open.
+
 ### 1.3 The guide contradicts itself on `on_frame` — **wrong shape** (doc)
 
 **Wanted:** to know `on_frame`'s signature.

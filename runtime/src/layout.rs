@@ -410,6 +410,21 @@ fn emit<M>(
     }
 }
 
+/// Each `on_tile` slot's id and laid-out size, in paint order.
+pub(crate) fn tile_sizes<M>(placed: &[Placed<M>]) -> Vec<(String, (f32, f32))> {
+    placed
+        .iter()
+        .filter(|p| p.appearance.tile.is_some())
+        .filter_map(|p| {
+            let (id, _) = p.behaviour.on_tile.as_ref()?;
+            Some((
+                id.to_string(),
+                (p.rect.width() as f32, p.rect.height() as f32),
+            ))
+        })
+        .collect()
+}
+
 /// Lay out `root` within `viewport` (logical points); return painted nodes in paint order
 /// (parents before children).
 pub(crate) fn solve<M>(

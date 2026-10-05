@@ -70,6 +70,14 @@ pub struct EditFileResult {
     pub activation: SourceActivation,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuaTestResult {
+    pub name: String,
+    pub ok: bool,
+    pub frames: u32,
+    pub failure: Option<String>,
+}
+
 /// A passphrase on the wire. Serialises as a plain string (the protocol's shape) but never
 /// prints: `Debug` is redacted, so request logs and test failures cannot leak credentials.
 #[derive(Clone, Serialize, Deserialize)]
@@ -149,6 +157,13 @@ pub enum Request {
     OpenItem {
         item_id: String,
     },
+    /// Show an open item's app beside the focused one, both live. A stand-in for the chrome's
+    /// own layout until the Lua chrome owns tiling.
+    SplitWith {
+        item_id: String,
+    },
+    /// Back to the focused app alone. The other one keeps running, unseen.
+    Unsplit,
 
     // ── node (kunki) ────────────────────────────────────────────────────────────
     /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told
@@ -216,6 +231,11 @@ pub enum Request {
     },
 
     // ── app senses ──────────────────────────────────────────────────────────────
+    /// Run app-shipped Lua tests (`tests/*.lua`) from source, in a separate test VM.
+    RunTests {
+        item_id: String,
+        filter: Option<String>,
+    },
     /// The running app's `El` tree as JSON, no rects. The `id`s in it are `Click`'s targets.
     DumpTree {
         item_id: String,
@@ -287,6 +307,17 @@ pub enum Request {
         to: (f32, f32),
         steps: usize,
     },
+    /// Move to `(x, y)`, then one wheel event of logical `(dx, dy)`. With `ctrl` it is a
+    /// `zoomable`'s zoom, `1.1^(dy/30)` around the pointer; without, a scroll (or a pan once no
+    /// scroller is left to take it). Answers like `PointerMove`. Offscreen only.
+    Wheel {
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+        #[serde(default)]
+        ctrl: bool,
+    },
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,
@@ -308,6 +339,17 @@ pub enum Request {
     /// seeding/escape-hatch need ever becomes real, re-spec it against that need.)
     AppDataGet {
         item_id: String,
+    },
+
+    // ── search (docs/design/search.md) ──────────────────────────────────────────
+    /// Query an open item's index, exactly as its `search.query` would. Answers
+    /// `{ hits: [{doc, id, score, snippet}], fields_runs }` — `fields_runs` counts `index.lua`
+    /// calls since the item was opened, so a caller can tell indexing that re-ran from indexing
+    /// that did not.
+    Search {
+        item_id: String,
+        query: String,
+        limit: Option<usize>,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]

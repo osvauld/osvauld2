@@ -137,6 +137,9 @@ class Bridge:
     def reload_item(self, item_id: str) -> str:
         return self.request("ReloadItem", item_id=item_id)
 
+    def run_tests(self, item_id: str, filter: str | None = None) -> list:
+        return self.request("RunTests", item_id=item_id, filter=filter)
+
     def dump_tree(self, item_id: str) -> dict:
         return self.request("DumpTree", item_id=item_id)
 
@@ -148,6 +151,12 @@ class Bridge:
 
     def key(self, item_id: str, el_id: str, key: str) -> str:
         return self.request("Key", item_id=item_id, el_id=el_id, key=key)
+
+    def search(self, item_id: str, query: str, limit: int = 20) -> dict:
+        """The item's search index: {"hits": [{doc, id, score, snippet}], "fields_runs": n}.
+        `fields_runs` counts `index.lua` calls since the shell started — a restart that re-ran
+        them all would show it."""
+        return self.request("Search", item_id=item_id, query=query, limit=limit)
 
     def read_data(self, item_id: str) -> dict:
         """Every open runtime-data doc as {name: deep JSON} — live, pre-flush."""
@@ -203,6 +212,10 @@ class Bridge:
 
     def drag(self, frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> list[dict]:
         return self.request("Drag", **{"from": list(frm), "to": list(to), "steps": steps})["rects"]
+
+    def wheel(self, x: float, y: float, dx: float, dy: float, ctrl: bool = False) -> list[dict]:
+        """Wheel at a point. `ctrl` zooms a `zoomable` by 1.1^(dy/30) around it."""
+        return self.request("Wheel", x=x, y=y, dx=dx, dy=dy, ctrl=ctrl)["rects"]
 
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)

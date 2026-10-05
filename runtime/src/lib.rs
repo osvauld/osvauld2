@@ -9,6 +9,7 @@ mod anim;
 mod android_insets;
 pub mod coords;
 mod drag;
+pub mod drawing;
 mod editor;
 mod el;
 pub mod frame;
@@ -23,6 +24,7 @@ pub mod scene3d;
 mod scroll;
 mod state;
 mod text;
+mod tile;
 mod zoom;
 use crate::anim::{Driver, Spring, Transition};
 use crate::coords::{NodePoint, ScreenPoint};
@@ -38,6 +40,7 @@ use crate::state::Slot;
 use crate::zoom::Zoom;
 use editor::Field;
 use scroll::*;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Fn;
 use std::sync::Arc;
@@ -57,14 +60,15 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 pub use drag::{DragEvent, DragPhase, Mods};
 pub use el::{
-    Action, Anchor, At, El, ElInfo, FrameTick, KeyInput, Placement, PlacementAlign,
-    PlacementSide, WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input,
+    Action, Anchor, At, El, ElInfo, FrameTick, KeyInput, Placement, PlacementAlign, PlacementSide,
+    WheelEvent, col, custom, frame, rich, row, scene3d, text, text_area, text_input, tile,
 };
 pub use headless::Headless;
-pub use hover::{HoverEvent, HoverPhase};
-pub use render::{CapturedImage, Render};
+pub use hover::{CursorLook, HoverEvent, HoverPhase};
+pub use render::{CapturedImage, Render, SceneView3d};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
+pub use tile::{Tile, TileEvent, TileFrame, TileInput};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -121,6 +125,13 @@ pub enum DriverOp {
         from: (f32, f32),
         to: (f32, f32),
         steps: usize,
+    },
+    /// Move to `at`, then one wheel event of logical `delta` — with `ctrl` held for this event
+    /// only, which is a `zoomable`'s zoom: `1.1^(dy/30)` around the pointer.
+    Wheel {
+        at: (f32, f32),
+        delta: (f32, f32),
+        ctrl: bool,
     },
 }
 
@@ -187,6 +198,13 @@ pub trait App {
     }
     fn reload(&mut self) {}
 
+    /// Advance app-owned native simulation before a normal frame's view. Time is absolute
+    /// monotonic Runner seconds; the app owns fixed-step planning and catch-up limits.
+    /// Never called for live/custom capture frames. Return true to request another normal frame.
+    fn advance_simulation(&mut self, _elapsed: f64) -> bool {
+        false
+    }
+
     /// Take a pending screenshot request, if any. The default keeps non-automation apps unaware
     /// of capture; implementations must remove the request when returning it.
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Self::Msg>> {
@@ -197,6 +215,23 @@ pub trait App {
     /// keeps non-automation apps unaware of it, and an implementation must remove what it returns.
     fn take_driver(&mut self) -> Option<DriverRequest<Self::Msg>> {
         None
+    }
+
+    /// A message that arrived on its own — a wall-clock timer, a doc subscriber, the network —
+    /// rather than from input or the driver. Offscreen it paints but does not move the virtual
+    /// clock, so time stays exactly what the driver asked for.
+    fn is_ambient(&self, _msg: &Self::Msg) -> bool {
+        false
+    }
+
+    /// Before each frame lays out, with the time it is drawn at. A host of tiles fetches their
+    /// latest frames here — offscreen it waits for them, which keeps a driven run exact.
+    fn before_frame(&mut self, _now: f64) {}
+
+    /// The `on_tile` slots laid out at a new size, by id. `true` lays the frame out again, for a
+    /// host that resized a tile and already has its frame at that size.
+    fn tiles_sized(&mut self, _sizes: &[(String, (f32, f32))]) -> bool {
+        false
     }
 }
 
@@ -280,6 +315,19 @@ struct Runner<A: App> {
     start: Instant,
     /// Offscreen time, in seconds, advanced only by `Headless`. Unused with a window.
     clock: f64,
+    /// `now` reads `clock` rather than the OS. Offscreen, except for a `Tile`.
+    virtual_clock: bool,
+    /// A frame is owed. The window has its own flag; this one is for a `Tile`'s host.
+    wants_frame: Cell<bool>,
+    /// The `tile` element the pointer is over, the one holding a press, and the one with the
+    /// keyboard.
+    tile_over: Option<Id>,
+    tile_grab: Option<Id>,
+    tile_keys: Option<Id>,
+    /// What `tiles_sized` was last told.
+    tile_sizes: Vec<(String, (f32, f32))>,
+    /// The last frame's 3D viewport — what a tile hands its host with its Scene.
+    view3d: Option<render::SceneView3d>,
     last_frame: Option<f64>,
     /// When the pointer event now being processed arrived, on the same monotonic clock as
     /// `start`. Stamped once per event so everything one event fires shares it.
@@ -289,6 +337,8 @@ struct Runner<A: App> {
     held_owner: Option<Id>,
     pressed: Option<(Geometry, Option<Id>, Click<A::Msg>, PickContent)>,
     hovered: Hovered,
+    /// The primary button is held, wherever it was pressed. `pressed` is only a click target.
+    button_down: bool,
 }
 
 /// A frame an element draws, and the element-local origin it is drawn at — everything a pointer
@@ -379,6 +429,9 @@ struct Hits<M> {
     esc: Vec<(Id, M)>,
     bar: Vec<Thumb>,
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
+    no_cursor: Vec<Geometry>,
+    looks: Vec<(Geometry, CursorLook)>,
+    tile: Vec<(Geometry, Id, Box<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -398,6 +451,9 @@ impl<M> Default for Hits<M> {
             esc: Vec::new(),
             bar: Vec::new(),
             zoom: Vec::new(),
+            no_cursor: Vec::new(),
+            looks: Vec::new(),
+            tile: Vec::new(),
         }
     }
 }
@@ -434,6 +490,9 @@ impl<M> Hits<M> {
             esc,
             bar,
             zoom,
+            no_cursor,
+            looks,
+            tile,
         } = self;
         click.clear();
         input.clear();
@@ -449,6 +508,9 @@ impl<M> Hits<M> {
         esc.clear();
         bar.clear();
         zoom.clear();
+        no_cursor.clear();
+        looks.clear();
+        tile.clear();
     }
 }
 
@@ -476,7 +538,8 @@ impl<A: App> Runner<A> {
             );
         }
         let pointer_op = matches!(&op, DriverOp::PointerMove(_)
-            | DriverOp::PointerPress | DriverOp::PointerRelease | DriverOp::Drag { .. });
+            | DriverOp::PointerPress | DriverOp::PointerRelease | DriverOp::Drag { .. }
+            | DriverOp::Wheel { .. });
         let mut rects = None;
         let frames = match op {
             DriverOp::Rects => {
@@ -512,16 +575,36 @@ impl<A: App> Runner<A> {
                 self.pointer_move(to);
                 1
             }
+            DriverOp::Wheel { at, delta, ctrl } => {
+                if !(delta.0.is_finite() && delta.1.is_finite()) {
+                    return Err("wheel wants a finite delta".into());
+                }
+                // The move painted, so the zoom regions are current: one op, one pointer step —
+                // the same price as a move, which is what lets a recorder spread a zoom per frame.
+                self.pointer_move(at);
+                let held = self.modifiers;
+                if ctrl {
+                    self.modifiers = held | ModifiersState::CONTROL;
+                }
+                // Lines, not pixels: a pixel delta is divided by the render scale, and the caller
+                // speaks logical points.
+                self.on_wheel_moved(MouseScrollDelta::LineDelta(
+                    delta.0 / LINE_STEP,
+                    delta.1 / LINE_STEP,
+                ));
+                self.modifiers = held;
+                1
+            }
             DriverOp::PointerPress => {
                 self.tick();
                 self.clock += POINTER;
-                self.click();
+                self.button(true);
                 1
             }
             DriverOp::PointerRelease => {
                 self.tick();
                 self.clock += POINTER;
-                self.on_cursor_release();
+                self.button(false);
                 1
             }
             DriverOp::Keyboard(event) => {
@@ -545,14 +628,14 @@ impl<A: App> Runner<A> {
                 self.pointer_move(from);
                 self.tick();
                 self.clock += POINTER;
-                self.click();
+                self.button(true);
                 for i in 1..=steps {
                     let f = i as f32 / steps as f32;
                     self.pointer_move((from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f));
                 }
                 self.tick();
                 self.clock += POINTER;
-                self.on_cursor_release();
+                self.button(false);
                 (steps + 3) as u32
             }
         };
@@ -646,6 +729,29 @@ impl<A: App> Runner<A> {
                 }),
             }
         }
+        // A tile's elements, from its last frame, moved into this window and cut to the slot.
+        for (g, _, _, rects) in &self.hits.tile {
+            let (Some(visible), origin, k) = (
+                g.visible_rect_kurbo(),
+                g.screen_rect_kurbo().origin(),
+                g.scale() as f64,
+            ) else {
+                continue;
+            };
+            for r in rects.iter() {
+                let (x, y) = (origin.x + r.x as f64 * k, origin.y + r.y as f64 * k);
+                let at = Rect::new(x, y, x + r.w as f64 * k, y + r.h as f64 * k).intersect(visible);
+                if at.width() > 0.0 && at.height() > 0.0 {
+                    out.push(ElRect {
+                        x: at.x0 as f32,
+                        y: at.y0 as f32,
+                        w: at.width() as f32,
+                        h: at.height() as f32,
+                        ..r.clone()
+                    });
+                }
+            }
+        }
         for e in &mut out {
             e.hits.sort_unstable();
         }
@@ -682,25 +788,32 @@ impl<A: App> Runner<A> {
         } else {
             surface_transform
         };
+        let simulation_active = screenshot.is_none() && self.app.advance_simulation(now);
         let clear = self.app.clear();
+        self.wants_frame.set(false);
         self.scene.reset();
-        let app = &self.app;
-        let pointer = self.pointer;
-        let hits = &mut self.hits;
-        let store = &mut self.store;
-        let focused = &mut self.focused;
-        let pressed = self
-            .pressed
-            .as_ref()
-            .map(|(geometry, id, _, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
-        let text = &mut self.text;
-        let debug = self.debug;
-        let mut needs_redraw = false;
-        let mut any_in_flight = false;
+        if self.render.is_none() {
+            // A tile's host composites this scene over its own, so it carries its background.
+            self.scene.fill(
+                vello::peniko::Fill::NonZero,
+                Affine::IDENTITY,
+                clear,
+                None,
+                &Rect::new(0.0, 0.0, viewport.0 as f64, viewport.1 as f64),
+            );
+        }
+        self.app.before_frame(now);
         let safe = usable_rect(viewport, surface_scale,
             if custom_capture { [0; 4] } else { self.content_insets });
-        let mut placed = layout::solve(app.view(), text,
-            (safe.width() as f32, safe.height() as f32), store);
+        let layout_viewport = (safe.width() as f32, safe.height() as f32);
+        let mut placed = layout::solve(self.app.view(), &mut self.text, layout_viewport, &self.store);
+        let sizes = layout::tile_sizes(&placed);
+        if sizes != self.tile_sizes {
+            self.tile_sizes = sizes;
+            if self.app.tiles_sized(&self.tile_sizes) {
+                placed = layout::solve(self.app.view(), &mut self.text, layout_viewport, &self.store);
+            }
+        }
         if self.content_insets != [0; 4] && !custom_capture {
             let origin = Affine::translate((safe.x0, safe.y0));
             for p in &mut placed {
@@ -714,6 +827,18 @@ impl<A: App> Runner<A> {
             }));
             placed.push(layout::clip_marker(PlacedKind::PopClip));
         }
+        let pointer = self.pointer;
+        let hits = &mut self.hits;
+        let store = &mut self.store;
+        let focused = &mut self.focused;
+        let pressed = self
+            .pressed
+            .as_ref()
+            .map(|(geometry, id, _, _)| (geometry.screen_rect_kurbo(), id.as_ref()));
+        let text = &mut self.text;
+        let debug = self.debug;
+        let mut needs_redraw = false;
+        let mut any_in_flight = simulation_active;
         let prev_inputs: HashSet<Id> = hits.input_maps.iter().map(|(id, _)| id.clone()).collect();
         let previous_key = hits.key.pop();
         hits.clear();
@@ -745,11 +870,34 @@ impl<A: App> Runner<A> {
                     p.rect.x1 - p.pad.x1,
                     p.rect.y1 - p.pad.y1,
                 );
-                let rect = p.transform.transform_rect_bbox(content).intersect(visible);
-                if rect.width() > 0.0 && rect.height() > 0.0 {
+                let rect = p.transform.transform_rect_bbox(content);
+                let clip = rect.intersect(visible);
+                if clip.width() > 0.0 && clip.height() > 0.0 {
                     scene3d = Some(render::SceneView3d {
                         scene: scene.clone(),
                         rect,
+                        clip,
+                    });
+                }
+            }
+            // A tile's 3D view, from its coordinates into this frame and cut to its slot. Still
+            // one viewport a frame: the first one placed wins.
+            if scene3d.is_none()
+                && let (Some(view), Some(visible)) = (
+                    p.appearance.tile.as_ref().and_then(|t| t.view3d.as_ref()),
+                    visible,
+                )
+            {
+                let to_here = p.transform * Affine::translate((p.rect.x0, p.rect.y0));
+                let clip = to_here
+                    .transform_rect_bbox(view.clip)
+                    .intersect(visible)
+                    .intersect(p.transform.transform_rect_bbox(p.rect));
+                if clip.width() > 0.0 && clip.height() > 0.0 {
+                    scene3d = Some(render::SceneView3d {
+                        scene: view.scene.clone(),
+                        rect: to_here.transform_rect_bbox(view.rect),
+                        clip,
                     });
                 }
             }
@@ -765,6 +913,13 @@ impl<A: App> Runner<A> {
                 if let Some(hit_rect) = visible {
                     hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
                 }
+            }
+
+            if p.behaviour.hide_cursor {
+                hits.no_cursor.push(geometry);
+            }
+            if let Some(look) = &p.behaviour.cursor {
+                hits.looks.push((geometry, look.clone()));
             }
 
             if p.behaviour.press_scale.is_some()
@@ -839,6 +994,13 @@ impl<A: App> Runner<A> {
                 && visible.is_some()
             {
                 hits.wheel.push((geometry, id, handler));
+            }
+            if let Some((id, handler)) = p.behaviour.on_tile.take()
+                && visible.is_some()
+            {
+                let rects = p.appearance.tile.as_ref().map(|f| f.rects.clone());
+                hits.tile
+                    .push((geometry, id, handler, rects.unwrap_or_else(|| Arc::new([]))));
             }
             if let Some((id, handler)) = p.behaviour.on_key.take()
                 && visible.is_some()
@@ -995,6 +1157,7 @@ impl<A: App> Runner<A> {
         if debug {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
+        self.view3d = scene3d.clone();
         let captured = if self.render.is_none() {
             None // nothing to present to, and a screenshot request just goes unanswered
         } else if custom_capture {
@@ -1081,10 +1244,27 @@ impl<A: App> Runner<A> {
     }
 
     fn redraw(&self) {
+        self.wants_frame.set(true);
         if let Some(render) = &self.render {
             render.request_redraw();
         }
     }
+    /// Press or release, then tell hover listeners: the button state is part of what they see.
+    fn button(&mut self, down: bool) {
+        self.button_down = down;
+        self.route_tile_button(down);
+        if down {
+            self.click();
+        } else {
+            self.on_cursor_release();
+        }
+        if let Some(at) = self.pointer
+            && self.hover(at, true)
+        {
+            self.redraw();
+        }
+    }
+
     /// Hit-test a press against the last frame's regions; topmost (last-painted) wins.
     fn click(&mut self) {
         self.event_at = self.now();
@@ -1203,9 +1383,10 @@ impl<A: App> Runner<A> {
     /// advanced, so a headless gesture is timed the same on every machine and a test that measures
     /// a fling is not secretly a benchmark of the machine running it.
     fn now(&self) -> f64 {
-        match self.offscreen {
-            None => self.start.elapsed().as_secs_f64(),
-            Some(_) => self.clock,
+        if self.virtual_clock {
+            self.clock
+        } else {
+            self.start.elapsed().as_secs_f64()
         }
     }
 
@@ -1223,8 +1404,16 @@ impl<A: App> Runner<A> {
                 (local, shape_at(shapes, local))
             })
             .collect();
+        let down = self.button_down;
+        // Topmost first, the hit-test order: the last painted look containing the pointer.
+        let look = in_window
+            .then(|| self.hits.looks.iter().rev().find(|(g, _)| g.contains(p)))
+            .flatten()
+            .map(|(_, l)| l.clone());
         let phases = self.hovered.step(
             (px, py),
+            down,
+            look.as_ref(),
             hover
                 .iter()
                 .zip(&at)
@@ -1239,6 +1428,8 @@ impl<A: App> Runner<A> {
                     phase: phase?,
                     pos: (local.x as f32, local.y as f32),
                     shape: hit,
+                    down,
+                    look: look.clone(),
                 }))
             })
             .collect();
@@ -1251,6 +1442,10 @@ impl<A: App> Runner<A> {
 
     fn right_click(&mut self) {
         let Some((px, py)) = self.pointer else { return };
+        if let Some((id, _)) = self.tile_at((px, py)) {
+            self.to_tile(&id, TileInput::RightClick);
+            return;
+        }
         let p = vello::kurbo::Point::new(px as f64, py as f64);
         if let Some((_, handler)) = self.hits.context.iter().rev().find(|(r, _)| r.contains(p)) {
             let msg = handler((px, py));
@@ -1331,7 +1526,7 @@ impl<A: App> Runner<A> {
         scroll: &Scroll,
         (spx, spy): &(f32, f32),
     ) {
-        if let Some(r) = &self.render {
+        {
             let desired = match thumb.axis {
                 Axis::X => scroll.x + (lx - spx) * thumb.gain,
                 Axis::Y => scroll.y + (ly - spy) * thumb.gain,
@@ -1344,7 +1539,7 @@ impl<A: App> Runner<A> {
                 thumb.viewport,
                 thumb.content,
             );
-            r.request_redraw();
+            self.redraw();
         }
     }
     fn on_drag_move(
@@ -1489,14 +1684,14 @@ impl<A: App> Runner<A> {
     }
 
     fn clear_touch(&mut self) {
+        if let Some(id) = self.tile_grab.take() {
+            self.to_tile(&id, TileInput::Cancel);
+        }
+        self.button_down = false;
         self.touch_id = None;
         self.drag = None;
         self.pressed = None;
-        if let Some(at) = self.pointer {
-            self.hover(at, false);
-        }
-        self.pointer = None;
-        self.redraw();
+        self.on_cursor_left();
     }
 
     fn on_touch(&mut self, phase: TouchPhase, id: u64, position: PhysicalPosition<f64>) {
@@ -1508,12 +1703,12 @@ impl<A: App> Runner<A> {
                 // Only the first finger owns capture; other fingers never become pinch or clicks.
                 self.touch_id = Some(id);
                 self.on_cursor_moved(position);
-                self.click();
+                self.button(true);
             }
             TouchPhase::Moved if self.touch_id == Some(id) => self.on_cursor_moved(position),
             TouchPhase::Ended if self.touch_id == Some(id) => {
                 self.on_cursor_moved(position);
-                self.on_cursor_release();
+                self.button(false);
                 self.clear_touch();
             }
             TouchPhase::Cancelled if self.touch_id == Some(id) => self.clear_touch(),
@@ -1528,6 +1723,7 @@ impl<A: App> Runner<A> {
         let lx = (x / scale) as f32;
         let ly = (y / scale) as f32;
         self.pointer = Some((lx, ly));
+        self.route_tile_move((lx, ly));
         let p = vello::kurbo::Point::new(lx as f64, ly as f64);
         let drag = self.drag.clone();
         //if its a scroll drag event return after scroll drag processed.
@@ -1647,24 +1843,29 @@ impl<A: App> Runner<A> {
         }
         self.hover((lx, ly), true);
 
-        let over_input = self
-            .hits
-            .input
-            .iter()
-            .any(|(geometry, _, _)| geometry.contains(p));
         // Repaint so hover follows the pointer (only while it's actually moving).
+        let icon = self.cursor_icon(p);
         if let Some(r) = &self.render {
-            r.set_cursor(if self.drag.as_ref().is_some_and(Capture::is_grab) {
-                CursorIcon::Grabbing
-            } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
-                CursorIcon::Grab
-            } else if over_input {
-                CursorIcon::Text
-            } else {
-                CursorIcon::Default
-            });
-            r.request_redraw();
+            r.set_cursor(icon);
         }
+        self.redraw();
+    }
+
+    /// The system pointer for a point, or `None` where the app draws its own.
+    fn cursor_icon(&self, p: Point) -> Option<CursorIcon> {
+        if self.hits.no_cursor.iter().any(|g| g.contains(p)) {
+            return None;
+        }
+        let over_input = self.hits.input.iter().any(|(g, _, _)| g.contains(p));
+        Some(if self.drag.as_ref().is_some_and(Capture::is_grab) {
+            CursorIcon::Grabbing
+        } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
+            CursorIcon::Grab
+        } else if over_input {
+            CursorIcon::Text
+        } else {
+            CursorIcon::Default
+        })
     }
     fn on_wheel_moved(&mut self, delta: MouseScrollDelta) {
         let Some((px, py)) = self.pointer else { return };
@@ -1680,6 +1881,10 @@ impl<A: App> Runner<A> {
                 ((pos.x / scale) as f32, (pos.y / scale) as f32)
             }
         };
+        if let Some((id, _)) = self.tile_at((px, py)) {
+            self.to_tile(&id, TileInput::Wheel(dx, dy));
+            return;
+        }
         if let Some(msg) = self
             .hits
             .wheel
@@ -1774,6 +1979,10 @@ impl<A: App> Runner<A> {
     }
 
     fn on_game_key(&mut self, event: KeyInput) {
+        if let Some(id) = self.keyboard_tile() {
+            self.to_tile(&id, TileInput::GameKey(event));
+            return;
+        }
         if self.focused.get().is_some() {
             return;
         }
@@ -1798,6 +2007,10 @@ impl<A: App> Runner<A> {
 
     fn handle_input(&mut self, mut event: KeyEvent) {
         event.logical_key = editing_key(&event.physical_key, &event.logical_key);
+        if let Some(id) = self.keyboard_tile() {
+            self.to_tile(&id, TileInput::Key(event));
+            return;
+        }
         let pressed = event.state == ElementState::Pressed;
         let (mut enter_pressed, mut esc_pressed, mut f12_pressed, mut f5_pressed) =
             (false, false, false, false);
@@ -1941,6 +2154,10 @@ impl<A: App> Runner<A> {
     }
 
     fn suspend(&mut self) {
+        self.clear_touch();
+        if let Some(id) = self.tile_keys.take() {
+            self.to_tile(&id, TileInput::Blur);
+        }
         // Android requires the native surface to be released before this callback returns.
         self.render = None;
         self.ime_allowed = false;
@@ -1949,13 +2166,6 @@ impl<A: App> Runner<A> {
         #[cfg(all(target_os = "android", debug_assertions))]
         { self.android_content_probe = None; }
         self.cancel_keys();
-        if let Some(at) = self.pointer {
-            self.hover(at, false);
-        }
-        self.pointer = None;
-        self.touch_id = None;
-        self.drag = None;
-        self.pressed = None;
         self.modifiers = ModifiersState::empty();
         #[cfg(target_os = "android")]
         self.hits.invalidate_geometry();
@@ -1964,6 +2174,138 @@ impl<A: App> Runner<A> {
         self.last_frame = None;
         if let Some(field) = self.focused.focused_field(&mut self.store) {
             field.on_ime_disabled(&mut self.text);
+        }
+    }
+
+    fn on_cursor_left(&mut self) {
+        if let Some(id) = self.tile_over.take() {
+            self.to_tile(&id, TileInput::Leave);
+        }
+        if let Some(at) = self.pointer {
+            self.hover(at, false);
+        }
+        self.pointer = None;
+        self.redraw();
+    }
+
+    fn on_ime(&mut self, ime: Ime) {
+        if let Some(id) = self.keyboard_tile() {
+            self.to_tile(&id, TileInput::Ime(ime));
+            return;
+        }
+        match ime {
+            Ime::Enabled => {}
+            Ime::Preedit(s, cur) => {
+                if let Some(field) = self.focused.focused_field(&mut self.store) {
+                    field.on_ime(&s, cur, &mut self.text);
+                    self.redraw();
+                }
+            }
+            Ime::Commit(s) => {
+                if let Some(field) = self.focused.focused_field(&mut self.store) {
+                    field.on_ime_commit(&s, &mut self.text);
+                    self.notify_app_text();
+                }
+            }
+            Ime::Disabled => {
+                if let Some(field) = self.focused.focused_field(&mut self.store) {
+                    field.on_ime_disabled(&mut self.text);
+                }
+            }
+        }
+    }
+
+    /// The topmost tile under a window point, and that point in the tile's coordinates.
+    fn tile_at(&self, (x, y): (f32, f32)) -> Option<(Id, (f32, f32))> {
+        let p = Point::new(x as f64, y as f64);
+        let (g, id, _, _) = self
+            .hits
+            .tile
+            .iter()
+            .rev()
+            .find(|(g, _, _, _)| g.contains(p))?;
+        Some((id.clone(), Self::tile_local(g, (x, y))))
+    }
+
+    fn tile_local(g: &Geometry, (x, y): (f32, f32)) -> (f32, f32) {
+        let n = g.node_point(ScreenPoint::new(x as f64, y as f64));
+        (n.x as f32, n.y as f32)
+    }
+
+    /// The tile the keyboard goes to: the one last pressed while it is still on screen, else
+    /// the topmost one unless a field of this runtime's own has focus.
+    fn keyboard_tile(&mut self) -> Option<Id> {
+        if let Some(id) = &self.tile_keys
+            && !self.hits.tile.iter().any(|(_, i, _, _)| i == id)
+        {
+            self.tile_keys = None;
+        }
+        if self.tile_keys.is_some() {
+            return self.tile_keys.clone();
+        }
+        if self.focused.get().is_some() {
+            return None;
+        }
+        self.hits.tile.last().map(|(_, id, _, _)| id.clone())
+    }
+
+    fn to_tile(&mut self, id: &Id, input: TileInput) {
+        let at = self.now();
+        if let Some((_, _, handler, _)) = self.hits.tile.iter().find(|(_, i, _, _)| i == id) {
+            let msg = handler(TileEvent {
+                input,
+                at,
+                mods: self.modifiers,
+            });
+            self.app.update(msg);
+        }
+    }
+
+    /// A held press keeps the tile it began in, so a drag past the edge is still the tile's.
+    fn route_tile_move(&mut self, at: (f32, f32)) {
+        let under = self.tile_at(at);
+        let over = under.as_ref().map(|(id, _)| id.clone());
+        if self.tile_over != over
+            && let Some(left) = self.tile_over.take()
+            && Some(&left) != self.tile_grab.as_ref()
+        {
+            self.to_tile(&left, TileInput::Leave);
+        }
+        self.tile_over = over;
+        let target = match self.tile_grab.clone() {
+            Some(grab) => self
+                .hits
+                .tile
+                .iter()
+                .find(|(_, i, _, _)| *i == grab)
+                .map(|(g, _, _, _)| (grab.clone(), Self::tile_local(g, at))),
+            None => under,
+        };
+        if let Some((id, (x, y))) = target {
+            self.to_tile(&id, TileInput::Move(x, y));
+        }
+    }
+
+    fn route_tile_button(&mut self, down: bool) {
+        if !down {
+            if let Some(id) = self.tile_grab.take() {
+                self.to_tile(&id, TileInput::Button(false));
+            }
+            return;
+        }
+        let under = self
+            .pointer
+            .and_then(|at| self.tile_at(at))
+            .map(|(id, _)| id);
+        if self.tile_keys != under
+            && let Some(old) = self.tile_keys.take()
+        {
+            self.to_tile(&old, TileInput::Blur);
+        }
+        if let Some(id) = under {
+            self.to_tile(&id, TileInput::Button(true));
+            self.tile_keys = Some(id.clone());
+            self.tile_grab = Some(id);
         }
     }
 }
@@ -2042,18 +2384,12 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 self.on_cursor_moved(position);
                 // Physical → logical: hit-testing and rects are all in logical points.
             }
-            WindowEvent::CursorLeft { .. } if self.touch_id.is_none() => {
-                if let Some(at) = self.pointer {
-                    self.hover(at, false);
-                }
-                self.pointer = None;
-                self.redraw();
-            }
+            WindowEvent::CursorLeft { .. } if self.touch_id.is_none() => self.on_cursor_left(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if self.touch_id.is_none() => self.click(),
+            } if self.touch_id.is_none() => self.button(true),
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
                 state: ElementState::Pressed,
@@ -2064,7 +2400,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 button: MouseButton::Left,
                 ..
             } if self.touch_id.is_none() => {
-                self.on_cursor_release();
+                self.button(false);
             }
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
             WindowEvent::RedrawRequested => self.frame(),
@@ -2072,6 +2408,9 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 self.handle_input(event);
             }
             WindowEvent::Focused(false) => {
+                if let Some(id) = self.tile_keys.clone() {
+                    self.to_tile(&id, TileInput::Blur);
+                }
                 self.cancel_keys();
                 if self.touch_id.is_some() {
                     self.clear_touch();
@@ -2080,28 +2419,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
-            WindowEvent::Ime(ime) => {
-                match ime {
-                    Ime::Enabled => {}
-                    Ime::Preedit(s, cur) => {
-                        if let Some(field) = self.focused.focused_field(&mut self.store) {
-                            field.on_ime(&s, cur, &mut self.text);
-                            self.redraw();
-                        }
-                    }
-                    Ime::Commit(s) => {
-                        if let Some(field) = self.focused.focused_field(&mut self.store) {
-                            field.on_ime_commit(&s, &mut self.text);
-                            self.notify_app_text();
-                        }
-                    }
-                    Ime::Disabled => {
-                        if let Some(field) = self.focused.focused_field(&mut self.store) {
-                            field.on_ime_disabled(&mut self.text);
-                        }
-                    }
-                };
-            }
+            WindowEvent::Ime(ime) => self.on_ime(ime),
             WindowEvent::MouseWheel { delta, .. } if self.touch_id.is_none() => self.on_wheel_moved(delta),
             _ => {}
         }
@@ -2110,6 +2428,12 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         // Debug automation can wake the loop to get a fresh, unchanged geometry sample.
         #[cfg(all(target_os = "android", debug_assertions))]
         { self.android_content_probe = None; }
+        self.deliver(msg);
+    }
+}
+
+impl<A: App> Runner<A> {
+    fn deliver(&mut self, msg: A::Msg) {
         self.app.update(msg);
         // A driver op is answered here rather than by the app, because only this side owns the
         // clock and the frame. Draining after `update` is what lets the request that asked for it
@@ -2124,14 +2448,14 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         };
         // Windowed, `redraw` asks the compositor and the frame comes back as an event. Offscreen
         // there is nobody to ask, so the frame happens here instead — one delivered message, one
-        // frame, which keeps the bridge's "answering also repaints" contract intact. It is also
-        // the only thing that advances the virtual clock, so an app animates per request rather
-        // than per second: deterministic, and never free-running.
+        // frame, which keeps the bridge's "answering also repaints" contract intact. Ordinary
+        // requests are observations, not elapsed time: only explicit frame/advance and pointer
+        // drivers move the virtual clock. In particular screenshots cannot create catch-up debt.
         //
         // A driver op painted its own frames and is not owed another, or `Frame(n)` would be n+1.
         match self.offscreen {
             None => self.redraw(),
-            Some(_) if !drove => self.tick(),
+            Some(_) if !drove => self.frame(),
             Some(_) => {}
         }
     }
@@ -2219,10 +2543,18 @@ impl<A: App> Runner<A> {
             scene: Scene::new(),
             start: Instant::now(),
             clock: 0.0,
+            virtual_clock: offscreen.is_some(),
+            wants_frame: Cell::new(false),
+            tile_over: None,
+            tile_grab: None,
+            tile_keys: None,
+            tile_sizes: Vec::new(),
+            view3d: None,
             last_frame: None,
             event_at: 0.0,
             pressed: None,
             hovered: Hovered::default(),
+            button_down: false,
         }
     }
 }

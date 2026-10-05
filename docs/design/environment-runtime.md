@@ -1,8 +1,16 @@
 # Composable Environment runtime — design and handover
 
-Status: **planning baseline, 2026-09-12, revised 2026-09-20; the first bounded built-in-mesh 3D
-rendering slice is now built, but no retained World, ECS, physics binding, cloth, world picking,
-GLB or perspective UI is built.** The current runtime is a Lua-authored 2D interface/vector
+Status: **2026-10-01 branch `3d-math`, pending user acceptance: bounded Lua triangle meshes,
+triangle picking, retained ECS/Rapier3D bodies, native fixed-step dispatch and experimental
+`gfx.world3d` drop/reset binding are built. The general Environment API, cloth, GLB, projected
+UI and general 3D query APIs remain unbuilt. Authored/reset rotation, fixed zones, atomic
+pose/motion commands and paused resolved snapshots drive a playable Lua Marble
+Gates level with tilt, release, win/loss and retry. Independent agent-as-maker acceptance remains
+open.**
+
+*Earlier status (2026-09-12, revised 2026-09-20): the first bounded built-in-mesh 3D rendering
+slice was built, but no retained World, ECS, physics binding, cloth, world picking, GLB or
+perspective UI was built.* The current runtime is a Lua-authored 2D interface/vector
 substrate with one experimental 3D viewport. This document records the product direction
 and experimental gates. The owned-WGPU substrate decision is recorded in §10; proposed names and
 example Lua below are illustrative, not shipped contracts.
@@ -13,6 +21,13 @@ Companions:
 - [Visual substrate](visual-substrate.md) — prior Frame/math/physics research and history.
 - [View and interaction](view-and-interaction.md) — current 2D interaction model and history.
 - [Animation](animation.md) — retained UI transitions and the experimental Lua frame callback.
+
+**2026-10-01 branch extension:** [math-first 3D](3d-math.md) records `3d-math`'s bounded
+Lua triangle meshes, shared GPU resources, actual-mesh picking and raw mesh summaries.
+The wave-surface demo remains a static geometry proof. The later Marble Gates drop/reset demo
+adds app-local retained native worlds, reload preflight, scene omission/tab pause, raw physics
+inspection and observational captures; it does not implement projected UI or a general query
+API. The earlier baseline below is retained as history.
 
 ## 1. Product intent
 

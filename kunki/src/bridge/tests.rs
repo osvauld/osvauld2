@@ -127,6 +127,7 @@ fn an_invite_is_minted_and_redeemed_over_the_wire() {
         token,
         role: "member".to_string(),
         scope: Scope::Workspace("a".repeat(32)),
+        public: false,
     };
     let ticket: InviteTicket = match roundtrip(&vault, &Request::Invite(request)) {
         Response::Ok { result } => serde_json::from_value(result).unwrap(),
@@ -232,6 +233,7 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
                 token: alice_token.clone(),
                 role: "member".to_string(),
                 scope: Scope::Node,
+                public: false,
             },
             "kunki",
             now(),

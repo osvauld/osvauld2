@@ -27,7 +27,8 @@ headers. Check, in order:
    future sessions will follow it.
 5. **Status ledger.** If something landed, `docs/status.md` moves it from "not built" to
    "built". If it was cut, the reason is recorded.
-6. **Slice discipline.** The diff should be one reviewable idea (~100 lines of code). If it
-   is three ideas, say so — that is a SHOULD, not a style nit.
+6. **Test-first discipline.** The diff should be one step of its plan doc, and the end-to-end
+   test that step targets must exist and pass. Code without the test that drove it, or a step
+   that mixes three ideas, is a SHOULD, not a style nit.
 7. **Precedent.** Is this the first instance of a new pattern? If yes, the pattern should be
    named in a doc, or it will be reinvented inconsistently next month.
