@@ -15,6 +15,7 @@ members = [
   "workspace",
   "kunki",
   "courier",
+  "manifest",
   "voice",
   "search",
 ]

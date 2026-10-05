@@ -1,8 +1,8 @@
 -- MODEL
 --
 -- `chat` holds the channel list; each channel's messages live in their own doc,
--- `channel:<id>`, so one busy channel never makes another's doc large. Search spans them all
--- because `index.lua` matches `channel:*`.
+-- `channel/<id>`, so one busy channel never makes another's doc large. Search spans them all
+-- because `index.lua` matches `channel/*`.
 local M = { S = { channel = "general", editing = nil } }
 
 local chat = doc:open("chat")
@@ -18,7 +18,7 @@ local docs = {}
 function M.channel(cid)
 	local d = docs[cid]
 	if not d then
-		d = doc:open("channel:" .. cid)
+		d = doc:open("channel/" .. cid)
 		docs[cid] = d
 	end
 	return d
@@ -61,9 +61,9 @@ function M.delete(id)
 	end
 end
 
--- "channel:design" → "design"
+-- "channel/design" → "design"
 function M.channel_of(doc_name)
-	return doc_name:match("^channel:(.+)$")
+	return doc_name:match("^channel/(.+)$")
 end
 
 return M

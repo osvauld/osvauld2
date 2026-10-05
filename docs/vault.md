@@ -64,9 +64,15 @@ identity/label                    display name (plain)
 ws/<id>/meta                      WorkspaceMeta { id, name, created }
 ws/<ws>/item/<id>/meta            WorkspaceItem { id, ws, name, kind, created }
 ws/<ws>/item/<id>/src             an .app's source doc — a Loro snapshot, sealed
-ws/<ws>/item/<id>/doc/<name>      its state docs, name-keyed (no `/`, non-empty)
+ws/<ws>/item/<id>/doc/<name>      its state docs, name-keyed (a doc name, below)
 entry/<name>                       opaque caller-keyed records, sealed, uninterpreted
 ```
+
+A doc name is a path: `/`-separated segments of 1–128 bytes of `[A-Za-z0-9_:-]`, at most
+`workspace::MAX_DOC_NAME_LEN` (955) bytes, so `ws/<ws>/<item>/<name>` is always a valid resource
+address (`workspace::valid_doc_name`). `put_doc` and `get_doc` both refuse anything else.
+*Revised 2026-10-04 (group-chat-sync step 5):* names were any non-empty string without `/`;
+a name with `.`, a space or non-ASCII stored before then can no longer be read or written.
 
 redb allows a single handle per file: the active account's store is held open for the
 session; any other account is opened read-only, briefly, to read its label.

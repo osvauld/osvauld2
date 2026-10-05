@@ -161,7 +161,8 @@ Release `shell2`, offscreen, sprites bouncing via `on_frame`, wall time per driv
 Speed was not the limit; the budget was. `runtime/src/frame.rs` caps a frame at 65,536 path
 commands and 4,096 items, and instances count at their full expanded cost, so ~70 pixel sprites
 or ~4,000 single-item instances. The caps will be raised; the Lua/render cost split is not yet
-measured.
+measured. *Revised 2026-10-04:* the 4,096-item cap is gone. *Revised 2026-10-05:* so is the frame-wide
+path-command total; only one path's 65,536 commands are capped. The costs are measured by the [benchmark suite](perf-benchmarks.md).
 
 ## 7. Milestone — the chest
 

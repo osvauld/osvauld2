@@ -335,7 +335,9 @@ def main():
         after_objects = node(after, "maze-view")["scene3d"]["objects"]
         assert [o["id"] for o in after_objects] == [o["id"] for o in before_objects]
         for old, new in zip(before_objects, after_objects):
-            assert {k: v for k, v in old.items() if k != "mesh"} == {k: v for k, v in new.items() if k != "mesh"}
+            assert {k: v for k, v in old.items() if k != "mesh_resource"} == {
+                k: v for k, v in new.items() if k != "mesh_resource"
+            }, (old, new)
         shot("reloaded")
         assert rpc.read_console(item) == [], rpc.read_console(item)
         (SHOTS / "tilt-maze-evidence.json").write_text(json.dumps({

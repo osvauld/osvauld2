@@ -7,6 +7,12 @@ registered smokes pass; the full sweep hit its time cap after 12 and the final s
 separately.**
 Camera follow is owned by the 2D session first.
 
+Revision 2026-10-05: the independent Tilt Maze authoring proof now passes alongside Marble
+Gates, including walls/checkpoint progression, win/loss/retry, pause, capture and reload.
+The generic offscreen driver reply barrier fixes observation-time catch-up; both its minimal
+regression and Tilt Maze are registered. All 15 smokes pass in one sweep. The earlier one-game
+acceptance note below describes the original checkpoint, not this later gate.
+
 ## End-to-end proofs (write failing tests before each step)
 
 All proofs use the real offscreen shell, bridge, Lua VM and raw `worlds3d` inspection;

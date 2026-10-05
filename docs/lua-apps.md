@@ -180,7 +180,8 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else.
+  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
+  takes `camera` (see Camera, below).
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -392,6 +393,44 @@ local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, 
   dump. A `set` or a spawn shows in answers from the next frame on.
 - Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
   five hundred things take a few milliseconds; a ray per guard per frame is fine.
+
+### Camera — a map bigger than the box
+
+`width` and `height` are the box: what is shown. A `camera` says which part of the world the box
+shows, so the map can be many screens wide. `demo_apps/camera` is the whole of it.
+
+```lua
+ui.world({
+	id = "map", width = 640, height = 400,
+	camera = { follow = "hero", ease = 8, bounds = { 0, 0, 3000, 2000 } },
+	...
+})
+world("map"):set_camera({ at = { 1500, 1000 } })     -- look here: stops following
+world("map"):set_camera({ follow = "boss" })          -- follow someone else, eased
+local p = world("map"):to_world({ e.x, e.y })         -- a point in the box, in world units
+local s = world("map"):to_screen({ wx, wy })          -- where a world point shows in the box
+```
+
+- The camera's point is the world point at the box's centre. `follow` aims at the entity's box
+  centre, from the first frame on; or `at = { x, y }` looks at a fixed point. Not both.
+- `ease` is a rate per second (each step closes `1 − exp(−ease/120)` of the gap); without it the
+  camera follows exactly. It moves on the world's fixed step, so it ends the same at any frame
+  rate. `bounds = { x, y, w, h }` keeps the box inside the map; a map smaller than the box is
+  centred. Without bounds the camera goes anywhere.
+- A followed id the world does not have is not an error: the camera holds (`lost = true` in the
+  dump) and follows again when it comes back.
+- `set_camera` is a command, so only in a handler. It holds until the description's `camera`
+  changes — describing the same camera again does not undo it. Hot reload keeps where the
+  camera is and takes `follow`, `ease` and `bounds` from the new description.
+- `to_world` and `to_screen` are questions, allowed in `view` too. Pointer events stay in the
+  box's units (`e.x`, `e.y`); `e.shape` is already the entity drawn there.
+- Only what the box can show is posed and drawn: an entity whose box, grown by half its size each
+  side, misses the view costs nothing in the frame. This holds without a camera too. A pose
+  reaching further than that past its box may pop in at the edge. The dump's `camera` has
+  `at`, `follow`, `lost`, `ease`, `bounds`, `view` and `drawn`.
+- Measured (`scripts/bench.py`): 20000 entities through a 1280 × 720 camera build their frame in
+  under a millisecond; all drawn, about 4 ms.
+- Not yet: zoom, rotation, shake, two cameras on one world.
 
 ### Facing and gait — decided in Lua
 
@@ -829,6 +868,76 @@ The rules that bite, once each:
   are walking does not shrink until the next frame.
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
+
+## Signals
+
+A **signal** is app state whose value is frozen: reading it is plain and fast, and the only way
+to change it is `set` or `update`, in a handler. A write that skips them errors at once instead
+of going unseen. A **group** in a world (below) re-runs only when a signal it read changed
+(`docs/design/signals.md`).
+
+```lua
+local coins = signal({ { id = "c1", x = 40, y = 80 } }, "coins")   -- the name is for errors
+local score = signal(0, "score")
+
+for _, c in coins() do ... end                 -- read: a plain table; ipairs, #, all of it
+
+coins:update(function(list)                    -- in a handler: a writable copy of the list
+  table.insert(list, { id = uuid(), x = 5, y = 9 })
+  list[1] = { id = list[1].id, x = 0, y = list[1].y }   -- change an item by replacing it
+end)
+score:update(function(n) return n + 1 end)     -- not a table: return the new value
+coins:set({})                                  -- replace outright
+```
+
+- **Everything in it is frozen**, items too: `coins()[1].x = 5`, `table.insert(coins(), …)` and
+  `table.sort(coins(), …)` error with "attempt to modify a readonly table". The table you pass
+  to `signal` or `set` is frozen in place — keep no writable reference to it.
+- `update` hands a list or map a **shallow** copy: add, remove, sort and replace entries freely;
+  the entries themselves stay frozen. For anything else it hands the value and takes back what
+  the function returns — forgetting to return is an error, not a silent no-op.
+- An `update` of a 5000-item list costs about half a millisecond: the freeze looks at every
+  entry to find the new ones. Fine in a handler; split a huge list across signals if it is not.
+- A failed `update` (the function errors) leaves the value as it was. `set` with the value it
+  already holds changes nothing.
+- `set` and `update` are refused while `view` describes, like `world(id):set`, and a signal's
+  `update` inside its own `update` is refused (the outer one would overwrite it). Changing another
+  signal from inside is fine.
+- A table with a metatable inside the value (a doc mirror, a `doc.map{}`) is left unfrozen: it
+  belongs to something else.
+
+### Groups — `ui.group` among a world's entities
+
+A world re-describes every entity on every view. For thousands of things that is the cost — a
+coin pickup re-describes 4000 blades of grass. A group is a part of the world that describes
+itself, and runs again only when a signal it read has changed; otherwise the world keeps its
+entities exactly as they were, without building, checking or diffing them.
+
+```lua
+ui.world({ id = "map", width = 720, height = 400,
+  player(hero()),                              -- outside groups: described every view
+  ui.group("coins", function()                 -- runs again only when `coins` changes
+    local out = {}
+    for i, c in coins() do out[i] = { id = c.id, pos = { c.x, c.y }, drawing = coin } end
+    return out
+  end),
+})
+```
+
+- The function returns a list of entities, like a world's children (`false` entries skipped).
+  Ids are unique across the whole world, groups included. A group's id is unique in its world.
+- **What re-runs a group is the signals it read** (`coins()` inside it). A group that reads no
+  signal runs every view, as if it were not a group — so plain state still works, it just saves
+  nothing. A group that reads a signal *and* plain state will not notice the plain state change:
+  put everything it shows in signals.
+- **The grain is the signal.** One changed signal re-runs every group that read it, whole. For a
+  big list, split it: one signal and one group per chunk (by map area, say). Measured, release
+  (`scripts/bench.py`): a pickup among 5000 coins in one group costs ~24 ms; as 50 groups of
+  100, ~1.4 ms. Walking past them costs no coin work at all.
+- Inside a group's function, as in `view`, signals cannot be written. An error in it names the
+  group and keeps the last good world; the group runs again next view.
+- A group inside a group is an error, and so is `ui.group` outside a world (UI-tree groups are not
+  built yet).
 
 ## Search
 

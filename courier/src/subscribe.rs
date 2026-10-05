@@ -5,7 +5,7 @@
 //! differs between them is which action the caller takes with an already-proven request — not
 //! anything about what needs proving.
 //!
-//! Same authorization as sync: [`policy::membership`], workspace membership alone, no platform
+//! Same authorization as sync: [`policy::membership`] over the item ([`crate::sync::item_scope`]), no platform
 //! capability. Explicit by design (not implicit from sync history) — decided so a subscription
 //! is a fact someone chose to create, not a side effect of an unrelated call.
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::policy;
 use crate::sync::SyncLayer;
-use crate::token::{Scope, Token};
+use crate::token::Token;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeHello {
@@ -48,6 +48,9 @@ pub fn desktop_start_subscribe(
 /// Prove `hello` is a legitimate request to (un)subscribe. Which action it is is the caller's
 /// business, not this function's — a subscribe and an unsubscribe from the same holder for the
 /// same layer are equally authorized, so there is nothing here for the two to differ on.
+///
+/// Membership only, not the manifest's read rule: a read rule's inputs change after the
+/// subscription is made (a group gains or loses a member), so fan-out checks it on every push.
 pub fn node_accept_subscription(
     hello: &SubscribeHello,
     node_did: &str,
@@ -58,17 +61,18 @@ pub fn node_accept_subscription(
         &hello.token,
         node_did,
         &hello.desktop_did,
-        &Scope::Workspace(hello.ws_id.clone()),
+        &crate::sync::layer_target(&hello.token, &hello.ws_id, &hello.item_id, &hello.layer)?,
         now,
         revoked,
     )?;
     Ok(())
 }
 
-/// Prove a `Listen` connection is legitimate: the same membership check as above, but at
-/// `Scope::Node` rather than one workspace — a listen connection is not scoped to a single
-/// item's layer, since a desktop may hold subscriptions across several workspaces on the same
-/// node and all of them arrive over the one connection.
+/// Prove a `Listen` connection is legitimate: a live chain this node rooted, held by the
+/// caller, at any scope. A listen carries only pushes for subscriptions that were each
+/// authorized against their own item (and re-checked at fan-out), so it needs no scope of its
+/// own. *Revised 2026-10-04:* this required `Scope::Node`, which shut every workspace- or
+/// app-scoped member out of pushes.
 pub fn node_accept_listen(
     token: &Token,
     node_did: &str,
@@ -76,7 +80,7 @@ pub fn node_accept_listen(
     now: u64,
     revoked: &HashSet<[u8; 32]>,
 ) -> Result<()> {
-    policy::membership(token, node_did, desktop_did, &Scope::Node, now, revoked)?;
+    crate::token::verify_chain(token, node_did, desktop_did, now, revoked)?;
     Ok(())
 }
 

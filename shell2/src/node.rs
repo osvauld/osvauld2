@@ -8,11 +8,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use courier::invite::{InviteRequest, InviteTicket, InviteWelcome, desktop_start_invite_claim};
 use courier::publish::{PublishAck, PublishedItem, PublishedWorkspace, desktop_publish};
+use courier::role::RoleRequest;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncAck, SyncHello, SyncLayer, desktop_start_sync};
+use courier::sync::{SyncAck, SyncHello, SyncLayer, SyncReply, desktop_start_sync, item_scope};
 use courier::token::{Scope, Token};
 use courier::{ClaimWelcome, ConnectionTicket, DesktopNodeRecord};
-use kunki::bridge::Request;
+use kunki::bridge::{Envelope, Request};
 use kunki::push::Push;
 use loro::{ExportMode, LoroDoc};
 use osvauld_rpc::Response;
@@ -47,6 +48,15 @@ pub fn save_relationship(vault: &Vault, record: &DesktopNodeRecord) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Saves only if `did` is still the active account: a claim runs off the UI thread, and the
+/// account may have switched while it was in flight.
+fn save_as(vault: &Vault, did: &str, record: &DesktopNodeRecord) -> Result<(), String> {
+    if vault.with_signer(|d| d.did() == did) != Some(true) {
+        return Err("account changed during the claim".into());
+    }
+    save_relationship(vault, record)
+}
+
 pub fn load_relationship(vault: &Vault) -> Result<Option<DesktopNodeRecord>, String> {
     let Some(bytes) = vault
         .get_entry(RELATIONSHIP_KEY)
@@ -60,11 +70,30 @@ pub fn load_relationship(vault: &Vault) -> Result<Option<DesktopNodeRecord>, Str
 /// See `kunki::bridge::READ_TIMEOUT`: a stalled node must not wedge the shell's UI thread.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// For the requests that name no caller: `Ping` and the two claims.
 fn call(socket: &Path, req: &Request) -> Result<Response, String> {
+    send(socket, &Envelope::plain(req)?)
+}
+
+/// Signed as the vault's account, for the node this account has claimed (`courier::proof`).
+fn call_as(socket: &Path, vault: &Vault, req: &Request) -> Result<Response, String> {
+    send(socket, &seal(vault, req)?)
+}
+
+fn seal(vault: &Vault, req: &Request) -> Result<Envelope, String> {
+    let node_did = load_relationship(vault)?
+        .ok_or("this account has not joined a node")?
+        .node_did;
+    vault
+        .with_signer(|me| Envelope::signed(req, me, &node_did, kunki::bridge::now_ms()))
+        .ok_or("account is locked")?
+}
+
+fn send(socket: &Path, env: &Envelope) -> Result<Response, String> {
     let mut conn = connect(socket)?;
     conn.set_read_timeout(Some(READ_TIMEOUT))
         .map_err(|e| e.to_string())?;
-    let payload = serde_json::to_vec(req).map_err(|e| e.to_string())?;
+    let payload = serde_json::to_vec(env).map_err(|e| e.to_string())?;
     osvauld_rpc::write_msg(&mut conn, &payload).map_err(|e| e.to_string())?;
     let bytes = osvauld_rpc::read_msg(&mut conn).map_err(|e| e.to_string())?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
@@ -95,11 +124,15 @@ pub fn claim(
         .with_signer(|desktop| courier::desktop_start_claim(ticket.clone(), desktop, now))
         .ok_or("account is locked")?
         .map_err(|e| e.to_string())?;
+    let me = hello.desktop_did.clone();
     let welcome: ClaimWelcome = unpack(call(socket, &Request::Claim(hello))?)?;
-    vault
+    let record = vault
         .with_signer(|desktop| courier::desktop_finish_claim(ticket, welcome, desktop, now))
         .ok_or("account is locked")?
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Saved here, not by the caller: every later request is signed for this node's DID.
+    save_as(vault, &me, &record)?;
+    Ok(record)
 }
 
 /// Announce a workspace and its item headers to the claimed node. Idempotent: `Admin::accept_publish`
@@ -116,7 +149,7 @@ pub fn publish(
         .with_signer(|desktop| desktop.did().to_string())
         .ok_or("account is locked")?;
     let hello = desktop_publish(&did, token, workspace, items);
-    unpack(call(socket, &Request::Publish(hello))?)
+    unpack(call_as(socket, vault, &Request::Publish(hello))?)
 }
 
 /// Ask the claimed node to mint an invite for someone else to redeem at `role`/`scope`. Only
@@ -139,7 +172,7 @@ pub fn invite(
         scope,
         public: false,
     };
-    unpack(call(socket, &Request::Invite(request))?)
+    unpack(call_as(socket, vault, &Request::Invite(request))?)
 }
 
 /// Redeem an invite minted by [`invite`]. No `desktop_finish_invite_claim` exists — unlike
@@ -155,13 +188,16 @@ pub fn claim_invite(
         .with_signer(|desktop| desktop_start_invite_claim(ticket.clone(), desktop, now))
         .ok_or("account is locked")?
         .map_err(|e| e.to_string())?;
+    let me = hello.desktop_did.clone();
     let welcome: InviteWelcome = unpack(call(socket, &Request::ClaimInvite(hello))?)?;
-    Ok(DesktopNodeRecord {
+    let record = DesktopNodeRecord {
         node_did: welcome.node_did,
         node_id: ticket.node_id,
         node_encryption_key: ticket.node_encryption_key,
         token: welcome.token,
-    })
+    };
+    save_as(vault, &me, &record)?;
+    Ok(record)
 }
 
 /// What one text box accepts: a `ConnectionTicket` (`osv1.`) claims an unowned node, an
@@ -191,8 +227,16 @@ pub fn join(
 /// (`courier::desktop_start_sync` needs the doc itself, not bytes), and the ack's `update` is
 /// imported back into that same doc after. Both of those touch a doc that is not `Send`; this
 /// function is the part of the exchange that is, so a caller offloads only this to a thread.
-pub fn sync(socket: &Path, hello: SyncHello) -> Result<SyncAck, String> {
-    unpack(call(socket, &Request::Sync(hello))?)
+pub fn sync(socket: &Path, vault: &Vault, hello: SyncHello) -> Result<SyncReply, String> {
+    unpack(call_as(socket, vault, &Request::Sync(hello))?)
+}
+
+/// `sync` where a rejection is only a failure: a pull, or a push with no doc to roll back.
+fn sync_acked(socket: &Path, vault: &Vault, hello: SyncHello) -> Result<SyncAck, String> {
+    match sync(socket, vault, hello)? {
+        SyncReply::Ack(ack) => Ok(ack),
+        SyncReply::Rejected(r) => Err(format!("rejected: {}", r.reason)),
+    }
 }
 
 /// Pull whatever the node already has for one doc layer, best-effort: `None` on any failure —
@@ -221,7 +265,7 @@ pub fn pull_doc(
         None,
     )
     .ok()?;
-    let ack = sync(socket, hello).ok()?;
+    let ack = sync_acked(socket, vault, hello).ok()?;
     doc.import(&ack.update).ok()?;
     // Checked on the doc's own oplog, not `ack.update`'s byte length: whether an empty diff
     // serializes to zero bytes is a Loro encoding detail, not something to depend on. A doc
@@ -256,7 +300,7 @@ pub fn join_item(
     let doc = LoroDoc::new();
     let hello = desktop_start_sync(&did, token, &ws.id, &item.id, SyncLayer::Src, &doc, None)
         .map_err(|e| e.to_string())?;
-    let ack = sync(socket, hello)?;
+    let ack = sync_acked(socket, vault, hello)?;
     doc.import(&ack.update).map_err(|e| e.to_string())?;
     let bytes = doc
         .export(ExportMode::Snapshot)
@@ -286,7 +330,7 @@ pub fn push_src(
         .ok_or("account is locked")?;
     let hello = desktop_start_sync(&did, token, ws_id, item_id, SyncLayer::Src, &doc, None)
         .map_err(|e| e.to_string())?;
-    sync(socket, hello).map(|_ack| ())
+    sync_acked(socket, vault, hello).map(|_ack| ())
 }
 
 /// Declare interest in one item's layer — what makes a future push for it reach this desktop,
@@ -295,6 +339,7 @@ pub fn push_src(
 /// layer costs nothing beyond the round trip.
 pub fn subscribe(
     socket: &Path,
+    vault: &Vault,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
@@ -302,11 +347,12 @@ pub fn subscribe(
     layer: SyncLayer,
 ) -> Result<(), String> {
     let hello = desktop_start_subscribe(desktop_did, token, ws_id, item_id, layer);
-    unpack(call(socket, &Request::Subscribe(hello))?)
+    unpack(call_as(socket, vault, &Request::Subscribe(hello))?)
 }
 
 pub fn unsubscribe(
     socket: &Path,
+    vault: &Vault,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
@@ -314,20 +360,60 @@ pub fn unsubscribe(
     layer: SyncLayer,
 ) -> Result<(), String> {
     let hello = desktop_start_subscribe(desktop_did, token, ws_id, item_id, layer);
-    unpack(call(socket, &Request::Unsubscribe(hello))?)
+    unpack(call_as(socket, vault, &Request::Unsubscribe(hello))?)
+}
+
+/// Give `to` an app role on one item, or with `revoke` take it back. The node decides from
+/// this account's grants on record; `token` only proves membership.
+#[allow(clippy::too_many_arguments)]
+pub fn change_role(
+    socket: &Path,
+    vault: &Vault,
+    token: Token,
+    ws_id: &str,
+    item_id: &str,
+    to: &str,
+    role: &str,
+    revoke: bool,
+) -> Result<(), String> {
+    let desktop_did = vault
+        .with_signer(|d| d.did().to_string())
+        .ok_or("account is locked")?;
+    let req = RoleRequest {
+        desktop_did,
+        token,
+        to: to.to_string(),
+        role: role.to_string(),
+        scope: item_scope(ws_id, item_id),
+    };
+    let req = if revoke {
+        Request::RevokeRole(req)
+    } else {
+        Request::AssignRole(req)
+    };
+    match call_as(socket, vault, &req)? {
+        Response::Ok { .. } => Ok(()),
+        Response::Err { message } => Err(message),
+    }
 }
 
 /// Open the channel pushes travel on and wait for the node's ack. Deliberately not a loop
 /// itself — a caller reads pushes off the returned connection with [`next_push`], normally in
 /// a loop on its own thread, so establishing the connection (with its own retry-on-drop
 /// policy) and consuming it stay two separate concerns.
-pub fn listen(socket: &Path, desktop_did: &str, token: Token) -> Result<UnixStream, String> {
-    let mut conn = connect(socket)?;
+pub fn listen(
+    socket: &Path,
+    vault: &Vault,
+    desktop_did: &str,
+    token: Token,
+) -> Result<UnixStream, String> {
     let req = Request::Listen {
         desktop_did: desktop_did.to_string(),
         token,
     };
-    let payload = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+    let env = seal(vault, &req)?;
+    let mut conn = connect(socket)?;
+    let payload = serde_json::to_vec(&env).map_err(|e| e.to_string())?;
     osvauld_rpc::write_msg(&mut conn, &payload).map_err(|e| e.to_string())?;
     let bytes = osvauld_rpc::read_msg(&mut conn).map_err(|e| e.to_string())?;
     match serde_json::from_slice(&bytes).map_err(|e| e.to_string())? {

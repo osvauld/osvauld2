@@ -14,7 +14,6 @@ use vello::Scene;
 pub const MAX_PATH_COMMANDS: usize = 65_536;
 pub const MAX_FRAME_COORDINATE: f64 = 10_000_000.0;
 pub const MAX_FRAME_DEPTH: usize = 32;
-pub const MAX_FRAME_ITEMS: usize = 4_096;
 pub const MAX_GRADIENT_STOPS: usize = 64;
 pub const MAX_STROKE_DASHES: usize = 64;
 
@@ -323,10 +322,6 @@ pub enum FrameError {
     TooManyStrokeDashes,
     #[error("Frame nesting depth exceeds {MAX_FRAME_DEPTH}")]
     TooDeep,
-    #[error("Frame expands to more than {MAX_FRAME_ITEMS} items")]
-    TooManyItems,
-    #[error("Frame expands to more than {MAX_PATH_COMMANDS} path commands")]
-    TooManyPathCommands,
 }
 
 impl Frame {
@@ -570,21 +565,12 @@ fn item_stats(items: &[Item], depth: usize) -> Result<FrameStats, FrameError> {
             },
         };
         stats.hittable += if item.id.is_some() { 1 } else { child.hittable };
-        stats.expanded_items = stats
-            .expanded_items
-            .checked_add(child.expanded_items)
-            .ok_or(FrameError::TooManyItems)?;
-        stats.expanded_path_commands = stats
-            .expanded_path_commands
-            .checked_add(child.expanded_path_commands)
-            .ok_or(FrameError::TooManyPathCommands)?;
+        // Counted, not capped: a big world is many small things. One path is capped, in
+        // `Path::new`; a frame's totals are for inspection.
+        stats.expanded_items = stats.expanded_items.saturating_add(child.expanded_items);
+        stats.expanded_path_commands =
+            stats.expanded_path_commands.saturating_add(child.expanded_path_commands);
         stats.depth = stats.depth.max(child.depth);
-        if stats.expanded_items > MAX_FRAME_ITEMS {
-            return Err(FrameError::TooManyItems);
-        }
-        if stats.expanded_path_commands > MAX_PATH_COMMANDS {
-            return Err(FrameError::TooManyPathCommands);
-        }
         if stats.depth > MAX_FRAME_DEPTH {
             return Err(FrameError::TooDeep);
         }

@@ -15,6 +15,15 @@ pub enum NodeError {
     Damaged(String),
     #[error("not an item kind this build understands: {0}")]
     BadItemKind(String),
+    // Roles are read from the app's manifest; without its source the node cannot know them.
+    #[error("no app source on this node for {0}")]
+    NoManifest(String),
+    #[error("app source for {0} is unreadable")]
+    BadSource(String),
+    #[error(transparent)]
+    Manifest(#[from] manifest::Error),
+    #[error("this invite has no recorded inviter; ask for a new one")]
+    UntrackedInvite,
     #[error(transparent)]
     Vault(#[from] vault::VaultError),
     #[error(transparent)]
