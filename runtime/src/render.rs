@@ -375,6 +375,10 @@ impl Render {
     /// Ask winit for the next frame — call after rendering to keep the loop alive. Offscreen this
     /// is deliberately nothing: no window means no `RedrawRequested`, so frames happen when the
     /// driver says and an animating app cannot free-run.
+    pub fn window_id(&self) -> Option<winit::window::WindowId> {
+        self.presenter.as_ref().map(|p| p.window.id())
+    }
+
     pub fn request_redraw(&self) {
         if let Some(p) = &self.presenter {
             p.window.request_redraw();

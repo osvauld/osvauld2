@@ -56,7 +56,7 @@ use osvauld_rpc::{
 };
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
-    KeyInput, Mods, ScreenshotRequest, TileEvent, col, row, text, tile,
+    KeyInput, Mods, ScreenshotRequest, TileEvent, WindowFrame, WindowIn, col, row, text, tile,
 };
 use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem, WorkspaceMeta};
 
@@ -73,6 +73,8 @@ pub enum Msg {
     TileInput(Arc<str>, TileEvent),
     /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
     TileDirty(Arc<str>),
+    /// Bring an app back from its own window into its tab.
+    Dock(Arc<str>),
     /// An app's thread saved: what changed (to sync), the docs it has open (to subscribe), and
     /// whether the save failed.
     AppSaved {
@@ -1001,6 +1003,8 @@ struct Shell {
     focused: usize,
     /// The open app shown beside the focused one, if any (`SplitWith`).
     split: Option<Arc<str>>,
+    /// Open apps shown in windows of their own (`PopOut`), in the order they left.
+    popped: Vec<Arc<str>>,
     /// Offscreen, tiles run on the shell's virtual clock and every paint waits for them.
     offscreen: Option<(f32, f32)>,
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
@@ -1134,6 +1138,7 @@ impl Shell {
         self.node_vv.retain(|(item, _), _| *item != id);
         self.tabs.remove(pos);
         self.split = self.split.take().filter(|s| *s != id);
+        self.popped.retain(|p| *p != id);
         let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
         if let (Some(record), Some(names), Some(o)) = (
             self.node.clone(),
@@ -1239,6 +1244,7 @@ impl Shell {
         self.apps.clear();
         self.focused = 0;
         self.split = None;
+        self.popped.clear();
         self.error = None;
     }
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
@@ -1460,6 +1466,24 @@ impl Shell {
                 self.split = None;
                 Response::ok("unsplit")
             }
+            Request::PopOut { item_id } => match self.apps.get_key_value(item_id.as_str()) {
+                Some((id, _)) => {
+                    let id = id.clone();
+                    if !self.popped.contains(&id) {
+                        self.split = self.split.take().filter(|s| *s != id);
+                        self.popped.push(id);
+                    }
+                    Response::ok("popped out")
+                }
+                None => Response::err("item is not open; call OpenItem first"),
+            },
+            Request::DockIn { item_id } => {
+                if self.dock(item_id.as_str()) {
+                    Response::ok("docked")
+                } else {
+                    Response::err("item is not in a window of its own")
+                }
+            }
             Request::ListTabs => Response::ok(
                 self.tabs
                     .iter()
@@ -1475,6 +1499,7 @@ impl Shell {
                             "name": name,
                             "focused": idx == self.focused,
                             "shown": app.is_some_and(|a| a.is_shown()),
+                            "window": self.popped.contains(id),
                             "responding": app.is_some_and(|a| a.responding()),
                         })
                     })
@@ -1485,18 +1510,39 @@ impl Shell {
     }
 
     /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
+    /// The apps in the main window: the focused one and the split one, unless in a window of
+    /// their own.
     fn on_screen(&self) -> Vec<Arc<str>> {
         let Some(Tab::App((id, _))) = self.tabs.get(self.focused) else {
             return Vec::new();
         };
         let mut ids = vec![id.clone()];
         ids.extend(self.split.clone().filter(|s| s != id));
+        ids.retain(|id| !self.popped.contains(id));
         ids
     }
 
-    /// Only apps on screen paint; every other one keeps running unseen.
+    /// Back into its tab, focused. False if it was not in a window of its own.
+    fn dock(&mut self, id: &str) -> bool {
+        let Some(pos) = self.popped.iter().position(|p| p.as_ref() == id) else {
+            return false;
+        };
+        self.popped.remove(pos);
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == id))
+        {
+            self.focused = idx;
+        }
+        true
+    }
+
+    /// Only apps on screen paint — in the main window or their own; every other one keeps
+    /// running unseen.
     fn show_on_screen(&mut self) {
-        let shown = self.on_screen();
+        let mut shown = self.on_screen();
+        shown.extend(self.popped.iter().cloned());
         for (id, a) in self.apps.iter_mut() {
             a.show(shown.contains(id));
         }
@@ -1606,6 +1652,7 @@ impl Shell {
             apps: HashMap::new(),
             focused: 0,
             split: None,
+            popped: Vec::new(),
             offscreen,
             clock: 0.0,
             error: None,
@@ -1710,6 +1757,7 @@ impl Shell {
     fn close_test_tab(&mut self, id: &Arc<str>, restore_focus: usize) {
         self.apps.remove(id);
         self.split = self.split.take().filter(|s| s != id);
+        self.popped.retain(|p| p != id);
         if let Some(pos) = self
             .tabs
             .iter()
@@ -1813,6 +1861,24 @@ impl App for Shell {
                 Screen::Spaces(s) => s.view(),
                 Screen::Items(i) => i.view(),
             },
+            Tab::App((id, _)) if self.popped.contains(id) => col()
+                .w_full()
+                .grow()
+                .center()
+                .gap(12.0)
+                .child(text("open in its own window").color(theme::fg_3()))
+                .child(
+                    row()
+                        .h(28.0)
+                        .px(12.0)
+                        .radius(6.0)
+                        .center()
+                        .id(format!("dock:{id}"))
+                        .fill(theme::bg_2())
+                        .hover_fill(theme::bg_3())
+                        .on_click(Msg::Dock(id.clone()))
+                        .child(text("bring back").font_size(13.0)),
+                ),
             Tab::App(_) => {
                 let mut tiles = row().w_full().grow();
                 for (i, id) in self.on_screen().into_iter().enumerate() {
@@ -1885,6 +1951,10 @@ impl App for Shell {
                 if idx < self.tabs.len() {
                     self.focused = idx;
                 }
+                None
+            }
+            Msg::Dock(id) => {
+                self.dock(&id);
                 None
             }
             Msg::Close(id) => {
@@ -2566,6 +2636,44 @@ impl App for Shell {
         for (id, asked) in asked {
             if let Some(a) = self.apps.get_mut(&id) {
                 a.take(asked);
+            }
+        }
+    }
+
+    fn windows(&self) -> Vec<WindowFrame> {
+        self.popped
+            .iter()
+            .filter_map(|id| {
+                let a = self.apps.get(id)?;
+                let title = self.tabs.iter().find_map(|t| match t {
+                    Tab::App((tid, name)) if tid == id => Some(name.clone()),
+                    _ => None,
+                })?;
+                Some(WindowFrame {
+                    key: id.to_string(),
+                    title,
+                    frame: a.frame.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn window_event(&mut self, key: &str, event: WindowIn) {
+        match event {
+            WindowIn::Input(e) => {
+                if let Some(a) = self.apps.get(key) {
+                    a.input(e);
+                }
+            }
+            WindowIn::Resized(size) => {
+                if let Some(a) = self.apps.get_mut(key) {
+                    a.resize(size, self.clock);
+                }
+            }
+            // Docks rather than closes: closing a window must not lose the app.
+            WindowIn::Closed => {
+                self.dock(key);
+                self.show_on_screen();
             }
         }
     }
