@@ -658,10 +658,17 @@ let a part of the description re-run only when what it read changed. Step 1:
 handler; writes that skip them error. Step 2: `ui.group(id, fn)` among a world's entities runs
 again only when a signal it read changed; the world keeps a clean group's entities untouched
 (`World2d::reconcile_parts`). 5000 coins: walking costs no coin work (~1 ms a frame with view, 20 ms
-without groups); a pickup costs ~24 ms as one group, ~1.4 ms as 50 chunked groups. Next, in order: the camera with
-culling (`camera = { follow, ease, bounds }`, `set_camera`, agreed with 3D); a `follow`
+without groups); a pickup costs ~24 ms as one group, ~1.4 ms as 50 chunked groups. **Camera** ([design/camera.md](design/camera.md)):
+`camera = { follow, at, ease, bounds }` on `ui.world` shows part of a map bigger than the box;
+it follows on the fixed step (`ease` per second), stops at explicit `bounds = { x, y, w, h }`
+(revised from the 3D agreement's `bounds = true`), holds when its target is gone (`lost`), and
+survives reload. `world(id):set_camera({ at } | { follow })` in handlers; `to_world`/`to_screen`
+anywhere. Every world now draws only what meets its box (half an entity's size of margin): 20000
+entities through a 1280 × 720 camera build in ~0.9 ms against ~4.3 ms all drawn; walking past
+20000 grouped coins is ~2.8 ms a frame (target 2 ms — a spatial grid is the lever).
+`smoke_camera.py` checks it in pixels, rects and the dump. Next, in order: a `follow`
 controller; acceleration; then the RPG. Signals steps 3–6 (UI-tree groups, `view` as root
-group, inspection and the dev check, docs as signals) after the camera.
+group, inspection and the dev check, docs as signals).
 **Owed — the agent-as-maker test:** no agent has yet built a game from `docs/lua-apps.md` alone
 (hockey was written with full context). A fresh agent, given only the docs, builds carrom and
 logs every wall it hits in `gap-log.md`, as `six-apps.md` did for apps. **Lua app tests started:**

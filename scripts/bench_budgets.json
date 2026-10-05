@@ -9,6 +9,11 @@
     "budget_us": 40000,
     "note": "reference, not a target: one group of 5000 re-describes whole. The guide says chunk instead."
   },
+  "app_walk_20000_camera": {
+    "baseline_us": 2804.1,
+    "budget_us": 5000,
+    "note": "walking past 20000 coins in 200 groups through a 1280x720 camera following the hero (~2300 on screen). Target: under 2 ms; the check of every entity against the view is the next lever (a spatial grid)."
+  },
   "app_walk_5000_grouped": {
     "baseline_us": 1001.9,
     "budget_us": 2000,
@@ -38,6 +43,11 @@
     "baseline_us": 3367.0,
     "budget_us": 8000,
     "note": "building the frame of a 20000-entity world (pose and place each). Was refused by the 4096-item cap."
+  },
+  "world_frame_20000_camera": {
+    "baseline_us": 897.5,
+    "budget_us": 1500,
+    "note": "the same 20000 through a 1280x720 camera: ~6% drawn. Most of it is checking every entity against the view; a spatial grid would cut that."
   },
   "world_frame_5000": {
     "baseline_us": 704.3,

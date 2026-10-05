@@ -3,6 +3,7 @@ use mlua::{FromLua, Table};
 use runtime::HoverPhase;
 use std::rc::Rc;
 
+mod camera;
 mod index;
 mod reload;
 mod require;
@@ -5055,6 +5056,11 @@ fn a_world_shown_again_runs_its_groups_again() {
 /// is a `ui.group`; otherwise every coin is described every view, as without signals.
 /// `runs[c]` counts how often chunk `c` was described.
 fn coin_map(chunks: usize, per: usize, grouped: bool) -> LuaApp<LuaMsg> {
+    coin_map_in(chunks, per, grouped, "width = 400, height = 300")
+}
+
+/// The same, with the world's box (and camera) given as Lua fields.
+fn coin_map_in(chunks: usize, per: usize, grouped: bool, seen: &str) -> LuaApp<LuaMsg> {
     app_of(&format!(
         "{HERO} chunks = {{}} runs = {{}} \
          for c = 1, {chunks} do local list = {{}} \
@@ -5064,7 +5070,7 @@ fn coin_map(chunks: usize, per: usize, grouped: bool) -> LuaApp<LuaMsg> {
          local function describe(c) runs[c] += 1 local out = {{}} \
            for i, coin in chunks[c]() do out[i] = {{ id = coin.id, pos = {{ coin.x, coin.y }}, drawing = hero }} end \
            return out end \
-         return function() local world = {{ id = 'map', width = 400, height = 300, \
+         return function() local world = {{ id = 'map', {seen}, \
              {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero, \
                 controller = {{ speed = 100, axis_x = {{ neg = 'KeyA', pos = 'KeyD' }} }} }} }} \
            for c = 1, {chunks} do \
@@ -5142,6 +5148,21 @@ fn bench_app_walk() {
             let _ = app.view();
         });
     }
+}
+
+/// B7: a frame of walking past 20000 coins (a 2000 × 4000 field) through a 1280 × 720 camera
+/// following the hero: tick, view and the frame of what is on screen.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_walk_camera() {
+    let mut app = coin_map_in(200, 100, true, "width = 1280, height = 720, camera = { follow = 'hero' }");
+    walk_right(&mut app);
+    let mut i = 0;
+    bench("app_walk_20000_camera", 30, || {
+        i += 1;
+        app.update(LuaMsg::TickWorld("map".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    });
 }
 
 /// A coin picked up: the signal's update and the view after it.

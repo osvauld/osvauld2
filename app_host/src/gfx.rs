@@ -439,6 +439,34 @@ impl UserData for WorldHandle {
             answer.set("tick", tick)?;
             Ok(Value::Table(answer))
         });
+        // `map:set_camera({ at = { x, y } })` looks there and stops following;
+        // `map:set_camera({ follow = "boss" })` follows, eased as described.
+        methods.add_method("set_camera", |_, this, look: Table| {
+            let owner = format!("world {:?}:set_camera", this.id);
+            named_fields(&look, &owner, &["at", "follow"])?;
+            let at = maybe_table(&look, &owner, "at")?;
+            let follow = entity_id(&look, &owner, "follow")?;
+            let look = match (at, follow) {
+                (Some(p), None) => {
+                    let p = point(p, &format!("{owner}.at"))?;
+                    world::Look::At((p.x, p.y))
+                }
+                (None, Some(id)) => world::Look::Follow(id),
+                _ => return Err(Error::runtime(format!("{owner}: set_camera needs at or follow, one of them"))),
+            };
+            this.command(&owner, |w| w.set_camera(look))
+        });
+        // `map:to_world({ x, y })`: a point in the box, as pointer events give it, in world units;
+        // `map:to_screen` the other way — where to put a speech bubble over an entity.
+        type Convert = fn(&world::World2d, (f64, f64)) -> (f64, f64);
+        for (name, convert) in [("to_world", world::World2d::to_world as Convert), ("to_screen", world::World2d::to_screen)] {
+            methods.add_method(name, move |lua, this, p: Table| {
+                let owner = format!("world {:?}:{name}", this.id);
+                let p = point(p, &owner)?;
+                let ((x, y), _) = this.ask(&owner, |w| Ok(convert(w, (p.x, p.y))))?;
+                lua.create_sequence_from([x, y])
+            });
+        }
         // `rink:at({ x, y })`: the ids there, sorted, as a list that also has `tick`.
         methods.add_method("at", |lua, this, at: Table| {
             let owner = format!("world {:?}:at", this.id);
@@ -448,6 +476,45 @@ impl UserData for WorldHandle {
             answer.set("tick", tick)?;
             Ok(answer)
         });
+    }
+}
+
+/// `camera = { follow = id | at = { x, y }, ease = per_second, bounds = { x, y, w, h } }` on a
+/// world; nil for none. Ranges are the world's to check (`CameraSpec::check`).
+pub(crate) fn camera(node: &Table) -> mlua::Result<Option<world::CameraSpec>> {
+    let Some(t) = maybe_table(node, "world", "camera")? else {
+        return Ok(None);
+    };
+    let owner = "camera";
+    named_fields(&t, owner, &["follow", "at", "ease", "bounds"])?;
+    let at = match maybe_table(&t, owner, "at")? {
+        Some(p) => point(p, "camera.at").map(|p| Some((p.x, p.y)))?,
+        None => None,
+    };
+    let bounds = match maybe_table(&t, owner, "bounds")? {
+        None => None,
+        Some(b) if positional_len(&b, "camera.bounds")? == 4 => {
+            Some((b.get(1)?, b.get(2)?, b.get(3)?, b.get(4)?))
+        }
+        Some(_) => return Err(Error::runtime("camera: bounds must be { x, y, w, h }")),
+    };
+    Ok(Some(world::CameraSpec {
+        follow: entity_id(&t, owner, "follow")?,
+        at,
+        ease: maybe_number(&t, owner, "ease")?,
+        bounds,
+    }))
+}
+
+/// An optional field naming an entity.
+fn entity_id(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<String>> {
+    match table.get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::String(s) => Ok(Some(s.to_str()?.to_string())),
+        other => Err(Error::runtime(format!(
+            "{owner}.{field} must be an entity id, got {}",
+            other.type_name()
+        ))),
     }
 }
 

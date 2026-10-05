@@ -7,6 +7,7 @@
 //! change of direction — queue as `WorldEvent`s for Lua to decide on. Private 3D collider/solver
 //! groundwork and retained 3D body IDs live here too; their host binding is not exposed yet.
 
+mod camera;
 pub mod clip;
 mod physics;
 mod physics3d;
@@ -18,8 +19,10 @@ use std::sync::Arc;
 use bevy_ecs::prelude::{Component, Entity, World};
 use runtime::drawing::{Drawing, DrawingError, Pose};
 use runtime::frame::{Frame, FrameError, Item};
-use runtime::vello::kurbo::{Affine, Point};
+use runtime::vello::kurbo::{Affine, Point, Rect};
 
+pub use crate::camera::{CameraInspection, CameraSpec, Look};
+use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
 pub use crate::physics::{Collider, Material, Shape};
@@ -116,6 +119,7 @@ pub struct WorldInspection {
     pub tick: u64,
     /// Seconds stalls have cost: frame time past `MAX_STEPS` steps, never run.
     pub dropped: f64,
+    pub camera: Option<CameraInspection>,
 }
 
 /// What a ray met first.
@@ -326,6 +330,7 @@ pub struct World2d {
     /// name keeps its bit for the world's life.
     groups: Vec<String>,
     timers: Vec<Timer>,
+    camera: Option<Camera>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -347,6 +352,8 @@ pub enum WorldError {
     /// A group described wrongly.
     #[error("{0}")]
     Group(String),
+    #[error("camera: {0}")]
+    Camera(String),
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
@@ -848,10 +855,13 @@ impl World2d {
     }
 
     /// Each entity is an instance named by its id, so a hit on the world reports which entity.
+    /// Only what can show in the box is posed and drawn: the rest costs nothing here.
     pub fn frame(&self, width: f64, height: f64) -> Result<Frame, WorldError> {
+        let view = self.view((width, height));
         let mut items = self
             .order
             .iter()
+            .filter(|&&entity| self.shows(entity, view))
             .map(|&entity| {
                 let e = self.ecs.entity(entity);
                 let (Some(name), Some(look)) = (e.get::<Name>(), e.get::<Appearance>()) else {
@@ -872,7 +882,11 @@ impl World2d {
             // Stable, so ties keep list order.
             items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         }
-        let items = items.into_iter().map(|(_, item)| item).collect();
+        let mut items: Vec<Item> = items.into_iter().map(|(_, item)| item).collect();
+        if let Some(c) = &self.camera {
+            let (dx, dy) = c.to_screen((0.0, 0.0));
+            items = vec![Item::group(Affine::translate((dx, dy)), items)?];
+        }
         // Clipped: a head or hand spilling past the room's edge is not drawn outside it.
         Ok(Frame::new(width, height, None, items)?.clipped())
     }
@@ -956,6 +970,7 @@ impl World2d {
                 e.insert(Velocity::default());
             }
         }
+        self.aim(dt);
     }
 
     /// Fires `Timer(name)` once `secs` have passed; the same name again starts it over.
@@ -1024,7 +1039,8 @@ impl World2d {
     /// Whether anything plays or moves — only then does the world need the frame clock.
     pub fn needs_ticks(&self) -> bool {
         let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
-        self.ticking || !self.timers.is_empty() || self.order.iter().any(sliding)
+        let behind = (self.camera.as_ref()).is_some_and(|c| self.goal().is_some_and(|g| !c.arrived(g)));
+        self.ticking || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take
@@ -1139,6 +1155,113 @@ impl World2d {
 
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
+    }
+}
+
+impl World2d {
+    /// The camera as described this view. Describing the same again changes nothing, so a
+    /// `set_camera` holds until the description changes; a new camera starts on its target.
+    pub fn describe_camera(&mut self, view: (f64, f64), spec: Option<CameraSpec>) -> Result<(), WorldError> {
+        let Some(spec) = spec else {
+            self.camera = None;
+            return Ok(());
+        };
+        spec.check().map_err(WorldError::Camera)?;
+        let fresh = self.camera.is_none();
+        let c = self.camera.get_or_insert_with(|| Camera {
+            at: (view.0 / 2.0, view.1 / 2.0),
+            follow: None,
+            lost: false,
+            view,
+            described: CameraSpec::default(),
+        });
+        c.view = view;
+        if fresh || c.described != spec {
+            c.follow = spec.follow.clone();
+            c.at = spec.at.unwrap_or(c.at);
+            c.described = spec;
+        }
+        let goal = self.goal();
+        let c = self.camera.as_mut().expect("just made");
+        c.lost = c.follow.is_some() && goal.is_none();
+        c.at = match (fresh, goal) {
+            (true, Some(goal)) => goal,
+            _ => c.clamp(c.at),
+        };
+        Ok(())
+    }
+
+    /// A handler's command: look at a point (which stops following) or follow an entity, eased
+    /// as described. Holds until it or the description changes.
+    pub fn set_camera(&mut self, look: Look) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Camera(why.to_string());
+        let c = self.camera.as_mut().ok_or_else(|| err("the world has no camera to point"))?;
+        match look {
+            Look::At((x, y)) if !(x.is_finite() && y.is_finite()) => return Err(err("at must be finite numbers")),
+            Look::At(p) => {
+                (c.follow, c.lost) = (None, false);
+                c.at = c.clamp(p);
+            }
+            Look::Follow(id) => {
+                c.lost = !self.by_id.contains_key(&id);
+                c.follow = Some(id);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn camera(&self) -> Option<CameraInspection> {
+        let c = self.camera.as_ref()?;
+        let view = self.view(c.view);
+        let drawn = self.order.iter().filter(|&&e| self.shows(e, view)).count();
+        Some(c.inspect(drawn))
+    }
+
+    /// The box's rectangle in world units.
+    fn view(&self, (width, height): (f64, f64)) -> Rect {
+        let (x, y) = self.to_world((0.0, 0.0));
+        Rect::new(x, y, x + width, y + height)
+    }
+
+    /// Whether an entity can show in `view`: its placed box, grown by half its size each side
+    /// for what a pose swings past it, meets the view. Reaching further, it may pop at the edge.
+    fn shows(&self, entity: Entity, view: Rect) -> bool {
+        let look = self.ecs.get::<Appearance>(entity).expect("every entity has an Appearance");
+        let (w, h) = look.drawing.size();
+        let b = self.place(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
+        let b = b.inflate(b.width() / 2.0, b.height() / 2.0);
+        b.x0 < view.x1 && b.x1 > view.x0 && b.y0 < view.y1 && b.y1 > view.y0
+    }
+
+    /// A point in the box (as pointer events give it) in world units; without a camera, itself.
+    pub fn to_world(&self, p: (f64, f64)) -> (f64, f64) {
+        self.camera.as_ref().map_or(p, |c| c.to_world(p))
+    }
+
+    pub fn to_screen(&self, p: (f64, f64)) -> (f64, f64) {
+        self.camera.as_ref().map_or(p, |c| c.to_screen(p))
+    }
+
+    /// Where a following camera is headed: its target's box centre, kept in bounds. None when
+    /// not following, or lost.
+    fn goal(&self) -> Option<(f64, f64)> {
+        let c = self.camera.as_ref()?;
+        let entity = *self.by_id.get(c.follow.as_ref()?)?;
+        let (w, h) = self.ecs.get::<Appearance>(entity)?.drawing.size();
+        let p = self.place(entity) * Point::new(w / 2.0, h / 2.0);
+        Some(c.clamp((p.x, p.y)))
+    }
+
+    /// The camera's part of a step: closer to what it follows, or holding while that is gone.
+    fn aim(&mut self, dt: f64) {
+        let goal = self.goal();
+        let Some(c) = self.camera.as_mut().filter(|c| c.follow.is_some()) else {
+            return;
+        };
+        c.lost = goal.is_none();
+        if let Some(goal) = goal {
+            c.approach(goal, dt);
+        }
     }
 }
 

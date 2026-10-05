@@ -180,7 +180,8 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else.
+  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
+  takes `camera` (see Camera, below).
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -392,6 +393,44 @@ local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, 
   dump. A `set` or a spawn shows in answers from the next frame on.
 - Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
   five hundred things take a few milliseconds; a ray per guard per frame is fine.
+
+### Camera — a map bigger than the box
+
+`width` and `height` are the box: what is shown. A `camera` says which part of the world the box
+shows, so the map can be many screens wide. `demo_apps/camera` is the whole of it.
+
+```lua
+ui.world({
+	id = "map", width = 640, height = 400,
+	camera = { follow = "hero", ease = 8, bounds = { 0, 0, 3000, 2000 } },
+	...
+})
+world("map"):set_camera({ at = { 1500, 1000 } })     -- look here: stops following
+world("map"):set_camera({ follow = "boss" })          -- follow someone else, eased
+local p = world("map"):to_world({ e.x, e.y })         -- a point in the box, in world units
+local s = world("map"):to_screen({ wx, wy })          -- where a world point shows in the box
+```
+
+- The camera's point is the world point at the box's centre. `follow` aims at the entity's box
+  centre, from the first frame on; or `at = { x, y }` looks at a fixed point. Not both.
+- `ease` is a rate per second (each step closes `1 − exp(−ease/120)` of the gap); without it the
+  camera follows exactly. It moves on the world's fixed step, so it ends the same at any frame
+  rate. `bounds = { x, y, w, h }` keeps the box inside the map; a map smaller than the box is
+  centred. Without bounds the camera goes anywhere.
+- A followed id the world does not have is not an error: the camera holds (`lost = true` in the
+  dump) and follows again when it comes back.
+- `set_camera` is a command, so only in a handler. It holds until the description's `camera`
+  changes — describing the same camera again does not undo it. Hot reload keeps where the
+  camera is and takes `follow`, `ease` and `bounds` from the new description.
+- `to_world` and `to_screen` are questions, allowed in `view` too. Pointer events stay in the
+  box's units (`e.x`, `e.y`); `e.shape` is already the entity drawn there.
+- Only what the box can show is posed and drawn: an entity whose box, grown by half its size each
+  side, misses the view costs nothing in the frame. This holds without a camera too. A pose
+  reaching further than that past its box may pop in at the edge. The dump's `camera` has
+  `at`, `follow`, `lost`, `ease`, `bounds`, `view` and `drawn`.
+- Measured (`scripts/bench.py`): 20000 entities through a 1280 × 720 camera build their frame in
+  under a millisecond; all drawn, about 4 ms.
+- Not yet: zoom, rotation, shake, two cameras on one world.
 
 ### Facing and gait — decided in Lua
 

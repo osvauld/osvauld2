@@ -1851,6 +1851,7 @@ fn bench_world_reconcile() {
     });
 }
 
+/// Every entity drawn: the box is the whole map, so nothing is culled.
 #[test]
 #[ignore = "benchmark: scripts/bench.py"]
 fn bench_world_frame() {
@@ -1859,7 +1860,7 @@ fn bench_world_frame() {
         let world = crowded(&d, grass);
         let name = format!("world_frame_{}", grass + 1000);
         bench(&name, 20, || {
-            world.frame(1280.0, 720.0).unwrap();
+            world.frame(4010.0, 4010.0).unwrap();
         });
     }
 }
@@ -1879,5 +1880,280 @@ fn bench_world_rays() {
     let world = crates();
     bench("world_rays_1000", 20, || {
         thousand_rays(&world);
+    });
+}
+
+const VIEW: (f64, f64) = (1280.0, 720.0);
+
+fn follow(id: &str) -> CameraSpec {
+    CameraSpec {
+        follow: Some(id.into()),
+        ..CameraSpec::default()
+    }
+}
+
+/// A walking hero at `(x, y)` on a map many screens wide, seen through `camera`.
+fn on_map(x: f64, y: f64, camera: CameraSpec) -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = EntitySpec {
+        pos: (x, y),
+        ..controlled(&d, wasd(100.0))
+    };
+    world.reconcile(vec![hero]).unwrap();
+    world.describe_camera(VIEW, Some(camera)).unwrap();
+    world
+}
+
+fn camera_at(world: &World2d) -> (f64, f64) {
+    world.camera().unwrap().at
+}
+
+/// Which entity is on screen at `(x, 360)`, the view's middle row.
+fn on_screen(world: &World2d, x: f64) -> Option<String> {
+    let hit = world.frame(VIEW.0, VIEW.1).unwrap().hit(Point::new(x, 360.0))?;
+    Some(hit.id.to_string())
+}
+
+/// C1.
+#[test]
+fn a_following_camera_centres_its_target_from_the_first_frame() {
+    let mut world = on_map(2000.0, 1500.0, follow("hero"));
+    assert_eq!(camera_at(&world), (2004.0, 1504.0), "the box's centre, not eased in from 0, 0");
+    // The test drawing covers x 4..8 on its row y = 4; its box's top-left is drawn 4 up and 4
+    // left of the view's centre.
+    assert_eq!(on_screen(&world, 642.0).as_deref(), Some("hero"));
+    assert_eq!(on_screen(&world, 637.0), None);
+    world.key("KeyD", true);
+    frames(&mut world, 1.0, 1.0);
+    let t = world.transform("hero").unwrap();
+    assert!(t.x > 2090.0);
+    assert!(near(camera_at(&world), (t.x + 4.0, t.y + 4.0)), "without ease, exactly on it");
+    assert_eq!(on_screen(&world, 642.0).as_deref(), Some("hero"), "still in the middle");
+}
+
+/// C2.
+#[test]
+fn an_eased_camera_closes_the_same_share_of_the_gap_each_step() {
+    let eased = CameraSpec {
+        ease: Some(8.0),
+        ..follow("hero")
+    };
+    let mut world = on_map(1000.0, 500.0, eased.clone());
+    let there = Set {
+        pos: Some((1200.0, 500.0)),
+        ..Set::default()
+    };
+    world.set("hero", there).unwrap();
+    world.tick(STEP, STEP);
+    let share = 1.0 - (-8.0 * STEP).exp();
+    assert!(near(camera_at(&world), (1004.0 + 200.0 * share, 504.0)), "{:?}", camera_at(&world));
+
+    let a_second_at = |fps: f64| {
+        let mut world = on_map(1000.0, 500.0, eased.clone());
+        world.key("KeyD", true);
+        for i in 1..=fps as usize {
+            world.tick(i as f64 / fps, 1.0 / fps);
+        }
+        camera_at(&world)
+    };
+    let at60 = a_second_at(60.0);
+    assert!(at60.0 > 1004.0 && at60.0 < 1104.0, "behind the walking hero: {at60:?}");
+    for fps in [30.0, 144.0, 240.0] {
+        let at = a_second_at(fps);
+        assert!(near(at, at60), "{fps} fps: {at:?}, at 60: {at60:?}");
+    }
+}
+
+#[test]
+fn an_easing_camera_asks_for_ticks_only_until_it_arrives() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![spec("chest", (1000.0, 500.0), &d)]).unwrap();
+    let eased = CameraSpec {
+        ease: Some(8.0),
+        ..follow("chest")
+    };
+    world.describe_camera(VIEW, Some(eased)).unwrap();
+    assert!(!world.needs_ticks(), "already there");
+    let there = Set {
+        pos: Some((1500.0, 500.0)),
+        ..Set::default()
+    };
+    world.set("chest", there).unwrap();
+    assert!(world.needs_ticks(), "behind");
+    frames(&mut world, 3.0, 3.0);
+    assert_eq!(camera_at(&world), (1504.0, 504.0), "arrived, exactly");
+    assert!(!world.needs_ticks());
+}
+
+/// C3.
+#[test]
+fn bounds_stop_the_camera_at_the_maps_edge() {
+    let map = CameraSpec {
+        bounds: Some((0.0, 0.0, 4000.0, 3000.0)),
+        ..follow("hero")
+    };
+    let world = on_map(10.0, 2990.0, map.clone());
+    assert_eq!(camera_at(&world), (640.0, 2640.0), "the view's corner on the map's");
+    let world = on_map(3990.0, 10.0, map);
+    assert_eq!(camera_at(&world), (3360.0, 360.0));
+    let small = CameraSpec {
+        bounds: Some((100.0, 100.0, 800.0, 400.0)),
+        ..follow("hero")
+    };
+    let world = on_map(10.0, 10.0, small);
+    assert_eq!(camera_at(&world), (500.0, 300.0), "a map smaller than the view is centred");
+}
+
+/// C4.
+#[test]
+fn a_lost_target_holds_the_camera_until_it_comes_back() {
+    let d = drawing();
+    let boss = |x| spec("boss", (x, 1000.0), &d);
+    let mut world = World2d::default();
+    world.reconcile(vec![boss(2000.0)]).unwrap();
+    let eased = CameraSpec {
+        ease: Some(8.0),
+        ..follow("boss")
+    };
+    world.describe_camera(VIEW, Some(eased)).unwrap();
+    world.reconcile(vec![]).unwrap();
+    frames(&mut world, 1.0, 1.0);
+    let c = world.camera().unwrap();
+    assert_eq!((c.at, c.follow.as_deref(), c.lost), ((2004.0, 1004.0), Some("boss"), true));
+    world.reconcile(vec![boss(3000.0)]).unwrap();
+    frames(&mut world, 2.0, 1.0);
+    let c = world.camera().unwrap();
+    assert!(!c.lost);
+    assert!(c.at.0 > 2900.0 && c.at.0 <= 3004.0, "eased back to it: {:?}", c.at);
+
+    let mut world = World2d::default();
+    world.describe_camera(VIEW, Some(follow("ghost"))).unwrap();
+    let c = world.camera().unwrap();
+    assert_eq!((c.at, c.lost), ((640.0, 360.0), true), "lost from the start: shows 0, 0 on");
+}
+
+#[test]
+fn set_camera_holds_until_the_description_changes() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let both = vec![spec("hero", (1000.0, 500.0), &d), spec("boss", (3000.0, 900.0), &d)];
+    world.reconcile(both).unwrap();
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    world.set_camera(Look::At((2000.0, 1000.0))).unwrap();
+    let c = world.camera().unwrap();
+    assert_eq!((c.at, c.follow), ((2000.0, 1000.0), None), "looking here clears follow");
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    frames(&mut world, 1.0, 1.0);
+    assert_eq!(camera_at(&world), (2000.0, 1000.0), "the same description does not undo it");
+    world.set_camera(Look::Follow("boss".into())).unwrap();
+    frames(&mut world, 2.0, 1.0);
+    assert_eq!(camera_at(&world), (3004.0, 904.0));
+    let changed = CameraSpec {
+        ease: Some(4.0),
+        ..follow("hero")
+    };
+    world.describe_camera(VIEW, Some(changed)).unwrap();
+    assert_eq!(world.camera().unwrap().follow.as_deref(), Some("hero"), "a change applies");
+    world.describe_camera(VIEW, None).unwrap();
+    assert!(world.camera().is_none(), "described away");
+}
+
+#[test]
+fn a_bad_camera_is_refused_and_changes_nothing() {
+    let mut world = World2d::default();
+    let bad = [
+        CameraSpec {
+            at: Some((0.0, 0.0)),
+            ..follow("hero")
+        },
+        CameraSpec {
+            ease: Some(0.0),
+            ..follow("hero")
+        },
+        CameraSpec {
+            ease: Some(f64::NAN),
+            ..CameraSpec::default()
+        },
+        CameraSpec {
+            bounds: Some((0.0, 0.0, -1.0, 10.0)),
+            ..CameraSpec::default()
+        },
+        CameraSpec {
+            at: Some((f64::INFINITY, 0.0)),
+            ..CameraSpec::default()
+        },
+    ];
+    for spec in bad {
+        assert!(world.describe_camera(VIEW, Some(spec.clone())).is_err(), "{spec:?}");
+    }
+    assert!(world.camera().is_none());
+    assert!(world.set_camera(Look::At((0.0, 0.0))).is_err(), "no camera to point");
+    world.describe_camera(VIEW, Some(CameraSpec::default())).unwrap();
+    assert!(world.set_camera(Look::At((f64::NAN, 0.0))).is_err());
+}
+
+/// Part of C7.
+#[test]
+fn screen_and_world_points_convert_through_the_camera() {
+    let world = on_map(2000.0, 1500.0, follow("hero"));
+    assert_eq!(world.to_world((640.0, 360.0)), (2004.0, 1504.0));
+    assert_eq!(world.to_screen(world.to_world((10.0, 20.0))), (10.0, 20.0));
+    assert_eq!(World2d::default().to_world((10.0, 20.0)), (10.0, 20.0), "no camera: the same");
+}
+
+/// A 100 × 100 grid of the 8 × 8 test drawing, 40 apart: a 4000 × 4000 map, `t{col + 100 row}`.
+fn grid_map(at: (f64, f64)) -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    let grid = (0..10_000)
+        .map(|i| spec(&format!("t{i}"), ((i % 100) as f64 * 40.0, (i / 100) as f64 * 40.0), &d))
+        .collect();
+    world.reconcile(grid).unwrap();
+    let look = CameraSpec {
+        at: Some(at),
+        ..CameraSpec::default()
+    };
+    world.describe_camera(VIEW, Some(look)).unwrap();
+    world
+}
+
+/// C6.
+#[test]
+fn a_camera_draws_only_what_meets_the_view() {
+    // The view is x 1360..2640, y 1640..2360. A box x..x+8 grown by 4 each side meets it for
+    // x in (1348, 2644) — columns 34..=66 — and y in (1628, 2364) — rows 41..=59.
+    let world = grid_map((2000.0, 2000.0));
+    let frame = world.frame(VIEW.0, VIEW.1).unwrap();
+    assert_eq!(frame.stats().hittable, 33 * 19, "of 10000");
+    assert_eq!(world.camera().unwrap().drawn, 33 * 19);
+
+    // Moved 4 right, column 34 (x 1360..1368) straddles the left edge: its visible half draws.
+    let world = grid_map((2004.0, 2000.0));
+    let hit = world.frame(VIEW.0, VIEW.1).unwrap().hit(Point::new(2.0, 364.0));
+    assert_eq!(hit.map(|h| h.id.to_string()).as_deref(), Some("t5034"));
+}
+
+#[test]
+fn a_world_without_a_camera_draws_only_what_meets_its_box() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![spec("in", (10.0, 10.0), &d), spec("out", (500.0, 10.0), &d)]).unwrap();
+    assert_eq!(world.frame(200.0, 100.0).unwrap().stats().hittable, 1);
+}
+
+/// B7: the frame of the 20000-entity crowd through a 1280 × 720 camera — about 6% of the map.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_frame_camera() {
+    let mut world = crowded(&drawing(), 19000);
+    let look = CameraSpec {
+        at: Some((2000.0, 2000.0)),
+        ..CameraSpec::default()
+    };
+    world.describe_camera(VIEW, Some(look)).unwrap();
+    bench("world_frame_20000_camera", 20, || {
+        world.frame(VIEW.0, VIEW.1).unwrap();
     });
 }

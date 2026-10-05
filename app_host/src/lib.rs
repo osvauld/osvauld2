@@ -823,7 +823,7 @@ impl<M: 'static> LuaApp<M> {
     /// Each live world's entities, by world id.
     pub fn inspect_worlds(&self) -> HashMap<String, world::WorldInspection> {
         let worlds = self.worlds.borrow();
-        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers(), tick: w.steps(), dropped: w.dropped() };
+        let inspect = |w: &world::World2d| world::WorldInspection { entities: w.inspect(), timers: w.timers(), tick: w.steps(), dropped: w.dropped(), camera: w.camera() };
         worlds.iter().map(|(id, w)| (id.clone(), inspect(w))).collect()
     }
 
@@ -1748,6 +1748,11 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
+    // Checked before the world is touched, so a bad camera keeps the last good world whole.
+    let camera = gfx::camera(node)?;
+    if let Some(c) = &camera {
+        c.check().map_err(|e| mlua::Error::runtime(format!("world {id:?}: camera: {e}")))?;
+    }
     for handler in ["on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
         match node.get::<Value>(handler)? {
             Value::Nil => {}
@@ -1803,6 +1808,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     context.groups.borrow_mut().extend(read);
     world.set_order(order);
     world.set_actions(actions);
+    world.describe_camera((width, height), camera).map_err(mlua::Error::external)?;
     let visual = world.frame(width, height).map_err(mlua::Error::external)?;
     let mut el = frame_el(Arc::new(visual));
     if world.wants_keys() {
@@ -1970,6 +1976,7 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
         "world" => &[
             "width",
             "height",
+            "camera",
             "order",
             "actions",
             "on_action",
