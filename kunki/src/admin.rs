@@ -23,7 +23,7 @@ use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelco
 use courier::publish::{PublishAck, PublishHello};
 use courier::role::{Grant, RoleRequest};
 use courier::subscribe::SubscribeHello;
-use courier::sync::{SyncAck, SyncHello, SyncLayer, item_scope, reaches};
+use courier::sync::{SyncHello, SyncLayer, SyncReply, item_scope, reaches};
 use courier::token::{Scope, Token};
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
 use manifest::{Manifest, OWNER};
@@ -213,6 +213,9 @@ impl Admin {
     /// A doc sync is judged by the app's manifest first (`courier::access`): the caller's roles
     /// from its grants on record, `members(...)` from the node's own copies.
     ///
+    /// A write the rules refuse is answered with `SyncReply::Rejected`, not an error: nothing is
+    /// stored or pushed, and the writer rolls back (`group-chat-sync.md` §5).
+    ///
     /// Fans the new snapshot out to every other subscriber on this layer once it's stored.
     /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
     /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
@@ -222,24 +225,46 @@ impl Admin {
         hello: SyncHello,
         now: u64,
         pusher: &impl Pusher,
-    ) -> Result<SyncAck, NodeError> {
+    ) -> Result<SyncReply, NodeError> {
         let node_did = node::did(&self.vault)?;
         let revoked = self.revoked()?;
         let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
         let grants = self.grants_given(&hello.desktop_did, now, &revoked)?;
-        let access = self.access(rules.as_ref(), &hello, &hello.desktop_did, &grants)?;
+        // An undeclared doc is judged as one nobody may read or write, so membership still
+        // runs first and a stranger is refused as a stranger.
+        let (access, undeclared) =
+            match self.access(rules.as_ref(), &hello, &hello.desktop_did, &grants) {
+                Ok(access) => (access, false),
+                Err(NodeError::Courier(CourierError::Undeclared)) => {
+                    (Access { read: false, write: false }, true)
+                }
+                Err(e) => return Err(e),
+            };
         let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
-        let (ack, snapshot) = courier::sync::node_accept_sync(
+        let why = match courier::sync::node_accept_sync(
             &hello,
             &node_did,
             current.as_deref(),
             access,
             now,
             &revoked,
-        )?;
-        self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
-        self.fan_out(&hello, &snapshot, rules.as_ref(), now, pusher)?;
-        Ok(ack)
+        ) {
+            Ok(_) if undeclared => CourierError::Undeclared,
+            Ok((ack, snapshot)) => {
+                self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
+                self.fan_out(&hello, &snapshot, rules.as_ref(), now, pusher)?;
+                return Ok(SyncReply::Ack(ack));
+            }
+            Err(CourierError::NoRead | CourierError::NoWrite) if undeclared => {
+                CourierError::Undeclared
+            }
+            Err(why) => why,
+        };
+        // A refused write is answered, not failed: the writer rolls back to the node's copy.
+        match courier::sync::node_reject(&hello, &why, current.as_deref(), access)? {
+            Some(rejected) => Ok(SyncReply::Rejected(rejected)),
+            None => Err(why.into()),
+        }
     }
 
     /// The manifest a doc layer is judged by; `None` for the source layer, which has its own

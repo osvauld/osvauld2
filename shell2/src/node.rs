@@ -10,7 +10,7 @@ use courier::invite::{InviteRequest, InviteTicket, InviteWelcome, desktop_start_
 use courier::publish::{PublishAck, PublishedItem, PublishedWorkspace, desktop_publish};
 use courier::role::RoleRequest;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncAck, SyncHello, SyncLayer, desktop_start_sync, item_scope};
+use courier::sync::{SyncAck, SyncHello, SyncLayer, SyncReply, desktop_start_sync, item_scope};
 use courier::token::{Scope, Token};
 use courier::{ClaimWelcome, ConnectionTicket, DesktopNodeRecord};
 use kunki::bridge::{Envelope, Request};
@@ -218,8 +218,16 @@ pub fn join(
 /// (`courier::desktop_start_sync` needs the doc itself, not bytes), and the ack's `update` is
 /// imported back into that same doc after. Both of those touch a doc that is not `Send`; this
 /// function is the part of the exchange that is, so a caller offloads only this to a thread.
-pub fn sync(socket: &Path, vault: &Vault, hello: SyncHello) -> Result<SyncAck, String> {
+pub fn sync(socket: &Path, vault: &Vault, hello: SyncHello) -> Result<SyncReply, String> {
     unpack(call_as(socket, vault, &Request::Sync(hello))?)
+}
+
+/// `sync` where a rejection is only a failure: a pull, or a push with no doc to roll back.
+fn sync_acked(socket: &Path, vault: &Vault, hello: SyncHello) -> Result<SyncAck, String> {
+    match sync(socket, vault, hello)? {
+        SyncReply::Ack(ack) => Ok(ack),
+        SyncReply::Rejected(r) => Err(format!("rejected: {}", r.reason)),
+    }
 }
 
 /// Pull whatever the node already has for one doc layer, best-effort: `None` on any failure —
@@ -248,7 +256,7 @@ pub fn pull_doc(
         None,
     )
     .ok()?;
-    let ack = sync(socket, vault, hello).ok()?;
+    let ack = sync_acked(socket, vault, hello).ok()?;
     doc.import(&ack.update).ok()?;
     // Checked on the doc's own oplog, not `ack.update`'s byte length: whether an empty diff
     // serializes to zero bytes is a Loro encoding detail, not something to depend on. A doc
@@ -283,7 +291,7 @@ pub fn join_item(
     let doc = LoroDoc::new();
     let hello = desktop_start_sync(&did, token, &ws.id, &item.id, SyncLayer::Src, &doc, None)
         .map_err(|e| e.to_string())?;
-    let ack = sync(socket, vault, hello)?;
+    let ack = sync_acked(socket, vault, hello)?;
     doc.import(&ack.update).map_err(|e| e.to_string())?;
     let bytes = doc
         .export(ExportMode::Snapshot)
@@ -313,7 +321,7 @@ pub fn push_src(
         .ok_or("account is locked")?;
     let hello = desktop_start_sync(&did, token, ws_id, item_id, SyncLayer::Src, &doc, None)
         .map_err(|e| e.to_string())?;
-    sync(socket, vault, hello).map(|_ack| ())
+    sync_acked(socket, vault, hello).map(|_ack| ())
 }
 
 /// Declare interest in one item's layer — what makes a future push for it reach this desktop,

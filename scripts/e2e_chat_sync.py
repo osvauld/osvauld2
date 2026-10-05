@@ -206,13 +206,21 @@ def t8(net):
     a, b = net.peer("alice"), net.peer("bob")
     _, item = net.share_app(a, [b], CHAT)
     i = item["id"]
-    # The UI hides channel creation from members; a modified client calls it anyway.
-    patch_local(b, i, "main.lua", "return function()",
-                'M.add_channel("bobs-room")\nreturn function()')
+    # The UI hides channel creation from members; a modified client writes it anyway.
+    run_once(b, i, BOBS_ROOM)
+    rejected(b, i)
     wait_until(lambda: not any(c["id"] == "bobs-room" for c in data(b, i)["chat"]["channels"]),
                PUSH, "bob's channel to roll back")
     never_sees(a, i, "bobs-room")
-    assert any("rejected" in line for line in b.rpc.read_console(i)), "no rejection reported"
+    # The rolled-back doc syncs on, and stays rolled back across a restart.
+    unpatch_once(b, i, BOBS_ROOM)
+    send(b, i, "after the rollback")
+    sees(a, i, "after the rollback")
+    b.restart()
+    b.rpc.open_item(i)
+    sees(b, i, "after the rollback")
+    assert not any(c["id"] == "bobs-room" for c in data(b, i)["chat"]["channels"]), \
+        "the rejected channel came back"
     shots("T8", i, a, b)
 
 
@@ -318,16 +326,17 @@ def t14(net):
 
 
 def t15(net):
-    """B can't write under A's DID segment."""
+    """B can't write under A's DID segment; B's own copy rolls back."""
     a, b = net.peer("alice"), net.peer("bob")
     _, item = net.share_app(a, [b], CHAT)
     i = item["id"]
     alice = _did(a, i)
     patch_local(b, i, "main.lua", "return function()",
                 f'doc:open("user/{alice}"):set({{"me"}}, doc.map({{ name = "mallory" }}))\nreturn function()')
-    time.sleep(1.5)
+    rejected(b, i)
+    wait_until(lambda: "mallory" not in json.dumps(data(b, i).get(f"user/{alice}")),
+               PUSH, "bob's write to roll back")
     assert "mallory" not in json.dumps(data(a, i)), "bob renamed alice"
-    assert any("rejected" in line for line in b.rpc.read_console(i)), "no rejection reported"
 
 
 def _did(p, item) -> str:
@@ -346,6 +355,21 @@ def run_once(p, item, lua):
     """Run `lua` once in this peer's app, at load, with `M` (the model) in scope — a modified
     client for hostile tests, a scripted user for the rest."""
     patch_local(p, item, "main.lua", "return function()", f"do\n{lua}\nend\nreturn function()")
+
+
+def unpatch_once(p, item, lua):
+    """Undo `run_once`, so a reload or restart doesn't run it again."""
+    patch_local(p, item, "main.lua", f"do\n{lua}\nend\n", "")
+
+
+def rejected(p, item, timeout=PUSH):
+    """Wait for the node's refusal to reach this peer's app console."""
+    wait_until(lambda: any("rejected" in line for line in p.rpc.read_console(item)),
+               timeout, f"{p.name} to report a rejection")
+
+
+BOBS_ROOM = ('M.chat:set({ "channels" }, doc.list({ doc.map({ id = "general", name = "general" }), '
+             'doc.map({ id = "bobs-room", name = "bobs-room" }) }))')
 
 
 def msg_id(p, item, text, channel="general"):
@@ -565,8 +589,7 @@ def t8a(net):
     _, item = net.share_app(a, [b], CHAT)
     i = item["id"]
     # A set, not an insert: module code runs on every load.
-    run_once(b, i, 'M.chat:set({ "channels" }, doc.list({ doc.map({ id = "general", name = "general" }), '
-                   'doc.map({ id = "bobs-room", name = "bobs-room" }) }))')
+    run_once(b, i, BOBS_ROOM)
     wait_until(lambda: any(c["id"] == "bobs-room" for c in data(b, i)["chat"]["channels"]),
                PUSH, "bob's local channel")
     send(a, i, "alice still syncs")

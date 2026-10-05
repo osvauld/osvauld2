@@ -3,12 +3,12 @@
 
 use courier::CourierError;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
+use courier::sync::{SyncLayer, SyncReply, desktop_start_sync};
 use courier::token::{Scope, Token, issue_root};
 use identity::Identity;
 use loro::LoroDoc;
 
-use super::roles_tests::{Fixture, NOW, fixture_with, minted, refused};
+use super::roles_tests::{Fixture, NOW, acked, fixture_with, minted, refused, rejected};
 use super::*;
 use crate::push::MockPusher;
 
@@ -48,7 +48,7 @@ impl Fixture {
         name: &str,
         doc: &LoroDoc,
         pusher: &MockPusher,
-    ) -> Result<SyncAck, NodeError> {
+    ) -> Result<SyncReply, NodeError> {
         let layer = SyncLayer::Doc(name.to_string());
         let hello =
             desktop_start_sync(who.did(), token.clone(), &self.ws, item, layer, doc, None).unwrap();
@@ -61,7 +61,7 @@ impl Fixture {
         token: &Token,
         name: &str,
         doc: &LoroDoc,
-    ) -> Result<SyncAck, NodeError> {
+    ) -> Result<SyncReply, NodeError> {
         self.sync_on(&self.item, who, token, name, doc, &MockPusher::new())
     }
 
@@ -90,14 +90,24 @@ fn a_member_may_read_an_admin_doc_but_not_change_it() {
     f.sync(&f.alice, &f.alice_token, "chat", &text("general"))
         .unwrap();
 
-    let ack = f.sync(&bob, &bob_token, "chat", &LoroDoc::new()).unwrap();
+    let ack = acked(f.sync(&bob, &bob_token, "chat", &LoroDoc::new()));
     let mine = LoroDoc::new();
     mine.import(&ack.update).unwrap();
     assert_eq!(mine.get_text("t").to_string(), "general");
 
+    f.subscribe(&f.alice, &f.alice_token, "chat");
     mine.get_text("t").insert(0, "bobs-room ").unwrap();
-    refused(f.sync(&bob, &bob_token, "chat", &mine), CourierError::NoWrite);
+    let pusher = MockPusher::new();
+    let r = rejected(
+        f.sync_on(&f.item, &bob, &bob_token, "chat", &mine, &pusher),
+        "may not write",
+    );
     assert_eq!(f.stored_text("chat"), "general");
+    assert!(pusher.received_by(f.alice.did()).is_empty(), "a rejected write was pushed");
+    // Bob may read it, so he is told what to roll back to.
+    assert!(r.state.is_some(), "a reader's rejection carries the node's copy");
+    let back = courier::sync::desktop_roll_back(&mine, Some(&ack.vv), &r).unwrap();
+    assert_eq!(back.get_text("t").to_string(), "general");
 }
 
 #[test]
@@ -107,19 +117,15 @@ fn nobody_writes_under_another_users_did() {
     let alices = format!("user/{}", f.alice.did());
     f.sync(&f.alice, &f.alice_token, &alices, &text("alice"))
         .unwrap();
-    refused(
-        f.sync(&bob, &bob_token, &alices, &text("mallory")),
-        CourierError::NoRead,
-    );
+    let r = rejected(f.sync(&bob, &bob_token, &alices, &text("mallory")), "may not read");
+    assert_eq!(r.state, None, "bob learned alice's doc from a rejection");
     assert_eq!(f.stored_text(&alices), "alice");
 
     // Nor may bob create one for someone who hasn't yet.
     let (carol, _) = f.member();
     let carols = format!("user/{}", carol.did());
-    refused(
-        f.sync(&bob, &bob_token, &carols, &text("mallory")),
-        CourierError::NoWrite,
-    );
+    let r = rejected(f.sync(&bob, &bob_token, &carols, &text("mallory")), "may not write");
+    assert_eq!(r.state, None);
     assert!(f.stored(&carols).is_none());
 }
 
@@ -178,10 +184,8 @@ fn a_group_reaches_whoever_its_meta_lists_now() {
         CourierError::NoRead,
     );
     let tomorrow = "group/g1/2026-10-05";
-    refused(
-        f.sync(&carol, &carol_token, tomorrow, &text("let me in")),
-        CourierError::NoWrite,
-    );
+    let r = rejected(f.sync(&carol, &carol_token, tomorrow, &text("let me in")), "may not write");
+    assert_eq!(r.state, None);
 
     // The read rule is re-read on every push: listing carol reaches her from then on.
     listed.get_map("members").insert(carol.did(), true).unwrap();
@@ -198,11 +202,17 @@ fn a_group_reaches_whoever_its_meta_lists_now() {
 #[test]
 fn an_undeclared_doc_is_refused_even_to_the_owner() {
     let f = fixture_with(CHAT);
-    refused(
+    let r = rejected(
         f.sync(&f.alice, &f.alice_token, "smuggled/x", &text("x")),
+        "does not declare",
+    );
+    assert_eq!(r.state, None);
+    assert!(f.stored("smuggled/x").is_none());
+    // Asking for it is still only refused: there is nothing to roll back.
+    refused(
+        f.sync(&f.alice, &f.alice_token, "smuggled/x", &LoroDoc::new()),
         CourierError::Undeclared,
     );
-    assert!(f.stored("smuggled/x").is_none());
 }
 
 #[test]
