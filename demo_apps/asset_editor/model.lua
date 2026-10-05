@@ -14,6 +14,8 @@ M.seeds = {
 			parts = hero.parts,
 			clips = require("seed/clips"),
 			sockets = { head_top = { kind = "hat", part = "head", at = { 80, 34 }, width = 60 } },
+			-- Top-down, only the feet meet a wall: a small circle where they stand.
+			world = { collider = { circle = 16, at = { 80, 222 } } },
 		}
 	end,
 	toggle = function()
@@ -25,11 +27,14 @@ M.seeds = {
 	hat = function()
 		return require("seed/hat")
 	end,
+	crate = function()
+		return require("seed/crate")
+	end,
 	room = function()
 		return require("seed/room")
 	end,
 }
-M.names = { "hero", "toggle", "chest", "hat" }
+M.names = { "hero", "toggle", "chest", "hat", "crate" }
 M.scenes = { room = true }
 
 -- Doc writes are tagged at every depth: a table with only positional entries is a list,

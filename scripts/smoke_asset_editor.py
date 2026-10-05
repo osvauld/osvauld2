@@ -1,0 +1,63 @@
+"""The asset editor over the real path: a room made in the editor plays as a map. Its entities
+take their world fields — collider, sensor, loose — from their assets, and the room's own fields
+(the hero's keys) on top (design/maker-parity.md §0)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from osvauld.session import Session, shell_binary
+
+
+def find(tree, el_id):
+    if tree.get("id") == el_id:
+        return tree
+    for child in tree.get("children", []):
+        found = find(child, el_id)
+        if found:
+            return found
+    return None
+
+
+with Session(shell_binary=shell_binary(), offscreen=(1200, 900)) as s:
+    s.rpc.signup("maker", "maker passphrase")
+    ws = s.rpc.create_workspace("maker smoke")
+    item = s.rpc.create_item(ws["id"], "asset editor", "app")["id"]
+    s.rpc.upload_folder(item, Path(__file__).parent.parent / "demo_apps" / "asset_editor")
+    s.rpc.open_item(item)
+    s.rpc.frame(2)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+
+    def entities():
+        return {e["id"]: e for e in find(s.rpc.dump_tree(item), "stage-play")["world"]["entities"]}
+
+    def hold(code, key, frames):
+        s.rpc.keyboard(code, key, True)
+        s.rpc.frame(frames)
+        s.rpc.keyboard(code, key, False)
+        s.rpc.frame(2)
+
+    # E1: play the room. The chest is solid by its asset, the crate loose by its own.
+    s.rpc.click(item, "asset:room")
+    s.rpc.frame(3)  # the room seeds, then the assets it shows
+    s.rpc.click(item, "stage:play")
+    s.rpc.frame(2)
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+    seen = entities()
+    assert (seen["hero"]["body"], seen["chest"]["body"], seen["crate"]["body"]) == ("moved", "fixed", "loose"), seen
+
+    # Held D drives the hero right; its foot circle (r 16, at x 80) stops at the chest's
+    # collider (x 8 into a chest at 460): pos.x 372, far short of where 3 s would take it.
+    hold("KeyD", "d", 180)
+    x = entities()["hero"]["pos"][0]
+    assert abs(x - 372) < 2, f"the hero should stop at the chest, not at x {x}"
+
+    # Held A drives it back across the room into the crate, which slides away.
+    crate = entities()["crate"]["pos"]
+    hold("KeyA", "a", 240)
+    moved = entities()["crate"]["pos"]
+    assert moved[0] < crate[0] - 10, f"the hero should push the crate: {crate} → {moved}"
+    assert not s.rpc.read_console(item), s.rpc.read_console(item)
+
+    print("asset editor: a room made in the editor plays — a solid chest, a pushed crate")

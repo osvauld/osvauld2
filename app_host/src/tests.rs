@@ -3897,6 +3897,7 @@ fn asset_editor() -> LuaApp<LuaMsg> {
         "seed/toggle.lua",
         "seed/chest.lua",
         "seed/hat.lua",
+        "seed/crate.lua",
         "seed/room.lua",
     ] {
         let body = std::fs::read_to_string(format!("../demo_apps/asset_editor/{name}"))
@@ -4029,18 +4030,64 @@ fn asset_editor_stage_moves_and_equips() {
     };
 
     drag(&mut app, "chest", (500.0, 280.0), (40.0, 20.0));
-    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=320,300 rival=560,100");
+    assert_eq!(stage(&app), "chest=500,284 hero=140,110 crate=40,308 hat=320,300 rival=560,100");
 
     // The hat's plug (its pos + {32, 44}) to the socket (the hero's pos + {80, 34}).
     drag(&mut app, "hat", (330.0, 320.0), (-132.0, -200.0));
-    let equipped = "chest=500,270 hero=140,110 hat=on hero.head_top rival=560,100";
+    let equipped = "chest=500,284 hero=140,110 crate=40,308 hat=on hero.head_top rival=560,100";
     assert_eq!(stage(&app), equipped);
 
     // Pulled off from where it sits on the head, (188, 100), it lands by its travel.
     drag(&mut app, "hat", (200.0, 110.0), (150.0, 150.0));
-    assert_eq!(stage(&app), "chest=500,270 hero=140,110 hat=338,250 rival=560,100");
+    assert_eq!(stage(&app), "chest=500,284 hero=140,110 crate=40,308 hat=338,250 rival=560,100");
     let console = app.console(100);
     assert!(console.is_empty(), "{console:?}");
+}
+
+/// A stage entity plays with its asset's `world` fields, each replaced whole by the entity's own;
+/// `false` takes one away, and only the room gives keys. The room plays with them, cleanly.
+#[test]
+fn asset_editor_stage_fields_override_the_asset() {
+    let mut app = asset_editor();
+    let _ = app.view();
+    click(&mut app, "asset:room");
+    let _ = app.view(); // the room and the assets it shows seed here
+    let _ = app.view();
+    let fields: String = app
+        .vm
+        .load(
+            r#"
+            local S, M = require("stage"), require("model")
+            local chest, crate, hero = M.load("chest"), M.load("crate"), M.load("hero")
+            local function say(f)
+                local c, s = f.collider, f.sensor
+                return table.concat({
+                    c and (c.rect and "rect" .. c.rect[1] or "circle" .. c.circle) or "-",
+                    s and "sensor" .. s.circle or "-",
+                    f.loose and "loose" or "-",
+                    f.controller and "keys" .. f.controller.speed or "-",
+                }, ",")
+            end
+            return table.concat({
+                say(S.fields({ asset = "chest" }, chest)),
+                say(S.fields({ asset = "chest", sensor = false, loose = true }, chest)),
+                say(S.fields({ asset = "crate", collider = { circle = 4 } }, crate)),
+                say(S.fields({ asset = "hero", controller = { speed = 9 } }, hero)),
+            }, " ")
+            "#,
+        )
+        .eval()
+        .unwrap();
+    let want = "rect80,sensor72,-,- rect80,-,loose,- circle4,-,loose,- circle16,-,-,keys9";
+    assert_eq!(fields, want);
+
+    click(&mut app, "stage:play");
+    let info = app.view().info();
+    let world = &info.children[0].children[1].children[0];
+    assert_eq!(world.id.as_deref(), Some("stage-play"));
+    let console = app.console(100);
+    assert!(console.is_empty(), "{console:?}");
+    assert!(app.error.is_none(), "editor failed: {:?}", app.error);
 }
 
 #[test]

@@ -210,6 +210,11 @@ which need a render pass that is its own project.
 and a plain button in an app. An asset may still carry a *default* collider, in slice 5's
 vocabulary, drawn in the editor, so a game does not guess the chest's footprint.
 
+*Built 2026-10-05 ([Maker parity](maker-parity.md) step 1):* an asset's `world` root holds its
+defaults — `collider`, `sensor`, `loose`, `group`, `blocks` in the world's own words — and a stage
+entity's field of the same name replaces one whole (`false` takes it away). `controller` is a stage
+entity's alone: the keys are the room's, and the rival is the hero asset with none.
+
 ## 5b. Events
 
 An asset is data and sends nothing. It **declares named moments and places**; whatever plays it
@@ -251,7 +256,8 @@ coordinated across clips from Lua. A piece that is *reused* becomes its own asse
 `use` (a cloud in the toggle and in a game background). Things that *act independently* — hero
 and chest, three toggles on a panel — are separate assets in a stage.
 
-**A stage** is `{ scene = { size = {w, h}, entities = { { id, asset, pos, clip?, mount? }, … } } }`.
+**A stage** is `{ scene = { size = {w, h}, entities = { { id, asset, pos, clip?, mount? }, … } } }`;
+an entity may also carry `vars` and the world fields of §5.
 Edit draws every entity as a named instance in one frame, so a drag reports the entity; play is
 the same scene as a `ui.world`, clips per entity, mounts as `attach`.
 

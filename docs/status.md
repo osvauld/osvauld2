@@ -707,8 +707,15 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
   its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
   pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.
-  Not built: picking a var from a list (type `@name` for now), editing gradients, stage entity fields,
-  reparenting and reordering, adding parts, the clip timeline, colliders in stage play, behaviour preview. App tests cover all of it headlessly; no smoke drives it yet.
+  **World fields** ([maker-parity.md](design/maker-parity.md) step 1, 2026-10-05): an asset's
+  `world` root gives its `collider`, `sensor`, `loose`, `group` and `blocks`; a stage entity's own
+  field replaces one whole, `false` removes it, and `controller` comes only from the entity. Stage
+  edit outlines each collider and dashes each sensor; in play the room's hero walks on WASD, stops
+  at the chest and pushes a loose `crate`.
+  Not built: picking a var from a list (type `@name` for now), editing gradients, editing stage
+  entity fields in the editor, reparenting and reordering, adding parts, the clip timeline,
+  behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` plays the room over
+  the bridge.
 
 ### Environment — composable 3D interfaces and worlds
 

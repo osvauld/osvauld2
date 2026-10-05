@@ -21,4 +21,6 @@ return {
 		open = { length = 0.5, tracks = { lid = { rot = { {0, 0}, {0.5, -100, "in_out"} } } } },
 		close = { length = 0.4, tracks = { lid = { rot = { {0, -100}, {0.4, 0, "in_out"} } } } },
 	},
+	-- Solid along its base; its sensor is the reach of whoever comes to open it.
+	world = { collider = { rect = { 80, 24 }, at = { 8, 56 } }, sensor = { circle = 72, at = { 48, 68 } } },
 }

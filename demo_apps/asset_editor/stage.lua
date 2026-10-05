@@ -155,22 +155,66 @@ local function on_drag(e, entities)
 	end
 end
 
+local function ring(x, y, r)
+	local k = 0.5523 * r
+	return gfx.path({
+		{ "move", x + r, y }, { "cubic", x + r, y + k, x + k, y + r, x, y + r },
+		{ "cubic", x - k, y + r, x - r, y + k, x - r, y },
+		{ "cubic", x - r, y - k, x - k, y - r, x, y - r },
+		{ "cubic", x + k, y - r, x + r, y - k, x + r, y }, { "close" },
+	})
+end
+
+-- The world fields an entity plays with: its asset's `world` defaults, each replaced whole by
+-- the entity's own, where `false` takes one away. Keys are the room's: only an entity has them.
+local FIELDS = { "collider", "sensor", "loose", "group", "blocks" }
+function S.fields(e, a)
+	local out = { controller = e.controller or nil }
+	for _, k in ipairs(FIELDS) do
+		local v = e[k]
+		if v == nil then
+			v = a.world and a.world[k]
+		end
+		out[k] = v or nil
+	end
+	return out
+end
+
+-- Each collider as a line and each sensor dashed, where the entity stands. A mounted entity
+-- has neither while it rides.
+local function body_marks(entities)
+	local marks = {}
+	for _, e in ipairs(entities) do
+		local r, p = rest(e.asset), last[e.id]
+		local f = r and p and not e.mount and S.fields(e, r.asset) or {}
+		for _, k in ipairs({ "collider", "sensor" }) do
+			local s = f[k]
+			if s then
+				local at = s.at or { 0, 0 }
+				local x, y = p[1] + at[1], p[2] + at[2]
+				local path = s.rect and gfx.path({
+					{ "move", x, y }, { "line", x + s.rect[1], y }, { "line", x + s.rect[1], y + s.rect[2] },
+					{ "line", x, y + s.rect[2] }, { "close" },
+				}) or ring(x, y, s.circle)
+				local brush = gfx.solid(k == "sensor" and C.muted or C.accent)
+				table.insert(marks, gfx.stroke({
+					path = path, brush = brush, width = 1.5, dashes = k == "sensor" and { 6, 4 } or nil,
+				}))
+			end
+		end
+	end
+	return marks
+end
+
 -- A ring at every socket the dragged plug fits, filled where it would snap.
 local function socket_marks()
 	local marks = {}
 	for _, s in ipairs(drag and drag.sockets or {}) do
-		local k, r = 0.5523 * 9, 9
-		local x, y = s.x, s.y
-		local ring = gfx.path({
-			{ "move", x + r, y }, { "cubic", x + r, y + k, x + k, y + r, x, y + r },
-			{ "cubic", x - k, y + r, x - r, y + k, x - r, y },
-			{ "cubic", x - r, y - k, x - k, y - r, x, y - r },
-			{ "cubic", x + k, y - r, x + r, y - k, x + r, y }, { "close" },
-		})
+		local circle = ring(s.x, s.y, 9)
 		local on = drag.snap and drag.snap.to == s.to and drag.snap.socket == s.socket
 		local brush = gfx.solid(on and C.accent or C.muted)
-		table.insert(marks, on and gfx.fill({ path = ring, brush = brush })
-			or gfx.stroke({ path = ring, brush = brush, width = 2 }))
+		table.insert(marks, on and gfx.fill({ path = circle, brush = brush })
+			or gfx.stroke({ path = circle, brush = brush, width = 2 }))
 	end
 	return marks
 end
@@ -201,6 +245,9 @@ local function world_entity(e, by_id, at)
 	local plug = r.asset.plug
 	if socket and plug then
 		out.attach = { to = host.id, part = socket.part, at = socket.at, pivot = plug.at, turn = true }
+	end
+	for k, v in pairs(S.fields(e, r.asset)) do
+		out[k] = v
 	end
 	return out
 end
@@ -254,6 +301,9 @@ function S.view()
 			local place = { 1, 0, 0, 1, p[1], p[2] }
 			table.insert(items, gfx.instance({ id = e.id, visual = r.frame, transform = place }))
 		end
+	end
+	for _, mark in ipairs(body_marks(scene.entities)) do
+		table.insert(items, mark)
 	end
 	for _, mark in ipairs(socket_marks()) do
 		table.insert(items, mark)
