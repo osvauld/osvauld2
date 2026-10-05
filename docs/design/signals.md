@@ -5,6 +5,8 @@ Status: **design draft, 2026-10-04.** Step 1 (`signal`) and step 2 (`ui.group` i
 probes behind it (§8) ran in a release build on the apps' Luau VM. `docs/status.md` says what is
 real.
 
+Steps 3–4 continue in [ui-reuse](ui-reuse.md), which adds layout reuse (2026-10-05).
+
 Companions:
 - [Architecture](../architecture.md) — "immediate description + retained islands", which this
   extends rather than replaces.
