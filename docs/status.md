@@ -718,8 +718,9 @@ together; sockets and plugs are the interface for swappable pieces. **Landed 202
   world.
   Not built: picking a var from a list (type `@name` for now), editing gradients, editing stage
   entity fields in the editor, reparenting and reordering, adding parts, the clip timeline,
-  behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` plays the room over
-  the bridge.
+  behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` drives it over the
+  bridge — a point and a part dragged by the real pointer (the socket rides the head), the room
+  played, the toggle switched in another app.
 
 ### Environment — composable 3D interfaces and worlds
 

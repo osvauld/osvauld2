@@ -1,6 +1,6 @@
 # Maker parity — the asset editor as a GameMaker-class sprite and room editor
 
-Status: **plan, 2026-10-04. Steps 1–2 built 2026-10-05 (E1, E2 green).** E2 reads the switch's
+Status: **plan, 2026-10-04. Steps 1–3 built 2026-10-05 (E1–E3 green).** E2 reads the switch's
 state from a readout in the demo, not a pose: the dump has no pose to read. A test-first plan: §0 lists the end-to-end tests that
 prove it done; they are written first, then §3's steps make them pass. Grows out of
 [Assets](assets.md) §4 (editor tools in the order they pay off) and the world session's
@@ -91,5 +91,8 @@ Each is talked through before it's written; its test comes first and every step 
   pixels; for vector parts, pinning parts to edges may fit better. Undecided.
 - **Live edits across apps.** Each app holds its own copy of an asset until sync lands
   (lua-apps.md, 2026-10-01): an edit in the editor reaches an open app only when it reopens.
+- **Overlapping dots.** At 1× a cubic's end sits 3 units from its controls, so the
+  pointer takes the topmost control, not the end (found writing E3, which drags a `line` end
+  instead). Ends could draw and hit above controls, or controls show only for the held point.
 - **The fixed step.** Stage-play tests passed through the 1/120 s step unchanged; E1 must still
   read positions with a tolerance and drive the world by frames, not by one long tick.
