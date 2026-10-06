@@ -39,6 +39,26 @@
     "budget_us": 600,
     "note": "an update of a 5000-item signal: nearly all of it the freeze checking every entry."
   },
+  "text_60_paragraphs_cold": {
+    "baseline_us": 7063.7,
+    "budget_us": 15000,
+    "note": "reference: the same with nothing cached, i.e. the first frame or a screen full of new text."
+  },
+  "text_60_paragraphs_warm": {
+    "baseline_us": 1142.9,
+    "budget_us": 3000,
+    "note": "60 wrapped ~400-char paragraphs measured and painted, all cached; what is left is encoding glyphs into the scene. 14.2 ms with the cache off."
+  },
+  "text_page_edit_frame": {
+    "baseline_us": 3550.9,
+    "budget_us": 8000,
+    "note": "same page, one cell's text changes each frame: a miss costs nothing visible. 191 ms with the cache off."
+  },
+  "text_page_warm_frame": {
+    "baseline_us": 3664.4,
+    "budget_us": 8000,
+    "note": "ui-reuse.md §2a: 100 wrapping chat messages + a 50x8 table, unscrolled and unculled, a frame with nothing changed. 186 ms with the shaping cache off."
+  },
   "workspace_list_40_idle_frame": {
     "baseline_us": 2428.0,
     "budget_us": 6000,

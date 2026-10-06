@@ -76,7 +76,12 @@ shaped at least twice a frame (measured, then painted) whether or not anything c
 **Landed 2026-10-05 (step 1a):** `TextEngine` keeps layouts for the frame and the one before
 (`Shaped`, swept from the frame loop); tests in `runtime/src/text/cache_tests.rs`. U1, quiet
 machine, one core: **8 cards 2.7 → 0.52 ms; 40 cards 13.8 → 2.4 ms** (5–6×), both inside their
-budgets. Layout/paint structure was never the cost; what remains per card (~0.05 ms) is the
+budgets. **With real amounts of text the difference is far larger** (`runtime/src/text/bench_tests.rs`,
+same method, cache switched off for the "before"): a page of 100 wrapping chat messages plus a
+50 × 8 table, unscrolled and unculled, **186 ms → 3.7 ms** a frame; one cell edited each frame
+3.6 ms (a miss is invisible); 60 wrapped 400-character paragraphs 14.2 → 1.1 ms warm, 7.1 ms
+cold (the first frame, or a screen of new text — what cold costs is why tables must virtualize).
+Layout/paint structure was never the cost; what remains per card (~0.05 ms) is the
 next thing to measure before steps 2–5 are justified.
 
 So the order is: **cache the shaping first** (cheap, helps every frame, dirty ones too), then

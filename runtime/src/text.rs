@@ -436,6 +436,8 @@ impl TextEngine {
 /// number here differs between machines; what cannot differ is that wrapping makes text narrower
 /// and taller, and that it stops at the longest word.
 #[cfg(test)]
+mod bench_tests;
+#[cfg(test)]
 mod cache_tests;
 
 #[cfg(test)]
