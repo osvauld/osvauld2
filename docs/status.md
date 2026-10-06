@@ -14,6 +14,11 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - Android startup seam: Android-only `run_android_with(AndroidApp, build)` configures
   Winit's NativeActivity backend and enters the shared Runner. Desktop windowed and
   offscreen entry points remain unchanged; ARM64 Android compilation is verified.
+- Android merged with `dev` (**2026-10-06**, `android-support`): `shell2/src/main.rs` is a thin
+  entry over `lib.rs`; `runtime`'s Android `about_to_wait` runs ahead of `dev`'s window sync.
+  Verified: `cargo test -p shell2 -p runtime`, aarch64 and x86_64 debug APKs build, and
+  `smoke_android_sync.py` passes on the API 35 emulator. The emulator needs `-gpu host`:
+  SwiftShader lacks `SHADER_FLOAT16_IN_FLOAT32`, which Vello's flatten shader requires.
 - `android_app` packages that runtime as an ARM64 NativeActivity APK with a bundled-font
   text/vector probe, Android API 28 minimum and API 35 target. Debug APK build, signature
   and packaged entry point are verified. An explicit x86_64 build has launched on the API 35
