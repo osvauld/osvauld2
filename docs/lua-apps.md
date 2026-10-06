@@ -1029,8 +1029,34 @@ ui.world({ id = "map", width = 720, height = 400,
   100, ~1.4 ms. Walking past them costs no coin work at all.
 - Inside a group's function, as in `view`, signals cannot be written. An error in it names the
   group and keeps the last good world; the group runs again next view.
-- A group inside a group is an error, and so is `ui.group` outside a world (UI-tree groups are not
-  built yet).
+- A group inside a group is an error in a world. In the UI tree they nest (below).
+
+### Groups in the UI tree
+
+The same `ui.group(id, fn)` among ordinary elements. Its function returns **one element**, and
+runs again only when a signal it read has changed; otherwise the app is handed what the group built
+last time — the same element, with its handlers, so a click inside it still lands. Use it for a
+row of a long list or a panel that changes rarely, not around everything.
+
+```lua
+for _, m in messages() do
+  rows[#rows + 1] = ui.group("msg:" .. m.id, function()   -- one group per message
+    return ui.row({ ui.text({ m.author }), ui.text({ m.body }) })
+  end)
+end
+```
+
+- **Ids are unique in the whole UI tree**, not only among siblings: two groups named alike in one
+  view is an error. Key them by your data (`"msg:" .. m.id`).
+- **A group that reads no signal runs every view**, as in a world. So does any group that holds a
+  `ui.world`, a retained `ui.scene3d`, or another group that cannot be kept — a world's frame
+  moves without a signal. Put everything the group shows in signals.
+- **Nested groups:** what an inner group read counts for the group around it. Change a signal the
+  inner group read and both re-run; change one only the outer read and the inner is kept.
+- A group the view stops describing is forgotten; shown again, it runs again. A reload runs every
+  group again.
+- Writing a signal inside the function is an error, as in `view`. A bad element inside it shows
+  its error card and the group is not kept, so the next view tries again.
 
 ## Search
 

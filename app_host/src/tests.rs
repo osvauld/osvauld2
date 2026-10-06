@@ -13,6 +13,7 @@ mod require;
 mod round_trip;
 mod scratch;
 mod source_edit;
+mod ui_groups;
 mod world3d;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
@@ -5020,7 +5021,6 @@ fn a_group_is_checked_strictly() {
              ui.group('a', function() return {{ ui.group('b', function() return {{}} end) }} end) }}) end \
            if mode == 'twice' then return ui.world({{ id = 'w', width = 9, height = 9, \
              ui.group('a', function() return {{}} end), ui.group('a', function() return {{}} end) }}) end \
-           if mode == 'ui' then return ui.col({{ ui.group('a', function() return {{}} end) }}) end \
            return ui.text({{ 'ok' }}) end"
     ));
     let errs = said(&app, "return table.concat(errs, ' | ')");
@@ -5029,7 +5029,6 @@ fn a_group_is_checked_strictly() {
     for (mode, wanted) in [
         ("nested", "group \"a\": a group inside a group"),
         ("twice", "two groups share the id \"a\""),
-        ("ui", "ui.group goes among a world's entities"),
     ] {
         said(&app, &format!("mode = '{mode}'"));
         let _ = app.view();

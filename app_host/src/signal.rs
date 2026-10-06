@@ -20,6 +20,7 @@ struct Signal {
 }
 
 /// A signal read while a group described itself, and its version then.
+#[derive(Clone)]
 pub(crate) struct Read {
     version: Rc<Cell<u64>>,
     seen: u64,

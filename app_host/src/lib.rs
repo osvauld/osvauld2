@@ -12,6 +12,7 @@ pub mod index;
 mod modules;
 mod props;
 pub(crate) mod signal;
+mod ui_group;
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
@@ -335,6 +336,8 @@ pub struct Ctx<'a, M> {
     /// description keeps the last good world rather than dropping it.
     pub worlds_seen: HashSet<String>,
     pub(crate) groups: Groups,
+    pub(crate) kept: ui_group::KeptGroups<M>,
+    pub(crate) scope: ui_group::Scope,
     /// `(world, group)` this walk described or kept; the rest are forgotten after it.
     pub(crate) groups_seen: HashSet<(String, String)>,
     pub(crate) tracker: signal::Tracker,
@@ -360,6 +363,8 @@ impl<'a, M> Ctx<'a, M> {
             worlds: Worlds::default(),
             worlds_seen: HashSet::new(),
             groups: Groups::default(),
+            kept: Default::default(),
+            scope: Default::default(),
             groups_seen: HashSet::new(),
             tracker: signal::Tracker::default(),
             viewing: Rc::new(Cell::new(false)),
@@ -441,6 +446,8 @@ pub struct LuaApp<M> {
     /// What each world group read when it last described itself. Per VM: a reload's new
     /// signals are not the old ones, so its groups all run again.
     groups: Groups,
+    /// What each UI group built, handed back while its signals hold still.
+    kept: ui_group::KeptGroups<M>,
     tracker: signal::Tracker,
     resolve: Resolve,
     wake: Wake,
@@ -558,7 +565,7 @@ pub fn write_source_file(doc: &LoroDoc, path: &str, content: &str) -> Result<Vec
     doc.export(ExportMode::Snapshot).map_err(|e| e.to_string())
 }
 
-impl<M: 'static> LuaApp<M> {
+impl<M: Clone + 'static> LuaApp<M> {
     pub fn open(
         src: LoroDoc,
         resolve: Resolve,
@@ -682,6 +689,7 @@ impl<M: 'static> LuaApp<M> {
             entry,
             host_context,
             groups: Groups::default(),
+            kept: Default::default(),
             tracker,
         })
     }
@@ -1062,12 +1070,14 @@ impl<M: 'static> LuaApp<M> {
         let mut context = Ctx::new(&mut handlers, self.to_msg.clone());
         context.worlds = self.worlds.clone();
         context.groups = self.groups.clone();
+        context.kept = self.kept.clone();
         context.tracker = self.tracker.clone();
         context.viewing = self.viewing.clone();
         let el = match walk(tree, &mut context) {
             Ok(el) => {
                 let groups_seen = &context.groups_seen;
                 self.groups.borrow_mut().retain(|key, _| groups_seen.contains(key));
+                self.kept.borrow_mut().retain(|id, _| groups_seen.contains(&(String::new(), id.clone())));
                 let seen = &context.worlds_seen;
                 let mut worlds = self.worlds.borrow_mut();
                 worlds.retain(|id, _| seen.contains(id));
@@ -1619,13 +1629,13 @@ fn fail<M>(context: &mut Ctx<M>, msg: String) -> El<M> {
 /// `props` — is an [`mlua::Error::Runtime`], whose `Display` prepends `runtime error: `. That
 /// prefix is mlua's plumbing, not something an app author can act on, so it comes off here.
 /// Anything else (a Lua-raised error, carrying its `file:line`) passes through untouched.
-fn reason(e: &Error) -> String {
+pub(crate) fn reason(e: &Error) -> String {
     match e {
         Error::RuntimeError(msg) => msg.clone(),
         other => other.to_string(),
     }
 }
-fn children<M: 'static>(
+fn children<M: Clone + 'static>(
     mut el: El<M>,
     node: &Table,
     context: &mut Ctx<M>,
@@ -1706,7 +1716,7 @@ fn err_box<M>(msg: &str) -> El<M> {
     el
 }
 
-fn walk<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+pub(crate) fn walk<M: Clone + 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     let tag: String = node.get("tag")?;
     // The breadcrumb is dev-only scaffolding, and it isn't cheap: a boundary get for
     // `line`, another for `id`, a `format!`, and a `push_str` — per element, per frame.
@@ -1781,7 +1791,7 @@ fn keys(node: &Table) -> String {
         .join(",")
 }
 
-fn build_overlay<M: 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+fn build_overlay<M: Clone + 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     if max_index(&node) != 2 {
         return Err(mlua::Error::runtime(
             "overlay needs exactly two children: anchor, then panel",
@@ -2000,7 +2010,7 @@ fn world_actions(node: &Table) -> mlua::Result<Vec<(String, String)>> {
     Ok(actions)
 }
 
-fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
+fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Result<El<M>> {
     if tag == "overlay" {
         return build_overlay(node, context);
     }
@@ -2030,13 +2040,13 @@ fn build<M: 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> mlua::Resu
                 .clone();
             frame_el(visual)
         }
-        "world" => build_world(&node, context)?,
-        "group" => {
-            return Err(mlua::Error::runtime(
-                "ui.group goes among a world's entities; in the UI tree it is not built yet",
-            ));
+        "world" => {
+            context.scope.volatile = true;
+            build_world(&node, context)?
         }
+        "group" => return ui_group::build_group(&node, context),
         "scene3d" => {
+            context.scope.volatile = true;
             if max_index(&node) > 0 {
                 return Err(mlua::Error::runtime("scene3d takes no children"));
             }

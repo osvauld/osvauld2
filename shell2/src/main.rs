@@ -331,7 +331,7 @@ fn spawn_push_listener(
 /// Builds a `SyncHello` against one open doc and, if that succeeds, sends it off-thread —
 /// the one piece `SyncTick` and an immediate post-flush push (a local edit reaching the node
 /// without waiting for the next tick) both need, so it exists once rather than twice.
-fn sync_doc<M: 'static>(
+fn sync_doc<M: Clone + 'static>(
     proxy: &EventLoopProxy<Msg>,
     vault: &Vault,
     desktop_did: &str,
@@ -422,7 +422,7 @@ fn subscribe_if_new(
 
 /// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
 /// `search.query`'s error — never a reason not to open the app.
-fn attach_index<M: 'static>(
+fn attach_index<M: Clone + 'static>(
     app: &mut LuaApp<M>,
     opened: Result<indexer::ItemIndex, String>,
 ) -> Option<indexer::Shared> {
@@ -442,7 +442,7 @@ fn attach_index<M: 'static>(
     }
 }
 
-fn reindex<M: 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
+fn reindex<M: Clone + 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
     if let Some(ix) = index {
         if let Err(e) = indexer::index_dirty(ix, app, dirtied) {
             app.note(format!("search: {e}"));

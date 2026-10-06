@@ -23,9 +23,9 @@ Through the real path: Lua VM in `app_host`, `Headless` in `runtime`, the shell 
 | C3 | An entry unused for a whole frame is dropped (two-generation sweep); one used each frame survives indefinitely | the cache does not grow without bound for apps that change their text | ✅ 1a |
 | C4 | A scene drawn from a cached layout is identical to one from a fresh engine (`Scene` encodings equal), plain and rich, wrapped and not | the cache changes cost, never pixels | ✅ 1a |
 | U1 | `bench_workspace_list_idle_frame` (app-level, release): the workspace list with 8 workspaces × 15 items, 60 forced frames, nothing changing. Reports p50 of view, layout, total; budget in `scripts/bench_budgets.json` | the number this plan exists to move; fails first against a budget set below today's 2.7 ms (8 cards) and 13.8 ms (40 cards); moves with 1a | 1, 1a |
-| U2 | A UI `ui.group` of rows reads signal `rows`; a handler changes a signal it does not read; the next view calls only the groups that changed (per-group run counter in Lua) | only dirty groups re-run, in the UI tree | 2 |
-| U3 | A clean group's nodes are reused: a click on a button inside it still lands on the right handler, before and after another group re-ran | reuse is safe for interaction (signals T5) — handlers are rebuilt every view today, so this is the risk | 2 |
-| U4 | A group that reads no signal re-runs every view; an app with no groups behaves exactly as today (the existing app_host suite, unchanged) | opt-in, nothing breaks | 2 |
+| U2 | A UI `ui.group` of rows reads signal `rows`; a handler changes a signal it does not read; the next view calls only the groups that changed (per-group run counter in Lua) | only dirty groups re-run, in the UI tree | ✅ 2 |
+| U3 | A clean group's nodes are reused: a click on a button inside it still lands on the right handler, before and after another group re-ran | reuse is safe for interaction (signals T5) — handlers are rebuilt every view today, so this is the risk | ✅ 2 |
+| U4 | A group that reads no signal re-runs every view; an app with no groups behaves exactly as today (the existing app_host suite, unchanged) | opt-in, nothing breaks | ✅ 2 |
 | U5 | `view` reads only signals and none changed: `view` is not called (counter), the frame still paints the same pixels as the last (screenshot equal) | `view` as root group (signals T8) | 3 |
 | U6 | Nothing changed since the last frame — same viewport, same scroll/zoom/animation state, view clean: `layout::solve` is not run (counter in `runtime`), and the placed list from last frame is used | whole-frame layout reuse | 4 |
 | U7 | Same as U6 but a scroll offset changes, or a spring is mid-flight, or the viewport resizes: layout runs | the reuse key is complete — the traps are stale pixels, so they are tests | 4 |
@@ -146,7 +146,14 @@ fresh solve on a sampled frame.
 1a. **Text shaping cache** (C1–C4). `runtime/src/text.rs` and the frame loop's sweep. Re-run U1;
    the 40-card frame should drop from ~13.8 ms toward ~3 ms. The rest of this plan is then
    re-measured and may shrink.
-2. **`ui.group` in the UI tree with handler reuse** (U2, U3, U4). Lua + `app_host` only.
+2. **`ui.group` in the UI tree with handler reuse** (U2, U3, U4). **Landed 2026-10-05.** Needed
+   `El` to be cloneable first (step 2a: handler closures `Box` → `Rc`, `#[derive(Clone)]`;
+   `runtime/src/tests/el_clone.rs`), because a kept group hands back the `El` it built. Then
+   `app_host/src/ui_group.rs`: a group's `El`, its handler entries and the groups below it are
+   kept per VM; a nested group's reads count for the group around it; a group that read no
+   signal, holds a world or a retained 3D scene, or had an element error is never kept, nor is
+   any group around one. Tests: `app_host/src/tests/ui_groups.rs`. Not measured yet — the next
+   number to take is a chat-style list of groups, one message dirtied at a time.
 3. **`view` as root group** (U5). Lua + `app_host` only.
 4. **Whole-frame layout reuse** (U6, U7). `runtime` gains the hook and the reuse key; `app_host`
    implements the hook from step 3's root-clean state. Re-measure U1; decide on step 5.
