@@ -132,13 +132,19 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
   passed. No app-thread integration changes; final reviews/full smokes remain deferred.
 
-### Text shaping cache (2026-10-05, tests green; smokes not yet run)
+### Text shaping cache, cloneable El, UI groups (2026-10-05, tests and all 26 smokes green)
 - `TextEngine` remembers the parley layouts of this frame and the last (`runtime/src/text.rs`),
   so a label that did not change is shaped once, not at measure and again at paint every frame.
   Workspace-list idle frame, release, one quiet core: 8 cards 2.7 → 0.52 ms, 40 cards
   13.8 → 2.4 ms. Plan and revision note: [design/ui-reuse.md](design/ui-reuse.md) §2a. Signals
   steps 3–4 and layout reuse are re-justified only if the next measurement still shows a cost.
   Tables will still need row virtualization; the cache does not bound 100k cells.
+- `El` clones (handler closures behind `Rc`) and `ui.group` works in the UI tree
+  (`app_host/src/ui_group.rs`): a group whose signals hold still hands back the `El` and handlers
+  it built. 300 chat rows, one edited: view 5.4 → 2.2 ms in a real window. Offscreen
+  `python3 scripts/smoke.py` (26) passed after all three changes. Windowed numbers and the next
+  steps (shared virtualization core, `ui.virtual_list`; the grid island belongs to
+  `sharded-datasets`): [design/ui-reuse.md](design/ui-reuse.md) §2b.
 
 ### Lua shell dev integration (2026-10-05, validation in progress)
 - Checkpoint `becddb0` preserves the validated session/list/creation slices on `lua-shell`.
