@@ -42,6 +42,7 @@ use scroll::*;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Fn;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use vello::Scene;
@@ -398,13 +399,13 @@ struct Hits<M> {
     /// The last field is the element's nearest zoomable ancestor.
     click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, PickContent)>,
     input: Vec<(Geometry, Id, Insets)>,
-    input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
-    context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
-    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
-    drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
-    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
-    wheel: Vec<(Geometry, Id, Box<dyn Fn(WheelEvent) -> M>)>,
-    key: Vec<(Id, Box<dyn Fn(KeyInput) -> M>)>,
+    input_maps: Vec<(Id, Rc<dyn Fn(String) -> M>)>,
+    context: Vec<(Rect, Rc<dyn Fn((f32, f32)) -> M>)>,
+    drag: Vec<(Geometry, Id, Rc<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
+    drop: Vec<(Geometry, Id, Rc<dyn Fn(DropEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Rc<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
+    wheel: Vec<(Geometry, Id, Rc<dyn Fn(WheelEvent) -> M>)>,
+    key: Vec<(Id, Rc<dyn Fn(KeyInput) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -412,7 +413,7 @@ struct Hits<M> {
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
     no_cursor: Vec<Geometry>,
     looks: Vec<(Geometry, CursorLook)>,
-    tile: Vec<(Geometry, Id, Box<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
+    tile: Vec<(Geometry, Id, Rc<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
