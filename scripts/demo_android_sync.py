@@ -57,6 +57,36 @@ def boot_emulator(adb, serial, headless):
     subprocess.run([adb, "-s", serial, "wait-for-device"], check=True, timeout=60)
 
 
+def check_apps(android, adb, serial, items, names, outdir):
+    """Per app: open it on the device, screenshot via adb, tap the screen centre, screenshot again.
+    The Android shell is windowed, so the offscreen-only driver ops (Frame, Rects) are not
+    available; this is the real device path instead — adb pixels and adb touches."""
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    def shot(path):
+        png = subprocess.run([adb, "-s", serial, "exec-out", "screencap", "-p"],
+                             capture_output=True, timeout=30).stdout
+        path.write_bytes(png)
+        return len(png)
+
+    rows = []
+    for it, name in zip(items, names):
+        row = {"app": name}
+        try:
+            android.rpc.open_item(it["id"])
+            time.sleep(1.5)
+            row["shot1_bytes"] = shot(outdir / f"{name}-1.png")
+            subprocess.run([adb, "-s", serial, "shell", "input", "tap", "540", "1200"], timeout=15)
+            time.sleep(1.0)
+            row["shot2_bytes"] = shot(outdir / f"{name}-2.png")
+            console = android.rpc.read_console(it["id"], last=50)
+            row["console_errors"] = [l for l in console if "error" in l.lower() or "panic" in l.lower()][:3]
+        except Exception as e:  # a probe reports, it never aborts the rest
+            row["failed"] = str(e)[:200]
+        rows.append(row)
+    return rows
+
+
 def install_apk(adb, serial):
     subprocess.run([sys.executable, str(ROOT / "scripts/build_android.py"),
                     "--target", "x86_64-linux-android"], cwd=ROOT, check=True)
@@ -74,6 +104,7 @@ def main():
     parser.add_argument("--boot", action="store_true", help="start the emulator if none is up")
     parser.add_argument("--headless", action="store_true", help="with --boot: no emulator window")
     parser.add_argument("--install", action="store_true", help="build and install the x86_64 APK")
+    parser.add_argument("--check", action="store_true", help="probe every app on Android; shots in shots/android-apps/")
     parser.add_argument("--apps", default=DEFAULT_APPS,
                         help="comma-separated demo_apps folders to publish; scratch is forced first")
     args = parser.parse_args()
@@ -130,6 +161,9 @@ def main():
         clock.step("desktop edit reaches Android", lambda: demo_sync.wait_for_note(android, item["id"], "live from desktop", 15))
         demo_sync.add_note(android, item["id"], "live from Android")
         clock.step("Android edit reaches desktop", lambda: demo_sync.wait_for_note(alice, item["id"], "live from Android", 15))
+        if args.check:
+            for row in check_apps(android, args.adb, args.serial, items, apps, ROOT / "shots/android-apps"):
+                print("CHECK", row, flush=True)
         print(f"Sync verified both ways. Android account: {account}, passphrase: demo", flush=True)
         print("Android app data was not erased. Ctrl-C stops the demo and removes its ADB mappings.", flush=True)
         if not args.once:
