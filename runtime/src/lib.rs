@@ -2356,27 +2356,6 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         }
     }
 
-    #[cfg(target_os = "android")]
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.render.is_none() { return; }
-        if let Some(insets) = self.android_insets.as_ref().and_then(|adapter| adapter.latest()) {
-            self.update_content_insets(insets);
-        }
-        #[cfg(debug_assertions)]
-        {
-            use winit::platform::android::ActiveEventLoopExtAndroid;
-            let activity = event_loop.android_app();
-            let Some(window) = activity.native_window() else { return };
-            let rect = activity.content_rect();
-            let sample = ([rect.left, rect.top, rect.right, rect.bottom],
-                (window.width(), window.height()));
-            if self.android_content_probe != Some(sample) {
-                eprintln!("ANDROID_CONTENT_PROBE content_px={:?} surface_px={:?}", sample.0, sample.1);
-                self.android_content_probe = Some(sample);
-            }
-        }
-    }
-
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.windows.owns(id) {
             match event {
@@ -2460,6 +2439,8 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
 
     /// After every batch of events: the host's windows follow what it now names.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        self.android_about_to_wait(event_loop);
         let wanted = self.app.windows();
         if wanted.is_empty() && self.windows.keys().next().is_none() {
             return;
@@ -2474,6 +2455,27 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
 }
 
 impl<A: App> Runner<A> {
+    #[cfg(target_os = "android")]
+    fn android_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.render.is_none() { return; }
+        if let Some(insets) = self.android_insets.as_ref().and_then(|adapter| adapter.latest()) {
+            self.update_content_insets(insets);
+        }
+        #[cfg(debug_assertions)]
+        {
+            use winit::platform::android::ActiveEventLoopExtAndroid;
+            let activity = event_loop.android_app();
+            let Some(window) = activity.native_window() else { return };
+            let rect = activity.content_rect();
+            let sample = ([rect.left, rect.top, rect.right, rect.bottom],
+                (window.width(), window.height()));
+            if self.android_content_probe != Some(sample) {
+                eprintln!("ANDROID_CONTENT_PROBE content_px={:?} surface_px={:?}", sample.0, sample.1);
+                self.android_content_probe = Some(sample);
+            }
+        }
+    }
+
     fn deliver(&mut self, msg: A::Msg) {
         self.app.update(msg);
         // A driver op is answered here rather than by the app, because only this side owns the
