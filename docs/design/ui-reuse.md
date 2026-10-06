@@ -113,6 +113,13 @@ without `ui.group`.
   not (layout 0.4 ms). Per-row layout is ~0.03 ms; the cache hit itself allocates its key.
 - **Stalls:** the worst frames are 70–112 ms, almost all layout (first frame, nothing cached).
   A screen of new text is the cold case of §2a; not yet traced further.
+- **Scroll (real wheel, text page, 40 s, 506 app-thread frames):** wheel events do reach the app
+  thread. p50 (p95): view 3.0 (4.7), layout 3.1 (4.6), paint 1.8 (2.4), **total 8.1 (11.4) ms**,
+  worst 56 ms. A pure scroll changes nothing the app described, yet every frame re-runs `view`
+  and lays out all 500 nodes; only the offset moved. Signals step 4 (`view` as root group) and
+  layout reuse with a moved offset would remove most of it; virtualization removes it by
+  shrinking the tree to the window. (An earlier 40 s run logged ~2 app frames because no
+  scrolling reached the window — the pointer was elsewhere, not a delivery bug.)
 - Not measured: input-to-display latency, GPU time (present is vsync-bound and cannot be split),
   the shell-thread cost while an app thread is busy.
 
