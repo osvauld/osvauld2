@@ -88,6 +88,34 @@ So the order is: **cache the shaping first** (cheap, helps every frame, dirty on
 signals/groups, then layout reuse only for what the cache leaves. Signals still matter — they
 bound what Lua re-describes — but they could not have fixed this frame.
 
+## 2b. Windowed measurements, 2026-10-05
+
+Release build, a real window on Wayland at 60 Hz (the shell thread's present stage is ~16.2 ms:
+it waits for the refresh), `OSVAULD_FRAME_TIMINGS=1`, throwaway data dir. The bridge's driver
+ops (rects, pointer, wheel) are offscreen-only, so the workspace list and the text page were
+driven by hand and the chat apps drive themselves (an `on_frame` edits one of 300 messages every
+250 ms). Each app runs on its **own thread** (ThreadId 19 below); the shell thread only presents.
+Apps: the scratchpad copies of a 100-message + 50×8-table page and a 300-row chat, with and
+without `ui.group`.
+
+| app thread, p50 (p95) | view | layout | paint | **total** |
+|---|---|---|---|---|
+| workspace list (shell thread, hover/scroll) | 0.47 (0.63) | 0.40 (0.58) | 0.06 | **13.1** incl. ~12 ms present wait; CPU ≈ 1 ms |
+| text page (100 msgs + 50×8 table), hover/scroll | 3.1 (5.0) | 5.1 (6.6) | 1.9 | **10.3** (13.5) |
+| chat, 300 rows, one edit / 250 ms, **grouped** | 2.2 (2.8) | 8.7 (10.6) | 1.8 | **13.1** (15.2) |
+| chat, 300 rows, same, **plain** | 5.4 (7.0) | 9.1 (11.3) | 2.0 | **16.9** (19.5) |
+
+- **Groups work in a real window:** view 5.4 → 2.2 ms, total 16.9 → 13.1 ms. At 60 Hz the plain
+  chat's p95 (19.5 ms) misses the 16.7 ms frame; the grouped one's (15.2 ms) makes it.
+- **Layout is now the cost of a big list:** 8.7 ms of 13.1 for 300 rows (~900 text leaves, none
+  culled), with the shaping cache already in. Layout reuse (rung 1) and, for tables,
+  virtualization are therefore justified by a real number, where for the 8-card list they were
+  not (layout 0.4 ms). Per-row layout is ~0.03 ms; the cache hit itself allocates its key.
+- **Stalls:** the worst frames are 70–112 ms, almost all layout (first frame, nothing cached).
+  A screen of new text is the cold case of §2a; not yet traced further.
+- Not measured: input-to-display latency, GPU time (present is vsync-bound and cannot be split),
+  the shell-thread cost while an app thread is busy.
+
 ## 3. Design
 
 Two layers, each useful alone, in this order because the second is only safe once the first can
