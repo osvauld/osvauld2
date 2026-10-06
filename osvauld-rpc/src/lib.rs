@@ -169,7 +169,16 @@ pub enum Request {
     },
     /// Back to the focused app alone. The other one keeps running, unseen.
     Unsplit,
-    /// The open app tabs in strip order: `[{item_id, name, focused, shown, responding}]`.
+    /// Show an open item's app in a window of its own; its tab stays. Closing that window docks
+    /// it back rather than closing the app.
+    PopOut {
+        item_id: String,
+    },
+    /// Back from its own window into its tab, which is focused.
+    DockIn {
+        item_id: String,
+    },
+    /// The open app tabs in strip order: `[{item_id, name, focused, shown, window, responding}]`.
     /// `responding` is false while the app's thread has been busy longer than the watchdog
     /// (`OSVAULD_WATCHDOG_MS`, default 3000).
     ListTabs,

@@ -24,6 +24,7 @@ mod state;
 mod text;
 mod timing;
 mod tile;
+mod windows;
 mod zoom;
 use crate::anim::{Driver, Spring, Transition};
 use crate::coords::{NodePoint, ScreenPoint};
@@ -67,6 +68,7 @@ pub use render::{CapturedImage, Render, SceneView3d};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use tile::{Tile, TileEvent, TileFrame, TileInput};
+pub use windows::{WindowFrame, WindowIn};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -223,6 +225,15 @@ pub trait App {
     fn tiles_sized(&mut self, _sizes: &[(String, (f32, f32))]) -> bool {
         false
     }
+
+    /// Frames shown in windows of their own, beside the main one. A window opens when a key
+    /// first appears and closes when it is gone; it is redrawn when its frame's scene changes.
+    fn windows(&self) -> Vec<WindowFrame> {
+        Vec::new()
+    }
+
+    /// What one of [`Self::windows`] reports: its input, its size, a close.
+    fn window_event(&mut self, _key: &str, _event: WindowIn) {}
 }
 
 #[derive(Clone)]
@@ -310,6 +321,8 @@ struct Runner<A: App> {
     tile_sizes: Vec<(String, (f32, f32))>,
     /// The last frame's 3D viewport — what a tile hands its host with its Scene.
     view3d: Option<render::SceneView3d>,
+    /// The host's other windows (`App::windows`).
+    windows: windows::Windows,
     last_frame: Option<f64>,
     /// When the pointer event now being processed arrived, on the same monotonic clock as
     /// `start`. Stamped once per event so everything one event fires shares it.
@@ -2199,7 +2212,21 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         self.app.ready();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.windows.owns(id) {
+            match event {
+                WindowEvent::RedrawRequested => self.windows.paint(id, self.app.clear()),
+                WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+                event => {
+                    let (at, mods) = (self.now(), self.modifiers);
+                    if let Some((key, said)) = self.windows.event(id, event, at, mods) {
+                        self.app.window_event(&key, said);
+                        self.redraw();
+                    }
+                }
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -2257,6 +2284,20 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
     }
     fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
         self.deliver(msg);
+    }
+
+    /// After every batch of events: the host's windows follow what it now names.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let wanted = self.app.windows();
+        if wanted.is_empty() && self.windows.keys().next().is_none() {
+            return;
+        }
+        let told = self
+            .windows
+            .sync(wanted, Some(event_loop), self.offscreen, self.render.as_ref());
+        for (key, said) in told {
+            self.app.window_event(&key, said);
+        }
     }
 }
 
@@ -2356,6 +2397,7 @@ impl<A: App> Runner<A> {
             tile_keys: None,
             tile_sizes: Vec::new(),
             view3d: None,
+            windows: windows::Windows::default(),
             last_frame: None,
             event_at: 0.0,
             pressed: None,

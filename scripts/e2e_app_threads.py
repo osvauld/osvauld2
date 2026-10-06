@@ -345,10 +345,25 @@ def t9_search(tmp):
 @test
 def t10_own_window(tmp):
     with Shell(tmp, "t10") as sh:
-        a, _ = two_probes(sh)
+        a, b = two_probes(sh)
+        sh.rpc.open_item(a)
+        ids = lambda: [r["id"] for r in sh.rpc.rects()]
+        assert "add" in ids()
         sh.rpc.request("PopOut", item_id=a)
+        tabs = {t["item_id"]: t for t in sh.rpc.request("ListTabs")}
+        assert tabs[a]["window"] and tabs[a]["shown"] and not tabs[b]["window"], tabs
+        # A left the main window: its focused tab shows a placeholder, not its tile.
+        sh.rpc.frame(1)
+        assert "add" not in ids(), ids()
+        # Tile vs window is invisible to the app: it answers and acts as before.
         assert "PROBE" in str(sh.rpc.dump_tree(a))
+        sh.rpc.click(a, "add")
+        assert "note:" in str(sh.rpc.read_data(a))
         sh.rpc.request("DockIn", item_id=a)
+        tabs = {t["item_id"]: t for t in sh.rpc.request("ListTabs")}
+        assert not tabs[a]["window"] and tabs[a]["focused"], tabs
+        sh.rpc.frame(1)
+        assert "add" in ids(), ids()
         assert "PROBE" in str(sh.rpc.dump_tree(a))
 
 
