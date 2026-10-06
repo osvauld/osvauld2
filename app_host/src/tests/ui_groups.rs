@@ -148,3 +148,31 @@ fn a_group_writing_a_signal_while_it_describes_is_refused() {
     let console = app.console(10).join("\n");
     assert!(console.contains("only in a handler"), "{console}");
 }
+
+/// A chat-shaped list: 300 messages, one signal each, one `ui.group` each or none.
+fn chat(grouped: bool) -> LuaApp<LuaMsg> {
+    app_of(&format!(
+        "msgs = {{}} for i = 1, 300 do msgs[i] = signal({{ who = 'user' .. i, body = 'a message with a few words in it, number ' .. i }}, 'm' .. i) end \
+         local function row(i) local m = msgs[i]() \
+           return ui.row({{ gap = 8, ui.text({{ m.who, color = '#8899aa' }}), ui.text({{ m.body }}), \
+             ui.button({{ id = 'like' .. i, on_click = function() end, 'like' }}) }}) end \
+         return function() local rows = {{}} for i = 1, 300 do \
+           rows[i] = {grouped} and ui.group('m' .. i, function() return row(i) end) or row(i) end \
+           return ui.col({{ gap = 4, rows }}) end"
+    ))
+}
+
+/// One message edited among 300: the view after it, with and without groups.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_ui_groups() {
+    for (name, grouped) in [("app_chat_300_edit_grouped", true), ("app_chat_300_edit_plain", false)] {
+        let app = chat(grouped);
+        let mut n = 0;
+        bench(name, 30, || {
+            n += 1;
+            said(&app, &format!("msgs[150]:set({{ who = 'user150', body = 'edited {n}' }})"));
+            let _ = app.view();
+        });
+    }
+}

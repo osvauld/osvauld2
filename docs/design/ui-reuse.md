@@ -152,8 +152,11 @@ fresh solve on a sampled frame.
    `app_host/src/ui_group.rs`: a group's `El`, its handler entries and the groups below it are
    kept per VM; a nested group's reads count for the group around it; a group that read no
    signal, holds a world or a retained 3D scene, or had an element error is never kept, nor is
-   any group around one. Tests: `app_host/src/tests/ui_groups.rs`. Not measured yet — the next
-   number to take is a chat-style list of groups, one message dirtied at a time.
+   any group around one. Tests: `app_host/src/tests/ui_groups.rs`. Measured (`bench_app_ui_groups`,
+   release, view only, machine under load so noisy): 300 chat rows, one edited — **4.5–5.6 ms
+   plain, 1.5–1.7 ms grouped**, ~3×. The 1.5 ms left is cloning 300 kept subtrees and
+   re-registering ~900 handler entries; keeping handlers in one shared map across views (rather
+   than clear-and-refill) would shrink it, and is the next lever if a list this size matters.
 3. **`view` as root group** (U5). Lua + `app_host` only.
 4. **Whole-frame layout reuse** (U6, U7). `runtime` gains the hook and the reuse key; `app_host`
    implements the hook from step 3's root-clean state. Re-measure U1; decide on step 5.

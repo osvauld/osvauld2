@@ -1,4 +1,14 @@
 {
+  "app_chat_300_edit_grouped": {
+    "baseline_us": 1547.2,
+    "budget_us": 3000,
+    "note": "ui-reuse.md step 2: 300 chat rows each in a ui.group, one message edited, then the view (Lua + walk; layout not included). Recorded under load ~5, so likely high. What is left is cloning 300 kept subtrees and re-registering their handlers."
+  },
+  "app_chat_300_edit_plain": {
+    "baseline_us": 4475.3,
+    "budget_us": 10000,
+    "note": "reference, not a target: the same list without groups, every row described every view."
+  },
   "app_pickup_5000_chunked": {
     "baseline_us": 755.5,
     "budget_us": 2500,
