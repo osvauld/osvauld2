@@ -457,6 +457,65 @@ on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   --
 - A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
   lists them as `timers = { { name, left } }` beside `entities`.
 
+### Gravity, forces, hands and joints — a side-on world
+
+A world has no gravity until its description gives it some, so every top-down world above is
+unchanged. `demo_apps/gravity_lab` is all of this at once: a slingshot, a castle that collapses,
+dominoes, a pendulum on a chain, a seesaw.
+
+```lua
+ui.world({
+    id = "lab", width = 960, height = 520,
+    gravity = { 0, 900 },                                   -- units a second squared; +y is down
+    wells = { { at = { 490, 330 }, radius = 200, pull = 1700 } },
+    joints = {
+        { id = "chain0", kind = "rope", a = "link0", a_at = { 5, 5 }, b_at = { 390, 24 }, length = 30 },
+        { id = "see",    kind = "pin",  a = "plank", a_at = { 80, 5 }, b_at = { 270, 451 }, limits = { -12, 12 } },
+    },
+    -- entities …
+})
+```
+
+- **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
+  changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
+  falls; it comes to rest asleep on what holds it, as before.
+- **`friction` is not the floor's.** A loose thing's `friction` is *damping* — speed lost a
+  second, in the air too — so under gravity keep it small (0 to 0.1) or things fall slowly, and
+  let `grip` (surface friction) stop the sliding. `grip` is also what lets a thing tumble.
+- **`loose = { density = n }`** (default 1, above 0): mass is density × area, so a stone block
+  outweighs a wooden one the same size and flings what it hits.
+- **`wells = { { at, radius, pull }, … }`** are standing fields, described like `gravity`: a loose
+  thing whose centre is within `radius` of `at` accelerates toward it at `pull`, fading to nothing
+  at the edge; a negative `pull` pushes away. They wake what they reach.
+- **`joints`** hold things together, described every view and kept while they are the same (a
+  swinging pendulum is not reset by the next view). `id`, `kind`, `a` and `a_at` (a point in the
+  entity's own drawing box), and `b` and `b_at` — with no `b`, `b_at` is a point of the world,
+  fixed. By kind:
+  - `"pin"`: a hinge. Optional `limits = { low, high }` in degrees. A loose end needs `grip`, or
+    it cannot turn.
+  - `"rope"`: never farther apart than `length`, free to come closer — a chain is ropes between links.
+  - `"spring"`: pulls toward `length` apart; needs `stiffness` and `damping`.
+  - `contacts = true` lets the two bodies collide with each other (off by default); one end at
+    least must be loose. A joint naming something not in the description is an error, and the
+    previous joints stay.
+
+Commands, in handlers only like `set`:
+
+```lua
+world("lab"):push("ball", { 300, -120 })                  -- adds to a loose thing's velocity
+local n = world("lab"):blast({ 480, 400 }, { speed = 600, radius = 200 })   -- an explosion; n moved
+world("lab"):grab("block", { e.x, e.y })                  -- a hand: bring it to the point …
+world("lab"):release("block")                             -- … let go: it keeps its speed (a throw)
+```
+
+- `push` is a velocity change, whatever the mass — a kick. `blast` throws every loose thing
+  within `radius` straight away from the point at `speed`, fading to nothing at the edge (one
+  right on it goes up).
+- `grab` drives a loose thing toward the point each step: call it again from `on_drag`'s
+  `"move"` with the pointer, and `release` on `"end"`. What it meets still stops it; gravity does
+  not pull a held thing. Drags that end after the thing has gone are no error.
+- `e.shape` of an `on_drag` on a world is the entity's id — it says which body was taken.
+
 ### Questions — `world(id):ray` and `:at`
 
 Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
