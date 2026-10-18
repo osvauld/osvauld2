@@ -782,7 +782,7 @@ fn a_loose_thing_is_checked_strictly() {
         format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {loose} }} }})")
     };
-    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }"] {
+    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }", "{ density = 4 }"] {
         walk_world(&lua, &worlds, &room(fine)).unwrap();
     }
     let cases = [
@@ -791,6 +791,8 @@ fn a_loose_thing_is_checked_strictly() {
         ("{ bouncy = 1 }", "loose: unknown field bouncy"),
         ("{ bounce = 2 }", "bounce must be from 0 to 1, got 2"),
         ("{ friction = -1 }", "friction must be 0 or more, got -1"),
+        ("{ density = 'x' }", "loose.density must be a number, got string"),
+        ("{ density = 0 }", "density must be above 0, got 0"),
     ];
     for (loose, wanted) in cases {
         let err = walk_world(&lua, &worlds, &room(loose)).unwrap_err().to_string();

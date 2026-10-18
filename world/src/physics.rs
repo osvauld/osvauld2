@@ -69,12 +69,15 @@ pub struct Material {
     /// How much its surface catches at a contact: a glancing hit sets it turning. Without, it
     /// never turns — the drawing stays upright.
     pub grip: Option<f64>,
+    /// Mass per area: a stone ball outweighs a wooden one the same size, so it flings what it
+    /// strikes and is hardly slowed by it.
+    pub density: f64,
 }
 
 impl Default for Material {
     /// A let-go chest's: a modest bounce, at rest in about half a second.
     fn default() -> Self {
-        Self { bounce: 0.5, friction: 6.0, grip: None }
+        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }
     }
 }
 
@@ -88,6 +91,9 @@ impl Material {
         }
         if let Some(g) = self.grip.filter(|g| !(g.is_finite() && *g >= 0.0)) {
             return Err(format!("grip must be 0 or more, got {g}"));
+        }
+        if !(self.density.is_finite() && self.density > 0.0) {
+            return Err(format!("density must be above 0, got {}", self.density));
         }
         Ok(())
     }
@@ -159,14 +165,15 @@ impl Physics {
             }
         };
         // Walls and walkers keep nothing; a bounce is the moving body's own (the larger of two).
-        let (bounce, grip) = match kind {
-            Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32),
-            _ => (0.0, 0.0),
+        let (bounce, grip, density) = match kind {
+            Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32, m.density as f32),
+            _ => (0.0, 0.0, 1.0),
         };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
         if let Some(c) = solid {
             let solid = shape(c, anchor)
+                .density(density)
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(grip)

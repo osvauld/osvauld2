@@ -615,7 +615,7 @@ fn maybe_number(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<
     }
 }
 
-/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n }` with any
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n, density = n }` with any
 /// left to its default (no grip: it never turns); `false` or absent, it is not loose. The world
 /// checks the ranges.
 fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
@@ -629,13 +629,14 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction", "grip"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip", "density"])?;
     let d = world::Material::default();
     let number = |field: &str| maybe_number(&m, &owner, field);
     Ok(Some(world::Material {
         bounce: number("bounce")?.unwrap_or(d.bounce),
         friction: number("friction")?.unwrap_or(d.friction),
         grip: number("grip")?,
+        density: number("density")?.unwrap_or(d.density),
     }))
 }
 
