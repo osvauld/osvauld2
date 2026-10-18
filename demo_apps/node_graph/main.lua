@@ -341,7 +341,7 @@ return function()
 			delete_button(),
 		}),
 		ui.col({
-			id = "graph-camera", grow = true, zoomable = true,
+			id = "graph-camera", grow = true, zoomable = true, zoom_min = 0.1, -- a big graph, whole
 			ui.col({
 				id = "graph-canvas", w = graph.W, h = graph.H, no_shrink = true, fill = C.canvas,
 				-- Canvas units with zoom undone, so picking an edge is geometry. Past the press slop

@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use app_host::{LuaApp, LuaMsg};
+use app_host::{DocKey, LuaApp, LuaMsg};
 use courier::token::Token;
 use loro::LoroDoc;
 use runtime::{App, El, EventLoopProxy, Tile, TileEvent, TileFrame};
@@ -357,7 +357,7 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
     let doc = LoroDoc::new();
     doc.import(&open.src).map_err(|e| e.to_string())?;
     let resolve = match (&open.node, open.persist) {
-        (_, false) => std::rc::Rc::new(|_: &str| Ok(None)) as app_host::Resolve,
+        (_, false) => std::rc::Rc::new(|_: &DocKey| Ok(None)) as app_host::Resolve,
         (Some((did, token)), true) => resolver_with_node(
             &open.vault,
             &open.ws_id,
@@ -500,16 +500,20 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) -> bool {
     let mut error = None;
     if ctx.persist {
         let mut put = persist(&ctx.vault, &ctx.ws_id, &ctx.id);
-        if let Err(e) = h.app.flush(|name, bytes| {
-            dirtied.push(name.to_string());
-            put(name, bytes)
+        if let Err(e) = h.app.flush(|key, bytes| {
+            if let DocKey::Own(name) = key {
+                dirtied.push(name.clone());
+            }
+            put(key, bytes)
         }) {
             error = Some(format!("save failed: {e}"));
         }
     } else {
         // Nothing to save, but the flush still says what changed — the index needs it.
-        let _ = h.app.flush(|name, _| {
-            dirtied.push(name.to_string());
+        let _ = h.app.flush(|key, _| {
+            if let DocKey::Own(name) = key {
+                dirtied.push(name.clone());
+            }
             Ok(())
         });
     }

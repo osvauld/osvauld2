@@ -43,20 +43,29 @@ pub enum Seg {
     Name(String),
     Pos(usize),
 }
-/// Load a doc's stored snapshot by name. `Ok(None)` is "never saved" — the ordinary first
+/// Which doc an app opened: one of its own (`doc:open`), or a workspace asset (`asset:open`),
+/// each by name. Two variants rather than a name prefix, so no doc name can pose as an asset.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DocKey {
+    Own(String),
+    Asset(String),
+}
+/// Load a doc's stored snapshot by key. `Ok(None)` is "never saved" — the ordinary first
 /// run. An `Err` is a *storage failure*, and it must stay distinguishable: collapsing the two
 /// makes an unreadable vault look like an empty board, which the next flush then overwrites
 /// with that emptiness.
-pub type Resolve = Rc<dyn Fn(&str) -> Result<Option<Vec<u8>>, String>>;
-pub type Docs = Rc<RefCell<HashMap<String, DocEntry>>>;
-/// The open docs, indexed by name, surviving every VM the app has had. Held by `LuaApp` and
+pub type Resolve = Rc<dyn Fn(&DocKey) -> Result<Option<Vec<u8>>, String>>;
+pub type Docs = Rc<RefCell<HashMap<DocKey, DocEntry>>>;
+/// The open docs, indexed by key, surviving every VM the app has had. Held by `LuaApp` and
 /// handed to each `install`, so a rebuilt VM re-opens what it had rather than reloading it.
-pub type Cores = Rc<RefCell<HashMap<String, Rc<DocCore>>>>;
+pub type Cores = Rc<RefCell<HashMap<DocKey, Rc<DocCore>>>>;
 /// Ask the host for a frame. Called from Loro's subscriber, which is `Send + Sync`, so this is
 /// too — it cannot touch the VM or the mirror, and does not need to: all it has to do is get the
 /// event loop to run `view()` again, which repatches on its own.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
+/// Installs `doc` and `asset`. `asset` reaches any asset in the app's workspace by name — read
+/// and write — which is the grant: data belongs to the workspace, not the app.
 pub fn install(
     lua: &Lua,
     docs: Docs,
@@ -64,7 +73,32 @@ pub fn install(
     resolve: Resolve,
     wake: Wake,
 ) -> mlua::Result<()> {
-    let open = lua.create_function(move |lua, (_this, name): (Value, String)| {
+    let opens = |scope: fn(String) -> DocKey| {
+        let (docs, cores) = (docs.clone(), cores.clone());
+        let (resolve, wake) = (resolve.clone(), wake.clone());
+        lua.create_function(move |lua, (_this, name): (Value, String)| {
+            open(lua, &docs, &cores, &resolve, &wake, scope(name))
+        })
+    };
+    let t = lua.create_table()?;
+    t.set("open", opens(DocKey::Own)?)?;
+    install_kinds(lua, &t)?;
+    lua.globals().set("doc", t)?;
+    let a = lua.create_table()?;
+    a.set("open", opens(DocKey::Asset)?)?;
+    lua.globals().set("asset", a)?;
+    Ok(())
+}
+
+fn open(
+    lua: &Lua,
+    docs: &Docs,
+    cores: &Cores,
+    resolve: &Resolve,
+    wake: &Wake,
+    name: DocKey,
+) -> mlua::Result<Table> {
+    {
         let hit = docs.borrow().get(&name).map(|e| e.mirror.clone());
         if let Some(mirror) = hit {
             return Ok(mirror);
@@ -102,12 +136,7 @@ pub fn install(
             },
         );
         Ok(mirror)
-    })?;
-    let t = lua.create_table()?;
-    t.set("open", open)?;
-    install_kinds(lua, &t)?;
-    lua.globals().set("doc", t)?;
-    Ok(())
+    }
 }
 
 /// A doc's host-side half, its version counter starting at `version`.
@@ -511,14 +540,14 @@ fn show_value(v: &Value) -> String {
     }
 }
 
-fn methods(lua: &Lua, docs: &Docs, name: &str) -> mlua::Result<Table> {
+fn methods(lua: &Lua, docs: &Docs, name: &DocKey) -> mlua::Result<Table> {
     let methods = lua.create_table()?;
     // One clone per method: each `create_function` closure owns its captures for the life of
     // the VM, and they all need the same two.
-    let (docs2, name2) = (docs.clone(), name.to_string());
-    let (docs3, name3) = (docs.clone(), name.to_string());
-    let (docs4, name4) = (docs.clone(), name.to_string());
-    let (docs, name) = (docs.clone(), name.to_string());
+    let (docs2, name2) = (docs.clone(), name.clone());
+    let (docs3, name3) = (docs.clone(), name.clone());
+    let (docs4, name4) = (docs.clone(), name.clone());
+    let (docs, name) = (docs.clone(), name.clone());
     let set = lua.create_function(move |lua, (_this, path, val): (Value, Table, Value)| {
         let doc = handle(&docs, &name)?;
         match segments(&path)?.as_slice() {
@@ -646,7 +675,7 @@ fn insert_at(lua: &Lua, l: &LoroMovableList, i: usize, v: &Value) -> mlua::Resul
 /// `LoroDoc::clone` is a reference clone (loro/src/lib.rs:114), so this costs an refcount bump
 /// and buys the guarantee that no `RefCell` borrow is alive across `commit()` — which fires
 /// subscribers synchronously, and will soon poke the event loop from inside one.
-fn handle(docs: &Docs, name: &str) -> mlua::Result<LoroDoc> {
+fn handle(docs: &Docs, name: &DocKey) -> mlua::Result<LoroDoc> {
     docs.borrow()
         .get(name)
         .map(|e| e.core.doc.clone())

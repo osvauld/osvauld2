@@ -146,6 +146,20 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   steps (shared virtualization core, `ui.virtual_list`; the grid island belongs to
   `sharded-datasets`): [design/ui-reuse.md](design/ui-reuse.md) §2b.
 
+### Assets merged with dev (2026-10-18, validated in the `assets` worktree; dev not yet advanced)
+- `dev` `90d22ec` merged into `assets`: the asset editor, `asset:open`, `clip:at`, world fields and
+  `drag_on_shapes` now sit on top of cloneable `El`, `ui.group` and the text cache. Textual
+  conflicts: `runtime/src/el.rs` and `lib.rs` (handlers are `Rc` and `drag_on_shapes` kept),
+  `frame/tests.rs` (gradient/shadow tests and dev's benchmarks both kept), `scripts/smoke.py`
+  (dev's list plus `smoke_asset_editor.py`), `docs/lua-apps.md` (Assets and Signals sections).
+- Two breaks the merge did not flag: `Behaviour::on_zoom` was a `Box`, so the now-`Clone`
+  behaviour needed `Rc`; and `LuaApp::replace_doc` (sync rollback) looked docs up by name while
+  assets key them by `DocKey`, so it now uses `DocKey::Own`.
+- Verified: `cargo check --workspace --tests` clean; runtime 168 passed (6 ignored), app_host 307
+  (7 ignored), shell2 86 (2 ignored); offscreen `python3 scripts/smoke.py` 27/27 against the
+  merged release binary. Not run: `cargo test` for the other crates, native keyboard/IME,
+  windowed checks, and a fresh expert review of the merge diff.
+
 ### 2D gravity, forces, hands and joints (2026-10-18, branch `world-gravity`, not landed) — [plan](design/2d-gravity.md)
 - `ui.world` takes `gravity = { gx, gy }` (none by default, so every top-down world is unchanged),
   `wells` (radial pull fields) and `joints` (`pin` hinge with limits, `rope`, `spring`; kept across
@@ -1006,6 +1020,67 @@ temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.ste
 bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
 and `t.world()` snapshots. Soft bodies (rope, cape)
 are the assets session's own verlet solver, not Rapier joints.
+
+### Assets — shared drawings, an asset editor, stages
+
+**Design draft 2026-09-29:** [assets.md](design/assets.md) — a drawing with its clips is data in a
+workspace asset that any app opens by name; editors are many and disposable; stages place assets
+together; sockets and plugs are the interface for swappable pieces. **Landed 2026-10-01 (branch
+`assets`):**
+- **Storage and `asset:open`.** `ItemKind::Asset` (its content is the item's doc `asset`) and
+  `Vault::item_named` (oldest wins on duplicate names). `app_host` keys open docs by
+  `DocKey::Own | Asset`; `asset:open(name)` shares `doc:open`'s mirror, writes, reload and flush.
+  The shell routes an asset's reads and saves to its own item, creating it on first save. A doc
+  mirror goes straight into `gfx.drawing`. Not built: syncing assets through the node (2c), and one
+  shared doc per asset across open apps (chunk 3) — two apps editing one asset, the last save wins.
+- **Paint.** Drawing fills take `linear`, `radial` and `sweep` gradients as data, and
+  `gfx.radial_gradient` / `gfx.sweep_gradient` join `gfx.linear_gradient` (one parser for all).
+  A shape can be a soft shadow — `Item::Shadow`, Vello's blurred rounded rect, paint only, never
+  hit — also as `gfx.shadow`. Not built: blurring other outlines, part-level clipping, opacity.
+- **The asset editor** (`demo_apps/asset_editor`): opens `hero`, `toggle` (a detailed day/night
+  toggle: gradients, glow, shadows, a knob that rolls and becomes a moon), `chest` and `hat`, each
+  seeded per missing root; selects parts on a zoomable canvas drawn from a scaled copy of the data;
+  plays any clip in place (the canvas becomes a `ui.world`). **Stage edit:** the `room` scene
+  places hero, chest and a hat; entities drag, one write on release. Dragging a plug near a socket
+  of its kind rings every fitting socket and snaps to the near one: release there **equips**
+  (`mount = { to, socket }`, no position), and dragging a mounted entity away unequips it.
+  **Inspector:** the selected part's pivot and each shape's fill, stroke width and ink (a shadow's
+  blur and colour) are inputs — Enter writes one value if it parses, a bad one turns red and writes
+  nothing, the canvas redraws from the edit. **Vars:** a drawing's `vars = { skin = "#…", line = 2 }`
+  stand in as `"@skin"` for any colour and `"@line"` for a lone number (stroke width, shadow radius
+  and blur), resolved once by `gfx.drawing`; the editor and stage pass the asset's `vars` through.
+  A **variant** is `gfx.drawing(module, { vars = { shirt = … } })` — only declared vars, same
+  kind. The hero seed's colours and stroke width are vars, and a stage entity's own `vars` make a
+  variant: the room's `rival` is the hero in teal. The inspector lists the asset's vars (swatch and
+  value: one edit recolours every shape naming it); a shape's colour and width fields take
+  `@name` of a var of the right kind, and typing a plain value unlinks it. A zoomable takes
+  `zoom_min` / `zoom_max` (default 0.4–3, the old fixed clamp); the editor's viewport zooms to
+  20×, 50× the asset. **Point editing (E2b):** a selected part shows its path points as dots
+  (`pt:<shape>:<command>:<k>`; controls hollow, with guides); dragging one moves it live and
+  writes that one point on release. It snaps to the finest step the zoom shows (whole units at
+  1×, twentieths up close), and an end point carries the cubic controls either side of it. The
+  camera's `on_zoom` tells Lua its scale, so the dots and the selection outline keep their screen
+  size. The canvas sets `drag_on_shapes`, so a drag from a part or a dot is the editor's and one
+  from empty canvas pans. **Part moves:** dragging a part selects it and moves it with every part
+  under it, by snapped steps — pivots, path points, gradient points and shadow corners — and the
+  sockets on them; release writes each path whole.
+  **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
+  its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
+  pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.
+  **World fields** ([maker-parity.md](design/maker-parity.md) step 1, 2026-10-05): an asset's
+  `world` root gives its `collider`, `sensor`, `loose`, `group` and `blocks`; a stage entity's own
+  field replaces one whole, `false` removes it, and `controller` comes only from the entity. Stage
+  edit outlines each collider and dashes each sensor; in play the room's hero walks on WASD, stops
+  at the chest and pushes a loose `crate`.
+  **UI assets as widgets** (step 2, 2026-10-05): `clip:at(t)` samples a clip as the world does,
+  and `drawing:pose` draws it on a plain `ui.frame`; `clip.length` and `clip.loop` read back.
+  `demo_apps/toggle_demo` uses the toggle asset as a switch — `on_frame` only while it moves, no
+  world.
+  Not built: picking a var from a list (type `@name` for now), editing gradients, editing stage
+  entity fields in the editor, reparenting and reordering, adding parts, the clip timeline,
+  behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` drives it over the
+  bridge — a point and a part dragged by the real pointer (the socket rides the head), the room
+  played, the toggle switched in another app.
 
 ### Environment — composable 3D interfaces and worlds
 

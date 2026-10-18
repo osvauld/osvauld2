@@ -78,7 +78,9 @@ impl Open {
         let mut put = persist(&f.vault, &f.ws, &f.item);
         self.app
             .flush(|name, bytes| {
-                dirtied.push(name.to_string());
+                if let app_host::DocKey::Own(name) = name {
+                    dirtied.push(name.clone());
+                }
                 put(name, bytes)
             })
             .unwrap();
@@ -299,7 +301,9 @@ fn a_test_tab_gets_a_working_index_that_touches_no_vault() {
     attach(&index, &mut app).unwrap();
     let mut dirtied = Vec::new();
     app.flush(|name, _| {
-        dirtied.push(name.to_string());
+        if let app_host::DocKey::Own(name) = name {
+            dirtied.push(name.clone());
+        }
         Ok(())
     })
     .unwrap();

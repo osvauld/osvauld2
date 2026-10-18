@@ -175,11 +175,14 @@ implicit clip or scale.
 | `gfx.path(commands)` | positional list of commands | up to 65536; drawing before `move` is an error |
 | `gfx.solid(color)` | a CSS color string | |
 | `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
+| `gfx.radial_gradient({…})` | `center` · `radius` · (`focus` · `focus_radius`) · `stops` · `extend` | colour spreads from the focus circle (a point at the centre by default) out to `radius`; an off-centre `focus` moves the light |
+| `gfx.sweep_gradient({…})` | `center` · (`from_angle` · `to_angle`) · `stops` · `extend` | colour turns around `center`; angles in degrees from +x towards +y, a full turn (0–360) by default |
 | `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required; the result reads them back (`f.width`, `f.height`) |
 | `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
 | `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
 | `gfx.instance({…})` | `visual` (another frame) · `transform` | placed by its local origin — account for a centered shape's radius |
+| `gfx.shadow({…})` | `rect = {x, y, w, h}` · `blur` · `color` · (`radius`) | a blurred rounded rect; paint only, never hit, even with an `id` |
 
 `fill`, `stroke`, `group` and `instance` take an optional **`id`** — and that is what makes the
 drawing touchable. Put the pointer handler on the `ui.frame` itself, and `on_click`/`on_hover`
@@ -244,8 +247,27 @@ ui.frame({ id = "hero", visual = waving })
   follow. Naming a part that doesn't exist is an error.
 - Each posed part is a named group, so `on_hover`/`on_click` on the `ui.frame` report the part id
   as `e.shape`.
-- `pose` builds a new frame: pose once at module scope, not in `view`. Clips, `use` and paint
-  beyond solid colours are not built yet — `clips = …` and `use = …` are errors.
+- A shape's `fill` is a colour string or one gradient as data — `{ linear = {…} }`,
+  `{ radial = {…} }` or `{ sweep = {…} }`, each holding the fields of the matching `gfx.*_gradient`
+  (e.g. `fill = { linear = { from = {x, y}, to = {x, y}, stops = { {0, "#4aa3ff"}, {1, "#1b2a6b"} } } }`).
+  Points and radii are in the drawing's space, so the gradient moves with its part. A stroke's
+  colour is solid only.
+- A shape can instead be a **soft shadow**: `{ shadow = { rect = {x, y, w, h}, radius = 16,
+  blur = 6, color = "#00000066" } }` — a rounded rectangle blurred by `blur` (the gaussian's
+  standard deviation; positive), `radius` 0 by default. A circle is a rect with `radius` half its
+  width. List it before the shape it falls under; the pointer goes through it. Only rounded
+  rectangles blur — a soft shadow of any other outline is not built.
+- **Vars** name values once: `vars = { skin = "#e8b894", line = 2 }` beside `size` and `parts`,
+  then `"@skin"` wherever a colour goes (fill, stroke colour, gradient stop, shadow colour) and
+  `"@line"` wherever a lone number goes (stroke width, shadow `radius` and `blur`). A var is a
+  colour string or a number; an unknown name or the wrong kind is an error naming the shape.
+  Path points stay literal. Outside a drawing (`gfx.linear_gradient`, `gfx.shadow`) there are no
+  vars.
+- A **variant** is `gfx.drawing(module, { vars = { shirt = "#2ec4b6" } })`: the module's vars with
+  those few replaced — another team's shirt, a dark toggle — compiled once like any drawing. It
+  may only replace vars the module declares, with the same kind (a colour for a colour).
+- `pose` builds a new frame: pose once at module scope, not in `view`. Clips and `use` are not
+  built yet — `clips = …` and `use = …` are errors.
 
 `demo_apps/hero` is the reference.
 
@@ -361,6 +383,12 @@ ui.world({ id = "room", width = 720, height = 400,
   errors — `events`, speed, transitions and layers are not built yet.
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
+- **Without a world**, `clip:at(t)` gives each tracked part's pose `t` seconds in — `{ knob = { x,
+  y, rot, scale }, … }`, sampled exactly as the world samples it (a looped clip wraps, a once clip
+  holds its ends) — and `drawing:pose(clip:at(t))` draws it on a plain `ui.frame`. Lua keeps `t`:
+  declare `on_frame` only while a clip moves, so a resting widget asks for no frames.
+  `clip.length` and `clip.loop` read back the spec. This is how a UI asset is a widget —
+  `demo_apps/toggle_demo/toggle.lua` plays the toggle asset's `to_night` and rests on `night`.
 
 ### Controllers
 
@@ -862,7 +890,10 @@ before `fade`.
 | pointer | `system_cursor` | bool — `false` hides the system pointer while over this element, for an app that draws its own (`demo_apps/pointer/cursor.lua`) |
 | | `cursor` | a look name (`"grab"`, `"text"`, any string your cursor knows) or a `gfx.frame` to draw — hover handlers get the topmost declared one as `e.look` |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
+| | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
+| | `on_zoom` | `function(e)` — `e.scale` is the camera's zoom, told on the first frame and on each change. Divide by it to keep a mark (a selection outline, a handle) its size on screen. Only beside `zoomable`/`zoom_x`. |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
+| drag | `drag_on_shapes` | bool — `on_drag` takes only a press on one of the frame's named shapes; a press beside them falls through, so a camera around it still pans. Only beside `on_drag`. |
 | input | `value` · `autofocus` | string · bool |
 
 Four props need an `id` because the shell keys state by it: `scroll_*` (offset), `zoomable` /
@@ -1020,6 +1051,19 @@ The rules that bite, once each:
   are walking does not shrink until the next frame.
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
+
+### Assets
+
+`local hero = asset:open("hero")` opens a **workspace asset** by name — data that belongs to the
+workspace, not to your app, so any app in it can read and write the same one
+([design](design/assets.md)). The mirror and the writes are exactly `doc:open`'s.
+`asset:open("board")` and `doc:open("board")` are two different documents.
+
+An asset that does not exist yet opens empty, and your first write creates it.
+
+*2026-10-01: assets save and load locally. Not yet: syncing them to other devices, and two open
+apps seeing each other's edits live — today each app holds its own copy, and the last to save
+wins. Slices 2c and 3 of the design close these.*
 
 ## Signals
 

@@ -835,6 +835,86 @@ fn a_press_scales_the_hit_rect_with_the_paint() {
     );
 }
 
+/// Records the scales a camera's `on_zoom` was told.
+struct Zoomed {
+    told: Vec<f32>,
+}
+
+impl App for Zoomed {
+    type Msg = f32;
+    fn view(&self) -> El<f32> {
+        let content = crate::col().w(100.0).h(100.0);
+        crate::col().id("cam").full().zoomable().zoom_max(20.0).on_zoom(|s| s).child(content)
+    }
+    fn update(&mut self, scale: f32) {
+        self.told.push(scale);
+    }
+}
+
+/// `on_zoom` hears the scale once on the first frame and once per change, never per frame: a
+/// handler that rebuilds a drawing must not rebuild it sixty times a second.
+#[test]
+fn on_zoom_is_told_the_scale_once_per_change() {
+    let mut h = Headless::new(Zoomed { told: Vec::new() }, (400.0, 400.0));
+    h.frame();
+    h.frame();
+    assert_eq!(h.app().told, vec![1.0], "the first frame tells the starting scale");
+
+    h.ctrl_wheel(50.0, 50.0, LINE_STEP); // one line in
+    h.frame();
+    h.frame();
+    let told = &h.app().told;
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!((told[1] - 1.1).abs() < 1e-5, "{told:?}");
+}
+
+/// A canvas inside a camera whose drag takes only presses on its shapes.
+struct Grabby {
+    grabbed: Vec<bool>,
+}
+
+impl App for Grabby {
+    type Msg = bool;
+    fn view(&self) -> El<bool> {
+        let brush = Arc::new(Brush::solid(vello::peniko::Color::WHITE).unwrap());
+        let dot = Item::fill(square(10.0), brush, Fill::NonZero).with_id("dot");
+        let dot = Item::group(Affine::translate((100.0, 100.0)), vec![dot]).unwrap();
+        let canvas = crate::frame(Arc::new(Frame::new(200.0, 200.0, None, vec![dot]).unwrap()))
+            .id("canvas")
+            .on_drag("canvas", |d| d.shape.is_some())
+            .drag_on_shapes();
+        crate::col().id("cam").full().zoomable().child(canvas)
+    }
+    fn update(&mut self, on_shape: bool) {
+        self.grabbed.push(on_shape);
+    }
+}
+
+/// With `drag_on_shapes`, a press on a shape drags it and a press beside one pans the camera.
+#[test]
+fn drag_on_shapes_lets_a_press_beside_them_pan() {
+    let mut h = Headless::new(Grabby { grabbed: Vec::new() }, (400.0, 400.0));
+    h.frame();
+    let at = |h: &mut Headless<Grabby>| {
+        let r = h.rects();
+        let c = r.iter().find(|r| r.id == "canvas").unwrap();
+        (c.x, c.y)
+    };
+    let (x, y) = at(&mut h);
+
+    h.drag((x + 105.0, y + 105.0), (x + 145.0, y + 105.0), 4);
+    h.frame();
+    let grabbed = h.app().grabbed.clone();
+    assert!(!grabbed.is_empty() && grabbed.iter().all(|&g| g), "{grabbed:?}");
+    assert_eq!(at(&mut h), (x, y), "a drag on the dot must not pan");
+
+    h.app_mut().grabbed.clear();
+    h.drag((x + 20.0, y + 20.0), (x + 60.0, y + 20.0), 4);
+    h.frame();
+    assert!(h.app().grabbed.is_empty(), "{:?}", h.app().grabbed);
+    assert_eq!(at(&mut h), (x + 40.0, y), "a drag beside the dot pans");
+}
+
 /// A board to zoom: `card` is the one addressable thing inside it.
 struct Board;
 

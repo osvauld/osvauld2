@@ -322,6 +322,9 @@ pub(crate) struct Behaviour<M> {
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
     pub on_drag: Option<(Id, Rc<dyn Fn(DragEvent) -> M>)>,
+    /// `on_drag` takes only a press on one of the element's named shapes; any other falls
+    /// through, so a camera around it can still pan.
+    pub drag_on_shapes: bool,
     pub on_drop: Option<(Id, Rc<dyn Fn(DropEvent) -> M>)>,
     pub on_hover: Option<(Id, Rc<dyn Fn(HoverEvent) -> M>)>,
     pub on_tile: Option<(Id, Rc<dyn Fn(crate::tile::TileEvent) -> M>)>,
@@ -331,6 +334,10 @@ pub(crate) struct Behaviour<M> {
     pub opacity: f32,
     pub scale: f32,
     pub zoom: Option<(bool, bool)>,
+    /// A zoomable's `(min, max)` scale.
+    pub zoom_range: (f32, f32),
+    /// Told a zoomable's scale whenever it differs from the last one told, first frame included.
+    pub on_zoom: Option<Rc<dyn Fn(f32) -> M>>,
     /// The app draws its own pointer here, so the system one is hidden while over this element.
     pub hide_cursor: bool,
     pub cursor: Option<crate::hover::CursorLook>,
@@ -366,12 +373,15 @@ impl<M> Default for Behaviour<M> {
             input: None,
             scroll: None,
             on_drag: None,
+            drag_on_shapes: false,
             overlay: None,
             on_right_click: None,
             offset: (0.0, 0.0),
             opacity: 1.0,
             scale: 1.0,
             zoom: None,
+            zoom_range: crate::zoom::DEFAULT_RANGE,
+            on_zoom: None,
             hide_cursor: false,
             cursor: None,
             slide: None,
@@ -779,6 +789,22 @@ impl<M> El<M> {
         self.behaviour.zoom = Some((true, false));
         self
     }
+    /// The furthest a zoomable zooms out, as a scale (0.4 by default). Keep it below `zoom_max`.
+    pub fn zoom_min(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.0 = scale;
+        self
+    }
+    /// The furthest a zoomable zooms in, as a scale (3 by default).
+    pub fn zoom_max(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.1 = scale;
+        self
+    }
+    /// What a zoomable's content needs to know to draw at a fixed screen size: its scale, told
+    /// on the first frame and on every change after. Needs the zoomable's id, as zoom does.
+    pub fn on_zoom(mut self, map: impl Fn(f32) -> M + 'static) -> Self {
+        self.behaviour.on_zoom = Some(Rc::new(map));
+        self
+    }
 
     pub fn slide_in(mut self, (dx, dy): (f32, f32), ms: f32) -> Self {
         self.behaviour.slide = Some((
@@ -906,6 +932,12 @@ impl<M> El<M> {
         self
     }
 
+    /// See [`Behaviour::drag_on_shapes`].
+    pub fn drag_on_shapes(mut self) -> Self {
+        self.behaviour.drag_on_shapes = true;
+        self
+    }
+
     pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DropEvent) -> M + 'static) -> Self {
         self.behaviour.on_drop = Some((id.into(), Rc::new(map)));
         self
@@ -1020,6 +1052,9 @@ impl<M> El<M> {
         }
         if self.behaviour.on_wheel.is_some() {
             handlers.push("on_wheel");
+        }
+        if self.behaviour.on_zoom.is_some() {
+            handlers.push("on_zoom");
         }
         if self.behaviour.on_key.is_some() {
             handlers.push("on_key");

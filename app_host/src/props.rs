@@ -22,6 +22,30 @@ fn missing_id<'a>(id: Option<&'a str>, prop: &str) -> mlua::Result<&'a str> {
     id.ok_or_else(|| mlua::Error::runtime(format!("{prop} needs an id")))
 }
 
+/// `zoom_min` / `zoom_max` bound a camera, so they need one, must be a positive scale, and the
+/// pair must leave room to zoom — checked here, since each builder sees only its own value.
+fn zoom_limit(node: &Table, prop: &str, v: &Value) -> mlua::Result<()> {
+    let camera = node.contains_key("zoomable")? || node.contains_key("zoom_x")?;
+    if !camera {
+        return Err(mlua::Error::runtime(format!("{prop} needs zoomable or zoom_x")));
+    }
+    let scale = f32::from_prop(v)?;
+    if !(scale.is_finite() && scale > 0.0) {
+        return Err(mlua::Error::runtime(format!("{prop} must be a positive scale")));
+    }
+    let bound = |k: &str, default: f32| -> mlua::Result<f32> {
+        match node.get::<Value>(k)? {
+            Value::Nil => Ok(default),
+            other => f32::from_prop(&other),
+        }
+    };
+    let (lo, hi) = runtime::DEFAULT_ZOOM_RANGE;
+    if bound("zoom_min", lo)? >= bound("zoom_max", hi)? {
+        return Err(mlua::Error::runtime("zoom_min must be below zoom_max"));
+    }
+    Ok(())
+}
+
 impl FromProp for f32 {
     fn from_prop(v: &Value) -> mlua::Result<Self> {
         v.as_f32()
@@ -169,6 +193,11 @@ impl<M: 'static> Registry<M> {
                 to_msg(LuaMsg::CallWheel(key.clone(), event.delta.0, event.delta.1))
             }))
         }),
+        ("on_zoom", |el, v, cx| {
+            let key = cx.register("on_zoom", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_zoom(move |scale| to_msg(LuaMsg::CallZoom(key.clone(), scale))))
+        }),
         ("on_key", |el, v, cx| {
             let key = cx.register("on_key", v)?;
             let to_msg = cx.to_msg.clone();
@@ -297,6 +326,8 @@ impl<M: 'static> Registry<M> {
         prop!(scale, f32),
         prop!(zoomable),
         prop!(zoom_x),
+        prop!(zoom_min, f32),
+        prop!(zoom_max, f32),
         // A name the app's cursor knows, or a `gfx.frame` the element supplies to be drawn.
         (
             "cursor",
@@ -320,6 +351,7 @@ impl<M: 'static> Registry<M> {
         // scroll — both need an `id`; `walk` enforces that, since `apply` can't see one
         prop!(scroll_x),
         prop!(scroll_y),
+        prop!(drag_on_shapes),
         // input
         prop!(autofocus),
     ];
@@ -356,6 +388,12 @@ pub(crate) fn apply<M: 'static>(
             if k == "zoomable" || k == "zoom_x" {
                 missing_id(id, &k)?;
             }
+            if k == "zoom_min" || k == "zoom_max" {
+                zoom_limit(node, &k, &v)?;
+            }
+            if k == "drag_on_shapes" && !node.contains_key("on_drag")? {
+                return Err(mlua::Error::runtime("drag_on_shapes needs on_drag"));
+            }
             if k == "press_scale" {
                 missing_id(id, "press_scale")?;
                 if !node.contains_key("on_click")? {
@@ -374,6 +412,10 @@ pub(crate) fn apply<M: 'static>(
             .register(name, &v)?;
             el = build(el, (context.to_msg)(LuaMsg::Call(key)));
         } else if let Some((_, bind)) = Registry::<M>::BINDS.iter().find(|(b, _v)| *b == &*k) {
+            // Without a camera there is no scale to tell, and the handler would wait forever.
+            if k == "on_zoom" && !(node.contains_key("zoomable")? || node.contains_key("zoom_x")?) {
+                return Err(mlua::Error::runtime("on_zoom needs zoomable or zoom_x"));
+            }
             el = bind(
                 el,
                 &v,
