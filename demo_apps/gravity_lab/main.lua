@@ -218,6 +218,7 @@ local function build()
 	-- the kill zone along the ground where the castle stands: a pig that reaches it is down
 	add({ id = "killzone", pos = { 380, FY - 18 }, drawing = invisible(240, 18), sensor = { rect = { 240, 18 } } })
 
+	if state.flash then add({ id = "flash", pos = { 0, 0 }, drawing = memo("flash", function() return drawing(W, H, { { path = rectp(0, 0, W, H), fill = "#ffffff1c" } }) end) }) end
 	-- the sling: two posts and the stone in it (not a body: it is moved by hand with `set`)
 	add({ id = "sling", pos = { 84, 372 }, drawing = memo("sling", function()
 		return drawing(30, 52, { { path = rectp(10, 18, 8, 34), fill = "#5a3b22" }, { path = rectp(2, 6, 7, 20), fill = "#7a5230" },
@@ -369,7 +370,16 @@ local function on_zone(e)
 	end
 end
 
+-- Lua cannot read where a hit landed, so a hard one flashes the whole sky instead.
+local function on_hit(e)
+	if e.speed > 450 and not state.flash then
+		state.flash = true
+		world("lab"):after(0.09, "unflash")
+	end
+end
+
 local function on_timer(e)
+	if e.name == "unflash" then state.flash = nil end
 	if e.name == "launch" and state.pending then
 		local p = state.pending
 		state.pending = nil
@@ -405,7 +415,7 @@ return function()
 		gravity = state.g,
 		wells = state.well and { { at = { 490, 330 }, radius = 200, pull = 1700 } } or {},
 		joints = joints(),
-		on_drag = on_drag, on_zone = on_zone, on_timer = on_timer,
+		on_drag = on_drag, on_zone = on_zone, on_timer = on_timer, on_hit = on_hit,
 	}
 	for _, e in ipairs(build()) do lab[#lab + 1] = e end
 
