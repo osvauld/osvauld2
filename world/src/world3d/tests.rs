@@ -1,6 +1,9 @@
 use super::*;
 
 mod runner;
+mod commands;
+mod rotation;
+mod zones;
 
 fn body_count(world: &mut World3d) -> usize {
     world.ecs.query::<&Body>().iter(&world.ecs).count()
@@ -12,13 +15,17 @@ fn specs() -> Vec<EntitySpec3d> {
             id: "platform".into(),
             shape: Shape3d::Box([6.0, 0.5, 4.0]),
             position: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
             dynamic: false,
+            sensor: false,
         },
         EntitySpec3d {
             id: "marble".into(),
             shape: Shape3d::Sphere(0.25),
             position: [0.0, 3.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
             dynamic: true,
+            sensor: false,
         },
     ]
 }
@@ -259,7 +266,9 @@ fn invalid_batch_does_not_change_membership_state_or_reset_targets() {
         id: "bad".into(),
         shape: Shape3d::Sphere(f32::NAN),
         position: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
         dynamic: true,
+        sensor: false,
     });
     assert_eq!(
         world.reconcile(invalid),
@@ -293,7 +302,9 @@ fn invalid_ids_and_budget_reject_before_removing_old_bodies() {
             id: i.to_string(),
             shape: Shape3d::Sphere(0.25),
             position: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
             dynamic: true,
+            sensor: false,
         })
         .collect();
     assert_eq!(world.reconcile(too_many), Err(World3dError::Budget));

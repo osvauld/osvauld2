@@ -132,7 +132,7 @@ fn syncing_a_doc_lands_its_content_in_the_nodes_vault() {
     )
     .unwrap();
 
-    sync(&socket, hello).unwrap();
+    sync(&socket, &desktop, hello).unwrap();
 
     let stored = node_vault
         .get_doc(&ws_id, &item_id, "board")
@@ -178,7 +178,7 @@ fn joining_an_item_pulls_its_current_source_and_registers_it_locally() {
         None,
     )
     .unwrap();
-    sync(&socket, hello).unwrap();
+    sync(&socket, &alice, hello).unwrap();
 
     let invite_ticket = invite(&socket, &alice, alice_record.token, "member", Scope::Node).unwrap();
     let (bob, _bob_dir) = desktop_vault();
@@ -230,6 +230,7 @@ fn a_subscribed_desktop_receives_a_push_via_listen_when_another_desktop_syncs() 
 
     subscribe(
         &socket,
+        &bob,
         &bob_did,
         bob_record.token.clone(),
         &ws_id,
@@ -237,7 +238,7 @@ fn a_subscribed_desktop_receives_a_push_via_listen_when_another_desktop_syncs() 
         layer.clone(),
     )
     .unwrap();
-    let mut conn = listen(&socket, &bob_did, bob_record.token).unwrap();
+    let mut conn = listen(&socket, &bob, &bob_did, bob_record.token).unwrap();
 
     let doc = LoroDoc::new();
     doc.get_text("t").insert(0, "hello").unwrap();
@@ -251,7 +252,7 @@ fn a_subscribed_desktop_receives_a_push_via_listen_when_another_desktop_syncs() 
         None,
     )
     .unwrap();
-    sync(&socket, hello).unwrap();
+    sync(&socket, &alice, hello).unwrap();
 
     let push = next_push(&mut conn).unwrap();
     assert_eq!(push.item_id, item_id);
@@ -281,7 +282,7 @@ fn pull_doc_returns_content_another_desktop_already_synced() {
         None,
     )
     .unwrap();
-    sync(&socket, hello).unwrap();
+    sync(&socket, &alice, hello).unwrap();
 
     // Bob has never touched this item, but pulls straight from the node — this is what
     // keeps his app from mistaking "not synced to me yet" for "nobody's written this".

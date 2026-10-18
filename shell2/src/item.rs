@@ -1,17 +1,20 @@
-//! Items screen: inside one workspace — the apps it holds, drawn as the same card grid as
-//! the workspaces themselves. List-only for now: app upload/creation is the next design
-//! discussion, so an empty workspace just says so.
+//! Workspace items: Lua navigation/import presentation, with Rust authority and fallback chrome.
+//! Keeps the Rust grid as a fallback if the launcher cannot initialize.
 
 use crate::app_src::{app_name, read_app_folder, snapshot};
+use crate::launcher::{Launcher, session::Inventory};
 use crate::space::SpaceScreen;
 use crate::{Msg, Screen, theme};
+use app_host::LuaMsg;
 use runtime::{El, EventLoopProxy, col, row, text};
+use std::{cell::RefCell, rc::Rc};
 use vault::{Vault, WorkspaceItem, WorkspaceMeta};
 
 pub struct ItemsScreen {
     ws: WorkspaceMeta,
     items: Vec<WorkspaceItem>,
     error: Option<String>,
+    inventory: Inventory,
 }
 
 #[derive(Clone)]
@@ -19,6 +22,7 @@ pub enum ItemsScreenMsg {
     Back,
     Upload,
     Open(WorkspaceItem),
+    Launcher(String, u64, LuaMsg),
 }
 
 impl ItemsScreen {
@@ -33,10 +37,37 @@ impl ItemsScreen {
             Ok(i) => (i, None),
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
-        ItemsScreen { ws, items, error }
+        let inventory = Rc::new(RefCell::new(crate::shell_api::Snapshot {
+            workspace: ws.clone(),
+            items: items.clone(),
+        }));
+        ItemsScreen {
+            ws,
+            items,
+            error,
+            inventory,
+        }
     }
 
-    pub fn view(&self) -> El<Msg> {
+    pub fn inventory(&self) -> Inventory {
+        self.inventory.clone()
+    }
+
+    pub fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    pub fn refresh(&mut self, vault: &Vault) {
+        match vault.items(&self.ws.id) {
+            Ok(items) => {
+                self.items = items;
+                self.inventory.borrow_mut().items = self.items.clone();
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    pub fn view(&self, launcher: Option<&Launcher>, warning: Option<&str>) -> El<Msg> {
         let upload_btn = row()
             .h(36.0)
             .px(14.0)
@@ -77,7 +108,9 @@ impl ItemsScreen {
             .child(col().grow())
             .child(upload_btn);
 
-        let body = if self.items.is_empty() {
+        let body = if let Some(launcher) = launcher {
+            launcher.view()
+        } else if self.items.is_empty() {
             col().grow().center().child(
                 text("no apps in this workspace yet")
                     .font_size(13.0)
@@ -108,10 +141,15 @@ impl ItemsScreen {
             col().id("items").grow().scroll_y().child(grid)
         };
 
-        let mut page = col().full().pad(40.0).gap(24.0).child(header);
+        // The reserved marker opts into Lua presentation. Old overrides and failed views keep
+        // the Rust controls; query the Rust description, never execute a handler to probe it.
+        let mut page = col().full().pad(40.0).gap(24.0);
+        if !body.contains_id("launcher:workspace-header") {
+            page = page.child(header);
+        }
         // Upload failures land here (no main.lua, non-utf8 file, locked vault) — without this
         // the button is a silent no-op.
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.as_deref().or(warning) {
             page = page.child(text(error).font_size(12.0).color(theme::error()));
         }
         page.child(body)
@@ -129,7 +167,7 @@ impl ItemsScreen {
                 self.error = self.upload(vault).err();
                 None
             }
-            ItemsScreenMsg::Open(item) => None, //intercepted before its reaced here
+            ItemsScreenMsg::Open(_) | ItemsScreenMsg::Launcher(..) => None, // intercepted by Shell
         }
     }
 
@@ -147,6 +185,7 @@ impl ItemsScreen {
             .put_src(&self.ws.id, &item.id, &snapshot_bytes)
             .map_err(|e| e.to_string())?;
         self.items = vault.items(&self.ws.id).map_err(|e| e.to_string())?;
+        self.inventory.borrow_mut().items = self.items.clone();
         Ok(())
     }
 }

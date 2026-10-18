@@ -157,6 +157,11 @@ pub enum Request {
     OpenItem {
         item_id: String,
     },
+    /// Close the item's tab; its docs were flushed on the previous update. Answers "closed",
+    /// or "not open".
+    CloseItem {
+        item_id: String,
+    },
     /// Show an open item's app beside the focused one, both live. A stand-in for the chrome's
     /// own layout until the Lua chrome owns tiling.
     SplitWith {
@@ -164,8 +169,38 @@ pub enum Request {
     },
     /// Back to the focused app alone. The other one keeps running, unseen.
     Unsplit,
+    /// Show an open item's app in a window of its own; its tab stays. Closing that window docks
+    /// it back rather than closing the app.
+    PopOut {
+        item_id: String,
+    },
+    /// Back from its own window into its tab, which is focused.
+    DockIn {
+        item_id: String,
+    },
+    /// The open app tabs in strip order: `[{item_id, name, focused, shown, window, responding}]`.
+    /// `responding` is false while the app's thread has been busy longer than the watchdog
+    /// (`OSVAULD_WATCHDOG_MS`, default 3000).
+    ListTabs,
 
     // ── node (kunki) ────────────────────────────────────────────────────────────
+    /// The unlocked account: `{did, name}`.
+    Whoami,
+    /// Run the reconciliation pass `SyncTick` runs, now — so a test never waits on its timer.
+    SyncNow,
+    /// Give `did` an app role (declared in the item's manifest) on that item, as the unlocked
+    /// account. The node refuses a role outside this account's grant cone.
+    AssignRole {
+        item_id: String,
+        did: String,
+        role: String,
+    },
+    /// Take an app role back; whatever it was used to grant goes with it.
+    RevokeRole {
+        item_id: String,
+        did: String,
+        role: String,
+    },
     /// Join a kunki node — a boot ticket (first admin) or an invite (later member), told
     /// apart by their text prefix the same way the shell's own paste box does. Answers with
     /// the joined node's did.
@@ -207,6 +242,33 @@ pub enum Request {
         item_id: String,
         path: String,
     },
+    /// Select a current account workspace on Home without closing any app instances.
+    SelectWorkspace {
+        ws_id: String,
+    },
+    /// Account-owned launcher source, scoped to the selected workspace UI (not an app item).
+    ReadLauncherFile {
+        path: String,
+    },
+    EditLauncherFile {
+        path: String,
+        expected_revision: String,
+        edits: Vec<SourceTextEdit>,
+    },
+    DumpLauncherTree {},
+    ClickLauncher {
+        el_id: String,
+    },
+    TypeLauncher {
+        el_id: String,
+        content: String,
+    },
+    ReadLauncherConsole {
+        last: usize,
+    },
+    /// Restore the account's bundled launcher; also available from the workspace listing.
+    ResetLauncher {},
+
     /// Read source plus an opaque per-file content revision for [`Request::EditFile`].
     ReadFileVersioned {
         item_id: String,
@@ -322,6 +384,12 @@ pub enum Request {
     ReadConsole {
         item_id: String,
         last: usize,
+    },
+    /// Capture shell chrome/Home too, without requiring a focused app item.
+    ScreenshotShell {
+        width: Option<f32>,
+        height: Option<f32>,
+        scale: Option<f32>,
     },
     /// Capture the next live frame. With no dimensions this is the exact visible window;
     /// width/height are logical points and scale controls physical pixels per point.

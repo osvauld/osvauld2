@@ -36,6 +36,93 @@ return function()
 end
 ```
 
+## Bundled workspace launcher
+
+The shell's default item grid lives in `shell2/src/launcher/` and runs as a separate Lua VM.
+It alone receives `shell.snapshot()` (fresh `{workspace = {id, name}, items = {{id, name, kind}, …}}`
+metadata) and `shell.open_item(id)` (handler-only, scoped to that workspace). Rust revalidates
+commands and opens or focuses the existing item instance. Ordinary uploaded apps do **not**
+receive `shell`. The default workspace title/Back/Add item header is also Lua-described.
+`shell.back()` and `shell.import_item()` enqueue handler-only, workspace-scoped requests;
+Rust rechecks unlocked-account membership and Home before navigating or opening its native
+folder picker/import path. No filesystem access is granted to Lua.
+
+The workspace list is also Lua-described, through `spaces_view.lua` → `spaces.lua` in the
+same sealed source document. That entry receives `shell.snapshot()` → `{workspaces = {{id,
+name}, …}}` and handler-only `shell.select_workspace(id)`. Rust rechecks Home, account membership
+and current listing before selecting; it preserves open app threads. The workspace entry remains
+`main.lua`, with its original snapshot/capabilities. No fake workspace or app VM is injected.
+Workspace creation presentation is Lua too (`workspace_create.lua`), through handler-only
+`shell.create_workspace(name)`. The submitting draft is bounded to 256 UTF-8 bytes (including
+surrounding whitespace); Rust trims it and rejects an empty name before queuing the operation.
+`shell.snapshot().creation` copies `{pending, generation, error}`: generation advances on a
+matched completion, error is absent on success. The form keeps its draft in `ui.state`, blocks
+submission/Cancel while pending, retains it on failure and dismisses after success.
+Rust owns the sealed write on a worker and wakes the loop with an account/job-scoped completion.
+Account checking and writing share the vault lock. An accepted write may finish in its original
+account after navigation; stale completions refresh same-account list metadata without changing
+another draft/job's feedback. Navigation/lock/reset discard Lua drafts, not accepted writes.
+Auth, invitations/publishing and tabs remain Rust-side in this slice.
+
+The reserved element ID `launcher:workspace-header` opts into Lua header presentation. If the
+rendered tree lacks it (older customized sources, initialization or view failure), Rust supplies
+its navigation/import header. Detection only inspects the Rust description; no handler executes.
+Rust recovery controls remain independent of this marker. On the list, the corresponding marker
+is `launcher:workspace-list`: a failed/non-list description keeps Rust cards. Missing list modules
+in older overrides are filled from the bundle in memory, without replacing `main.lua`/`theme.lua`
+or writing the saved record. `launcher:workspace-create` separately opts into Lua creation UI;
+older/custom lists without it keep the native creation control. Invalid list overrides fall back independently; selecting a
+workspace still evaluates its original override.
+
+Launcher source (including `theme.lua` configuration and the reused `cursor.lua` component) is
+saved as an account-owned sealed vault entry. On Home, use `rpc.select_workspace(ws_id)`,
+`rpc.read_launcher_file_versioned(path)` and `rpc.edit_launcher_file(path, revision, edits)`.
+Edits are staged through load/view/tree validation, persisted, then activated; a rejected edit
+or failed save changes neither the working source nor the saved override. Viewer `ui.state`
+is carried through successful reloads. `rpc.dump_launcher_tree()`, `rpc.read_launcher_console()`
+and `rpc.save_shell_screenshot(path)` provide feedback. Launcher senses require Home focus and can inspect the workspace list too. Edits/Customize
+still require selecting a workspace; candidate validation covers the current entry, so changes
+to an inactive entry can fail when next mounted (Rust fallback remains available). Reset (`rpc.reset_launcher()` or the Rust strip's two-step Reset launcher button) also
+works from the workspace listing. Invalid saved source falls back to the bundle with a warning,
+without deleting the override. Ordinary app `WriteFile`/`EditFile` never target launcher source.
+
+**Customize** opens the bundled Lua editor for `theme.lua`, `main.lua`, `cursor.lua`, `spaces.lua`
+and `spaces_view.lua`, plus `workspace_create.lua`.
+Its draft lives in `ui.state`, not the vault: failed saves retain it; Save validates and persists
+before applying; Cancel or changing files discards it. Lock/navigation/restart do not preserve
+unsaved drafts. The editor uses a plain `ui.text_area`, without syntax highlighting. Tabs display
+as four spaces; the input projection retains raw tabs outside the edited span.
+
+The launcher alone also receives `shell.read_launcher_file(path)` →
+`{content, revision, generation}` (copies of committed source) and handler-only
+`shell.edit_launcher_file(path, revision, {{old_text = ..., new_text = ...}})`.
+Edits enqueue plain data; Rust rechecks Home/workspace, validates, saves, then activates.
+`generation` changes after activation/reset so an open editor can dismiss without mutating in
+view. During a staging trial, reads still describe the committed source, not the candidate.
+`rpc.click_launcher(id)` and `rpc.type_launcher(id, text)` invoke current launcher handlers;
+use `rpc.click_at(*rpc.centre_of(id))` to test actual hit eligibility. Bridge `Keyboard` drives
+game-key events, not native field typing/IME; `TypeLauncher` exercises `on_input` directly.
+
+The launcher alone has a 32 MiB Lua heap cap and a 20,000-interrupt ceiling per execution,
+with cooperative thread-CPU limits of 100 ms for source load and 10 ms for view/handlers.
+The shared budget hook is configured before source evaluation and reinstalled in staged VMs;
+ordinary uploaded apps keep the app-thread defaults, not the launcher's stricter limits. Resource-exhausting candidates reject without changing committed or working source.
+These limits are not a hard frame-time or process-memory bound: Rust bindings, state copying,
+tree walking, layout, GPU resources and presentation are not preempted or covered by the Lua
+heap cap. On Unix, descheduling and sleeping do not spend the CPU budget; non-Unix targets
+currently fall back to wall time. Limits are armed only around execution, including staged state
+export/import and trial view/sweep; handler permission remains an independent capability guard.
+
+*Revised 2026-10-04: the initial wall deadlines counted descheduling and rejected valid loads
+under concurrent builds/heavy tests. Thread-CPU accounting replaces them; limits remain
+cooperative and cannot interrupt a blocked native call.*
+A runtime failure can still damage viewer scratch; Rust Reset starts a fresh bundled
+VM, discards scratch and does not execute the old VM, even to export state.
+
+The bundled custom pointer is active inside the workspace launcher; the list and Rust chrome
+keep the native cursor.
+Shell-wide pointer mounting and Lua auth/tabs remain unbuilt.
+
 ## The model — Elm, in Lua
 
 The architecture is **Elm's**: state, view, update.
@@ -202,7 +289,8 @@ ui.world({
 
 - Entities are the positional children, as data: `id`, `pos`, `drawing` (a `gfx.drawing`
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
-  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else.
+  `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
+  takes `camera` (see Camera, below).
   `false` drops out, like a child element. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
@@ -421,6 +509,44 @@ local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, 
 - Asking changes nothing, so it is allowed in `view` as well as handlers. A thousand rays over
   five hundred things take a few milliseconds; a ray per guard per frame is fine.
 
+### Camera — a map bigger than the box
+
+`width` and `height` are the box: what is shown. A `camera` says which part of the world the box
+shows, so the map can be many screens wide. `demo_apps/camera` is the whole of it.
+
+```lua
+ui.world({
+	id = "map", width = 640, height = 400,
+	camera = { follow = "hero", ease = 8, bounds = { 0, 0, 3000, 2000 } },
+	...
+})
+world("map"):set_camera({ at = { 1500, 1000 } })     -- look here: stops following
+world("map"):set_camera({ follow = "boss" })          -- follow someone else, eased
+local p = world("map"):to_world({ e.x, e.y })         -- a point in the box, in world units
+local s = world("map"):to_screen({ wx, wy })          -- where a world point shows in the box
+```
+
+- The camera's point is the world point at the box's centre. `follow` aims at the entity's box
+  centre, from the first frame on; or `at = { x, y }` looks at a fixed point. Not both.
+- `ease` is a rate per second (each step closes `1 − exp(−ease/120)` of the gap); without it the
+  camera follows exactly. It moves on the world's fixed step, so it ends the same at any frame
+  rate. `bounds = { x, y, w, h }` keeps the box inside the map; a map smaller than the box is
+  centred. Without bounds the camera goes anywhere.
+- A followed id the world does not have is not an error: the camera holds (`lost = true` in the
+  dump) and follows again when it comes back.
+- `set_camera` is a command, so only in a handler. It holds until the description's `camera`
+  changes — describing the same camera again does not undo it. Hot reload keeps where the
+  camera is and takes `follow`, `ease` and `bounds` from the new description.
+- `to_world` and `to_screen` are questions, allowed in `view` too. Pointer events stay in the
+  box's units (`e.x`, `e.y`); `e.shape` is already the entity drawn there.
+- Only what the box can show is posed and drawn: an entity whose box, grown by half its size each
+  side, misses the view costs nothing in the frame. This holds without a camera too. A pose
+  reaching further than that past its box may pop in at the edge. The dump's `camera` has
+  `at`, `follow`, `lost`, `ease`, `bounds`, `view` and `drawn`.
+- Measured (`scripts/bench.py`): 20000 entities through a 1280 × 720 camera build their frame in
+  under a millisecond; all drawn, about 4 ms.
+- Not yet: zoom, rotation, shake, two cameras on one world.
+
 ### Facing and gait — decided in Lua
 
 The world reports a change of direction; Lua picks what the entity shows. A top-down character is
@@ -488,36 +614,94 @@ that renders.
 Create `gfx.world3d({ id, scene, bodies })` at module scope. `scene` is a compiled
 `gfx.scene3d`; `bodies` is a dense list of `{ id, position = {x,y,z}, sphere = radius }`
 or `{ id, position = {x,y,z}, box = {width,height,depth} }`, optionally `dynamic = true`
-(default fixed). Exactly one shape is required; unknown fields are errors. Dimensions and
-positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
+(default fixed). Optional `rotation = {x,y,z,w}` supplies initial orientation, default identity.
+Quaternion components must be finite and bounded to 10,000, with length at least 0.001;
+physics normalizes them. Exactly one shape is required; unknown fields are errors. Dimensions
+and positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
 At most eight worlds per app and 256 bodies per world; IDs are nonempty and at most 128 bytes.
+`sensor = true` makes the body's sphere/box a nonblocking zone. Sensors are fixed-only initially:
+combining `sensor` and `dynamic` is an error. No separate collider or offset sensor is built yet.
 
 `ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
 visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
-are independent: scale does not resize a collider. Initial body orientation is identity;
-bound visuals must have identity authored rotation. Invisible bodies and unbound decoration
-are allowed. `demo_apps/marble_gates` generates its sphere in Lua and demonstrates the first
-native drop, bounce, sleep and reset.
+are independent: scale does not resize a collider. Bound visuals must have identity authored
+rotation; initial physical orientation belongs in the body recipe, and resolved snapshots rotate
+the visual with the body. Invisible bodies and unbound decoration are allowed.
+`demo_apps/marble_gates` generates its sphere in Lua and offers drop and tilted-ramp modes,
+sharing visual meshes between independent worlds; the inactive level stays paused. Its
+**Play gates** mode is a complete Lua-authored level with Release, live tilt, goal/fall zones,
+win/loss and Retry. Geometry, level descriptions and rules live in `level.lua`, not Rust.
 
 The native solver runs at 120 Hz before normal-frame view construction, with at most eight
 catch-up steps. No Lua runs per physics tick. `game:reset("marble")` restores the latest
-authored position and clears motion/forces, waking the body. Reset is allowed only in input
-handlers, never module initialization, `view`, `on_frame`, hover or animation-completion
-handlers. Scene handles resolve current poses when walked; they do not step the world.
+authored position and orientation and clears motion/forces, waking the body. Reset is allowed only in input
+handlers or retained-scene `on_zone`, never module initialization, `view`, `on_frame`, hover
+or animation-completion handlers. Scene handles resolve current poses when walked; they do not step the world.
 
 A world survives successful reload; existing IDs keep their simulated poses and new authored
-positions become reset targets. Collider/type changes on retained IDs reject: remove the body
+positions and rotations become reset targets, not live pose edits. Collider/type changes on retained IDs reject: remove the body
 in one accepted source revision before recreating it. All staged recipes validate before any
-live world changes; failed load or trial-view calls leave native state untouched. Worlds omitted
+live world changes; failed load or trial-view calls leave native state untouched. Sensor-role
+changes on retained IDs also require removal/recreation. Worlds omitted
 from an accepted source are dropped. Omitting a viewport pauses its world on the next simulation
 hook without deleting it; inactive tabs pause too, with no hidden-time catch-up on resume. Closing
-the app drops its worlds. Both screenshot paths skip native simulation; legacy `on_frame`
-callbacks retain their existing behavior, but cannot reset native bodies.
+the app drops its worlds. `game:scene(camera, {running=false})` still renders actual resolved
+poses but does not request simulation; resuming uses `{running=true}` (the default), without
+catch-up. `camera` may be nil; unknown options and non-boolean `running` are errors. Do not
+also draw a running snapshot of the same world while expecting it paused. Both screenshot paths
+skip native simulation; legacy `on_frame` callbacks retain their existing behavior, but cannot
+reset or command native bodies.
+
+A retained `ui.scene3d` leaf may declare `on_zone(e)`, with its required element `id`.
+`e.phase` is `"enter"` or `"leave"`, `e.id` is the sensor body ID, `e.who` the dynamic body ID,
+and `e.tick` the physics tick at detection (accepted sensor removals use the current tick).
+Events are delivered before the
+next normal view, after the frame's bounded native steps; they are not per-step Lua callbacks.
+Static solids do not count. Only one leaf per world can own `on_zone`; a plain render scene
+cannot. Missing handlers discard moments. At each tick leaves precede enters, each sorted by
+sensor/body ID. Removing a sensor emits leave for surviving bodies; removing a body clears its
+memberships quietly. Pause, inspection and captures produce no new events.
 
 `DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `tick`,
 `dropped_seconds` and ID-sorted `entities`. Each entity separates `authored` (shape, position,
-dynamic) from `resolved` (position, quaternion rotation, linear/angular velocity and sleeping).
-3D sensors, adjustable rotated ramps, goal rules and spatial-query RPCs remain unbuilt.
+quaternion rotation, dynamic, sensor) from `resolved` (position, quaternion rotation,
+linear/angular velocity and sleeping). Entity `zones` are sorted sensor IDs sampled on the last
+physics tick, with removed IDs pruned immediately (a reset refreshes overlaps on the next step).
+Each world buffers at most 4096 moments;
+newest overflow is discarded and counted by `dropped_zone_events`. Raw membership remains
+accurate despite event overflow. Fixed-pose resets and membership changes request a refresh tick
+even if dynamic bodies sleep. Spatial-query RPCs remain unbuilt.
+
+### 3D commands and Lua game rules
+
+`game:set(id, {pos, rotation, velocity, spin})` changes one retained body at a moment; any field
+may be omitted. `pos` is its metre-scale centre, `rotation` supplies an x/y/z/w quaternion
+normalized by physics,
+`velocity` is a three-component metre-per-second vector, and `spin` is a three-component
+**degrees-per-second** vector about world axes (the dump's `angular_velocity` remains radians).
+Components must be finite numbers bounded to 10,000; quaternions use the recipe's length limit.
+Velocity/spin require a dynamic body. Unknown fields, sparse/wrong-size arrays, numeric strings,
+invalid values and fixed-body motion fields reject **before any field changes**. An empty command
+is a no-op. Set shares reset's input/zone-handler permission guard.
+
+```lua
+-- In an input handler:
+game:set("ramp", { rotation = {0, 0, math.sin(angle/2), math.cos(angle/2)} }) -- angle in radians
+game:set("ball", { pos = {0,3,0}, velocity = {2,0,0}, spin = {0,90,0} })
+```
+
+Commands preserve native identity, clock and authored reset targets; unspecified live fields
+remain unchanged. Render snapshots and pose inspection update immediately; collision/zone
+membership refreshes on the next fixed step. Moving/rotating a fixed solid wakes dynamic bodies
+in that world so sleepers cannot ignore new contacts; sensor edits request a refresh without
+waking sleepers. Reset clears motion/forces; setting a pose alone does not.
+
+In `marble_gates/level.lua`, `on_zone` sets Lua status to Won for the goal and Lost for a fall
+zone. View publishes `running = status == "Playing"`, freezing actual poses for Ready/Won/Lost.
+Release/Retry and tilt are input handlers; no `on_frame` loop or Rust game-specific rule is needed.
+Status/attempt counters are module-local and reset on successful reload; native poses remain
+untouched until the next explicit Release/Retry. High-speed continuous sensor sweeps are not
+implemented: sensor membership is sampled at fixed-step intersections.
 
 ## Layout
 
@@ -540,8 +724,14 @@ children keep their natural size there. A scrolling container with `grow` uses t
 main-axis space instead of letting its content enlarge its viewport. **Needs an `id`.**
 
 **Overlay positioning** — `absolute` takes the element out of the flow; `top`/`left`/
-`right`/`bottom` position it in viewport coordinates. This is how kanban draws its drag ghost
-and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
+`right`/`bottom` position it relative to its containing parent. At a viewport-sized root this
+is the app viewport; a nested launcher root uses its own local coordinates, matching `on_hover`.
+
+*Corrected 2026-10-03: this previously said “position it in viewport coordinates” without the
+root qualification. The launcher mounts below Rust chrome; an offset-root headless test pins
+local pointer coordinates against the final painted position.*
+
+This is how kanban draws its drag ghost and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
 anchor then the root-painted panel. `side` is `bottom` (default), `top`, `left`, or `right`;
 `align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher and,
 like every handler, needs an `id`:
@@ -815,6 +1005,102 @@ An asset that does not exist yet opens empty, and your first write creates it.
 *2026-10-01: assets save and load locally. Not yet: syncing them to other devices, and two open
 apps seeing each other's edits live — today each app holds its own copy, and the last to save
 wins. Slices 2c and 3 of the design close these.*
+
+## Signals
+
+A **signal** is app state whose value is frozen: reading it is plain and fast, and the only way
+to change it is `set` or `update`, in a handler. A write that skips them errors at once instead
+of going unseen. A **group** in a world (below) re-runs only when a signal it read changed
+(`docs/design/signals.md`).
+
+```lua
+local coins = signal({ { id = "c1", x = 40, y = 80 } }, "coins")   -- the name is for errors
+local score = signal(0, "score")
+
+for _, c in coins() do ... end                 -- read: a plain table; ipairs, #, all of it
+
+coins:update(function(list)                    -- in a handler: a writable copy of the list
+  table.insert(list, { id = uuid(), x = 5, y = 9 })
+  list[1] = { id = list[1].id, x = 0, y = list[1].y }   -- change an item by replacing it
+end)
+score:update(function(n) return n + 1 end)     -- not a table: return the new value
+coins:set({})                                  -- replace outright
+```
+
+- **Everything in it is frozen**, items too: `coins()[1].x = 5`, `table.insert(coins(), …)` and
+  `table.sort(coins(), …)` error with "attempt to modify a readonly table". The table you pass
+  to `signal` or `set` is frozen in place — keep no writable reference to it.
+- `update` hands a list or map a **shallow** copy: add, remove, sort and replace entries freely;
+  the entries themselves stay frozen. For anything else it hands the value and takes back what
+  the function returns — forgetting to return is an error, not a silent no-op.
+- An `update` of a 5000-item list costs about half a millisecond: the freeze looks at every
+  entry to find the new ones. Fine in a handler; split a huge list across signals if it is not.
+- A failed `update` (the function errors) leaves the value as it was. `set` with the value it
+  already holds changes nothing.
+- `set` and `update` are refused while `view` describes, like `world(id):set`, and a signal's
+  `update` inside its own `update` is refused (the outer one would overwrite it). Changing another
+  signal from inside is fine.
+- A table with a metatable inside the value (a doc mirror, a `doc.map{}`) is left unfrozen: it
+  belongs to something else.
+
+### Groups — `ui.group` among a world's entities
+
+A world re-describes every entity on every view. For thousands of things that is the cost — a
+coin pickup re-describes 4000 blades of grass. A group is a part of the world that describes
+itself, and runs again only when a signal it read has changed; otherwise the world keeps its
+entities exactly as they were, without building, checking or diffing them.
+
+```lua
+ui.world({ id = "map", width = 720, height = 400,
+  player(hero()),                              -- outside groups: described every view
+  ui.group("coins", function()                 -- runs again only when `coins` changes
+    local out = {}
+    for i, c in coins() do out[i] = { id = c.id, pos = { c.x, c.y }, drawing = coin } end
+    return out
+  end),
+})
+```
+
+- The function returns a list of entities, like a world's children (`false` entries skipped).
+  Ids are unique across the whole world, groups included. A group's id is unique in its world.
+- **What re-runs a group is the signals it read** (`coins()` inside it). A group that reads no
+  signal runs every view, as if it were not a group — so plain state still works, it just saves
+  nothing. A group that reads a signal *and* plain state will not notice the plain state change:
+  put everything it shows in signals.
+- **The grain is the signal.** One changed signal re-runs every group that read it, whole. For a
+  big list, split it: one signal and one group per chunk (by map area, say). Measured, release
+  (`scripts/bench.py`): a pickup among 5000 coins in one group costs ~24 ms; as 50 groups of
+  100, ~1.4 ms. Walking past them costs no coin work at all.
+- Inside a group's function, as in `view`, signals cannot be written. An error in it names the
+  group and keeps the last good world; the group runs again next view.
+- A group inside a group is an error in a world. In the UI tree they nest (below).
+
+### Groups in the UI tree
+
+The same `ui.group(id, fn)` among ordinary elements. Its function returns **one element**, and
+runs again only when a signal it read has changed; otherwise the app is handed what the group built
+last time — the same element, with its handlers, so a click inside it still lands. Use it for a
+row of a long list or a panel that changes rarely, not around everything.
+
+```lua
+for _, m in messages() do
+  rows[#rows + 1] = ui.group("msg:" .. m.id, function()   -- one group per message
+    return ui.row({ ui.text({ m.author }), ui.text({ m.body }) })
+  end)
+end
+```
+
+- **Ids are unique in the whole UI tree**, not only among siblings: two groups named alike in one
+  view is an error. Key them by your data (`"msg:" .. m.id`).
+- **A group that reads no signal runs every view**, as in a world. So does any group that holds a
+  `ui.world`, a retained `ui.scene3d`, or another group that cannot be kept — a world's frame
+  moves without a signal. Put everything the group shows in signals.
+- **Nested groups:** what an inner group read counts for the group around it. Change a signal the
+  inner group read and both re-run; change one only the outer read and the inner is kept.
+- A group the view stops describing is forgotten; shown again, it runs again. A reload runs every
+  group again.
+- Writing a signal inside the function is an error, as in `view`. A bad element inside it shows
+  its error card and the group is not kept, so the next view tries again.
 
 ## Search
 

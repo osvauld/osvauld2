@@ -1,7 +1,18 @@
 use super::*;
 
+mod el_clone;
 mod simulation;
 
+#[test]
+fn element_contains_id_is_a_read_only_tree_query() {
+    let el: El<()> = col().id("root").child(row().child(text("leaf").id("nested")));
+    assert!(el.contains_id("root"));
+    assert!(el.contains_id("nested"));
+    assert!(!el.contains_id("missing"));
+    let el = el.overlay(text("panel").id("portal"), None,
+        Placement { side: PlacementSide::Bottom, align: PlacementAlign::Start }, Anchor::Element);
+    assert!(el.contains_id("portal"));
+}
 use crate::frame::{Brush, Frame, Item, Path};
 use crate::scene3d::{Camera3d, Object3d, Scene3d, mesh::MeshData};
 use glam::{Quat, Vec3};

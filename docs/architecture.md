@@ -41,6 +41,10 @@ Rust screen: El builders (typed M) ───────────────
   every interaction; heavy widgets (text editor, future grid/canvas) are retained islands
   that own their hot state. No VDOM differ, no reactive signals — a deliberate choice for
   LLM-authored code, re-validated in the 2026 landscape scan.
+  **Revised 2026-10-05:** `app_host` now offers frozen `signal` values and dependency-tracked
+  `ui.group` descriptions among a world's entities ([signals](design/signals.md), steps 1–2).
+  UI-tree groups and `view` as the root group remain unbuilt; runtime layout still rebuilds
+  each frame. This extends retained islands, not a fine-grained reactive widget runtime.
 - **Messages are plain data.** Lua callbacks register into a per-frame table and dispatch by
   index (`LuaMsg::Call(u32)`); Rust screens use typed enums. The VM never leaks into the
   runtime — this is what keeps "apps off the UI thread" a door that stays open.
@@ -74,14 +78,15 @@ Rust screen: El builders (typed M) ───────────────
 | crate | what it is |
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
-| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies, bounded fixed-step clocks, observational inspection/snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
+| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. |
 | `lua_tree` | isolated full-moon (Luau) parse → 22-kind semantic tree → printer groundwork. Semantic source storage and nids are deferred; the planned agent write path edits LoroText directly. See [`design/agent-source-editing.md`](design/agent-source-editing.md). |
 | `vault` | headless account manager: identity + storage over redb (one file per DID), workspaces, items, sealed source/doc storage, sealed `entry/` records for a caller's own bookkeeping, and `with_signer` for signing as the account without lending the identity out. Loro-free by design. |
 | `cryptography` `identity` `storage` | backend crates, unchanged by the rebuild. Contracts in [`identity.md`](identity.md), [`storage.md`](storage.md), [`vault.md`](vault.md). |
 | `workspace` | canonical shared-resource addresses, exact/terminal-subtree scopes, containment, the shared segment rule (`valid_id`), and callable index handles. It names and matches targets but does not authorize, persist, sync, or interpret documents. |
-| `courier` | transport-independent node/session protocol. Today it issues and verifies signed bootstrap tickets, desktop/node relationship permits, first-admin claim, and admin reconnect as pure message transitions. `courier::token` issues, delegates, and verifies node-rooted role-token chains, and `courier::policy` reads a verified chain against the closed platform capability table; manifest capabilities, workspace publish/sync, and transport adapters remain unbuilt. |
+| `courier` | transport-independent node/session protocol. Today it issues and verifies signed bootstrap tickets, desktop/node relationship permits, first-admin claim, and admin reconnect as pure message transitions. `courier::token` issues, delegates, and verifies node-rooted role-token chains; `courier::policy` reads a verified chain against the closed platform capability table; `publish`, `sync`, `subscribe` and `invite` are the workspace message transitions; `courier::proof` signs each request so the node knows its sender; `courier::role` decides app-role assignment from a caller's grants and the manifest's cone; `courier::access` judges a doc read or write against the manifest's declared rules. Lua write rules and transport adapters remain unbuilt. |
+| `manifest` | parses an app's `manifest.osv` (roles, grant cone, doc patterns with declarative read/write rules, shards, history, `uses`, channels) and answers which declaration governs a doc name and what a role may grant. Pure: no Loro, no Lua, no I/O. The grammar is [`design/app-permissions.md`](design/app-permissions.md) §3. kunki reads the grant cone for `role.assign`; doc rules are not enforced yet. |
 | `kunki` | the sovereign-node binary. Today it opens its identity as a `vault` account — created on first boot, unlocked from `OSVAULD_KUNKI_PASSPHRASE` after — and prints a `courier` bootstrap connection ticket signed through `Vault::with_signer`, so the node's key never reaches the binary. `admin` keeps what the node granted and revoked in sealed vault entries — issues keyed by token id, a `users/<did>/tokens/` index, a revoked set that is this node's alone, and a `Cause` linking an issue to the authority that caused it. It also holds the claim itself at `users/<did>/relationship`, so courier's first-admin check is decided against a list that survives a reboot. Publish, sync, subscribe, and push are built (`kunki::bridge`'s `Request` verbs; `kunki::push::LiveRegistry` is a real per-desktop `Pusher`, not a placeholder) — desktop-to-node reconciliation and node-to-subscriber delivery both work, over the local UDS bridge. A remote transport (iroh, replacing the socket itself) remains unbuilt. |
 | `osvauld-rpc` | UDS wire vocabulary for shell2 automation — auth, workspaces/items, source files (including revision-checked `EditFile`), app senses (`DumpTree`/`ReadConsole`/`AppDataGet`) and actions (`Click`/`Type`/`Key`). Wired by `shell2/src/bridge.rs` (status item 1). The sthalam-era `osvauld-mcp` shim (and `.mcp.json`) was removed 2026-09-10, unused — an MCP face, if ever wanted, is a thin rebuild over the bridge. |
 
@@ -104,6 +109,7 @@ ws/<ws>/…                     workspace metadata
 ws/<ws>/item/<id>/meta        item metadata (name, kind)
 ws/<ws>/item/<id>/src         the app's source doc, exported as a Loro snapshot
 ws/<ws>/item/<id>/doc/<name>  the app's state docs, name-keyed
+entry/shell/launcher/v1       personal launcher source/config snapshot, sealed to the account
 ```
 
 The **source doc** holds a `files` LoroMap — path string → one `LoroText` per file
@@ -132,9 +138,37 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
   only through `AppThread` — input, sizes, and `Send` closures that reply on a channel — and
   shows its latest frame with a `tile` element. Saving and indexing run on that thread after
   every batch it handles. Offscreen, every shell paint waits for its shown tiles at the same
-  virtual clock, so driven runs stay exact; with a window the shell never waits.
+  virtual clock, so driven runs stay exact; with a window the shell never waits. Successful
+  offscreen driver replies also settle shown tiles at their reported final clock before answering,
+  so later observations cannot expose catch-up owed by the preceding driver.
 - **Reload stages a whole second VM and swaps** (Lua can't unload a chunk); doc cores and
   per-viewer scratch outlive the VM; a failed reload leaves the running app untouched.
+- **Launcher customization is account-owned and transactional.** Its source/config is a sealed
+  entry, not a workspace item. `LuaApp::stage_source` validates an independent candidate with
+  a tree walk before the shell persists and activates it. Rust-owned reset/fallback never depends
+  on customized Lua, and ordinary apps receive no launcher editing or shell capability grant.
+- **Host bindings are explicit capability grants.** Trusted Rust callers may opt into
+  `LuaApp::open_with_setup`; its installer runs in each fresh VM before app source. A trusted
+  caller may use `open_with_entry` to select a file in the same source map; that entry is carried
+  through staging/reload. Ordinary apps still require `main.lua`, with no new Lua entry grant. Command
+  bindings must check the supplied VM-local `HostContext::require_handler` before side effects,
+  so load, view and reload trials cannot issue commands. Native 2D/3D world callbacks enter
+  that same handler scope, restored even on callback errors. Ordinary `open` grants none of these
+  extra bindings; installers only construct bindings, never perform host actions. A trusted
+  installer may also set VM-local `host::VmLimits` through `HostContext::set_limits`; launcher
+  load/view/handler CPU budgets arm independently through the same RAII budget/hook used by
+  app threads; setup changes limits, never replaces the hook. Staged state export/import and
+  trial view/sweep are also armed. Transactional source candidates use an independent 3D host,
+  so validation cannot commit into the running solver. Policy is reinstalled on staging. The Lua
+  heap cap excludes Rust-owned resources; interrupt limits are cooperative, not a hard UI
+  thread watchdog. Reset builds a fresh bundled launcher without calling the old VM or carrying
+  its scratch state. The shell-owned launcher session takes metadata handles from workspace/list
+  screens; neither screen owns a VM. List and workspace entries have separate capability sets
+  and fresh instance scopes on navigation. Rust selects workspaces through the same validated
+  path used by RPC; listing legacy/default modules never rewrites a saved override. Creation
+  presentation is Lua, but its handler-only command submits a Rust-owned worker write. Vault
+  checks the submitting DID under the write lock; globally unique UI jobs scope completion
+  feedback, not cancellation of accepted writes. Drafts/feedback remain ephemeral.
 - **Reads and writes to docs are different paths**: reads are plain Lua tables (the mirror,
   a frame behind), writes are explicit CRDT calls addressed by **stable id, never index**.
 - **Elements are tagged tables** — only `ui.*` constructors produce them; a bare table is a
@@ -152,6 +186,8 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 | [`design/code-as-tree.md`](design/code-as-tree.md), [`design/nid-channel.md`](design/nid-channel.md) | deferred tree-as-artifact design and provenance channel; historical reasoning preserved |
 | [`design/loro-notes.md`](design/loro-notes.md) | Loro mechanics, read out of their source |
 | [`design/workspace-permissions-sync.md`](design/workspace-permissions-sync.md) | design baseline: address/handle syntax and exact/subtree matching built; authorization, cross-app data, grant/key bundles, discovery, sync, and sovereign node unbuilt |
+| [`design/app-permissions.md`](design/app-permissions.md) | the general permission model: coarse role tokens vs membership docs, manifest forms, Lua write-rule helpers, node services, per-user docs, people directory |
+| [`design/group-chat-sync.md`](design/group-chat-sync.md) | long-horizon plan proving sync + permissions + index + shards + ephemeral through `demo_apps/chat` |
 | [`design/app-discovery-and-invocation.md`](design/app-discovery-and-invocation.md) | untrusted app documentation, callable live UI actions, explicit commands, and the future thin MCP boundary |
 | [`design/environment-runtime.md`](design/environment-runtime.md) | planning baseline for the unbuilt retained 3D Environment, world lifetime, physics composition, projected UI and rendering decision spikes |
 | [`design/lua-app-tests.md`](design/lua-app-tests.md) | app-shipped Lua tests in a separate test VM; only the `t.expect` runner is built so far |

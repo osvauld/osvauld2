@@ -215,8 +215,19 @@ impl Vault {
     /// to `ws/<id>/meta`; no registry doc is touched — the workspace exists by virtue of that
     /// key. Errs with [`VaultError::Locked`] when no account is unlocked.
     pub fn create_workspace(&self, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(None, name)
+    }
+
+    /// Workers must check their submitting account under the same lock as the write.
+    /// A lock/switch before this call rejects; a started write completes in its original account.
+    pub fn create_workspace_for(&self, did: &str, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(Some(did), name)
+    }
+
+    fn create_workspace_checked(&self, did: Option<&str>, name: &str) -> Result<WorkspaceMeta, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        if did.is_some_and(|did| did != active.did) { return Err(VaultError::Locked); }
         let meta = WorkspaceMeta {
             id: workspace::new_id(),
             name: name.to_string(),
@@ -372,7 +383,9 @@ impl Vault {
         self.put_sealed(&item::src_key(ws_id, item_id), snapshot)
     }
 
-    /// Same check as [`get_src`](Self::get_src), for the same reason.
+    /// Same check as [`get_src`](Self::get_src), for the same reason. `name` must be a doc name
+    /// (`workspace::valid_doc_name`) here too: a name nothing could have stored is refused, not
+    /// looked up.
     pub fn get_doc(
         &self,
         ws_id: &str,
@@ -381,6 +394,9 @@ impl Vault {
     ) -> Result<Option<Vec<u8>>, VaultError> {
         if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
             return Err(VaultError::BadItemId(item_id.to_string()));
+        }
+        if !::workspace::valid_doc_name(name) {
+            return Err(VaultError::InvalidName(name.to_string()));
         }
         self.get_sealed(&item::doc_key(ws_id, item_id, name))
     }
@@ -404,8 +420,7 @@ impl Vault {
         Ok(names)
     }
 
-    /// Same check as [`get_src`](Self::get_src), for the same reason, plus the `name` check
-    /// this already had.
+    /// Same checks as [`get_doc`](Self::get_doc).
     pub fn put_doc(
         &self,
         ws_id: &str,
@@ -416,7 +431,7 @@ impl Vault {
         if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
             return Err(VaultError::BadItemId(item_id.to_string()));
         }
-        if name.is_empty() || name.contains('/') {
+        if !::workspace::valid_doc_name(name) {
             return Err(VaultError::InvalidName(name.to_string()));
         };
         self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)

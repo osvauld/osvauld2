@@ -1,12 +1,14 @@
 use super::*;
 
+const IDENTITY: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
 fn drop_scene() -> (Physics3d, RigidBodyHandle, RigidBodyHandle) {
     let mut physics = Physics3d::default();
     let platform = physics
-        .add(Shape3d::Box([6.0, 0.5, 4.0]), [0.0; 3], false)
+        .add(Shape3d::Box([6.0, 0.5, 4.0]), [0.0; 3], IDENTITY, false, false)
         .unwrap();
     let marble = physics
-        .add(Shape3d::Sphere(0.25), [0.0, 3.0, 0.0], true)
+        .add(Shape3d::Sphere(0.25), [0.0, 3.0, 0.0], IDENTITY, true, false)
         .unwrap();
     (physics, platform, marble)
 }
@@ -59,7 +61,7 @@ fn reset_wakes_a_settled_body_and_clears_all_motion_and_forces() {
     body.set_angvel(Vector::new(1.0, 2.0, 3.0), true);
     body.add_force(Vector::new(100.0, 0.0, 0.0), true);
     body.add_torque(Vector::new(0.0, 100.0, 0.0), true);
-    physics.reset(marble, [0.0, 3.0, 0.0]).unwrap();
+    physics.reset(marble, [0.0, 3.0, 0.0], IDENTITY).unwrap();
     let reset = physics.inspect(marble);
     assert_eq!(reset.position, [0.0, 3.0, 0.0]);
     assert_eq!(reset.rotation, [0.0, 0.0, 0.0, 1.0]);
@@ -86,21 +88,21 @@ fn reset_wakes_a_settled_body_and_clears_all_motion_and_forces() {
 fn invalid_spawn_and_reset_reject_without_mutating_the_solver() {
     let (mut physics, _, marble) = drop_scene();
     for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0, 10001.0] {
-        assert!(physics.add(Shape3d::Sphere(bad), [0.0; 3], true).is_err());
+        assert!(physics.add(Shape3d::Sphere(bad), [0.0; 3], IDENTITY, true, false).is_err());
         assert!(
             physics
-                .add(Shape3d::Box([1.0, bad, 1.0]), [0.0; 3], false)
+                .add(Shape3d::Box([1.0, bad, 1.0]), [0.0; 3], IDENTITY, false, false)
                 .is_err()
         );
     }
     for bad in [f32::NAN, f32::INFINITY, 10001.0] {
         assert!(
             physics
-                .add(Shape3d::Sphere(1.0), [bad, 0.0, 0.0], true)
+                .add(Shape3d::Sphere(1.0), [bad, 0.0, 0.0], IDENTITY, true, false)
                 .is_err()
         );
         let before = physics.inspect(marble);
-        assert!(physics.reset(marble, [0.0, bad, 0.0]).is_err());
+        assert!(physics.reset(marble, [0.0, bad, 0.0], IDENTITY).is_err());
         assert_eq!(physics.inspect(marble), before);
     }
     assert_eq!(physics.world.bodies.len(), 2);

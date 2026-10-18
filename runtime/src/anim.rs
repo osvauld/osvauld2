@@ -69,6 +69,7 @@ impl Spring {
     }
 }
 
+#[derive(Clone)]
 pub enum Easing {
     Linear,
     EaseOut,
@@ -84,6 +85,7 @@ impl Easing {
     }
 }
 
+#[derive(Clone)]
 pub enum Driver {
     Hover,
     Value(f32),

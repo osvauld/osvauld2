@@ -22,7 +22,9 @@ pub mod scene3d;
 mod scroll;
 mod state;
 mod text;
+mod timing;
 mod tile;
+mod windows;
 mod zoom;
 use crate::anim::{Driver, Spring, Transition};
 use crate::coords::{NodePoint, ScreenPoint};
@@ -42,6 +44,7 @@ use scroll::*;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Fn;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use vello::Scene;
@@ -66,6 +69,7 @@ pub use render::{CapturedImage, Render, SceneView3d};
 use state::Store;
 pub use text::{MONO_FAMILY, PIXEL_FAMILY, Run, TextEngine, UI_FAMILY};
 pub use tile::{Tile, TileEvent, TileFrame, TileInput};
+pub use windows::{WindowFrame, WindowIn};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
@@ -222,6 +226,15 @@ pub trait App {
     fn tiles_sized(&mut self, _sizes: &[(String, (f32, f32))]) -> bool {
         false
     }
+
+    /// Frames shown in windows of their own, beside the main one. A window opens when a key
+    /// first appears and closes when it is gone; it is redrawn when its frame's scene changes.
+    fn windows(&self) -> Vec<WindowFrame> {
+        Vec::new()
+    }
+
+    /// What one of [`Self::windows`] reports: its input, its size, a close.
+    fn window_event(&mut self, _key: &str, _event: WindowIn) {}
 }
 
 #[derive(Clone)]
@@ -309,6 +322,8 @@ struct Runner<A: App> {
     tile_sizes: Vec<(String, (f32, f32))>,
     /// The last frame's 3D viewport — what a tile hands its host with its Scene.
     view3d: Option<render::SceneView3d>,
+    /// The host's other windows (`App::windows`).
+    windows: windows::Windows,
     last_frame: Option<f64>,
     /// When the pointer event now being processed arrived, on the same monotonic clock as
     /// `start`. Stamped once per event so everything one event fires shares it.
@@ -413,20 +428,20 @@ struct Hits<M> {
     /// The last field is the element's nearest zoomable ancestor.
     click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, PickContent)>,
     input: Vec<(Geometry, Id, Insets)>,
-    input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
-    context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
+    input_maps: Vec<(Id, Rc<dyn Fn(String) -> M>)>,
+    context: Vec<(Rect, Rc<dyn Fn((f32, f32)) -> M>)>,
     /// The last field is `drag_on_shapes`.
     drag: Vec<(
         Geometry,
         Id,
-        Box<dyn Fn(DragEvent) -> M>,
+        Rc<dyn Fn(DragEvent) -> M>,
         Option<Shapes>,
         bool,
     )>,
-    drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
-    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
-    wheel: Vec<(Geometry, Id, Box<dyn Fn(WheelEvent) -> M>)>,
-    key: Vec<(Id, Box<dyn Fn(KeyInput) -> M>)>,
+    drop: Vec<(Geometry, Id, Rc<dyn Fn(DropEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Rc<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
+    wheel: Vec<(Geometry, Id, Rc<dyn Fn(WheelEvent) -> M>)>,
+    key: Vec<(Id, Rc<dyn Fn(KeyInput) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -434,7 +449,7 @@ struct Hits<M> {
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
     no_cursor: Vec<Geometry>,
     looks: Vec<(Geometry, CursorLook)>,
-    tile: Vec<(Geometry, Id, Box<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
+    tile: Vec<(Geometry, Id, Rc<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -755,6 +770,7 @@ impl<A: App> Runner<A> {
             (None, Some(v)) => (v, 1.0, Affine::IDENTITY),
             (None, None) => return,
         };
+        let mut timing = timing::FrameTiming::start();
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
         let now = self.now();
@@ -791,14 +807,22 @@ impl<A: App> Runner<A> {
             );
         }
         self.app.before_frame(now);
-        let mut placed = layout::solve(self.app.view(), &mut self.text, viewport, &self.store);
+        timing.mark(0);
+        let view = self.app.view();
+        timing.mark(1);
+        let mut placed = layout::solve(view, &mut self.text, viewport, &self.store);
+        timing.mark(2);
         let sizes = layout::tile_sizes(&placed);
         if sizes != self.tile_sizes {
             self.tile_sizes = sizes;
             if self.app.tiles_sized(&self.tile_sizes) {
-                placed = layout::solve(self.app.view(), &mut self.text, viewport, &self.store);
+                timing.mark(2);
+                let view = self.app.view();
+                timing.mark(1);
+                placed = layout::solve(view, &mut self.text, viewport, &self.store);
             }
         }
+        timing.mark(2);
         let pointer = self.pointer;
         let hits = &mut self.hits;
         let store = &mut self.store;
@@ -1094,6 +1118,7 @@ impl<A: App> Runner<A> {
             }
         }
         store.sweep();
+        text.sweep();
         focused.clear_if_gone(store);
         if !self.held_keys.is_empty()
             && (focused.get().is_some()
@@ -1112,6 +1137,7 @@ impl<A: App> Runner<A> {
             .as_ref()
             .and_then(Capture::thumb)
             .map(|t| (&t.id, t.axis));
+        timing.mark(3);
         paint::draw(
             &mut self.scene,
             &placed,
@@ -1127,6 +1153,7 @@ impl<A: App> Runner<A> {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
         self.view3d = scene3d.clone();
+        timing.mark(4);
         let captured = if self.render.is_none() {
             None // nothing to present to, and a screenshot request just goes unanswered
         } else if custom_capture {
@@ -1160,6 +1187,8 @@ impl<A: App> Runner<A> {
                 }
             })
         };
+        timing.mark(5);
+        timing.finish(screenshot.is_some());
         let mut dispatched = !done_msgs.is_empty();
         if let (Some(request), Some(image)) = (screenshot, captured) {
             self.app.update((request.complete)(image));
@@ -2219,7 +2248,21 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         self.app.ready();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.windows.owns(id) {
+            match event {
+                WindowEvent::RedrawRequested => self.windows.paint(id, self.app.clear()),
+                WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+                event => {
+                    let (at, mods) = (self.now(), self.modifiers);
+                    if let Some((key, said)) = self.windows.event(id, event, at, mods) {
+                        self.app.window_event(&key, said);
+                        self.redraw();
+                    }
+                }
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -2277,6 +2320,20 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
     }
     fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
         self.deliver(msg);
+    }
+
+    /// After every batch of events: the host's windows follow what it now names.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let wanted = self.app.windows();
+        if wanted.is_empty() && self.windows.keys().next().is_none() {
+            return;
+        }
+        let told = self
+            .windows
+            .sync(wanted, Some(event_loop), self.offscreen, self.render.as_ref());
+        for (key, said) in told {
+            self.app.window_event(&key, said);
+        }
     }
 }
 
@@ -2376,6 +2433,7 @@ impl<A: App> Runner<A> {
             tile_keys: None,
             tile_sizes: Vec::new(),
             view3d: None,
+            windows: windows::Windows::default(),
             last_frame: None,
             event_at: 0.0,
             pressed: None,

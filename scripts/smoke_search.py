@@ -28,7 +28,7 @@ def ids(result):
 def message_id(s, item, text):
     """A sent message's uuid, read back from the live doc."""
     for name, value in s.rpc.read_data(item).items():
-        if name.startswith("channel:"):
+        if name.startswith("channel/"):
             for m in value.get("messages", []):
                 if m["text"] == text:
                     return m["id"]

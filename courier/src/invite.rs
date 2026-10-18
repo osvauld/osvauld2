@@ -169,6 +169,12 @@ pub fn issue_invite_ticket(
     })
 }
 
+/// The nonce a ticket is redeemed under — what a node keys its own notes about the ticket by
+/// (who asked for it), since the ticket itself carries nothing it did not sign.
+pub fn ticket_nonce(ticket: &InviteTicket) -> Result<String> {
+    Ok(verify_invite_ticket(ticket)?.nonce)
+}
+
 fn verify_invite_ticket(ticket: &InviteTicket) -> Result<InviteClaim> {
     let claim: InviteClaim =
         verify_blob(&ticket.invite_token, &ticket.node_did, INVITE_TICKET_DOMAIN)?;

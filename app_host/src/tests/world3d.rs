@@ -1,5 +1,7 @@
 use super::*;
 
+mod commands;
+
 const SOURCE: &str = r##"
 local game = gfx.world3d({ id = "game", scene = gfx.scene3d({
     camera = { eye = {8,5,8}, target = {0,1,0} },
@@ -66,6 +68,20 @@ fn world3d_lua_native_ticks_resolved_scene_reset_and_settle() {
 }
 
 #[test]
+fn staged_source_cannot_commit_changes_into_the_running_3d_solver() {
+    let mut running = app(SOURCE);
+    fall(&mut running);
+    let before = state(&running);
+    let candidate = LoroDoc::new();
+    candidate.get_map("files")
+        .insert_container("main.lua", LoroText::new()).unwrap()
+        .insert(0, "return function() return ui.text({'candidate'}) end").unwrap();
+    let staged = running.stage_source(candidate).unwrap();
+    assert_eq!(staged.view().info().text.as_deref(), Some("candidate"));
+    assert_eq!(state(&running), before);
+}
+
+#[test]
 fn world3d_reload_failure_preserves_pose_clock_recipe_and_running_vm() {
     let mut app = app(SOURCE);
     fall(&mut app);
@@ -128,6 +144,15 @@ fn world3d_rejects_unknown_fields_bad_shapes_and_frame_or_module_resets() {
         SOURCE.replace("dynamic=true", "dynmaic=true"),
         SOURCE.replace("sphere=0.25", "sphere=-1"),
         SOURCE.replace("sphere=0.25", "sphere=0.25, box={1,1,1}"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, sensor='yes'"),
+        SOURCE.replace("box={6,0.5,4}", "box={6,0.5,4},sensor='yes'"),
+        SOURCE.replace("dynamic=true", "dynamic='yes'"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, sensor=true"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, rotation={0,0,0,0}"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, rotation={0,0,0,math.huge}"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, rotation={[1]=0,[3]=0,[4]=1}"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, rotation={0,0,1}"),
+        SOURCE.replace("sphere=0.25", "sphere=0.25, rotation={0,0,0,1,extra=1}"),
         SOURCE.replace("local visible = true", "game:reset('marble')"),
         SOURCE.replace("id = \"game\"", "id = \"\""),
     ] {
@@ -144,4 +169,74 @@ fn world3d_rejects_unknown_fields_bad_shapes_and_frame_or_module_resets() {
     app.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0));
     assert_eq!(state(&app), before);
     assert!(app.console(1)[0].contains("only allowed in input handlers"));
+}
+
+fn zone_source(handler: &str) -> String {
+    SOURCE.replace("{id=\"platform\", box={6,0.5,4}, position={0,0,0}}",
+        "{id=\"goal\", box={1,1,1}, position={0,1.5,0}, sensor=true}")
+        .replace("local visible = true", "local visible = true\nlocal trace = ''")
+        .replace("return ui.col({", "return ui.col({ ui.text({trace}),")
+        .replace("id=\"view\", scene=game:scene()", &format!("id=\"view\", scene=game:scene(), on_zone=function(e) {handler} end"))
+}
+
+#[test]
+fn world3d_zone_callbacks_are_ordered_tick_stamped_and_views_are_observational() {
+    let mut app = app(&zone_source("assert(e.tick > 0 and e.tick % 1 == 0); trace = trace .. e.phase .. ':' .. e.id .. ':' .. e.who .. '|'"));
+    app.view();
+    app.advance_simulation(0.0, true);
+    for frame in 1..=100 {
+        app.advance_simulation(f64::from(frame) / 60.0, true);
+        app.view();
+    }
+    let trace = app.view().info().children[0].text.clone();
+    assert_eq!(trace.as_deref(), Some("enter:goal:marble|leave:goal:marble|"));
+    let before = state(&app);
+    for _ in 0..5 { app.view(); }
+    assert_eq!(state(&app), before);
+    assert_eq!(app.view().info().children[0].text, trace);
+    assert!(app.console(10).is_empty());
+}
+
+#[test]
+fn world3d_zone_callbacks_scope_host_permissions_even_on_error() {
+    let src = LoroDoc::new();
+    src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap()
+        .insert(0, &zone_source("host_record(); error('zone failed')")).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let recorded = calls.clone();
+    let setup: crate::host::VmSetup = Rc::new(move |vm, context| {
+        let recorded = recorded.clone();
+        vm.globals().set("host_record", vm.create_function(move |_, ()| {
+            context.require_handler()?;
+            recorded.set(recorded.get() + 1);
+            Ok(())
+        })?)
+    });
+    let mut app = LuaApp::open_with_setup(
+        src, Rc::new(|_| Ok(None)), noop_wake(), identity(), Some(setup),
+    ).unwrap();
+    app.view();
+    app.advance_simulation(0.0, true);
+    for frame in 1..=100 {
+        app.advance_simulation(f64::from(frame) / 60.0, true);
+        app.view();
+    }
+    assert!(calls.get() > 0, "zone handler did not receive host permission");
+    assert!(app.console(10).iter().any(|line| line.contains("zone failed")));
+    app.vm.load("assert(not pcall(host_record))").exec().unwrap();
+}
+
+#[test]
+fn world3d_zone_handlers_can_reset_and_errors_do_not_leave_commands_enabled() {
+    let mut app = app(&zone_source("if e.phase == 'enter' then game:reset('marble'); error('zone failed') end"));
+    app.view();
+    app.advance_simulation(0.0, true);
+    for frame in 1..=80 {
+        app.advance_simulation(f64::from(frame) / 60.0, true);
+        app.view();
+        if !app.console(1).is_empty() { break; }
+    }
+    assert_eq!(state(&app).entities[1].resolved.position, [0.0, 3.0, 0.0]);
+    assert!(app.console(1)[0].contains("zone failed"));
+    assert!(!app.worlds3d.commanding.get());
 }

@@ -1,6 +1,6 @@
 # App threads — one thread per app, the main thread is the chrome
 
-Status: **steps 0–3 and 9 built 2026-10-04 (T1, T2, T3, T6, T7, T8 green; T9 placeholder); steps 4–8, 10, 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
+Status: **steps 0–3 and 9 built 2026-10-04, steps 8 and 10 2026-10-05 (T1–T8, T10 green; T9 placeholder); step 11 open, 4–7 partly pulled into 3 (see its note).** A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §6's steps make them pass.
 Activates `runtime-rebuild-plan.md`'s "app-per-thread actors when multiple simultaneous apps
 … demand it" — tiling and background sync are that demand.
@@ -179,6 +179,19 @@ Each leaves `cargo test` and the smokes green.
 7. **Search index** moves into the thread; the indexer runs there. T9 green.
 8. **Background apps live.** Unfocused tiles keep running on events; watchdog badges a
    thread that stops answering. T4, T5, T6 green.
+   *Watchdog built 2026-10-05:* no ping — each thread stamps when it takes up a batch and
+   clears it when it goes back to its channel; the shell reads the stamp, since asking a stuck
+   thread is what hangs. One watchdog thread, alive only while apps are open, wakes the shell
+   when a stamp passes `OSVAULD_WATCHDOG_MS` (default 3 s, past the 1 s CPU budget) so the tab
+   badge shows with nothing else happening; the thread's next idle takes it off. A stuck app
+   is not asked for frames, its bridge requests are refused at once, and closing it skips
+   Drop's 3 s wait (`CloseItem` from `group-chat-sync`). A request already inside the hang
+   still waits out the bridge's 30 s: its reply sender is on the stuck stack.
+   *Decided and built 2026-10-05 (T5):* a push refreshes a hidden app — after a batch that
+   changed its docs, a hidden thread runs `view` once and drops the result. The import goes
+   through the same doc version and `patch_into` as a local write, so `signals.md` steps 4
+   and 6 (view as root group, docs as signals) make the run skip what the push did not touch
+   with no API between us. T5 also pins one view per push, for that work to keep green.
 9. **Two tiles.** A minimal side-by-side split in the Rust chrome (the Lua chrome takes it over
    later). T7 green.
    *Built 2026-10-04:* `SplitWith`/`Unsplit` bridge requests; the shell shows the focused app
@@ -205,7 +218,34 @@ Each leaves `cargo test` and the smokes green.
    moved from the shell into `Hosted`: only shown tiles frame, and the first frame back pauses
    instead of stepping, so hidden time is skipped as main's tab pause did. Still one 3D
    viewport a frame: two 3D apps split side by side show one.
+
+   *Driver completion revision 2026-10-05:* `Frame(n)` still paints before advancing and reports
+   exactly n shell frames. Before its reply (or any other successful driver reply), the shell
+   now settles shown app tiles at the reported final clock. Previously a tile could be one
+   interval behind that clock, and repeated `DumpTree` could expose ticks 67→69 at unchanged
+   virtual time as a later shell paint caught up. The driver owns that time, not the observation.
+   Hidden tiles are still excluded; Frame(0) and failed drivers spend no time. No extra shell
+   frame is added, and no physics/body-specific policy enters the shell.
+   Test-first `smoke_world3d_observation.py` failed on repeated dump ticks 22→24, then passes
+   explicit Frame/Advance and zero-time senses/live/custom captures. The original Tilt Maze
+   minimal reproduction no longer reproduces; its full acceptance now passes (including
+   checkpoint Retry and accepted reload). A separate test typo compared the generated mesh
+   resource ID despite intending to exclude it; it now excludes `mesh_resource`, retaining all
+   geometry/pose comparisons. Both smokes are registered.
 10. **Windows.** App window requests, compositor per window, dock back. T10 green.
+   *Built 2026-10-05:* the host names its windows (`App::windows`: key, title, the frame to
+   show) and the Runner opens and closes OS windows to match after every batch of events
+   (`about_to_wait`), redrawing one when its frame's scene changes. A window is a tile slot
+   the size of the window: its pointer, wheel, keys, IME and blur come back as `TileEvent`s
+   through `App::window_event`, with its size and its close. Closing docks the app rather
+   than closing it (decided with the user). The app thread cannot tell a window from a tile.
+   Each window has its own `Render` — its own wgpu device — which is simple but costs GPU
+   memory per window; share the device if many windows are wanted. A popped app's frame
+   still reaches its window through the main window's paint (`before_frame` takes it), so a
+   window's new frame repaints the main window too. Not built: `Rects`, pointer drivers and
+   `Screenshot` for a popped window (T10 drives it by element id); an app's own request for a
+   window (only the bridge and chrome pop out today). Offscreen a window is only a size, so
+   real windows were checked by hand.
 11. **Chrome VM guards.** Strictest wall-time budget + memory cap on the launcher VM, Rust
     fallback on kill. T11 green.
 

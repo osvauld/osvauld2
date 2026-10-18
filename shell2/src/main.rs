@@ -10,10 +10,12 @@ mod app_thread;
 mod bridge;
 mod indexer;
 mod item;
+mod launcher;
 mod login;
 mod mnemonic;
 mod names;
 mod node;
+mod shell_api;
 mod signup;
 mod space;
 #[cfg(test)]
@@ -24,7 +26,10 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -43,17 +48,17 @@ use app_host::{
 };
 use base64::Engine as _;
 use courier::DesktopNodeRecord;
-use courier::sync::{SyncAck, SyncLayer, desktop_start_sync};
+use courier::sync::{Rejected, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync};
 use courier::token::{Scope, Token};
 use kunki::push::Push;
-use loro::{Container, LoroDoc, ValueOrContainer};
+use loro::{Container, LoroDoc, ValueOrContainer, VersionVector};
 use osvauld_rpc::{
     AccountSummary, EditFileResult, ItemSummary, LuaTestResult, Request, Response,
     SourceActivation, VersionedFile, WorkspaceSummary,
 };
 use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
-    KeyInput, Mods, ScreenshotRequest, TileEvent, col, row, text, tile,
+    KeyInput, Mods, ScreenshotRequest, TileEvent, WindowFrame, WindowIn, col, row, text, tile,
 };
 use vault::{
     ASSET_DOC, ItemKind, PreparedAccount, UnlockedAccount, Vault, VaultError, WorkspaceItem,
@@ -69,10 +74,14 @@ pub enum Msg {
     Login(LoginMsg),
     Space(SpaceScreenMsg),
     Items(ItemsScreenMsg),
+    Launcher(u64, app_host::LuaMsg),
+    WorkspaceCreated { account: String, job: u64, result: Result<WorkspaceMeta, String> },
     /// Pointer, wheel or keys for an app's tile, in its coordinates — forwarded to its thread.
     TileInput(Arc<str>, TileEvent),
     /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
     TileDirty(Arc<str>),
+    /// Bring an app back from its own window into its tab.
+    Dock(Arc<str>),
     /// An app's thread saved: what changed (to sync), the docs it has open (to subscribe), and
     /// whether the save failed.
     AppSaved {
@@ -85,6 +94,8 @@ pub enum Msg {
     /// Keyed by item id, not index: closing is destructive, and a stale index would tear down
     /// the wrong app's VM. `Focus` can stay positional because being wrong there is harmless.
     Close(Arc<str>),
+    ResetLauncher,
+    CancelLauncherReset,
     /// One bridge request (`bridge.rs` is pure transport). Executed here, on the UI thread —
     /// the single authority — and the sender is how the reply travels back to the socket.
     Rpc(
@@ -134,9 +145,11 @@ pub enum Msg {
     /// Reads `Shell.node`, not `SpaceScreen`'s own copy: that one is dropped the moment the
     /// screen navigates away from Spaces, and sync has to keep running regardless of screen.
     SyncTick,
-    /// One item's sync round trip finished — `(item id, doc name, ack or error)`. The import
-    /// is sent on to the app's thread, which owns the doc.
-    SyncDone(Arc<str>, String, Result<SyncAck, String>),
+    /// One item's sync round trip finished — `(generation, item id, doc name, ack or error)`.
+    /// Every node-worker message carries the [`Shell::sync_gen`] it started under; one from an
+    /// earlier generation (another account, a lock, a re-claim) is dropped. The import
+    /// happens here, on the UI thread, because the doc it targets is not `Send`.
+    SyncDone(u64, Arc<str>, String, Result<SyncReply, String>),
     /// A node RPC (`ClaimNode`/`Invite`/`PublishAll`) finished on its worker thread — same
     /// shape as `AuthDone`, and for the same reason: these do socket I/O, so `answer_mut`'s
     /// inline-on-the-UI-thread family is the wrong place for them.
@@ -146,7 +159,13 @@ pub enum Msg {
     ),
     /// One `Push` arrived on the standing `Listen` connection ([`spawn_push_listener`]) —
     /// the primary delivery path now; `SyncTick` is the backstop.
-    PushReceived(Push),
+    PushReceived(u64, Push),
+    /// The `Listen` connection (re)opened. Anything pushed while it was down is lost, and a
+    /// restarted node may have missed subscribes, so every open doc is re-subscribed and
+    /// re-synced as if seen for the first time.
+    ListenUp(u64),
+    /// A subscribe never reached the node; `SyncTick` retries it.
+    SubscribeFailed(u64, Arc<str>, String),
 }
 
 #[derive(Clone)]
@@ -293,23 +312,34 @@ const LISTEN_RETRY: Duration = Duration::from_secs(2);
 /// Starts (or restarts) the connection pushes arrive on — one per claimed relationship, held
 /// for as long as the process runs. Reconnects on its own after any drop; the caller does not
 /// need to notice a disconnect and call this again.
-fn spawn_push_listener(proxy: &EventLoopProxy<Msg>, desktop_did: String, token: Token) {
+fn spawn_push_listener(
+    proxy: &EventLoopProxy<Msg>,
+    desktop_did: String,
+    token: Token,
+    current: Arc<AtomicU64>,
+    vault: Vault,
+) {
     let proxy = proxy.clone();
+    let gen_ = current.load(Ordering::SeqCst);
     std::thread::spawn(move || {
-        loop {
+        while current.load(Ordering::SeqCst) == gen_ {
             let socket = kunki::bridge::socket_path();
-            match node::listen(&socket, &desktop_did, token.clone()) {
-                Ok(mut conn) => loop {
-                    match node::next_push(&mut conn) {
-                        Ok(push) => {
-                            let _ = proxy.send_event(Msg::PushReceived(push));
-                        }
-                        Err(e) => {
-                            eprintln!("kunki listen: connection lost: {e}");
-                            break;
+            match node::listen(&socket, &vault, &desktop_did, token.clone()) {
+                Ok(mut conn) => {
+                    // Registered on the node by now, so nothing synced after this is missed.
+                    let _ = proxy.send_event(Msg::ListenUp(gen_));
+                    loop {
+                        match node::next_push(&mut conn) {
+                            Ok(push) => {
+                                let _ = proxy.send_event(Msg::PushReceived(gen_, push));
+                            }
+                            Err(e) => {
+                                eprintln!("kunki listen: connection lost: {e}");
+                                break;
+                            }
                         }
                     }
-                },
+                }
                 Err(e) => eprintln!("kunki listen: could not connect: {e}"),
             }
             std::thread::sleep(LISTEN_RETRY);
@@ -320,14 +350,17 @@ fn spawn_push_listener(proxy: &EventLoopProxy<Msg>, desktop_did: String, token: 
 /// Builds a `SyncHello` against one open doc and, if that succeeds, sends it off-thread —
 /// the one piece `SyncTick` and an immediate post-flush push (a local edit reaching the node
 /// without waiting for the next tick) both need, so it exists once rather than twice.
-fn sync_doc<M: 'static>(
+fn sync_doc<M: Clone + 'static>(
     proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
     item_id: &Arc<str>,
     name: &str,
     app: &LuaApp<M>,
+    since: Option<&[u8]>,
+    gen_: u64,
 ) {
     let hello = app.with_doc(name, |doc| {
         desktop_start_sync(
@@ -337,7 +370,7 @@ fn sync_doc<M: 'static>(
             item_id,
             SyncLayer::Doc(name.to_string()),
             doc,
-            None,
+            since,
         )
     });
     match hello {
@@ -345,10 +378,11 @@ fn sync_doc<M: 'static>(
             let proxy = proxy.clone();
             let id = item_id.clone();
             let doc_name = name.to_string();
+            let vault = vault.clone();
             std::thread::spawn(move || {
                 let socket = kunki::bridge::socket_path();
-                let result = node::sync(&socket, hello);
-                let _ = proxy.send_event(Msg::SyncDone(id, doc_name, result));
+                let result = node::sync(&socket, &vault, hello);
+                let _ = proxy.send_event(Msg::SyncDone(gen_, id, doc_name, result));
             });
         }
         Some(Err(e)) => eprintln!("sync: could not build hello for {item_id}/{name}: {e}"),
@@ -356,40 +390,58 @@ fn sync_doc<M: 'static>(
     }
 }
 
+/// Whether `new` should replace `old` as the node's known version: an ack that arrives after a
+/// later one must not move `since` backwards.
+fn newer_vv(old: Option<&Vec<u8>>, new: &[u8]) -> bool {
+    let Some(old) = old else { return true };
+    match (VersionVector::decode(old), VersionVector::decode(new)) {
+        (Ok(old), Ok(new)) => new.includes_vv(&old),
+        _ => true,
+    }
+}
+
 /// Subscribes to one doc's layer the first time it's seen for this item, so a future push
 /// delivers its changes — best-effort, off-thread, same as every other node call here. A
-/// no-op if this (item, name) pair is already subscribed.
+/// no-op if this (item, name) pair is already subscribed. True on a first sighting, which the
+/// caller answers with a sync: a doc opened from local storage may be behind the node.
 fn subscribe_if_new(
+    proxy: &EventLoopProxy<Msg>,
+    vault: &Vault,
+    gen_: u64,
     subscribed: &mut HashMap<Arc<str>, std::collections::HashSet<String>>,
     desktop_did: &str,
     token: Token,
     ws_id: &str,
     item_id: &Arc<str>,
     name: &str,
-) {
+) -> bool {
     let first_sighting = subscribed
         .entry(item_id.clone())
         .or_default()
         .insert(name.to_string());
     if !first_sighting {
-        return;
+        return false;
     }
+    let proxy = proxy.clone();
     let socket = kunki::bridge::socket_path();
     let did = desktop_did.to_string();
     let ws_id = ws_id.to_string();
     let id = item_id.clone();
     let layer = SyncLayer::Doc(name.to_string());
     let log_name = name.to_string();
+    let vault = vault.clone();
     std::thread::spawn(move || {
-        if let Err(e) = node::subscribe(&socket, &did, token, &ws_id, &id, layer) {
+        if let Err(e) = node::subscribe(&socket, &vault, &did, token, &ws_id, &id, layer) {
             eprintln!("subscribe: {id}/{log_name}: {e}");
+            let _ = proxy.send_event(Msg::SubscribeFailed(gen_, id, log_name));
         }
     });
+    true
 }
 
 /// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
 /// `search.query`'s error — never a reason not to open the app.
-fn attach_index<M: 'static>(
+fn attach_index<M: Clone + 'static>(
     app: &mut LuaApp<M>,
     opened: Result<indexer::ItemIndex, String>,
 ) -> Option<indexer::Shared> {
@@ -409,7 +461,7 @@ fn attach_index<M: 'static>(
     }
 }
 
-fn reindex<M: 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
+fn reindex<M: Clone + 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
     if let Some(ix) = index {
         if let Err(e) = indexer::index_dirty(ix, app, dirtied) {
             app.note(format!("search: {e}"));
@@ -691,8 +743,7 @@ fn refresh_after_workspace(screen: &mut Screen, vault: &Vault) {
 fn refresh_after_item(screen: &mut Screen, vault: &Vault, ws_id: &str) {
     if let Screen::Items(i) = screen {
         if i.ws().id == ws_id {
-            let ws = i.ws().clone();
-            *screen = Screen::Items(ItemsScreen::new(vault, ws));
+            i.refresh(vault);
         }
     }
 }
@@ -841,22 +892,28 @@ fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value 
         };
         serde_json::json!({
             "authored": { "id": e.authored.id, "shape": shape,
-                "position": e.authored.position, "dynamic": e.authored.dynamic },
+                "position": e.authored.position, "rotation": e.authored.rotation,
+                "dynamic": e.authored.dynamic, "sensor": e.authored.sensor },
+            "zones": e.zones,
             "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
                 "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
                 "sleeping": e.resolved.sleeping },
         })
     }).collect();
     serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
-        "entities": entities })
+        "dropped_zone_events": world.dropped_zone_events, "entities": entities })
 }
 
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
     let entities = world.entities.iter().map(|e| {
-        let clip = e.clip.as_ref().map(|c| {
-            serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped })
-        });
-        let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
+        let clip = e
+            .clip
+            .as_ref()
+            .map(|c| serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped }));
+        let attached = e
+            .attached
+            .as_ref()
+            .map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
             "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
@@ -864,8 +921,13 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
+    let camera = world.camera.as_ref().map(|c| serde_json::json!({
+        "at": [c.at.0, c.at.1], "follow": c.follow, "lost": c.lost, "ease": c.ease,
+        "bounds": c.bounds.map(|(x, y, w, h)| [x, y, w, h]), "view": [c.view.0, c.view.1],
+        "drawn": c.drawn,
+    }));
     serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
-        "tick": world.tick, "dropped": world.dropped })
+        "tick": world.tick, "dropped": world.dropped, "camera": camera })
 }
 
 /// A world draws as one frame element; its entities go on that element, found by the world's id.
@@ -960,6 +1022,10 @@ fn answer(vault: &Vault, req: Request) -> Response {
             ),
             Err(e) => Response::err(e.to_string()),
         },
+        Request::Whoami => match vault.current() {
+            Some(a) => Response::ok(serde_json::json!({ "did": a.did, "name": a.label })),
+            None => Response::err("locked"),
+        },
         req => Response::err(format!("not wired yet: {req:?}")),
     }
 }
@@ -973,7 +1039,7 @@ struct PendingDriver {
 
 struct PendingScreenshot {
     reply: std::sync::mpsc::Sender<Response>,
-    item_id: String,
+    item_id: Option<String>,
     viewport: Option<(f32, f32)>,
     scale: Option<f32>,
 }
@@ -988,11 +1054,15 @@ struct Shell {
     focused: usize,
     /// The open app shown beside the focused one, if any (`SplitWith`).
     split: Option<Arc<str>>,
+    /// Open apps shown in windows of their own (`PopOut`), in the order they left.
+    popped: Vec<Arc<str>>,
     /// Offscreen, tiles run on the shell's virtual clock and every paint waits for them.
     offscreen: Option<(f32, f32)>,
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
     clock: f64,
     error: Option<String>,
+    reset_launcher_pending: bool,
+    launcher: launcher::session::Session,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
     /// Mirrors whatever `SpaceScreen` last claimed — kept here too because `SyncTick` has to
@@ -1003,6 +1073,17 @@ struct Shell {
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
     subscribed: HashMap<Arc<str>, std::collections::HashSet<String>>,
+    /// Subscribes that never reached the node, retried by the next `SyncTick`. Not retried at
+    /// once: a node that is down would turn every failure into the next attempt.
+    failed_subs: Vec<(Arc<str>, String)>,
+    /// The node's version vector from the last ack, per (item, doc): the node provably holds
+    /// everything up to it, so the next push is a diff against it. In memory only — the first
+    /// sync after a restart pushes full history, which merges as a no-op.
+    node_vv: HashMap<(Arc<str>, String), Vec<u8>>,
+    /// Bumped by every auth transition and every (re)claim. Node workers and the push listener
+    /// tag their messages with the value they started under; stale ones are dropped, and a
+    /// listener whose generation has passed stops reconnecting.
+    sync_gen: Arc<AtomicU64>,
 }
 /// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
 /// logical points, which offscreen are also pixels. A flag rather than an env var (the other two
@@ -1048,19 +1129,216 @@ impl Shell {
     /// lock, unlock, signup — passes through here: open apps belong to the account that
     /// was active, and the post-update flush must never write their docs into another
     /// account's store. Nothing is lost: every prior update already flushed.
+    fn sync_one(&self, item_id: &Arc<str>, name: &str) {
+        let (Some(record), Some(a)) = (&self.node, self.apps.get(item_id)) else {
+            return;
+        };
+        let Some(did) = self.vault.with_signer(|d| d.did().to_string()) else {
+            return;
+        };
+        let since = self.node_vv.get(&(item_id.clone(), name.to_string())).cloned();
+        let (proxy, vault, token, ws, id, name, gen_) = (
+            self.proxy.clone(),
+            self.vault.clone(),
+            record.token.clone(),
+            a.ws_id.clone(),
+            item_id.clone(),
+            name.to_string(),
+            self.gen_(),
+        );
+        a.call(move |h| {
+            sync_doc(
+                &proxy,
+                &vault,
+                &did,
+                token,
+                &ws,
+                &id,
+                &name,
+                &h.app,
+                since.as_deref(),
+                gen_,
+            )
+        });
+    }
+
+    /// The backstop pass: retry any subscribe that failed, and sync every open doc.
+    fn reconcile(&mut self) {
+        for (id, name) in self.failed_subs.drain(..) {
+            if let Some(names) = self.subscribed.get_mut(&id) {
+                names.remove(&name);
+            }
+        }
+        let open: Vec<(Arc<str>, Vec<String>)> = self
+            .apps
+            .iter()
+            .map(|(id, a)| (id.clone(), a.doc_names.clone()))
+            .collect();
+        for (id, names) in open {
+            self.sync_open(&id, &names);
+        }
+    }
+
+    /// Tear down an item's tab and unsubscribe its docs. False if it was not open.
+    fn close_item(&mut self, id: Arc<str>) -> bool {
+        let found = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
+        let Some(pos) = found else {
+            return false;
+        };
+        self.node_vv.retain(|(item, _), _| *item != id);
+        self.tabs.remove(pos);
+        self.split = self.split.take().filter(|s| *s != id);
+        self.popped.retain(|p| *p != id);
+        let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
+        if let (Some(record), Some(names), Some(o)) = (
+            self.node.clone(),
+            self.subscribed.remove(&id),
+            closed.as_ref(),
+        ) {
+            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+                let socket = kunki::bridge::socket_path();
+                let (did, ws_id, item_id) = (desktop_did, o.ws_id.clone(), id.to_string());
+                let vault = self.vault.clone();
+                std::thread::spawn(move || {
+                    for name in names {
+                        let layer = SyncLayer::Doc(name.clone());
+                        if let Err(e) = node::unsubscribe(
+                            &socket,
+                            &vault,
+                            &did,
+                            record.token.clone(),
+                            &ws_id,
+                            &item_id,
+                            layer,
+                        ) {
+                            eprintln!("unsubscribe: {item_id}/{name}: {e}");
+                        }
+                    }
+                });
+            }
+        }
+        // Everything after `pos` shifts down one, so a focus at or past it must
+        // follow. Closing the focused tab therefore lands on its left neighbour —
+        // always valid, since Home holds index 0 and can never be the one removed.
+        if self.focused >= pos {
+            self.focused -= 1;
+        }
+        true
+    }
+
+    /// A new sync generation: drop every piece of per-node bookkeeping and, if a node is
+    /// claimed and the vault unlocked, start this generation's listener.
+    fn start_listener(&mut self) {
+        self.sync_gen.fetch_add(1, Ordering::SeqCst);
+        self.subscribed.clear();
+        self.failed_subs.clear();
+        self.node_vv.clear();
+        if let (Some(record), Some(did)) = (
+            &self.node,
+            self.vault.with_signer(|d| d.did().to_string()),
+        ) {
+            spawn_push_listener(
+                &self.proxy,
+                did,
+                record.token.clone(),
+                self.sync_gen.clone(),
+                self.vault.clone(),
+            );
+        }
+    }
+
+    /// `AssignRole`/`RevokeRole`: off-thread, answered through `NodeRpcDone`.
+    fn change_role(
+        &self,
+        item_id: &str,
+        did: String,
+        role: String,
+        revoke: bool,
+        tx: std::sync::mpsc::Sender<Response>,
+    ) {
+        let (record, wi) = match (self.node.clone(), find_item(&self.vault, item_id)) {
+            (Some(record), Ok(wi)) => (record, wi),
+            (None, _) => {
+                let _ = tx.send(Response::err("no node claimed"));
+                return;
+            }
+            (_, Err(e)) => {
+                let _ = tx.send(Response::err(e));
+                return;
+            }
+        };
+        let vault = self.vault.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let socket = kunki::bridge::socket_path();
+            let result = node::change_role(
+                &socket,
+                &vault,
+                record.token,
+                &wi.ws_id,
+                &wi.id,
+                &did,
+                &role,
+                revoke,
+            );
+            let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
+        });
+    }
+
+    fn gen_(&self) -> u64 {
+        self.sync_gen.load(Ordering::SeqCst)
+    }
+
     fn reset_tabs(&mut self) {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
+        self.launcher = Default::default();
+        self.reset_launcher_pending = false;
         self.focused = 0;
         self.split = None;
+        self.popped.clear();
         self.error = None;
     }
+    fn sync_launcher(&mut self) {
+        match &self.screen {
+            Screen::Items(screen) => self.launcher.bind(&self.vault, Some(screen.inventory())),
+            Screen::Spaces(screen) => self.launcher.bind_context(&self.vault,
+                Some(launcher::context::Context::Spaces(screen.inventory()))),
+            _ => self.launcher.bind(&self.vault, None),
+        }
+    }
+
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
     /// rather than the windowless `answer`. All are fast — seal plus a local write, no
     /// KDF — so they run inline on the UI thread (the single authority) and rebuild any
     /// screen that shows what they changed.
     fn answer_mut(&mut self, req: Request) -> Response {
-        match req {
+        let response = match req {
+            Request::SelectWorkspace { ws_id } => {
+                let workspace =
+                    self.vault
+                        .workspaces()
+                        .map_err(|e| e.to_string())
+                        .and_then(|workspaces| {
+                            workspaces
+                                .into_iter()
+                                .find(|w| w.id == ws_id)
+                                .ok_or_else(|| "workspace is not in this account".to_string())
+                        });
+                match workspace {
+                    Ok(ws) => {
+                        self.screen = Screen::Items(ItemsScreen::new(&self.vault, ws));
+                        self.focused = 0;
+                        self.error = None;
+                        self.reset_launcher_pending = false;
+                        Response::ok("selected")
+                    }
+                    Err(error) => Response::err(error),
+                }
+            }
             Request::CreateWorkspace { name } => {
                 if name.trim().is_empty() {
                     return Response::err("name is required");
@@ -1110,6 +1388,13 @@ impl Shell {
                     .map(Response::ok)
                     .unwrap_or_else(Response::err),
             },
+            req @ (Request::ReadLauncherFile { .. }
+            | Request::EditLauncherFile { .. }
+            | Request::ResetLauncher {}
+            | Request::DumpLauncherTree {}
+            | Request::ClickLauncher { .. }
+            | Request::TypeLauncher { .. }
+            | Request::ReadLauncherConsole { .. }) => self.answer_launcher(req),
             Request::ReadFileVersioned { item_id, path } => {
                 match find_item(&self.vault, &item_id) {
                     Err(e) => Response::err(e),
@@ -1240,7 +1525,9 @@ impl Shell {
             // item's data is what ReadFile sees, and its console no longer exists.
             Request::ReadConsole { .. } => Response::err("item is not open"),
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
-            Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
+            Request::Screenshot { .. } | Request::ScreenshotShell { .. } => {
+                Response::err("screenshot was not deferred")
+            }
             // Same: the Runner owns the clock and the frame, so these cannot be answered here.
             Request::Frame { .. }
             | Request::Advance { .. }
@@ -1274,29 +1561,93 @@ impl Shell {
                 self.split = None;
                 Response::ok("unsplit")
             }
+            Request::PopOut { item_id } => match self.apps.get_key_value(item_id.as_str()) {
+                Some((id, _)) => {
+                    let id = id.clone();
+                    if !self.popped.contains(&id) {
+                        self.split = self.split.take().filter(|s| *s != id);
+                        self.popped.push(id);
+                    }
+                    Response::ok("popped out")
+                }
+                None => Response::err("item is not open; call OpenItem first"),
+            },
+            Request::DockIn { item_id } => {
+                if self.dock(item_id.as_str()) {
+                    Response::ok("docked")
+                } else {
+                    Response::err("item is not in a window of its own")
+                }
+            }
+            Request::ListTabs => Response::ok(
+                self.tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, t)| match t {
+                        Tab::App((id, name)) => Some((idx, id, name)),
+                        Tab::Home => None,
+                    })
+                    .map(|(idx, id, name)| {
+                        let app = self.apps.get(id);
+                        serde_json::json!({
+                            "item_id": id.as_ref(),
+                            "name": name,
+                            "focused": idx == self.focused,
+                            "shown": app.is_some_and(|a| a.is_shown()),
+                            "window": self.popped.contains(id),
+                            "responding": app.is_some_and(|a| a.responding()),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             req => answer(&self.vault, req),
-        }
+        };
+        self.sync_launcher();
+        response
     }
 
     /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
+    /// The apps in the main window: the focused one and the split one, unless in a window of
+    /// their own.
     fn on_screen(&self) -> Vec<Arc<str>> {
         let Some(Tab::App((id, _))) = self.tabs.get(self.focused) else {
             return Vec::new();
         };
         let mut ids = vec![id.clone()];
         ids.extend(self.split.clone().filter(|s| s != id));
+        ids.retain(|id| !self.popped.contains(id));
         ids
     }
 
-    /// Only apps on screen paint; every other one keeps running unseen.
+    /// Back into its tab, focused. False if it was not in a window of its own.
+    fn dock(&mut self, id: &str) -> bool {
+        let Some(pos) = self.popped.iter().position(|p| p.as_ref() == id) else {
+            return false;
+        };
+        self.popped.remove(pos);
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == id))
+        {
+            self.focused = idx;
+        }
+        true
+    }
+
+    /// Only apps on screen paint — in the main window or their own; every other one keeps
+    /// running unseen.
     fn show_on_screen(&mut self) {
-        let shown = self.on_screen();
+        let mut shown = self.on_screen();
+        shown.extend(self.popped.iter().cloned());
         for (id, a) in self.apps.iter_mut() {
             a.show(shown.contains(id));
         }
     }
 
-    /// Subscribe to an open app's docs, and send `names` to the node. A no-op unclaimed.
+    /// Subscribe to an open app's docs, and send `names` to the node — plus any doc seen for the
+    /// first time, since one opened from local storage may be behind the node. A no-op
+    /// unclaimed.
     fn sync_open(&mut self, id: &Arc<str>, names: &[String]) {
         let (Some(record), Some(did)) = (
             self.node.clone(),
@@ -1306,8 +1657,12 @@ impl Shell {
         };
         let Some(a) = self.apps.get(id) else { return };
         let ws = a.ws_id.clone();
+        let mut send = names.to_vec();
         for name in &a.doc_names {
-            subscribe_if_new(
+            let first = subscribe_if_new(
+                &self.proxy,
+                &self.vault,
+                self.gen_(),
                 &mut self.subscribed,
                 &did,
                 record.token.clone(),
@@ -1315,17 +1670,39 @@ impl Shell {
                 id,
                 name,
             );
+            if first && !send.contains(name) {
+                send.push(name.clone());
+            }
         }
-        for name in names.iter().cloned() {
-            let (proxy, did, token, ws, id) = (
-                self.proxy.clone(),
-                did.clone(),
-                record.token.clone(),
-                ws.clone(),
-                id.clone(),
-            );
-            a.call(move |h| sync_doc(&proxy, &did, token, &ws, &id, &name, &h.app));
+        for name in send {
+            self.sync_one(id, &name);
         }
+    }
+
+    /// The node refused a write: put the doc back to the node's copy on the app's thread, and
+    /// say why in the app's console. Everything the node lacked goes, including edits made
+    /// after the refused push was sent; the next flush saves the result and syncs it.
+    fn roll_back(&mut self, item_id: &Arc<str>, name: String, rejected: Rejected) {
+        let key = (item_id.clone(), name.clone());
+        let since = self.node_vv.get(&key).cloned();
+        if let Some(state) = &rejected.state {
+            self.node_vv.insert(key, state.vv.clone());
+        }
+        let Some(a) = self.apps.get(item_id) else { return };
+        let id = item_id.clone();
+        a.call(move |h| {
+            let back = h
+                .app
+                .with_doc(&name, |doc| desktop_roll_back(doc, since.as_deref(), &rejected));
+            match back {
+                Some(Ok(doc)) => {
+                    h.app.replace_doc(&name, doc);
+                    h.app.note(format!("sync: {name} rejected: {}", rejected.reason));
+                }
+                Some(Err(e)) => eprintln!("sync: rolling back {id}/{name} failed: {e}"),
+                None => {}
+            }
+        });
     }
 
     /// Bytes from the node into an open app's doc, on its thread. `ws` is checked when given.
@@ -1370,6 +1747,11 @@ impl Shell {
         let Some(a) = self.apps.get(id.as_str()) else {
             return Some((req, tx));
         };
+        // Queued behind a hang, it would wait out the bridge's timeout.
+        if !a.responding() {
+            let _ = tx.send(Response::err("the app is not responding"));
+            return None;
+        }
         let vault = self.vault.clone();
         a.call(move |h| {
             let _ = tx.send(serve(h, req, &vault));
@@ -1385,7 +1767,7 @@ impl Shell {
         };
         let tabs = vec![Tab::Home];
         let node = node::load_relationship(&vault).ok().flatten();
-        let shell = Shell {
+        let mut shell = Shell {
             vault,
             proxy,
             screen,
@@ -1393,19 +1775,21 @@ impl Shell {
             apps: HashMap::new(),
             focused: 0,
             split: None,
+            popped: Vec::new(),
             offscreen,
             clock: 0.0,
             error: None,
+            reset_launcher_pending: false,
+            launcher: Default::default(),
             screenshot: None,
             driver: None,
             node: node.clone(),
             subscribed: HashMap::new(),
+            failed_subs: Vec::new(),
+            node_vv: HashMap::new(),
+            sync_gen: Arc::new(AtomicU64::new(0)),
         };
-        if let Some(record) = node {
-            if let Some(desktop_did) = shell.vault.with_signer(|d| d.did().to_string()) {
-                spawn_push_listener(&shell.proxy, desktop_did, record.token);
-            }
-        }
+        shell.start_listener();
         shell
     }
     /// Open-or-focus, the one path every opener takes: an open item's tab is focused, never
@@ -1414,7 +1798,7 @@ impl Shell {
         if let Some(pos) = self
             .tabs
             .iter()
-            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == wi.id))
+            .position(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == wi.id.as_str()))
         {
             self.focused = pos;
             return Ok(());
@@ -1481,7 +1865,7 @@ impl Shell {
     /// An app's share of the screen: its latest frame, or why there is none.
     fn app_slot(&self, id: &Arc<str>) -> El<Msg> {
         match self.apps.get(id) {
-            Some(a) if a.stuck => text("this app is not responding")
+            Some(a) if !a.responding() => text("this app is not responding")
                 .color(theme::error())
                 .grow(),
             Some(a) => {
@@ -1498,6 +1882,7 @@ impl Shell {
     fn close_test_tab(&mut self, id: &Arc<str>, restore_focus: usize) {
         self.apps.remove(id);
         self.split = self.split.take().filter(|s| s != id);
+        self.popped.retain(|p| p != id);
         if let Some(pos) = self
             .tabs
             .iter()
@@ -1519,6 +1904,10 @@ impl Shell {
                 Tab::Home => ("⌂".to_string(), "tab:home".to_string(), None),
                 Tab::App((id, name)) => (name.clone(), format!("tab:{id}"), Some(id.clone())),
             };
+            let stuck = close_id
+                .as_ref()
+                .and_then(|id| self.apps.get(id))
+                .is_some_and(|a| !a.responding());
 
             let mut el = row()
                 .h(28.0)
@@ -1545,6 +1934,9 @@ impl Shell {
                 theme::fg_3()
             };
             el = el.child(text(label).font_size(13.0).color(fg));
+            if stuck {
+                el = el.child(text("not responding").font_size(11.0).color(theme::error()));
+            }
 
             // Nested click: the runtime's hit test takes the innermost match (`lib.rs:462` walks
             // the hit list in reverse), so pressing × closes without also focusing.
@@ -1572,6 +1964,42 @@ impl Shell {
             .align_center()
             .fill(theme::bg_1())
             .children(tabs)
+            .child(col().grow())
+            .child(
+                row()
+                    .h(28.0)
+                    .px(8.0)
+                    .radius(6.0)
+                    .no_shrink()
+                    .align_center()
+                    .id("shell:reset-launcher")
+                    .hover_fill(theme::bg_2())
+                    .on_click(Msg::ResetLauncher)
+                    .child(
+                        text(if self.reset_launcher_pending {
+                            "Confirm reset"
+                        } else {
+                            "Reset launcher"
+                        })
+                        .font_size(11.0)
+                        .no_wrap()
+                        .color(theme::fg_3()),
+                    ),
+            )
+            .children(self.reset_launcher_pending.then(|| {
+                row()
+                    .h(28.0)
+                    .px(8.0)
+                    .align_center()
+                    .id("shell:cancel-launcher-reset")
+                    .on_click(Msg::CancelLauncherReset)
+                    .child(
+                        text("Cancel")
+                            .font_size(11.0)
+                            .no_wrap()
+                            .color(theme::fg_3()),
+                    )
+            }))
     }
 }
 
@@ -1591,9 +2019,27 @@ impl App for Shell {
                 Screen::Signup(f) => f.view(),
                 Screen::Mnemonic(m) => m.view(),
                 Screen::Login(a) => a.view(),
-                Screen::Spaces(s) => s.view(),
-                Screen::Items(i) => i.view(),
+                Screen::Spaces(s) => s.view(self.launcher.get().ok(), self.launcher.warning()),
+                Screen::Items(i) => i.view(self.launcher.get().ok(), self.launcher.warning()),
             },
+            Tab::App((id, _)) if self.popped.contains(id) => col()
+                .w_full()
+                .grow()
+                .center()
+                .gap(12.0)
+                .child(text("open in its own window").color(theme::fg_3()))
+                .child(
+                    row()
+                        .h(28.0)
+                        .px(12.0)
+                        .radius(6.0)
+                        .center()
+                        .id(format!("dock:{id}"))
+                        .fill(theme::bg_2())
+                        .hover_fill(theme::bg_3())
+                        .on_click(Msg::Dock(id.clone()))
+                        .child(text("bring back").font_size(13.0)),
+                ),
             Tab::App(_) => {
                 let mut tiles = row().w_full().grow();
                 for (i, id) in self.on_screen().into_iter().enumerate() {
@@ -1618,7 +2064,12 @@ impl App for Shell {
                     .py(10.0)
                     .fill(theme::bg_1())
                     .align_center()
-                    .child(text(e).font_size(12.0).color(theme::error())),
+                    // Full launcher validation diagnostics remain in its console.
+                    .child(
+                        text(e.lines().next().unwrap_or(e))
+                            .font_size(12.0)
+                            .color(theme::error()),
+                    ),
             );
         }
 
@@ -1632,14 +2083,116 @@ impl App for Shell {
         // not a move, so the match below still owns `msg` and dispatches it to the screen too.
         if let Msg::Space(SpaceScreenMsg::ClaimResult(Ok(record))) = &msg {
             self.node = Some(record.clone());
-            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
-            }
+            self.start_listener();
         }
         let next = match msg {
+            Msg::ResetLauncher => {
+                if self.reset_launcher_pending {
+                    self.error = self.reset_launcher().err();
+                    self.reset_launcher_pending = false;
+                } else if self.vault.current().is_some() {
+                    self.reset_launcher_pending = true;
+                }
+                None
+            }
+            Msg::CancelLauncherReset => {
+                self.reset_launcher_pending = false;
+                None
+            }
             Msg::Items(ItemsScreenMsg::Open(wi)) => {
                 self.error = self.open_tab(wi).err();
                 None
+            }
+            Msg::WorkspaceCreated { account, job, result } => {
+                if let Screen::Spaces(screen) = &mut self.screen {
+                    screen.finish_creation(&self.vault, &account, job, result);
+                }
+                None
+            }
+            Msg::Launcher(instance, msg) => {
+                let commands = if self.focused == 0 && self.vault.current().is_some()
+                    && matches!(self.screen, Screen::Spaces(_)) {
+                    self.launcher.get_mut().map(|launcher| launcher.update(instance, msg))
+                        .unwrap_or_default()
+                } else { Vec::new() };
+                for command in commands {
+                    match command {
+                        launcher::Command::SelectWorkspace(ws_id) => {
+                            self.error = match self.answer_mut(Request::SelectWorkspace { ws_id }) {
+                                Response::Ok { .. } => None,
+                                Response::Err { message } => Some(message),
+                            };
+                            break;
+                        }
+                        launcher::Command::CreateWorkspace(name) => {
+                            if let Screen::Spaces(screen) = &mut self.screen {
+                                self.error = screen.create_workspace(&self.vault, &self.proxy, &name).err();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Msg::Items(ItemsScreenMsg::Launcher(ws_id, instance, msg)) => {
+                let commands = match &mut self.screen {
+                    Screen::Items(i) if self.focused == 0 && i.ws().id == ws_id => {
+                        self.launcher.get_mut()
+                            .map(|launcher| launcher.update(instance, msg)).unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut next = None;
+                for command in commands {
+                    self.error = match command {
+                        launcher::Command::SelectWorkspace(_) | launcher::Command::CreateWorkspace(_) => Err("focus the workspace list to select or create".into()),
+                        launcher::Command::Workspace { ws_id, action } => {
+                            let home_ws = match &self.screen {
+                                Screen::Items(i) => Some(i.ws().id.as_str()),
+                                _ => None,
+                            };
+                            launcher::navigation::validate(&self.vault, home_ws, self.focused, &ws_id)
+                                .and_then(|_| {
+                                    let Screen::Items(i) = &mut self.screen else {
+                                        return Err("launcher workspace changed".into());
+                                    };
+                                    let msg = match action {
+                                        launcher::WorkspaceAction::Back => ItemsScreenMsg::Back,
+                                        launcher::WorkspaceAction::Import => ItemsScreenMsg::Upload,
+                                    };
+                                    next = i.update(msg, &self.vault, &self.proxy);
+                                    Ok(())
+                                })
+                        }
+                        launcher::Command::OpenItem(command) => {
+                            let item = self
+                                .vault
+                                .items(&ws_id)
+                                .map_err(|e| e.to_string())
+                                .and_then(|items| {
+                                    items
+                                        .into_iter()
+                                        .find(|i| command.ws_id == ws_id && i.id == command.item_id)
+                                        .ok_or_else(|| "item is not in this workspace".to_string())
+                                });
+                            item.and_then(|wi| self.open_tab(wi))
+                        }
+                        launcher::Command::EditSource {
+                            ws_id,
+                            path,
+                            revision,
+                            edits,
+                        } => self
+                            .edit_launcher(Some(&ws_id), &path, &revision, &edits)
+                            .map(|_| ()),
+                    }
+                    .err();
+                    if next.is_some() {
+                        self.reset_launcher_pending = false;
+                        break;
+                    }
+                }
+                next
             }
             Msg::TileInput(id, e) => {
                 if let Some(a) = self.apps.get(&id) {
@@ -1670,48 +2223,22 @@ impl App for Shell {
                 }
                 None
             }
+            Msg::Dock(id) => {
+                self.dock(&id);
+                None
+            }
             Msg::Close(id) => {
-                let found = self
-                    .tabs
-                    .iter()
-                    .position(|t| matches!(t, Tab::App((tid, _)) if *tid == id));
-                if let Some(pos) = found {
-                    self.tabs.remove(pos);
-                    self.split = self.split.take().filter(|s| *s != id);
-                    let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
-                    if let (Some(record), Some(names), Some(o)) = (
-                        self.node.clone(),
-                        self.subscribed.remove(&id),
-                        closed.as_ref(),
-                    ) {
-                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                            let socket = kunki::bridge::socket_path();
-                            let (did, ws_id, item_id) =
-                                (desktop_did, o.ws_id.clone(), id.to_string());
-                            std::thread::spawn(move || {
-                                for name in names {
-                                    let layer = SyncLayer::Doc(name.clone());
-                                    if let Err(e) = node::unsubscribe(
-                                        &socket,
-                                        &did,
-                                        record.token.clone(),
-                                        &ws_id,
-                                        &item_id,
-                                        layer,
-                                    ) {
-                                        eprintln!("unsubscribe: {item_id}/{name}: {e}");
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    // Everything after `pos` shifts down one, so a focus at or past it must
-                    // follow. Closing the focused tab therefore lands on its left neighbour —
-                    // always valid, since Home holds index 0 and can never be the one removed.
-                    if self.focused >= pos {
-                        self.focused -= 1;
-                    }
-                }
+                self.close_item(id);
+                None
+            }
+            Msg::Rpc(Request::CloseItem { item_id }, tx) => {
+                let closed = self.close_item(item_id.as_str().into());
+                let _ = tx.send(Response::ok(if closed { "closed" } else { "not open" }));
+                None
+            }
+            Msg::Rpc(Request::SyncNow, tx) => {
+                self.reconcile();
+                let _ = tx.send(Response::ok("syncing"));
                 None
             }
             // Auth: Argon2 must not run on the UI thread, so these two do not go through
@@ -1767,6 +2294,8 @@ impl App for Shell {
                 // Apps first: closing waits for their last save, which must land in this account.
                 self.reset_tabs();
                 self.vault.lock();
+                self.node = None;
+                self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
                     _ => Screen::Signup(SignupForm::default()),
@@ -1783,11 +2312,7 @@ impl App for Shell {
                 std::thread::spawn(move || {
                     eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
                     let socket = kunki::bridge::socket_path();
-                    let claimed = node::join(&socket, &vault, &ticket, node::now_secs());
-                    let result = claimed.and_then(|record| {
-                        node::save_relationship(&vault, &record)?;
-                        Ok(record)
-                    });
+                    let result = node::join(&socket, &vault, &ticket, node::now_secs());
                     eprintln!("DBG timing: ClaimNode send_event {}", debug_now_ms());
                     let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Claimed(result)));
                 });
@@ -1813,6 +2338,14 @@ impl App for Shell {
                         let _ = tx.send(Response::err("no node claimed"));
                     }
                 }
+                None
+            }
+            Msg::Rpc(Request::AssignRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, false, tx);
+                None
+            }
+            Msg::Rpc(Request::RevokeRole { item_id, did, role }, tx) => {
+                self.change_role(&item_id, did, role, true, tx);
                 None
             }
             Msg::Rpc(Request::PushSrc { item_id }, tx) => {
@@ -1938,10 +2471,8 @@ impl App for Shell {
                 let resp = match outcome {
                     NodeRpcOutcome::Claimed(Ok(record)) => {
                         let did = record.node_did.clone();
-                        if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                            spawn_push_listener(&self.proxy, desktop_did, record.token.clone());
-                        }
                         self.node = Some(record);
+                        self.start_listener();
                         Response::ok(did)
                     }
                     NodeRpcOutcome::Claimed(Err(e)) => Response::err(e),
@@ -2065,23 +2596,36 @@ impl App for Shell {
                 None
             }
             Msg::Rpc(
-                Request::Screenshot {
-                    item_id,
-                    width,
-                    height,
-                    scale,
-                },
+                req @ (Request::Screenshot { .. } | Request::ScreenshotShell { .. }),
                 reply,
             ) => {
+                let (item_id, width, height, scale) = match req {
+                    Request::Screenshot {
+                        item_id,
+                        width,
+                        height,
+                        scale,
+                    } => (Some(item_id), width, height, scale),
+                    Request::ScreenshotShell {
+                        width,
+                        height,
+                        scale,
+                    } => (None, width, height, scale),
+                    _ => unreachable!(),
+                };
                 let spec = screenshot_spec(width, height, scale);
-                let focused = self
-                    .tabs
-                    .get(self.focused)
-                    .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
-                let error = if !self.apps.contains_key(item_id.as_str()) {
-                    Some("item is not open".to_string())
-                } else if !focused {
-                    Some("item is not focused; call OpenItem first".to_string())
+                let item_error = item_id.as_ref().and_then(|item_id| {
+                    if !self.apps.contains_key(item_id.as_str()) {
+                        return Some("item is not open".to_string());
+                    }
+                    let focused = self
+                        .tabs
+                        .get(self.focused)
+                        .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
+                    (!focused).then(|| "item is not focused; call OpenItem first".to_string())
+                });
+                let error = if item_error.is_some() {
+                    item_error
                 } else if self.screenshot.is_some() {
                     Some("a screenshot is already pending".to_string())
                 } else {
@@ -2214,6 +2758,11 @@ impl App for Shell {
                 None
             }
             Msg::DriverDone(reply, result) => {
+                // Frame paints before advancing its clock. Settle shown tiles at the reported
+                // instant before replying, not during the caller's next observation.
+                if let Ok(report) = &result {
+                    self.before_frame(report.clock);
+                }
                 match reply {
                     DriverReply::Test(tx) => {
                         let _ = tx.send(result);
@@ -2268,12 +2817,7 @@ impl App for Shell {
                     // Refresh from the now-unlocked vault so a persisted relationship actually
                     // starts its listener, instead of sitting unused until the next claim.
                     self.node = node::load_relationship(&self.vault).ok().flatten();
-                    if let (Some(record), Some(desktop_did)) = (
-                        self.node.clone(),
-                        self.vault.with_signer(|d| d.did().to_string()),
-                    ) {
-                        spawn_push_listener(&self.proxy, desktop_did, record.token);
-                    }
+                    self.start_listener();
                 }
                 next
             }
@@ -2288,24 +2832,47 @@ impl App for Shell {
                 // Re-armed unconditionally: a node that is slow or unreachable this tick must
                 // not stop the next one from trying.
                 arm_sync_tick(&self.proxy);
-                let open: Vec<(Arc<str>, Vec<String>)> = self
-                    .apps
-                    .iter()
-                    .map(|(id, a)| (id.clone(), a.doc_names.clone()))
-                    .collect();
-                for (id, names) in open {
-                    self.sync_open(&id, &names);
-                }
+                self.reconcile();
                 None
             }
-            Msg::SyncDone(item_id, name, result) => {
+            Msg::SyncDone(gen_, _, _, _) | Msg::ListenUp(gen_) | Msg::PushReceived(gen_, _) | Msg::SubscribeFailed(gen_, _, _)
+                if gen_ != self.gen_() =>
+            {
+                None
+            }
+            Msg::SyncDone(_, item_id, name, result) => {
+                let key = (item_id.clone(), name.clone());
                 match result {
-                    Ok(ack) => self.import(&item_id, None, name, ack.update),
+                    Ok(SyncReply::Rejected(r)) => self.roll_back(&item_id, name, r),
+                    Ok(SyncReply::Ack(ack)) => {
+                        if self.apps.contains_key(&item_id) {
+                            self.import(&item_id, None, name.clone(), ack.update);
+                            if ack.missing {
+                                // Our `since` was ahead of the node: push everything.
+                                self.node_vv.remove(&key);
+                                self.sync_one(&item_id, &name);
+                            } else if newer_vv(self.node_vv.get(&key), &ack.vv) {
+                                self.node_vv.insert(key, ack.vv);
+                            }
+                        }
+                    }
                     Err(e) => eprintln!("sync: {item_id}/{name} failed: {e}"),
                 }
                 None
             }
-            Msg::PushReceived(push) => {
+            Msg::ListenUp(_) => {
+                self.subscribed.clear();
+                self.node_vv.clear();
+                // At once: subscribing rides on an app's save, and a quiet app may not save
+                // before the next tick.
+                self.reconcile();
+                None
+            }
+            Msg::SubscribeFailed(_, item_id, name) => {
+                self.failed_subs.push((item_id, name));
+                None
+            }
+            Msg::PushReceived(_, push) => {
                 if let SyncLayer::Doc(name) = &push.layer {
                     let id: Arc<str> = push.item_id.as_str().into();
                     self.import(&id, Some(&push.ws_id), name.clone(), push.snapshot);
@@ -2329,6 +2896,7 @@ impl App for Shell {
         if let Some(next) = next {
             self.screen = next;
         }
+        self.sync_launcher();
     }
 
     /// Wakes on wall-clock time or from a subscriber, never a request: offscreen they must not move
@@ -2338,7 +2906,9 @@ impl App for Shell {
             msg,
             Msg::SyncTick
                 | Msg::SyncDone(..)
-                | Msg::PushReceived(_)
+                | Msg::PushReceived(..)
+                | Msg::ListenUp(_)
+                | Msg::SubscribeFailed(..)
                 | Msg::TileDirty(_)
                 | Msg::AppSaved { .. }
         )
@@ -2356,6 +2926,44 @@ impl App for Shell {
         for (id, asked) in asked {
             if let Some(a) = self.apps.get_mut(&id) {
                 a.take(asked);
+            }
+        }
+    }
+
+    fn windows(&self) -> Vec<WindowFrame> {
+        self.popped
+            .iter()
+            .filter_map(|id| {
+                let a = self.apps.get(id)?;
+                let title = self.tabs.iter().find_map(|t| match t {
+                    Tab::App((tid, name)) if tid == id => Some(name.clone()),
+                    _ => None,
+                })?;
+                Some(WindowFrame {
+                    key: id.to_string(),
+                    title,
+                    frame: a.frame.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn window_event(&mut self, key: &str, event: WindowIn) {
+        match event {
+            WindowIn::Input(e) => {
+                if let Some(a) = self.apps.get(key) {
+                    a.input(e);
+                }
+            }
+            WindowIn::Resized(size) => {
+                if let Some(a) = self.apps.get_mut(key) {
+                    a.resize(size, self.clock);
+                }
+            }
+            // Docks rather than closes: closing a window must not lose the app.
+            WindowIn::Closed => {
+                self.dock(key);
+                self.show_on_screen();
             }
         }
     }
@@ -2380,11 +2988,14 @@ impl App for Shell {
 
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Msg>> {
         let pending = self.screenshot.take()?;
-        let still_focused = self
-            .tabs
-            .get(self.focused)
-            .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == pending.item_id));
-        if !still_focused || !self.apps.contains_key(pending.item_id.as_str()) {
+        let item_unavailable = pending.item_id.as_ref().is_some_and(|item_id| {
+            let focused = self
+                .tabs
+                .get(self.focused)
+                .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
+            !focused || !self.apps.contains_key(item_id.as_str())
+        });
+        if item_unavailable {
             let _ = pending
                 .reply
                 .send(Response::err("item stopped being focused before capture"));
