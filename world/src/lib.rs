@@ -1105,6 +1105,12 @@ impl World2d {
         Self::check_gravity(g)?;
         if g != self.physics.gravity() {
             self.physics.set_gravity(g);
+            // Awake now, so followed until each rests again: a world only ticks for those.
+            for (_, e) in self.by_id.iter() {
+                if let Some(mut s) = self.ecs.get_mut::<Solid>(*e).filter(|s| s.loose.is_some()) {
+                    s.sliding = true;
+                }
+            }
         }
         Ok(())
     }

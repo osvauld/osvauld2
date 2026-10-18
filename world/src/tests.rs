@@ -2236,7 +2236,9 @@ fn changing_gravity_wakes_the_sleepers() {
     let mut clock = 0.0;
     run(&mut world, &mut clock, 3.0);
     let rested = ball_of(&world).pos.1;
+    assert!(!world.needs_ticks(), "at rest, no clock");
     world.set_gravity((0.0, -900.0)).unwrap();
+    assert!(world.needs_ticks(), "a flip wakes the world: the frame clock has to start");
     run(&mut world, &mut clock, 0.5);
     assert!(ball_of(&world).pos.1 < rested - 20.0, "it rose: {rested} -> {:?}", ball_of(&world));
 }
