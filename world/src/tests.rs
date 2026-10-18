@@ -2286,3 +2286,129 @@ fn a_bad_density_is_refused() {
         assert!(err.contains("density must be above 0"), "{bad}: {err}");
     }
 }
+
+// ── forces: push, blast, wells ─────────────────────────────────────────────────────────────────
+
+/// Loose balls (radius 4) by their centres, at rest and friction-free, in a world with no gravity.
+fn balls_at(centres: &[(&str, f64, f64)]) -> World2d {
+    let d = drawing();
+    let specs = centres
+        .iter()
+        .map(|&(id, x, y)| EntitySpec {
+            loose: Some(DEAD),
+            ..solid(id, (x - 4.0, y - 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+        })
+        .collect();
+    let mut world = World2d::default();
+    world.reconcile(specs).unwrap();
+    world
+}
+
+fn entity(world: &World2d, id: &str) -> EntityInspection {
+    world.inspect().into_iter().find(|e| e.id == id).unwrap_or_else(|| panic!("no {id}"))
+}
+
+#[test]
+fn a_push_adds_to_a_loose_things_velocity_and_wakes_it() {
+    let mut world = balls_at(&[("ball", 50.0, 50.0)]);
+    assert!(!world.needs_ticks(), "asleep");
+    world.push("ball", (100.0, 0.0)).unwrap();
+    assert_eq!(entity(&world, "ball").velocity, (100.0, 0.0));
+    world.push("ball", (0.0, -40.0)).unwrap();
+    assert_eq!(entity(&world, "ball").velocity, (100.0, -40.0), "adds, not sets");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let b = entity(&world, "ball");
+    assert!((b.pos.0 - 146.0).abs() < 3.0 && (b.pos.1 - 6.0).abs() < 3.0, "went on: {b:?}");
+}
+
+#[test]
+fn a_push_needs_a_loose_thing() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)]).unwrap();
+    let err = world.push("wall", (1.0, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("push needs a loose thing"), "{err}");
+    let err = world.push("ghost", (1.0, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("there is no such entity"), "{err}");
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    let err = world.push("ball", (f64::NAN, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("finite"), "{err}");
+}
+
+#[test]
+fn a_blast_throws_what_is_near_away_and_leaves_the_rest() {
+    let mut world = balls_at(&[
+        ("near", 220.0, 200.0),  // 20 right of the blast
+        ("above", 200.0, 150.0), // 50 above it
+        ("far", 350.0, 200.0),   // beyond the radius
+        ("centre", 200.0, 200.0), // exactly on it
+    ]);
+    let moved = world.blast((200.0, 200.0), 300.0, 100.0).unwrap();
+    assert_eq!(moved, 3, "near, above and the one on it");
+    let (near, above) = (entity(&world, "near").velocity, entity(&world, "above").velocity);
+    assert!((near.0 - 240.0).abs() < 1e-6 && near.1.abs() < 1e-6, "300·(1 − 20/100), away: {near:?}");
+    assert!(above.0.abs() < 1e-6 && (above.1 + 150.0).abs() < 1e-6, "300·(1 − 50/100), up: {above:?}");
+    assert_eq!(entity(&world, "far").velocity, (0.0, 0.0));
+    let on = entity(&world, "centre").velocity;
+    assert!(on.0.is_finite() && on.1 < -100.0, "nudged up, never NaN: {on:?}");
+}
+
+#[test]
+fn a_bad_blast_is_refused() {
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    for (at, speed, radius, wanted) in [
+        ((f64::NAN, 0.0), 1.0, 1.0, "finite"),
+        ((0.0, 0.0), f64::INFINITY, 1.0, "finite"),
+        ((0.0, 0.0), 1.0, 0.0, "radius must be above 0"),
+        ((0.0, 0.0), 1.0, -5.0, "radius must be above 0"),
+    ] {
+        let err = world.blast(at, speed, radius).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{err}");
+    }
+}
+
+#[test]
+fn a_well_pulls_what_is_inside_its_radius_toward_its_centre() {
+    let mut world = balls_at(&[("in", 260.0, 200.0), ("out", 350.0, 200.0), ("edge", 200.0, 110.0)]);
+    world.set_wells(vec![Well { at: (200.0, 200.0), radius: 100.0, pull: 600.0 }]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    // At 60 away the pull is 600·(1 − 0.6) = 240, so about −24 a tenth of a second on, and more
+    // as it nears the centre.
+    let v = entity(&world, "in").velocity;
+    assert!(v.0 < -20.0 && v.1.abs() < 1.0, "pulled left: {v:?}");
+    assert_eq!(entity(&world, "out").velocity, (0.0, 0.0), "beyond the radius: untouched");
+    let top = entity(&world, "edge").velocity;
+    assert!(top.1 > 0.0 && top.0.abs() < 1.0, "90 above is near the edge: pulled down, weakly: {top:?}");
+}
+
+#[test]
+fn a_negative_well_repels_and_removing_it_ends_the_pull() {
+    let mut world = balls_at(&[("ball", 230.0, 200.0)]);
+    world.set_wells(vec![Well { at: (200.0, 200.0), radius: 100.0, pull: -600.0 }]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    let v = entity(&world, "ball").velocity;
+    assert!(v.0 > 20.0, "pushed away: {v:?}");
+    world.set_wells(vec![]).unwrap();
+    run(&mut world, &mut clock, 0.2);
+    let after = entity(&world, "ball").velocity;
+    assert!((after.0 - v.0).abs() < 1.0, "no well, no more change (friction-free): {v:?} -> {after:?}");
+}
+
+#[test]
+fn a_bad_well_is_refused_and_the_last_good_ones_kept() {
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    let fine = Well { at: (0.0, 0.0), radius: 10.0, pull: 5.0 };
+    world.set_wells(vec![fine]).unwrap();
+    for (bad, wanted) in [
+        (Well { radius: 0.0, ..fine }, "radius must be above 0"),
+        (Well { pull: f64::NAN, ..fine }, "finite"),
+        (Well { at: (f64::INFINITY, 0.0), ..fine }, "finite"),
+    ] {
+        let err = world.set_wells(vec![fine, bad]).unwrap_err().to_string();
+        assert!(err.contains("well 2") && err.contains(wanted), "{err}");
+        assert_eq!(world.wells().len(), 1, "kept");
+    }
+}

@@ -61,6 +61,15 @@ pub struct Set {
     pub spin: Option<f64>,
 }
 
+/// A radial field: a loose body within `radius` of `at` accelerates toward it, at `pull` in the
+/// middle fading to nothing at the edge; a negative `pull` pushes away. Units a second squared.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Well {
+    pub at: (f64, f64),
+    pub radius: f64,
+    pub pull: f64,
+}
+
 /// Past this a body crosses a world in a step and Rapier's solver goes wild.
 const MAX_GRAVITY: f64 = 100_000.0;
 
@@ -334,6 +343,7 @@ pub struct World2d {
     groups: Vec<String>,
     timers: Vec<Timer>,
     camera: Option<Camera>,
+    wells: Vec<Well>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -359,6 +369,9 @@ pub enum WorldError {
     Camera(String),
     #[error("gravity: {0}")]
     Gravity(String),
+    /// A blast or a well described wrongly.
+    #[error("{0}")]
+    Force(String),
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
@@ -936,6 +949,7 @@ impl World2d {
 
     /// One fixed step: bodies, then zones and hits, then walkers.
     fn step(&mut self, dt: f64) {
+        self.pull(dt);
         let before = self.velocities();
         self.physics.step(dt);
         self.steps += 1;
@@ -1059,6 +1073,111 @@ impl World2d {
             self.physics.set_gravity(g);
         }
         Ok(())
+    }
+
+    /// Checked whole, so a description with one bad well is refused whole.
+    pub fn check_wells(wells: &[Well]) -> Result<(), WorldError> {
+        for (i, w) in wells.iter().enumerate() {
+            let n = i + 1;
+            if ![w.at.0, w.at.1, w.radius, w.pull].iter().all(|v| v.is_finite()) {
+                return Err(WorldError::Force(format!("well {n}: at, radius and pull must be finite numbers")));
+            }
+            if w.radius <= 0.0 {
+                return Err(WorldError::Force(format!("well {n}: radius must be above 0, got {}", w.radius)));
+            }
+        }
+        Ok(())
+    }
+
+    /// The fields in the world, as described: what is not there has none. Bodies in one are kept
+    /// moving, so one that rested wakes when a well opens over it.
+    pub fn set_wells(&mut self, wells: Vec<Well>) -> Result<(), WorldError> {
+        Self::check_wells(&wells)?;
+        self.wells = wells;
+        Ok(())
+    }
+
+    pub fn wells(&self) -> &[Well] {
+        &self.wells
+    }
+
+    /// Adds to a loose thing's velocity: a kick, whatever it weighs.
+    pub fn push(&mut self, id: &str, by: (f64, f64)) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
+        let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
+        if !(by.0.is_finite() && by.1.is_finite()) {
+            return Err(err("push must be finite numbers"));
+        }
+        let loose = self.ecs.get::<Solid>(entity).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        if !loose {
+            return Err(err("push needs a loose thing: Rapier moves only those"));
+        }
+        self.kick(entity, by);
+        Ok(())
+    }
+
+    /// Adds `by` to a loose body's velocity and keeps it followed until it rests again.
+    fn kick(&mut self, entity: Entity, by: (f64, f64)) {
+        let s = self.ecs.get::<Solid>(entity).expect("checked loose");
+        let body = s.body;
+        let (vx, vy) = self.physics.velocity(body);
+        self.physics.set(body, None, Some((vx + by.0, vy + by.1)), None);
+        self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = true;
+    }
+
+    /// Where every loose body's centre is, as of the last step.
+    fn loose_centres(&self) -> Vec<(Entity, (f64, f64))> {
+        let centre = |&entity: &Entity| {
+            let s = self.ecs.get::<Solid>(entity).filter(|s| s.loose.is_some() && s.collider.is_some())?;
+            Some((entity, self.physics.centre_of(s.body)))
+        };
+        self.order.iter().filter_map(centre).collect()
+    }
+
+    /// An explosion: every loose body within `radius` of `at` is thrown directly away from it at
+    /// `speed` fading to nothing at the edge (straight up for one right on it). Says how many.
+    pub fn blast(&mut self, at: (f64, f64), speed: f64, radius: f64) -> Result<usize, WorldError> {
+        if ![at.0, at.1, speed].iter().all(|v| v.is_finite()) {
+            return Err(WorldError::Force("blast: the point and speed must be finite numbers".into()));
+        }
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err(WorldError::Force(format!("blast: radius must be above 0, got {radius}")));
+        }
+        let mut moved = 0;
+        for (entity, (x, y)) in self.loose_centres() {
+            let (dx, dy) = (x - at.0, y - at.1);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d >= radius {
+                continue;
+            }
+            let (ux, uy) = if d < 1e-9 { (0.0, -1.0) } else { (dx / d, dy / d) };
+            let v = speed * (1.0 - d / radius);
+            self.kick(entity, (ux * v, uy * v));
+            moved += 1;
+        }
+        Ok(moved)
+    }
+
+    /// Every well's pull on each loose body for `dt`, before Rapier moves anything.
+    fn pull(&mut self, dt: f64) {
+        if self.wells.is_empty() {
+            return;
+        }
+        for (entity, (x, y)) in self.loose_centres() {
+            let mut dv = (0.0, 0.0);
+            for w in &self.wells {
+                let (dx, dy) = (w.at.0 - x, w.at.1 - y);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d >= w.radius || d < 1e-9 {
+                    continue;
+                }
+                let a = w.pull * (1.0 - d / w.radius) * dt;
+                dv = (dv.0 + dx / d * a, dv.1 + dy / d * a);
+            }
+            if dv != (0.0, 0.0) {
+                self.kick(entity, dv);
+            }
+        }
     }
 
     pub fn set_order(&mut self, order: Order) {

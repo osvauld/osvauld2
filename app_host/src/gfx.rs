@@ -397,6 +397,23 @@ impl UserData for WorldHandle {
             let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")?, spin };
             this.command(&owner, |w| w.set(&entity, to))
         });
+        // `rink:push("ball", { vx, vy })` adds to a loose thing's velocity.
+        methods.add_method("push", |_, this, (entity, by): (String, Value)| {
+            let owner = format!("world {:?}:push {entity:?}", this.id);
+            let Value::Table(by) = by else {
+                return Err(Error::runtime(format!("{owner} must be {{ x, y }}, got {}", by.type_name())));
+            };
+            let by = point(by, &owner)?;
+            this.command(&owner, |w| w.push(&entity, (by.x, by.y)))
+        });
+        // `rink:blast({ x, y }, { speed = 400, radius = 150 })`: how many loose things it threw.
+        methods.add_method("blast", |_, this, (at, opts): (Table, Table)| {
+            let owner = format!("world {:?}:blast", this.id);
+            named_fields(&opts, &owner, &["speed", "radius"])?;
+            let at = point(at, &format!("{owner} point"))?;
+            let (speed, radius): (f64, f64) = (need(&opts, &owner, "speed")?, need(&opts, &owner, "radius")?);
+            this.command(&owner, |w| w.blast((at.x, at.y), speed, radius))
+        });
         // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
         methods.add_method("after", |_, this, (secs, name): (Value, Value)| {
             let owner = format!("world {:?}:after", this.id);
@@ -638,6 +655,27 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         grip: number("grip")?,
         density: number("density")?.unwrap_or(d.density),
     }))
+}
+
+/// `wells = { { at = { x, y }, radius = r, pull = a }, … }`: left out or empty, none.
+pub(crate) fn wells(node: &Table, owner: &str) -> mlua::Result<Vec<world::Well>> {
+    let list = match node.get::<Value>("wells")? {
+        Value::Nil => return Ok(vec![]),
+        Value::Table(t) => t,
+        _ => return Err(Error::runtime(format!("{owner}: world wells must be a list"))),
+    };
+    let mut wells = Vec::new();
+    for i in 1..=positional_len(&list, &format!("{owner}.wells"))? {
+        let here = format!("{owner}: well {i}");
+        let Value::Table(w) = list.get::<Value>(i)? else {
+            return Err(Error::runtime(format!("{here} must be a table")));
+        };
+        named_fields(&w, &here, &["at", "radius", "pull"])?;
+        let at = point(need(&w, &here, "at")?, &format!("{here}.at"))?;
+        let (radius, pull) = (need(&w, &here, "radius")?, need(&w, &here, "pull")?);
+        wells.push(world::Well { at: (at.x, at.y), radius, pull });
+    }
+    Ok(wells)
 }
 
 /// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing

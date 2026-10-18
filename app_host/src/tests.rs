@@ -5263,3 +5263,90 @@ fn a_world_takes_its_gravity_from_the_description() {
         assert_eq!(worlds.borrow()["room"].gravity(), (10.0, 20.0), "{extra}: the last good one kept");
     }
 }
+
+#[test]
+fn forces_are_handler_only_and_strict_through_lua() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             wells = {{ {{ at = {{ 100, 50 }}, radius = 40, pull = 100 }} }}, \
+             on_action = function() \
+               local room = world('room') \
+               room:push('ball', {{ 10, 0 }}) \
+               try(function() room:push('ball', {{ 1 }}) end) \
+               try(function() room:push('ball', 'up') end) \
+               try(function() room:push('hero', {{ 1, 0 }}) end) \
+               try(function() room:push('ghost', {{ 1, 0 }}) end) \
+               try(function() room:blast({{ 0, 0 }}, {{ speed = 5 }}) end) \
+               try(function() room:blast({{ 0, 0 }}, {{ speed = 5, radius = 0 }}) end) \
+               try(function() room:blast({{ 0, 0 }}, {{ speed = 5, radius = 9, power = 1 }}) end) \
+               local n = room:blast({{ 0, 0 }}, {{ speed = 5, radius = 100 }}) \
+               table.insert(heard, 'moved ' .. n) end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }}, \
+             {{ id = 'ball', pos = {{ 20, 20 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{ friction = 0 }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "world \"room\":push \"ball\" needs x and y",
+        "push \"ball\" must be { x, y }",
+        "push needs a loose thing",
+        "entity \"ghost\": there is no such entity",
+        "world \"room\":blast needs radius",
+        "radius must be above 0",
+        "world \"room\":blast: unknown field power",
+        "moved 1",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}
+
+#[test]
+fn force_commands_are_refused_while_view_describes() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = "return function() world('room'):push('ball', { 1, 1 }) world('room'):blast({ 0, 0 }, \
+        { speed = 1, radius = 1 }) return ui.text({ 'x' }) end";
+    main.insert(0, view).unwrap();
+    src.commit();
+    let app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let console = app.console(10).join("\n");
+    assert!(console.contains("only in a handler; view describes"), "{console}");
+}
+
+#[test]
+fn wells_are_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |wells: &str| format!("return ui.world({{ id = 'room', width = 1, height = 1, wells = {wells} }})");
+    walk_world(&lua, &worlds, &room("{ { at = { 1, 2 }, radius = 30, pull = 50 } }")).unwrap();
+    assert_eq!(worlds.borrow()["room"].wells().len(), 1);
+    let cases = [
+        ("7", "world wells must be a list"),
+        ("{ 7 }", "well 1 must be a table"),
+        ("{ { radius = 30, pull = 50 } }", "well 1 needs at"),
+        ("{ { at = { 1, 2 }, pull = 50 } }", "well 1 needs radius"),
+        ("{ { at = { 1, 2 }, radius = 30 } }", "well 1 needs pull"),
+        ("{ { at = { 1, 2 }, radius = 30, pull = 50, spin = 1 } }", "well 1: unknown field spin"),
+        ("{ { at = { 1, 2 }, radius = 0, pull = 50 } }", "radius must be above 0"),
+    ];
+    for (wells, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(wells)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{wells}: wanted {wanted:?}, got {err}");
+        assert_eq!(worlds.borrow()["room"].wells().len(), 1, "the last good kept");
+    }
+    walk_world(&lua, &worlds, &room("{}")).unwrap();
+    assert!(worlds.borrow()["room"].wells().is_empty(), "left out or empty: none");
+}

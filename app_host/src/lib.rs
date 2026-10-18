@@ -1879,6 +1879,8 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     }
     let actions = world_actions(node)?;
     let gravity = world_gravity(node, &id)?;
+    let wells = gfx::wells(node, &format!("world {id:?}"))?;
+    world::World2d::check_wells(&wells).map_err(mlua::Error::external)?;
     // Checked before the world is touched, so a bad camera keeps the last good world whole.
     let camera = gfx::camera(node)?;
     if let Some(c) = &camera {
@@ -1943,6 +1945,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         return Err(mlua::Error::external(e));
     }
     context.groups.borrow_mut().extend(read);
+    world.set_wells(wells).map_err(mlua::Error::external)?;
     world.set_order(order);
     world.set_actions(actions);
     world.describe_camera((width, height), camera).map_err(mlua::Error::external)?;
@@ -2144,6 +2147,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
             "camera",
             "order",
             "gravity",
+            "wells",
             "actions",
             "on_action",
             "on_move",
