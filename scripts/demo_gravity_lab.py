@@ -46,18 +46,21 @@ def gravity_lab(rec: Recorder, rpc, item: str) -> None:
     rec.hold(0.9)
     rec.step(rpc.release)
     rec.glide_to((ox + 480, oy + 60), 1.4)  # out of the way while it plays
-    rec.hold(8.5)  # castle, dominoes, marble, bucket
+    rec.hold(5.0)  # castle, dominoes, marble, bucket
+    rec.glide_to("swing", 0.7)
+    rec.click()  # the wrecking ball swings through what is left
+    rec.hold(1.6)
     x, y = at("seesaw_c1")
-    rec.glide_to((ox + x + 11, oy + y + 12), 1.0)
+    rec.glide_to((ox + x + 11, oy + y + 12), 0.9)
     rec.step(rpc.press)
     rec.glide_to((ox + x + 11 + 140, oy + y + 12 - 70), 0.35)
     rec.step(rpc.release)  # let go while moving: a throw
-    rec.hold(1.8)
-    rec.glide_to("gravity", 0.8)
-    rec.click()
-    rec.glide_to("swing", 0.6)
-    rec.click()
-    rec.hold(3.0)
+    rec.hold(1.0)
+    rec.glide_to("gravity", 0.7)
+    rec.click()  # the moon
+    rec.glide_to("bomb", 0.5)
+    rec.click()  # and the rubble floats up
+    rec.hold(3.6)
 
 
 def crop(src: Path, dst: Path) -> None:
@@ -66,7 +69,7 @@ def crop(src: Path, dst: Path) -> None:
                     "-movflags", "+faststart", str(dst)], check=True)
 
 
-def small_gif(src: Path, dst: Path, fps: int = 15, width: int = 700) -> None:
+def small_gif(src: Path, dst: Path, fps: int = 13, width: int = 660) -> None:
     vf = f"fps={fps},scale={width}:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", vf, str(dst)], check=True)
 
