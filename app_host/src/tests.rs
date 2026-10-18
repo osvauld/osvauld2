@@ -5234,3 +5234,30 @@ fn replacing_a_doc_that_is_not_open_does_nothing() {
     app.flush(puts.recorder()).unwrap();
     assert!(puts.take().is_empty());
 }
+
+#[test]
+fn a_world_takes_its_gravity_from_the_description() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |extra: &str| format!("return ui.world({{ id = 'room', width = 400, height = 300, {extra} }})");
+    walk_world(&lua, &worlds, &room("gravity = { 0, 900 }")).unwrap();
+    assert_eq!(worlds.borrow()["room"].gravity(), (0.0, 900.0));
+    // Left out, it is none: the description is the whole of it.
+    walk_world(&lua, &worlds, &room("")).unwrap();
+    assert_eq!(worlds.borrow()["room"].gravity(), (0.0, 0.0));
+
+    walk_world(&lua, &worlds, &room("gravity = { 10, 20 }")).unwrap();
+    let cases = [
+        ("gravity = 'up'", "world gravity must be { x, y }"),
+        ("gravity = { 1 }", "world gravity must be { x, y }"),
+        ("gravity = { 1, 2, 3 }", "world gravity must be { x, y }"),
+        ("gravity = { 1, 'a' }", "world gravity must be { x, y }"),
+        ("gravity = { 0, 1e12 }", "gravity: must be finite numbers"),
+        ("gravity = { 0, 0/0 }", "gravity: must be finite numbers"),
+    ];
+    for (extra, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(extra)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{extra}: wanted {wanted:?}, got {err}");
+        assert_eq!(worlds.borrow()["room"].gravity(), (10.0, 20.0), "{extra}: the last good one kept");
+    }
+}

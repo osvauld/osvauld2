@@ -61,6 +61,9 @@ pub struct Set {
     pub spin: Option<f64>,
 }
 
+/// Past this a body crosses a world in a step and Rapier's solver goes wild.
+const MAX_GRAVITY: f64 = 100_000.0;
+
 /// Bit 0 is the common group, everything not named into another.
 const COMMON: u32 = 1;
 
@@ -354,6 +357,8 @@ pub enum WorldError {
     Group(String),
     #[error("camera: {0}")]
     Camera(String),
+    #[error("gravity: {0}")]
+    Gravity(String),
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
@@ -652,7 +657,8 @@ impl World2d {
                 let owner = entity.to_bits();
                 let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
                 // Loose from the start, it waits asleep; let go, it is on the move.
-                if dynamic && !dropped {
+                // Not under gravity: a body that is not at rest has to fall.
+                if dynamic && !dropped && self.physics.gravity() == (0.0, 0.0) {
                     self.physics.sleep_if_clear(body);
                 }
                 if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
@@ -1030,6 +1036,29 @@ impl World2d {
     /// Focus left, so no key is known to be down any more.
     pub fn release_all(&mut self) {
         self.held.clear();
+    }
+
+    /// The world's gravity, in units a second squared; none unless described.
+    pub fn gravity(&self) -> (f64, f64) {
+        self.physics.gravity()
+    }
+
+    /// Checked without touching the world, so a description is refused whole.
+    pub fn check_gravity(g: (f64, f64)) -> Result<(), WorldError> {
+        let fine = |v: f64| v.is_finite() && v.abs() <= MAX_GRAVITY;
+        if fine(g.0) && fine(g.1) {
+            return Ok(());
+        }
+        Err(WorldError::Gravity(format!("must be finite numbers within {MAX_GRAVITY} either way")))
+    }
+
+    /// Falling is the description's to say every view, so only a change wakes the bodies.
+    pub fn set_gravity(&mut self, g: (f64, f64)) -> Result<(), WorldError> {
+        Self::check_gravity(g)?;
+        if g != self.physics.gravity() {
+            self.physics.set_gravity(g);
+        }
+        Ok(())
     }
 
     pub fn set_order(&mut self, order: Order) {

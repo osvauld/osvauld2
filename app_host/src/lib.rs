@@ -1878,6 +1878,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         }
     }
     let actions = world_actions(node)?;
+    let gravity = world_gravity(node, &id)?;
     // Checked before the world is touched, so a bad camera keeps the last good world whole.
     let camera = gfx::camera(node)?;
     if let Some(c) = &camera {
@@ -1934,7 +1935,13 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     parts.push(world::Part::Specs(specs));
     let mut worlds = context.worlds.borrow_mut();
     let world = worlds.entry(id.clone()).or_default();
-    world.reconcile_parts(parts).map_err(mlua::Error::external)?;
+    // Before the bodies, which rest or fall by it; put back if the description is refused.
+    let before = world.gravity();
+    world.set_gravity(gravity).map_err(mlua::Error::external)?;
+    if let Err(e) = world.reconcile_parts(parts) {
+        world.set_gravity(before).expect("it was accepted before");
+        return Err(mlua::Error::external(e));
+    }
     context.groups.borrow_mut().extend(read);
     world.set_order(order);
     world.set_actions(actions);
@@ -1983,6 +1990,24 @@ fn describe_group<M>(
         }
     }
     Ok((specs, reads))
+}
+
+/// `gravity = { 0, 900 }`: units a second squared, down being +y; none when left out.
+fn world_gravity(node: &Table, id: &str) -> mlua::Result<(f64, f64)> {
+    let bad = || mlua::Error::runtime(format!("world {id:?}: world gravity must be {{ x, y }}, two numbers"));
+    let Some(t) = node.get::<Option<Value>>("gravity")? else { return Ok((0.0, 0.0)) };
+    let Value::Table(t) = t else { return Err(bad()) };
+    let n = |i| match t.get::<Value>(i) {
+        Ok(Value::Number(n)) => Ok(n),
+        Ok(Value::Integer(n)) => Ok(n as f64),
+        _ => Err(bad()),
+    };
+    if t.raw_len() != 2 {
+        return Err(bad());
+    }
+    let g = (n(1)?, n(2)?);
+    world::World2d::check_gravity(g).map_err(|e| mlua::Error::runtime(format!("world {id:?}: {e}")))?;
+    Ok(g)
 }
 
 /// `actions = { jump = "Space" }`: action name to key code, sorted so events come in a stable
@@ -2118,6 +2143,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
             "height",
             "camera",
             "order",
+            "gravity",
             "actions",
             "on_action",
             "on_move",

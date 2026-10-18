@@ -2157,3 +2157,97 @@ fn bench_world_frame_camera() {
         world.frame(VIEW.0, VIEW.1).unwrap();
     });
 }
+
+// ── gravity ────────────────────────────────────────────────────────────────────────────────────
+
+/// A loose ball (radius 4, box 8) and a fixed floor whose top is at `floor_y`.
+fn ball_over_floor(floor_y: f64, ball: Material) -> (Vec<EntitySpec>, Arc<Drawing>) {
+    let d = drawing();
+    let ball = EntitySpec {
+        loose: Some(ball),
+        ..solid("ball", (50.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let floor = solid("floor", (0.0, floor_y), Shape::Rect(400.0, 20.0), (0.0, 0.0), &d);
+    (vec![ball, floor], d)
+}
+
+const DEAD: Material = Material { bounce: 0.0, friction: 0.0, grip: None };
+
+/// Ticks `secs` of 1/60 s frames from `*clock`.
+fn run(world: &mut World2d, clock: &mut f64, secs: f64) {
+    for _ in 0..(secs * 60.0).round() as usize {
+        *clock += 1.0 / 60.0;
+        world.tick(*clock, 1.0 / 60.0);
+    }
+}
+
+fn ball_of(world: &World2d) -> EntityInspection {
+    world.inspect().into_iter().find(|e| e.id == "ball").expect("a ball")
+}
+
+#[test]
+fn gravity_pulls_a_loose_thing_down_and_it_rests_on_the_floor() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    // Free fall: about ½·g·t² = 112.5 in half a second.
+    let fallen = ball_of(&world).pos.1;
+    assert!((fallen - 112.5).abs() < 15.0, "fell {fallen}");
+    run(&mut world, &mut clock, 3.0);
+    let b = ball_of(&world);
+    assert!((b.pos.1 + 8.0 - 500.0).abs() < 2.0, "rests on the floor: {b:?}");
+    assert_eq!((b.body, b.velocity), ("loose", (0.0, 0.0)), "asleep and still: {b:?}");
+}
+
+#[test]
+fn no_gravity_set_keeps_the_old_top_down_behaviour() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.reconcile(specs).unwrap();
+    assert_eq!(world.gravity(), (0.0, 0.0));
+    world.set("ball", Set { velocity: Some((100.0, 0.0)), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let b = ball_of(&world);
+    assert!((b.pos.0 - 150.0).abs() < 3.0 && b.pos.1.abs() < 0.5, "glided straight: {b:?}");
+}
+
+#[test]
+fn a_thing_spawned_in_a_gravity_world_starts_awake_and_falls() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    assert!(world.needs_ticks(), "a falling world needs the clock");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.3);
+    assert!(ball_of(&world).pos.1 > 20.0, "it fell: {:?}", ball_of(&world));
+}
+
+#[test]
+fn changing_gravity_wakes_the_sleepers() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 3.0);
+    let rested = ball_of(&world).pos.1;
+    world.set_gravity((0.0, -900.0)).unwrap();
+    run(&mut world, &mut clock, 0.5);
+    assert!(ball_of(&world).pos.1 < rested - 20.0, "it rose: {rested} -> {:?}", ball_of(&world));
+}
+
+#[test]
+fn a_bad_gravity_is_refused_and_the_last_good_one_kept() {
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    for bad in [(f64::NAN, 0.0), (0.0, f64::INFINITY), (0.0, 1.0e9)] {
+        let err = world.set_gravity(bad).unwrap_err().to_string();
+        assert!(err.contains("gravity"), "{err}");
+        assert_eq!(world.gravity(), (0.0, 900.0));
+    }
+}

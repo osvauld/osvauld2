@@ -191,6 +191,16 @@ impl Physics {
         body
     }
 
+    pub(crate) fn gravity(&self) -> (f64, f64) {
+        (self.world.gravity.x as f64, self.world.gravity.y as f64)
+    }
+
+    /// Every body is woken, since one that was resting may now fall.
+    pub(crate) fn set_gravity(&mut self, g: (f64, f64)) {
+        self.world.gravity = Vector::new(g.0 as f32, g.1 as f32);
+        self.world.wake_up_all(true);
+    }
+
     /// Moves a body that does not collide — one with only a sensor — by `by`.
     pub(crate) fn shift(&mut self, body: RigidBodyHandle, by: (f64, f64)) {
         let rb = &mut self.world.bodies[body];
