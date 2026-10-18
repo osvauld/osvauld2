@@ -25,7 +25,7 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, Material, Shape};
+pub use crate::physics::{Collider, JointKind, Material, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -59,6 +59,27 @@ pub struct Set {
     pub velocity: Option<(f64, f64)>,
     /// Degrees a second; only a loose thing with grip turns.
     pub spin: Option<f64>,
+}
+
+/// A joint between two entities, or one and the world. An anchor is a point in its entity's
+/// drawing box; with no `b`, `b_at` is a point of the world, fixed there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointSpec {
+    pub id: String,
+    pub kind: JointKind,
+    pub a: String,
+    pub a_at: (f64, f64),
+    pub b: Option<String>,
+    pub b_at: (f64, f64),
+    /// Whether the two bodies collide with each other: not, unless asked.
+    pub contacts: bool,
+}
+
+/// A joint as the world holds it, and the bodies it was made for: a rebuilt body ends it.
+struct Joined {
+    spec: JointSpec,
+    handle: rapier2d::prelude::ImpulseJointHandle,
+    bodies: (rapier2d::prelude::RigidBodyHandle, Option<rapier2d::prelude::RigidBodyHandle>),
 }
 
 /// A radial field: a loose body within `radius` of `at` accelerates toward it, at `pull` in the
@@ -352,6 +373,7 @@ pub struct World2d {
     wells: Vec<Well>,
     /// Loose things a hand holds: where each is being brought to.
     grabs: HashMap<Entity, (f64, f64)>,
+    joints: HashMap<String, Joined>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -377,6 +399,9 @@ pub enum WorldError {
     Camera(String),
     #[error("gravity: {0}")]
     Gravity(String),
+    /// A joint described wrongly, as `"joint id: why"`.
+    #[error("{0}")]
+    Joint(String),
     /// A blast or a well described wrongly.
     #[error("{0}")]
     Force(String),
@@ -1122,6 +1147,104 @@ impl World2d {
             return Err(err("push needs a loose thing: Rapier moves only those"));
         }
         self.kick(entity, by);
+        Ok(())
+    }
+
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// The joints in the world, as described: what is not there is not held. Checked whole before
+    /// anything changes; a joint kept as it was keeps swinging, and one whose body was rebuilt is
+    /// made again.
+    pub fn set_joints(&mut self, specs: Vec<JointSpec>) -> Result<(), WorldError> {
+        struct Made {
+            spec: JointSpec,
+            a: (rapier2d::prelude::RigidBodyHandle, (f64, f64)),
+            b: (Option<rapier2d::prelude::RigidBodyHandle>, (f64, f64)),
+        }
+        let mut made: Vec<Made> = Vec::new();
+        let mut seen = HashSet::new();
+        for spec in specs {
+            let id = spec.id.clone();
+            let bad = |why: String| WorldError::Joint(format!("joint {id:?}: {why}"));
+            if id.is_empty() {
+                return Err(WorldError::Joint("joint id must not be empty".into()));
+            }
+            if !seen.insert(id.clone()) {
+                return Err(WorldError::Joint(format!("duplicate joint id {id:?}")));
+            }
+            let (a_at, b_at) = (spec.a_at, spec.b_at);
+            if ![a_at.0, a_at.1, b_at.0, b_at.1].iter().all(|v| v.is_finite()) {
+                return Err(bad("anchors must be finite numbers".into()));
+            }
+            match spec.kind {
+                JointKind::Rope { length } if !(length.is_finite() && length > 0.0) => {
+                    return Err(bad(format!("length must be above 0, got {length}")));
+                }
+                JointKind::Spring { length, stiffness, damping } => {
+                    if !(length.is_finite() && length > 0.0) {
+                        return Err(bad(format!("length must be above 0, got {length}")));
+                    }
+                    if !(stiffness.is_finite() && stiffness >= 0.0) {
+                        return Err(bad(format!("stiffness must be 0 or more, got {stiffness}")));
+                    }
+                    if !(damping.is_finite() && damping >= 0.0) {
+                        return Err(bad(format!("damping must be 0 or more, got {damping}")));
+                    }
+                }
+                JointKind::Pin { limits: Some((lo, hi)) } if !(lo.is_finite() && hi.is_finite() && lo < hi) => {
+                    return Err(bad(format!("limits must be low then high, got {lo} and {hi}")));
+                }
+                _ => {}
+            }
+            // What an end is: its body, where the anchor sits in the body's frame, whether it moves.
+            let end = |name: &str, at: (f64, f64)| -> Result<_, WorldError> {
+                let entity = self.by_id.get(name).copied();
+                let solid = entity.and_then(|e| self.ecs.get::<Solid>(e)).filter(|s| s.collider.is_some());
+                let Some(s) = solid else {
+                    let why = if entity.is_some() { "has no body: give it a collider" } else { "there is no such entity" };
+                    return Err(bad(format!("{why} {name:?}")));
+                };
+                let (cx, cy) = s.collider.as_ref().expect("filtered").centre();
+                Ok((s.body, (at.0 - cx, at.1 - cy), s.loose))
+            };
+            if spec.b.as_deref() == Some(spec.a.as_str()) {
+                return Err(bad("a thing cannot be joined to itself".into()));
+            }
+            let a = end(&spec.a, a_at)?;
+            let b = spec.b.as_deref().map(|name| end(name, b_at)).transpose()?;
+            if a.2.is_none() && b.is_none_or(|b| b.2.is_none()) {
+                return Err(bad("it joins nothing that moves: one end must be loose".into()));
+            }
+            if matches!(spec.kind, JointKind::Pin { .. }) {
+                let ends = [(&spec.a, a.2)].into_iter().chain(spec.b.as_ref().zip(b.map(|b| b.2)));
+                for (name, loose) in ends {
+                    if loose.is_some_and(|m| m.grip.is_none()) {
+                        return Err(bad(format!("a pin needs grip on {name:?}: nothing else turns")));
+                    }
+                }
+            }
+            made.push(Made { a: (a.0, a.1), b: (b.map(|b| b.0), b.map_or(b_at, |b| b.1)), spec });
+        }
+        let wanted: HashSet<&str> = made.iter().map(|m| m.spec.id.as_str()).collect();
+        for gone in self.joints.keys().filter(|id| !wanted.contains(id.as_str())).cloned().collect::<Vec<_>>() {
+            let j = self.joints.remove(&gone).expect("listed");
+            self.physics.unjoin(j.handle);
+        }
+        for m in made {
+            let bodies = (m.a.0, m.b.0);
+            let id = m.spec.id.clone();
+            if let Some(old) = self.joints.get(&id) {
+                if old.spec == m.spec && old.bodies == bodies && self.physics.joined(old.handle) {
+                    continue;
+                }
+                let old = self.joints.remove(&id).expect("just seen");
+                self.physics.unjoin(old.handle);
+            }
+            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts);
+            self.joints.insert(id, Joined { spec: m.spec, handle, bodies });
+        }
         Ok(())
     }
 

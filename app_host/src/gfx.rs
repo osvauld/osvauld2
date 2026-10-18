@@ -700,6 +700,85 @@ pub(crate) fn wells(node: &Table, owner: &str) -> mlua::Result<Vec<world::Well>>
     Ok(wells)
 }
 
+/// `joints = { { id, kind = "pin" | "rope" | "spring", a, a_at, b, b_at, … }, … }`: what holds
+/// things together, described again each view and kept while it is the same. Left out or empty,
+/// none.
+pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::JointSpec>> {
+    let list = match node.get::<Value>("joints")? {
+        Value::Nil => return Ok(vec![]),
+        Value::Table(t) => t,
+        _ => return Err(Error::runtime(format!("{owner}: world joints must be a list"))),
+    };
+    let mut joints = Vec::new();
+    for i in 1..=positional_len(&list, &format!("{owner}.joints"))? {
+        let Value::Table(j) = list.get::<Value>(i)? else {
+            return Err(Error::runtime(format!("{owner}: joint {i} must be a table")));
+        };
+        let id: Option<String> = j.get("id")?;
+        let Some(id) = id else {
+            return Err(Error::runtime(format!("{owner}: joint {i} needs id")));
+        };
+        let here = format!("{owner}: joint {id:?}");
+        named_fields(&j, &here, &[
+            "id", "kind", "a", "a_at", "b", "b_at", "limits", "length", "stiffness", "damping", "contacts",
+        ])?;
+        let kind: String = need(&j, &here, "kind")?;
+        let has = |field: &str| j.get::<Value>(field).map(|v| !v.is_nil());
+        let only = |field: &str, kinds: &str| -> mlua::Result<()> {
+            Err(Error::runtime(format!("{here}: {field} is for {kinds}")))
+                .or_else(|e| if has(field)? { Err(e) } else { Ok(()) })
+        };
+        let kind = match kind.as_str() {
+            "pin" => {
+                only("length", "rope and spring, not pin")?;
+                only("stiffness", "spring, not pin")?;
+                only("damping", "spring, not pin")?;
+                let limits = match maybe_table(&j, &here, "limits")? {
+                    Some(t) => {
+                        if positional_len(&t, &format!("{here}.limits"))? != 2 {
+                            return Err(Error::runtime(format!("{here}: limits needs low and high")));
+                        }
+                        Some((t.get(1)?, t.get(2)?))
+                    }
+                    None => None,
+                };
+                world::JointKind::Pin { limits }
+            }
+            "rope" => {
+                only("limits", "pin, not rope")?;
+                only("stiffness", "spring, not rope")?;
+                only("damping", "spring, not rope")?;
+                world::JointKind::Rope { length: need(&j, &here, "length")? }
+            }
+            "spring" => {
+                only("limits", "pin, not spring")?;
+                world::JointKind::Spring {
+                    length: need(&j, &here, "length")?,
+                    stiffness: need(&j, &here, "stiffness")?,
+                    damping: need(&j, &here, "damping")?,
+                }
+            }
+            other => {
+                return Err(Error::runtime(format!(
+                    "{here}: kind must be \"pin\", \"rope\" or \"spring\", got {other:?}"
+                )));
+            }
+        };
+        let a_at = point(need(&j, &here, "a_at")?, &format!("{here}.a_at"))?;
+        let b_at = point(need(&j, &here, "b_at")?, &format!("{here}.b_at"))?;
+        joints.push(world::JointSpec {
+            kind,
+            a: need(&j, &here, "a")?,
+            a_at: (a_at.x, a_at.y),
+            b: entity_id(&j, &here, "b")?,
+            b_at: (b_at.x, b_at.y),
+            contacts: j.get::<Option<bool>>("contacts")?.unwrap_or(false),
+            id,
+        });
+    }
+    Ok(joints)
+}
+
 /// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
 /// units; `at` (default the origin) is a circle's centre, a rect's top-left corner. A sensor is
 /// the same shape.

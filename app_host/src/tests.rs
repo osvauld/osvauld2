@@ -5393,3 +5393,52 @@ fn grab_and_release_are_handler_only_and_strict_through_lua() {
         assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
     }
 }
+
+#[test]
+fn joints_are_described_and_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |joints: &str| {
+        format!(
+            "{HERO} return ui.world({{ id = 'room', width = 400, height = 300, gravity = {{ 0, 900 }}, joints = {joints}, \
+               {{ id = 'plank', pos = {{ 100, 100 }}, drawing = hero, collider = {{ rect = {{ 100, 8 }} }}, \
+                  loose = {{ grip = 0.5 }} }}, \
+               {{ id = 'ball', pos = {{ 250, 100 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{}} }} }})"
+        )
+    };
+    let fine = "{ { id = 'hinge', kind = 'pin', a = 'plank', a_at = { 0, 4 }, b_at = { 100, 104 }, limits = { -90, 90 } }, \
+                  { id = 'string', kind = 'rope', a = 'ball', a_at = { 4, 4 }, b = 'plank', b_at = { 100, 4 }, length = 60 }, \
+                  { id = 'bob', kind = 'spring', a = 'ball', a_at = { 4, 4 }, b_at = { 300, 50 }, \
+                    length = 40, stiffness = 100, damping = 2, contacts = true } }";
+    walk_world(&lua, &worlds, &room(fine)).unwrap();
+    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+    // The same description each frame keeps them.
+    walk_world(&lua, &worlds, &room(fine)).unwrap();
+    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+
+    let cases = [
+        ("7", "world joints must be a list"),
+        ("{ 7 }", "joint 1 must be a table"),
+        ("{ { kind = 'pin' } }", "joint 1 needs id"),
+        ("{ { id = 'j' } }", "joint \"j\" needs kind"),
+        ("{ { id = 'j', kind = 'chain' } }", "kind must be \"pin\", \"rope\" or \"spring\", got \"chain\""),
+        ("{ { id = 'j', kind = 'rope', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a_at"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs b_at"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 } } }", "joint \"j\" needs length"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5, spin = 1 } }", "joint \"j\": unknown field spin"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5, limits = { 0, 1 } } }", "limits is for pin"),
+        ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "length is for rope and spring"),
+        ("{ { id = 'j', kind = 'spring', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs stiffness"),
+        ("{ { id = 'j', kind = 'pin', a = 'ball', a_at = { 4, 4 }, b_at = { 0, 0 } } }", "a pin needs grip on \"ball\""),
+        ("{ { id = 'j', kind = 'rope', a = 'ghost', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "there is no such entity \"ghost\""),
+        ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, limits = { 5 } } }", "limits needs low and high"),
+    ];
+    for (joints, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(joints)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{joints}: wanted {wanted:?}, got {err}");
+        assert_eq!(worlds.borrow()["room"].joint_count(), 3, "{wanted}: the last good joints kept");
+    }
+    walk_world(&lua, &worlds, &room("{}")).unwrap();
+    assert_eq!(worlds.borrow()["room"].joint_count(), 0, "empty or left out: none");
+}

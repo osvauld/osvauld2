@@ -2483,3 +2483,169 @@ fn a_grab_is_refused_for_what_cannot_be_held_and_dropped_with_the_entity() {
     assert_eq!(world.grabs(), 0);
     world.release("ball").unwrap();
 }
+
+// ── joints ─────────────────────────────────────────────────────────────────────────────────────
+
+const GRIPPY: Material = Material { bounce: 0.0, friction: 0.0, grip: Some(0.5), density: 1.0 };
+
+fn joint(id: &str, kind: JointKind, a: &str, a_at: (f64, f64), b: Option<&str>, b_at: (f64, f64)) -> JointSpec {
+    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false }
+}
+
+/// A plank (100 × 8, loose, with grip so it can turn) whose box top-left is `pos`.
+fn plank(id: &str, pos: (f64, f64), d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        loose: Some(GRIPPY),
+        ..solid(id, pos, Shape::Rect(100.0, 8.0), (0.0, 0.0), d)
+    }
+}
+
+fn swing_world() -> World2d {
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world
+}
+
+#[test]
+fn a_pin_lets_a_plank_swing_about_a_fixed_point() {
+    let d = drawing();
+    let mut world = swing_world();
+    world.reconcile(vec![plank("plank", (100.0, 100.0), &d)]).unwrap();
+    // Its left end, (0, 4) in its own box, pinned to the world at (100, 104).
+    let pin = joint("hinge", JointKind::Pin { limits: None }, "plank", (0.0, 4.0), None, (100.0, 104.0));
+    world.set_joints(vec![pin]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.6);
+    let p = entity(&world, "plank");
+    assert!(p.rot.abs() > 60.0, "it swung down: {p:?}");
+    // The pinned end stayed where it was pinned.
+    let (cx, cy) = (p.pos.0 + 50.0, p.pos.1 + 4.0);
+    let a = p.rot.to_radians();
+    let end = (cx - 50.0 * a.cos(), cy - 50.0 * a.sin());
+    assert!((end.0 - 100.0).abs() < 2.0 && (end.1 - 104.0).abs() < 2.0, "pinned end at {end:?}");
+}
+
+#[test]
+fn a_rope_never_lets_a_thing_past_its_length() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball]).unwrap();
+    let rope = joint("rope", JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope]).unwrap();
+    world.set("ball", Set { velocity: Some((300.0, -200.0)), ..Set::default() }).unwrap();
+    let (mut clock, mut farthest) = (0.0, 0.0f64);
+    for _ in 0..240 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        let (x, y) = centre_of(&world, "ball");
+        farthest = farthest.max(((x - 200.0).powi(2) + (y - 100.0).powi(2)).sqrt());
+    }
+    assert!(farthest < 81.5, "never farther than the rope: {farthest}");
+    assert!(farthest > 60.0, "and it did swing out: {farthest}");
+    // Hanging at last (damped by nothing but the solver, so allow some swing).
+    let (x, y) = centre_of(&world, "ball");
+    assert!(y > 100.0, "below the anchor: {x},{y}");
+}
+
+#[test]
+fn a_spring_bobs_about_its_rest_length() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (196.0, 196.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball]).unwrap();
+    let spring = joint(
+        "spring",
+        JointKind::Spring { length: 50.0, stiffness: 400.0, damping: 2.0 },
+        "ball", (4.0, 4.0), None, (200.0, 100.0),
+    );
+    world.set_joints(vec![spring]).unwrap();
+    let (mut clock, mut crossings, mut last) = (0.0, 0, 0.0f64);
+    for _ in 0..180 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        let (x, y) = centre_of(&world, "ball");
+        let stretch = ((x - 200.0).powi(2) + (y - 100.0).powi(2)).sqrt() - 50.0;
+        if stretch * last < 0.0 {
+            crossings += 1;
+        }
+        if stretch != 0.0 {
+            last = stretch;
+        }
+    }
+    assert!(crossings >= 2, "it bobbed through its rest length: {crossings}");
+}
+
+#[test]
+fn a_joint_is_kept_across_descriptions_and_ends_with_its_entity_or_its_line() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = || EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball()]).unwrap();
+    let rope = || joint("rope", JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope()]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.4);
+    let before = centre_of(&world, "ball");
+    // The same description again, as every frame does: nothing restarts.
+    world.reconcile(vec![ball()]).unwrap();
+    world.set_joints(vec![rope()]).unwrap();
+    assert_eq!(centre_of(&world, "ball"), before, "not reset");
+    assert_eq!(world.joint_count(), 1);
+    run(&mut world, &mut clock, 0.4);
+    let on = centre_of(&world, "ball");
+    assert!(((on.0 - 200.0).powi(2) + (on.1 - 100.0).powi(2)).sqrt() < 81.5, "still held: {on:?}");
+
+    // The line gone, the ball is free and falls past it.
+    world.set_joints(vec![]).unwrap();
+    assert_eq!(world.joint_count(), 0);
+    run(&mut world, &mut clock, 1.0);
+    assert!(centre_of(&world, "ball").1 > 190.0, "fell free: {:?}", centre_of(&world, "ball"));
+
+    // Joined again, then the entity goes: its joint goes with it, quietly.
+    world.reconcile(vec![ball()]).unwrap();
+    world.set_joints(vec![rope()]).unwrap();
+    world.reconcile(vec![]).unwrap();
+    world.set_joints(vec![]).unwrap();
+    assert_eq!(world.joint_count(), 0);
+    run(&mut world, &mut clock, 0.1);
+}
+
+#[test]
+fn a_bad_joint_is_refused_and_the_last_good_ones_kept() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let wall = solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![ball, wall, plank("plank", (100.0, 200.0), &d)]).unwrap();
+    let rope = |id: &str| joint(id, JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope("good")]).unwrap();
+    let cases: Vec<(Vec<JointSpec>, &str)> = vec![
+        (vec![joint("j", JointKind::Rope { length: 80.0 }, "ghost", (0.0, 0.0), None, (0.0, 0.0))], "there is no such entity \"ghost\""),
+        (vec![joint("j", JointKind::Rope { length: 80.0 }, "ball", (0.0, 0.0), Some("ghost"), (0.0, 0.0))], "there is no such entity \"ghost\""),
+        (vec![joint("j", JointKind::Pin { limits: None }, "ball", (4.0, 4.0), None, (200.0, 100.0))], "needs grip"),
+        (vec![joint("j", JointKind::Rope { length: 0.0 }, "ball", (4.0, 4.0), None, (0.0, 0.0))], "length must be above 0"),
+        (vec![joint("j", JointKind::Spring { length: 5.0, stiffness: -1.0, damping: 0.0 }, "ball", (4.0, 4.0), None, (0.0, 0.0))], "stiffness must be 0 or more"),
+        (vec![joint("j", JointKind::Pin { limits: Some((90.0, 10.0)) }, "plank", (0.0, 4.0), None, (0.0, 0.0))], "limits must be low then high"),
+        (vec![rope("a"), rope("a")], "duplicate joint id \"a\""),
+        (vec![joint("", JointKind::Rope { length: 1.0 }, "ball", (0.0, 0.0), None, (0.0, 0.0))], "joint id must not be empty"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "wall", (0.0, 0.0), None, (0.0, 0.0))], "joins nothing that moves"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "ball", (0.0, 0.0), Some("ball"), (0.0, 0.0))], "a thing cannot be joined to itself"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "ball", (f64::NAN, 0.0), None, (0.0, 0.0))], "finite"),
+    ];
+    for (specs, wanted) in cases {
+        let err = world.set_joints(specs).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        assert_eq!(world.joint_count(), 1, "{wanted}: the last good kept");
+    }
+}
