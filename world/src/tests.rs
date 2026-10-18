@@ -2412,3 +2412,74 @@ fn a_bad_well_is_refused_and_the_last_good_ones_kept() {
         assert_eq!(world.wells().len(), 1, "kept");
     }
 }
+
+// ── grabbing ───────────────────────────────────────────────────────────────────────────────────
+
+fn centre_of(world: &World2d, id: &str) -> (f64, f64) {
+    let e = entity(world, id);
+    (e.pos.0 + 4.0, e.pos.1 + 4.0)
+}
+
+#[test]
+fn a_grabbed_thing_is_brought_to_the_point_even_under_gravity() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.grab("ball", (300.0, 200.0)).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let (x, y) = centre_of(&world, "ball");
+    assert!((x - 300.0).abs() < 3.0 && (y - 200.0).abs() < 3.0, "held at the point: {x},{y}");
+    // Let go, it falls: the hand was what held it.
+    world.release("ball").unwrap();
+    run(&mut world, &mut clock, 0.3);
+    assert!(centre_of(&world, "ball").1 > 220.0, "{:?}", centre_of(&world, "ball"));
+}
+
+#[test]
+fn letting_go_of_a_moving_grab_is_a_throw() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    let mut clock = 0.0;
+    // The hand drags it right at 200 a second for a second.
+    for i in 0..60 {
+        world.grab("ball", (100.0 + 200.0 * (i as f64 / 60.0), 100.0)).unwrap();
+        run(&mut world, &mut clock, 1.0 / 60.0);
+    }
+    world.release("ball").unwrap();
+    let thrown = entity(&world, "ball").velocity;
+    assert!((thrown.0 - 200.0).abs() < 40.0, "it leaves at about the hand's speed: {thrown:?}");
+    let at = centre_of(&world, "ball").0;
+    run(&mut world, &mut clock, 0.5);
+    assert!(centre_of(&world, "ball").0 > at + 70.0, "and goes on: {at} -> {:?}", centre_of(&world, "ball"));
+}
+
+#[test]
+fn a_grab_is_refused_for_what_cannot_be_held_and_dropped_with_the_entity() {
+    let d = drawing();
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    let wall = || solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wall(), EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (96.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    }]).unwrap();
+    let err = world.grab("wall", (1.0, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("grab needs a loose thing"), "{err}");
+    let err = world.grab("ghost", (1.0, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("there is no such entity"), "{err}");
+    let err = world.grab("ball", (f64::NAN, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("finite"), "{err}");
+
+    // Two grabs of one thing: the last point wins.
+    world.grab("ball", (10.0, 10.0)).unwrap();
+    world.grab("ball", (200.0, 50.0)).unwrap();
+    assert_eq!(world.grabs(), 1);
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let (x, y) = centre_of(&world, "ball");
+    assert!((x - 200.0).abs() < 3.0 && (y - 50.0).abs() < 3.0, "{x},{y}");
+
+    // The entity goes: the grab goes with it, and letting go of it is no error.
+    world.reconcile(vec![wall()]).unwrap();
+    run(&mut world, &mut clock, 0.1);
+    assert_eq!(world.grabs(), 0);
+    world.release("ball").unwrap();
+}

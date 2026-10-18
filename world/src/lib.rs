@@ -70,6 +70,12 @@ pub struct Well {
     pub pull: f64,
 }
 
+/// How fast a held thing closes on its point: a share of the distance a second.
+const GRAB_PULL: f64 = 15.0;
+
+/// The most a hand moves a thing, a second.
+const GRAB_MAX_SPEED: f64 = 3000.0;
+
 /// Past this a body crosses a world in a step and Rapier's solver goes wild.
 const MAX_GRAVITY: f64 = 100_000.0;
 
@@ -344,6 +350,8 @@ pub struct World2d {
     timers: Vec<Timer>,
     camera: Option<Camera>,
     wells: Vec<Well>,
+    /// Loose things a hand holds: where each is being brought to.
+    grabs: HashMap<Entity, (f64, f64)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -949,6 +957,7 @@ impl World2d {
 
     /// One fixed step: bodies, then zones and hits, then walkers.
     fn step(&mut self, dt: f64) {
+        self.hold();
         self.pull(dt);
         let before = self.velocities();
         self.physics.step(dt);
@@ -1114,6 +1123,57 @@ impl World2d {
         }
         self.kick(entity, by);
         Ok(())
+    }
+
+    /// Takes hold of a loose thing: each step it is driven toward `to`, so what it meets still
+    /// stops it, and gravity no longer pulls it. Again, with another point, moves the hand.
+    pub fn grab(&mut self, id: &str, to: (f64, f64)) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
+        let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
+        if !(to.0.is_finite() && to.1.is_finite()) {
+            return Err(err("grab must be finite numbers"));
+        }
+        let loose = self.ecs.get::<Solid>(entity).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        if !loose {
+            return Err(err("grab needs a loose thing: Rapier moves only those"));
+        }
+        self.grabs.insert(entity, to);
+        Ok(())
+    }
+
+    /// Lets go: it keeps the velocity the hand gave it. Nothing held, or nothing there, is fine —
+    /// a drag may end after what it held is gone.
+    pub fn release(&mut self, id: &str) -> Result<(), WorldError> {
+        if let Some(&entity) = self.by_id.get(id) {
+            self.grabs.remove(&entity);
+        }
+        Ok(())
+    }
+
+    /// How many things a hand holds.
+    pub fn grabs(&self) -> usize {
+        self.grabs.len()
+    }
+
+    /// Drives each held thing toward its point, dropping a grab whose thing is gone.
+    fn hold(&mut self) {
+        let held = |this: &Self, e: Entity| this.ecs.get::<Solid>(e).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        let gone: Vec<Entity> = self.grabs.keys().copied().filter(|&e| !held(self, e)).collect();
+        for e in gone {
+            self.grabs.remove(&e);
+        }
+        let hands: Vec<(Entity, (f64, f64))> = self.grabs.iter().map(|(&e, &p)| (e, p)).collect();
+        for (entity, to) in hands {
+            let body = self.ecs.get::<Solid>(entity).expect("held above").body;
+            let (x, y) = self.physics.centre_of(body);
+            let (mut vx, mut vy) = ((to.0 - x) * GRAB_PULL, (to.1 - y) * GRAB_PULL);
+            let speed = (vx * vx + vy * vy).sqrt();
+            if speed > GRAB_MAX_SPEED {
+                (vx, vy) = (vx / speed * GRAB_MAX_SPEED, vy / speed * GRAB_MAX_SPEED);
+            }
+            self.physics.set(body, None, Some((vx, vy)), None);
+            self.ecs.get_mut::<Solid>(entity).expect("held above").sliding = true;
+        }
     }
 
     /// Adds `by` to a loose body's velocity and keeps it followed until it rests again.

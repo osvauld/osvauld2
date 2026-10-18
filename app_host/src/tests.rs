@@ -5350,3 +5350,46 @@ fn wells_are_checked_strictly() {
     walk_world(&lua, &worlds, &room("{}")).unwrap();
     assert!(worlds.borrow()["room"].wells().is_empty(), "left out or empty: none");
 }
+
+#[test]
+fn grab_and_release_are_handler_only_and_strict_through_lua() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() return ui.col({{ ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               local room = world('room') \
+               room:grab('ball', {{ 50, 50 }}) \
+               try(function() room:grab('ball', {{ 1 }}) end) \
+               try(function() room:grab('ball', 'there') end) \
+               try(function() room:grab('hero', {{ 1, 1 }}) end) \
+               try(function() room:grab('ghost', {{ 1, 1 }}) end) \
+               room:release('ball') room:release('ghost') \
+               try(function() room:release(7) end) \
+               table.insert(heard, 'done') end, \
+             {{ id = 'hero', pos = {{ 0, 0 }}, drawing = hero }}, \
+             {{ id = 'ball', pos = {{ 20, 20 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{ friction = 0 }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    let heard = app.view().info().children[0].text.clone().unwrap();
+    for wanted in [
+        "world \"room\":grab \"ball\" needs x and y",
+        "grab \"ball\" must be { x, y }",
+        "grab needs a loose thing",
+        "entity \"ghost\": there is no such entity",
+        "world \"room\":release must be an entity id",
+        "done",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}

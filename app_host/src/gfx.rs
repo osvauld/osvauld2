@@ -414,6 +414,21 @@ impl UserData for WorldHandle {
             let (speed, radius): (f64, f64) = (need(&opts, &owner, "speed")?, need(&opts, &owner, "radius")?);
             this.command(&owner, |w| w.blast((at.x, at.y), speed, radius))
         });
+        // `rink:grab("puck", { x, y })` holds a loose thing and brings it to the point; call it
+        // again as the pointer moves, `rink:release("puck")` to let go: a throw if it was moving.
+        methods.add_method("grab", |_, this, (entity, to): (String, Value)| {
+            let owner = format!("world {:?}:grab {entity:?}", this.id);
+            let Value::Table(to) = to else {
+                return Err(Error::runtime(format!("{owner} must be {{ x, y }}, got {}", to.type_name())));
+            };
+            let to = point(to, &owner)?;
+            this.command(&owner, |w| w.grab(&entity, (to.x, to.y)))
+        });
+        methods.add_method("release", |_, this, entity: Value| {
+            let owner = format!("world {:?}:release", this.id);
+            let entity = entity_arg(entity, &owner)?;
+            this.command(&owner, |w| w.release(&entity))
+        });
         // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
         methods.add_method("after", |_, this, (secs, name): (Value, Value)| {
             let owner = format!("world {:?}:after", this.id);
@@ -532,6 +547,13 @@ fn entity_id(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<Str
             "{owner}.{field} must be an entity id, got {}",
             other.type_name()
         ))),
+    }
+}
+
+fn entity_arg(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!("{owner} must be an entity id, got {}", other.type_name()))),
     }
 }
 
