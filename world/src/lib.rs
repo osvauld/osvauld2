@@ -1234,7 +1234,10 @@ impl World2d {
             made.push(Made { a: (a.0, a.1), b: (b.map(|b| b.0), b.map_or(b_at, |b| b.1)), spec });
         }
         let wanted: HashSet<&str> = made.iter().map(|m| m.spec.id.as_str()).collect();
-        for gone in self.joints.keys().filter(|id| !wanted.contains(id.as_str())).cloned().collect::<Vec<_>>() {
+        // Sorted: removal order decides which slots a later joint reuses, and so the solver's order.
+        let mut gone: Vec<String> = self.joints.keys().filter(|id| !wanted.contains(id.as_str())).cloned().collect();
+        gone.sort();
+        for gone in gone {
             let j = self.joints.remove(&gone).expect("listed");
             self.physics.unjoin(j.handle);
         }

@@ -160,6 +160,24 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   merged release binary. Not run: `cargo test` for the other crates, native keyboard/IME,
   windowed checks, and a fresh expert review of the merge diff.
 
+### World-gravity merged with dev, reviewed (2026-10-18, in the `world-gravity` worktree; dev not advanced)
+- `dev` `737c02b` (assets) merged into `world-gravity`. Text conflicts were only `docs/status.md`
+  (both notes kept) and `scripts/smoke.py` (`smoke_asset_editor.py` and `smoke_gravity_lab.py`).
+  `cargo check --workspace --tests` was clean: no semantic breaks, though both branches touch
+  `app_host/src/{gfx,lib}.rs`.
+- Fresh review of the gravity Rust diff (expert-runtime / expert-app-host checklists). Fixed:
+  `Physics::joined` scanned every joint, so redescribing N joints each view was O(N²) — now
+  `impulse_joints.contains`; joints dropped from a description were removed in HashMap order, which
+  decides slot reuse and so the solver's order — now sorted. Checked and fine: a joint kept as
+  described survives redescription, a hand on a deleted body is dropped in `hold`, `release`
+  without a grab is a no-op, a gravity change wakes bodies only when it differs, every new surface
+  is refused whole. Notes, not defects: a joint to a kinematic walker is accepted (its pose is
+  driven by the controller, not the joint); `hold` and `pull` allocate per frame only when a hand
+  or a well exists.
+- Verified: `cargo test` world 149 (6 ignored), app_host 313 (7 ignored), runtime 168 (6 ignored),
+  shell2 86 (2 ignored); offscreen `python3 scripts/smoke.py` 28/28 on the merged release binary.
+  Not run: other crates' tests, native keyboard/IME, windowed checks.
+
 ### 2D gravity, forces, hands and joints (2026-10-18, branch `world-gravity`, not landed) — [plan](design/2d-gravity.md)
 - `ui.world` takes `gravity = { gx, gy }` (none by default, so every top-down world is unchanged),
   `wells` (radial pull fields) and `joints` (`pin` hinge with limits, `rope`, `spring`; kept across

@@ -271,7 +271,7 @@ impl Physics {
 
     /// Whether Rapier still has the joint: it goes with either of its bodies.
     pub(crate) fn joined(&self, joint: ImpulseJointHandle) -> bool {
-        self.world.impulse_joints().any(|(h, _)| h == joint)
+        self.world.impulse_joints.contains(joint)
     }
 
     pub(crate) fn gravity(&self) -> (f64, f64) {
