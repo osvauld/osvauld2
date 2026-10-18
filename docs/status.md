@@ -146,6 +146,22 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   steps (shared virtualization core, `ui.virtual_list`; the grid island belongs to
   `sharded-datasets`): [design/ui-reuse.md](design/ui-reuse.md) §2b.
 
+### 2D gravity, forces, hands and joints (2026-10-18, branch `world-gravity`, not landed) — [plan](design/2d-gravity.md)
+- `ui.world` takes `gravity = { gx, gy }` (none by default, so every top-down world is unchanged),
+  `wells` (radial pull fields) and `joints` (`pin` hinge with limits, `rope`, `spring`; kept across
+  views, one end loose); `loose.density`; handler-only `world:push`, `:blast`, `:grab`, `:release`
+  (drag then let go is a throw). All strict, all refused whole with the last good world kept.
+- A gravity change, a well or a hand keeps the world's frame clock running: two bugs the real-path
+  smoke found (unit tests tick directly) — now pinned by world tests.
+- `demo_apps/gravity_lab` ("Siege"): slingshot with a live dotted arc, a stone/wood/glass castle, a
+  domino run, a marble into a lighting bucket, a pendulum chain on rope joints, a seesaw on a pin,
+  bomb, moon/flip gravity, a gravity well, drag-to-throw of anything. `scripts/smoke_gravity_lab.py`
+  (registered): the full chain by a real pointer, run twice to the same positions, then the toys.
+  Clip: `scripts/demo_gravity_lab.py` (`shots/reel/gravity_lab.{mp4,gif}`).
+- Verified: `cargo test -p world` 149, `-p app_host` 294 (7 ignored); offscreen `smoke.py` all 27.
+  Not run: `-p shell2`/workspace suites (no shell2 source changed). Not built: Lua read-back of a
+  body's position (so no hit-position dust), joint motors, per-body gravity, 3D.
+
 ### Lua shell dev integration (2026-10-05, validation in progress)
 - Checkpoint `becddb0` preserves the validated session/list/creation slices on `lua-shell`.
   Merging dev `aa844b3` brings signals steps 1–2, cameras and the latest app-thread/sync work;

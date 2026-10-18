@@ -1,6 +1,6 @@
 # 2D gravity, forces, grabbing and joints
 
-Status: **plan, 2026-10-18; nothing built.** Branch/worktree: `world-gravity`,
+Status: **built 2026-10-18 (steps 1–6); see docs/status.md.** Tests in §0 exist under other names in `world/src/tests.rs`, `app_host/src/tests.rs` and `scripts/smoke_gravity_lab.py`. Branch/worktree: `world-gravity`,
 `.claude/worktrees/world-gravity`. Grows out of [2D world](2d-world.md) slice 5 (Rapier): bodies
 that Rapier moves already exist (`loose`), but the world has no gravity, nothing pushes a body
 except its own `velocity`, Lua cannot take hold of a body, and nothing connects two.
