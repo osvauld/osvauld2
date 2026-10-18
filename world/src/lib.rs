@@ -1371,7 +1371,9 @@ impl World2d {
     pub fn needs_ticks(&self) -> bool {
         let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
         let behind = (self.camera.as_ref()).is_some_and(|c| self.goal().is_some_and(|g| !c.arrived(g)));
-        self.ticking || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
+        // A well works on sleepers and a hand holds still ones, so either needs the clock.
+        let forces = !self.wells.is_empty() || !self.grabs.is_empty();
+        self.ticking || forces || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take

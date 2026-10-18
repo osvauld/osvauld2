@@ -23,6 +23,12 @@ local function disc(cx, cy, r)
 		{ "cubic", cx + r, cy + k, cx + k, cy + r, cx, cy + r }, { "cubic", cx - k, cy + r, cx - r, cy + k, cx - r, cy },
 		{ "cubic", cx - r, cy - k, cx - k, cy - r, cx, cy - r }, { "close" } }
 end
+local function ellipse(cx, cy, rx, ry)
+	local kx, ky = rx * 0.5523, ry * 0.5523
+	return { { "move", cx, cy - ry }, { "cubic", cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy },
+		{ "cubic", cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry }, { "cubic", cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy },
+		{ "cubic", cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry }, { "close" } }
+end
 local function drawing(w, h, shapes)
 	return gfx.drawing({ size = { w, h }, parts = { { id = "it", pivot = { w / 2, h / 2 }, shapes = shapes } } })
 end
@@ -43,7 +49,7 @@ local function bands(x, y, w, h, stops, n)
 	local shapes = {}
 	for i = 0, n - 1 do
 		local t = i / (n - 1) * (#stops - 1)
-		local s = math.min(#stops - 1, math.floor(t))
+		local s = math.min(#stops - 2, math.floor(t))
 		shapes[#shapes + 1] = { path = rectp(x, y + h * i / n, w, h / n + 1), fill = mix(stops[s + 1], stops[s + 2], t - s) }
 	end
 	return shapes
@@ -116,7 +122,7 @@ local KIND = { -- how each block is drawn and made
 	wood = { base = "#c58b4e", hi = "#e8b27a", lo = "#8a5a2c", mat = { bounce = 0.3, friction = 0.02, grip = 0.7, density = 0.7 } },
 	glass = { base = "#8fe3f8aa", hi = "#ffffffcc", lo = "#4aa7c4aa", edge = "#e8fbffcc",
 		mat = { bounce = 0.5, friction = 0.02, grip = 0.4, density = 0.8 } },
-	domino = { base = "#e0505a", hi = "#ff9aa0", lo = "#9a2a35", mat = { bounce = 0.2, friction = 0.02, grip = 0.9, density = 1 } },
+	domino = { base = "#e0505a", hi = "#ff9aa0", lo = "#9a2a35", mat = { bounce = 0.2, friction = 0.02, grip = 0.9, density = 1.5 } },
 }
 
 -- ── the scene as data ─────────────────────────────────────────────────────────────────────────
@@ -138,7 +144,12 @@ local function castle()
 	add("g2", "glass", 536, 254, 16, 16)
 	add("g3", "glass", 466, 300, 10, 26)
 	add("g4", "glass", 512, 300, 10, 26)
-	for i = 0, 11 do add("d" .. i, "domino", 596 + 17 * i, 440 - 34, 8, 34) end
+	-- dominoes grow taller along the run, so each hits harder than the last; the last is a hammer
+	local x = 600
+	for i, h in ipairs({ 30, 34, 38, 43, 48, 54, 60 }) do
+		add("d" .. (i - 1), "domino", x, 440 - h, 8, h)
+		x = x + 8 + 0.45 * h
+	end
 	add("crate1", "wood", 478, FY - 24, 24, 24)
 	add("seesaw_c1", "wood", 196, FY - 58, 22, 24)
 	return b
@@ -153,7 +164,7 @@ end
 state = fresh()
 
 local SLING = { 96, 392 } -- where the stone rests; pulled back, up to PULL away
-local PULL, POWER, PIPS, BAND = 72, 8.5, 16, 6
+local PULL, POWER, PIPS, BAND = 72, 11, 16, 6
 
 local grabbable = {} -- ids a drag may take; rebuilt each view
 
@@ -171,14 +182,18 @@ local function build()
 	local function add(e) out[#out + 1] = e end
 	add({ id = "sky", pos = { 0, 0 }, drawing = sky() })
 	-- contact shadows: soft dark ellipses on the ground under the structures
-	add({ id = "shadow", pos = { 380, FY - 6 }, drawing = memo("shadow", function()
-		return drawing(240, 12, { { path = disc(120, 6, 120), fill = "#00000033" }, { path = disc(120, 6, 80), fill = "#00000033" } })
+	add({ id = "shadow", pos = { 405, FY - 7 }, drawing = memo("shadow", function()
+		return drawing(190, 14, { { path = ellipse(95, 7, 95, 6), fill = "#00000030" }, { path = ellipse(95, 7, 70, 4.5), fill = "#00000040" } })
+	end) })
+	add({ id = "shadow2", pos = { 580, FY - 41 }, drawing = memo("shadow2", function()
+		return drawing(250, 5, { { path = ellipse(125, 2.5, 125, 2.5), fill = "#00000040" } })
 	end) })
 	-- floor, plinth, shelf and ramp: fixed colliders
 	add({ id = "floor", pos = { 0, FY }, drawing = ground(), collider = { rect = { W, H - FY } } })
+	add({ id = "wall:t", pos = { 0, -20 }, drawing = invisible(W, 20), collider = { rect = { W, 20 } } }) -- flipped gravity piles up here
 	add({ id = "wall:l", pos = { -20, 0 }, drawing = invisible(20, H), collider = { rect = { 20, H } } })
 	add({ id = "wall:r", pos = { W, 0 }, drawing = invisible(20, H), collider = { rect = { 20, H } } })
-	add({ id = "plinth", pos = { 56, 424 }, drawing = slab(80, 56, "#6b5b4a", "#9a8670", "#3f3428"), collider = { rect = { 80, 56 } } })
+	add({ id = "plinth", pos = { 82, 424 }, drawing = slab(28, 56, "#6b5b4a", "#9a8670", "#3f3428"), collider = { rect = { 28, 56 } } })
 	add({ id = "shelf", pos = { 580, 440 }, drawing = slab(240, 40, "#5b6075", "#8d93a6", "#3a3e50"), collider = { rect = { 240, 40 } } })
 	local RS, RW = 18, 4.5
 	for i = 0, RS - 1 do -- a slope in fine steps, the box colliders being axis-aligned
@@ -193,6 +208,12 @@ local function build()
 		return drawing(48, 28, { { path = rectp(0, 0, 48, 28), fill = c .. (state.goal and "" or "55") },
 			{ path = rectp(0, 24, 48, 4), fill = state.goal and "#fff6b0" or "#2a2118" } })
 	end), sensor = { rect = { 48, 28 } } })
+	if state.goal then
+		add({ id = "glow", pos = { 870, 400 }, drawing = memo("glow", function()
+			return drawing(110, 90, { { path = ellipse(55, 45, 55, 45), fill = "#ffe06622" }, { path = ellipse(55, 50, 38, 32), fill = "#ffe06633" },
+				{ path = ellipse(55, 56, 22, 18), fill = "#fff6b055" } })
+		end) })
+	end
 	add({ id = "goal", pos = { 906, 452 }, drawing = invisible(40, 28), sensor = { rect = { 40, 28 } } })
 	-- the kill zone along the ground where the castle stands: a pig that reaches it is down
 	add({ id = "killzone", pos = { 380, FY - 18 }, drawing = invisible(240, 18), sensor = { rect = { 240, 18 } } })
@@ -217,16 +238,17 @@ local function build()
 	local PIGM = { bounce = 0.35, friction = 0.02, grip = 0.5, density = 0.9 }
 	if state.pigs.pig_roof then add(loose(N("pig_roof"), 478, 256 - 14, pig(14), { circle = 14, at = { 14, 14 } }, PIGM)) end
 	if state.pigs.pig_mid then add(loose(N("pig_mid"), 482, 326 - 24, pig(12), { circle = 12, at = { 12, 12 } }, PIGM)) end
-	-- the marble waiting at the shelf's edge
-	add(loose(N("marble"), 802, 440 - 20, ball(10, "#6fa8ff", "#d6e6ff", "#2a4a8a"), { circle = 10, at = { 10, 10 } },
-		{ bounce = 0.3, friction = 0.01, grip = 0.6, density = 2 }))
+	-- the marble waiting on a post at the shelf's edge, where the hammer will strike it
+	add({ id = "post", pos = { 788, 400 }, drawing = slab(12, 40, "#7a6a55", "#a89478", "#4a3f30"), collider = { rect = { 12, 40 } } })
+	add(loose(N("marble"), 784, 380, ball(10, "#6fa8ff", "#d6e6ff", "#2a4a8a"), { circle = 10, at = { 10, 10 } },
+		{ bounce = 0.3, friction = 0.01, grip = 0.6, density = 0.5 }))
 	-- the pendulum: a chain of small links on rope joints, ending in an iron ball
-	local ax, ay, LINKS = 390, 24, 8
+	local ax, ay, LINKS = 390, 24, 9
 	for i = 0, LINKS - 1 do
-		add(loose(N("link" .. i), ax - 5, ay + 30 * (i + 1) - 5, ball(5, "#b9bcc8", "#ffffff", "#6a6e7e"), { circle = 5, at = { 5, 5 } },
+		add(loose(N("link" .. i), ax - 7, ay + 26 * (i + 1) - 7, ball(7, "#7d8497", "#dfe3f0", "#3d4152"), { circle = 7, at = { 7, 7 } },
 			{ bounce = 0.1, friction = 0.05, grip = 0.1, density = 3 }))
 	end
-	add(loose(N("bob"), ax - 22, ay + 30 * (LINKS + 1) - 22, ball(22, "#4a4f63", "#9aa0b8", "#1f2230"), { circle = 22, at = { 22, 22 } },
+	add(loose(N("bob"), ax - 22, ay + 26 * (LINKS + 1) - 22, ball(22, "#4a4f63", "#9aa0b8", "#1f2230"), { circle = 22, at = { 22, 22 } },
 		{ bounce = 0.2, friction = 0.03, grip = 0.3, density = 4 }))
 	add({ id = "anchor", pos = { ax - 8, ay - 8 }, drawing = ball(8, "#d9b07a", "#fff3d0", "#7a5230") })
 	-- the seesaw: a plank on a pin joint, centred on a fulcrum
@@ -238,19 +260,19 @@ local function build()
 	-- the shots fired so far
 	for _, s in ipairs(state.shots) do
 		add(loose(s, state[s].x - 11, state[s].y - 11, ball(11, "#9aa0b3", "#d9deee", "#5b6075"), { circle = 11, at = { 11, 11 } },
-			{ bounce = 0.1, friction = 0.02, grip = 0.6, density = 6 }))
+			{ bounce = 0.1, friction = 0.02, grip = 0.6, density = 14 }))
 	end
 	return out
 end
 
 local function joints()
-	local j, LINKS = {}, 8
+	local j, LINKS = {}, 9
 	local function rope(id, a, b, b_at, length)
-		j[#j + 1] = { id = id, kind = "rope", a = a, a_at = { 5, 5 }, b = b, b_at = b_at, length = length }
+		j[#j + 1] = { id = id, kind = "rope", a = a, a_at = { 7, 7 }, b = b, b_at = b_at, length = length }
 	end
-	rope("chain0", N("link0"), nil, { 390, 24 }, 30)
-	for i = 1, LINKS - 1 do rope("chain" .. i, N("link" .. i), N("link" .. (i - 1)), { 5, 5 }, 30) end
-	j[#j + 1] = { id = "chainbob", kind = "rope", a = N("bob"), a_at = { 22, 22 }, b = N("link" .. (LINKS - 1)), b_at = { 5, 5 }, length = 30 }
+	rope("chain0", N("link0"), nil, { 390, 24 }, 26)
+	for i = 1, LINKS - 1 do rope("chain" .. i, N("link" .. i), N("link" .. (i - 1)), { 7, 7 }, 26) end
+	j[#j + 1] = { id = "chainbob", kind = "rope", a = N("bob"), a_at = { 22, 22 }, b = N("link" .. (LINKS - 1)), b_at = { 7, 7 }, length = 26 }
 	j[#j + 1] = { id = "seesaw", kind = "pin", a = N("seesaw"), a_at = { 80, 5 }, b_at = { 270, FY - 22 - 7 }, limits = { -12, 12 } }
 	return j
 end

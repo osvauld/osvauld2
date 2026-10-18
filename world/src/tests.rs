@@ -2649,3 +2649,20 @@ fn a_bad_joint_is_refused_and_the_last_good_ones_kept() {
         assert_eq!(world.joint_count(), 1, "{wanted}: the last good kept");
     }
 }
+
+#[test]
+fn a_world_with_a_well_or_a_hand_keeps_asking_for_ticks_even_when_all_is_asleep() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    assert!(!world.needs_ticks(), "a world of sleepers needs no clock");
+    world.set_wells(vec![Well { at: (0.0, 0.0), radius: 10.0, pull: 1.0 }]).unwrap();
+    assert!(world.needs_ticks(), "a well can only work on a ticking world");
+    world.set_wells(vec![]).unwrap();
+    assert!(!world.needs_ticks());
+    world.grab("ball", (50.0, 50.0)).unwrap();
+    assert!(world.needs_ticks(), "a hand moves what it holds a step at a time");
+    world.release("ball").unwrap();
+    // Let go, it is awake and sliding until it rests again; the clock stops once it does.
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 3.0);
+    assert!(!world.needs_ticks(), "and at rest again, it needs none");
+}
