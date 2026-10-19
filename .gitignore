@@ -27,3 +27,4 @@ __pycache__/
 
 # dev vault stores (real encrypted accounts) — never committed
 osvauld-drive-data/
+/target
