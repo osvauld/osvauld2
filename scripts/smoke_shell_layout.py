@@ -38,18 +38,19 @@ for width in (320, 393, 900):
         field(rpc, "passphrase", width, min(width - 32, 460))
         field(rpc, "login", width, min(width - 32, 460))
         rpc.unlock("layout", "demo")
-        wait_for(lambda: any(r["id"] == "workspace_name" for r in rpc.rects()))
-        field(rpc, "workspace_name", width, min(width - 32, 420))
-        rpc.create_workspace("Phone")
-        wait_for(lambda: any(r["id"] == "add_space" for r in rpc.rects()))
-        assert len(rpc.list_workspaces()) == 1
-        for element in ("claim_node", "add_space", rpc.list_workspaces()[0]["id"]):
+        # Past auth the Lua launcher owns the list and creation form; claim stays Rust chrome.
+        wait_for(lambda: any(r["id"] == "launcher:new-workspace" for r in rpc.rects()))
+        field(rpc, "launcher:new-workspace", width)
+        field(rpc, "claim_node", width)
+        rpc.click_at(*rpc.centre_of("launcher:new-workspace"))
+        for element in ("launcher:create:name", "launcher:create:submit", "launcher:create:cancel"):
             field(rpc, element, width)
-        rpc.click_at(*rpc.centre_of("add_space"))
-        field(rpc, "workspace_name", width, min(width * 0.9, 320) - 24)
-        rpc.create_workspace("Second")
-        wait_for(lambda: len(rpc.list_workspaces()) == 2)
-        wait_for(lambda: not any(r["id"] == "workspace_name" for r in rpc.rects()))
+        rpc.click_at(*rpc.centre_of("launcher:create:cancel"))
+        rpc.create_workspace("Phone")
+        wait_for(lambda: len(rpc.list_workspaces()) == 1)
+        space = "launcher:space:" + rpc.list_workspaces()[0]["id"]
+        wait_for(lambda: any(r["id"] == space for r in rpc.rects()))
+        field(rpc, space, width)
         rpc.click_at(*rpc.centre_of("claim_node"))
         field(rpc, "claim_ticket", width, min(width * 0.9, 360) - 24)
-        print(f"shell layout {width}x720: signup, unlock, workspace creation and popovers ok")
+        print(f"shell layout {width}x720: signup, unlock, launcher creation and claim popover ok")

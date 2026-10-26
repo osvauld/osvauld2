@@ -17,7 +17,11 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - Android merged with `dev` (**2026-10-06**, `android-support`): `shell2/src/main.rs` is a thin
   entry over `lib.rs`; `runtime`'s Android `about_to_wait` runs ahead of `dev`'s window sync.
   Verified: `cargo test -p shell2 -p runtime`, aarch64 and x86_64 debug APKs build, and
-  `smoke_android_sync.py` passes on the API 35 emulator. The emulator needs `-gpu host`:
+  `smoke_android_sync.py` passes on the API 35 emulator. **Landed on `dev` 2026-10-26**:
+  `dev`'s `main.rs` changes three-way merged into `lib.rs`; `smoke_shell_layout.py` now checks
+  the Lua launcher's elements past auth. Verified: workspace check, `cargo test -p shell2 -p
+  runtime`, aarch64 debug APK, full `smoke.py` (Android sync smoke skipped, no emulator run).
+  The emulator needs `-gpu host`:
   SwiftShader lacks `SHADER_FLOAT16_IN_FLOAT32`, which Vello's flatten shader requires.
 - `android_app` packages that runtime as an ARM64 NativeActivity APK with a bundled-font
   text/vector probe, Android API 28 minimum and API 35 target. Debug APK build, signature
