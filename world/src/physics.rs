@@ -58,6 +58,18 @@ const WALKER: KinematicCharacterController = KinematicCharacterController {
     normal_nudge_factor: 1.0e-4,
 };
 
+/// What a joint holds two bodies (or a body and the world) to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JointKind {
+    /// A hinge: the two anchors stay together and the bodies turn about them, within `limits`
+    /// (degrees, low then high) if given.
+    Pin { limits: Option<(f64, f64)> },
+    /// A string: the anchors may come nearer but never be farther apart than `length`.
+    Rope { length: f64 },
+    /// A spring pulling the anchors to `length` apart.
+    Spring { length: f64, stiffness: f64, damping: f64 },
+}
+
 /// What a body Rapier moves is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
@@ -69,12 +81,15 @@ pub struct Material {
     /// How much its surface catches at a contact: a glancing hit sets it turning. Without, it
     /// never turns — the drawing stays upright.
     pub grip: Option<f64>,
+    /// Mass per area: a stone ball outweighs a wooden one the same size, so it flings what it
+    /// strikes and is hardly slowed by it.
+    pub density: f64,
 }
 
 impl Default for Material {
     /// A let-go chest's: a modest bounce, at rest in about half a second.
     fn default() -> Self {
-        Self { bounce: 0.5, friction: 6.0, grip: None }
+        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }
     }
 }
 
@@ -88,6 +103,9 @@ impl Material {
         }
         if let Some(g) = self.grip.filter(|g| !(g.is_finite() && *g >= 0.0)) {
             return Err(format!("grip must be 0 or more, got {g}"));
+        }
+        if !(self.density.is_finite() && self.density > 0.0) {
+            return Err(format!("density must be above 0, got {}", self.density));
         }
         Ok(())
     }
@@ -106,6 +124,8 @@ pub(crate) enum Body {
 
 pub(crate) struct Physics {
     world: PhysicsWorld,
+    /// A fixed body at the origin, for a joint to the world itself: made when first asked.
+    ground: Option<RigidBodyHandle>,
 }
 
 impl Default for Physics {
@@ -117,7 +137,7 @@ impl Default for Physics {
         // apart at 3. Resting overlap stays a tenth of a unit, not half: less than a pixel shows.
         world.integration_parameters.length_unit = 100.0;
         world.integration_parameters.normalized_allowed_linear_error = 0.001;
-        Self { world }
+        Self { world, ground: None }
     }
 }
 
@@ -159,14 +179,15 @@ impl Physics {
             }
         };
         // Walls and walkers keep nothing; a bounce is the moving body's own (the larger of two).
-        let (bounce, grip) = match kind {
-            Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32),
-            _ => (0.0, 0.0),
+        let (bounce, grip, density) = match kind {
+            Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32, m.density as f32),
+            _ => (0.0, 0.0, 1.0),
         };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
         if let Some(c) = solid {
             let solid = shape(c, anchor)
+                .density(density)
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(grip)
@@ -189,6 +210,78 @@ impl Physics {
             colliders.insert_with_parent(zone.user_data(owner as u128), body, bodies);
         }
         body
+    }
+
+    /// Joins body `a` to `b` — to the world, with none — each at an anchor in its own body's
+    /// frame (the world's own, for the world).
+    pub(crate) fn join(
+        &mut self,
+        a: RigidBodyHandle,
+        a_at: (f64, f64),
+        b: Option<RigidBodyHandle>,
+        b_at: (f64, f64),
+        kind: JointKind,
+        contacts: bool,
+    ) -> ImpulseJointHandle {
+        let b = match b {
+            Some(b) => b,
+            None => match self.ground {
+                Some(ground) => ground,
+                None => {
+                    let ground = self.world.insert_body(RigidBodyBuilder::fixed());
+                    *self.ground.insert(ground)
+                }
+            },
+        };
+        let v = |p: (f64, f64)| Vector::new(p.0 as f32, p.1 as f32);
+        let joint: GenericJoint = match kind {
+            JointKind::Pin { limits } => {
+                let hinge = RevoluteJointBuilder::new()
+                    .local_anchor1(v(a_at))
+                    .local_anchor2(v(b_at))
+                    .contacts_enabled(contacts);
+                match limits {
+                    Some((lo, hi)) => hinge.limits([lo.to_radians() as f32, hi.to_radians() as f32]),
+                    None => hinge,
+                }
+                .build()
+                .into()
+            }
+            JointKind::Rope { length } => RopeJointBuilder::new(length as f32)
+                .local_anchor1(v(a_at))
+                .local_anchor2(v(b_at))
+                .contacts_enabled(contacts)
+                .build()
+                .into(),
+            JointKind::Spring { length, stiffness, damping } => {
+                SpringJointBuilder::new(length as f32, stiffness as f32, damping as f32)
+                    .local_anchor1(v(a_at))
+                    .local_anchor2(v(b_at))
+                    .contacts_enabled(contacts)
+                    .build()
+                    .into()
+            }
+        };
+        self.world.insert_impulse_joint(a, b, joint)
+    }
+
+    pub(crate) fn unjoin(&mut self, joint: ImpulseJointHandle) {
+        self.world.remove_impulse_joint(joint);
+    }
+
+    /// Whether Rapier still has the joint: it goes with either of its bodies.
+    pub(crate) fn joined(&self, joint: ImpulseJointHandle) -> bool {
+        self.world.impulse_joints.contains(joint)
+    }
+
+    pub(crate) fn gravity(&self) -> (f64, f64) {
+        (self.world.gravity.x as f64, self.world.gravity.y as f64)
+    }
+
+    /// Every body is woken, since one that was resting may now fall.
+    pub(crate) fn set_gravity(&mut self, g: (f64, f64)) {
+        self.world.gravity = Vector::new(g.0 as f32, g.1 as f32);
+        self.world.wake_up_all(true);
     }
 
     /// Moves a body that does not collide — one with only a sensor — by `by`.

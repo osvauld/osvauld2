@@ -8,6 +8,22 @@ fn fresh() -> (Vault, TempDir) {
 }
 
 #[test]
+fn delayed_workspace_creation_cannot_write_into_another_account() {
+    let (mut vault, _tmp) = fresh();
+    let (alice, _) = vault.signup("alice", "pw").unwrap();
+    let worker = vault.clone();
+    vault.lock();
+    assert!(worker.create_workspace_for(&alice, "locked").is_err());
+    vault.signup("bob", "pw").unwrap();
+    assert!(worker.create_workspace_for(&alice, "wrong account").is_err());
+    assert!(vault.workspaces().unwrap().is_empty());
+    vault.lock();
+    vault.login(&alice, "pw").unwrap();
+    let workspace = worker.create_workspace_for(&alice, "Alice workspace").unwrap();
+    assert_eq!(vault.workspaces().unwrap(), vec![workspace]);
+}
+
+#[test]
 fn empty_vault_has_no_accounts() {
     let (vault, _tmp) = fresh();
     assert!(vault.is_empty());
@@ -588,4 +604,63 @@ fn a_locked_account_adopts_nothing() {
         }),
         Err(VaultError::Locked)
     ));
+}
+
+fn adopted(ws_id: &str, id: char, name: &str, created: u64) -> WorkspaceItem {
+    WorkspaceItem {
+        id: id.to_string().repeat(32),
+        ws_id: ws_id.to_string(),
+        name: name.to_string(),
+        kind: ItemKind::Asset,
+        created,
+    }
+}
+
+#[test]
+fn an_item_is_found_by_name_and_kind_within_its_workspace() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let ws = vault.create_workspace("ws").unwrap();
+    let other = vault.create_workspace("other").unwrap();
+    let hero = vault.create_item(&ws.id, "hero", ItemKind::Asset).unwrap();
+    vault.create_item(&ws.id, "hero", ItemKind::App).unwrap();
+    vault
+        .create_item(&other.id, "chest", ItemKind::Asset)
+        .unwrap();
+
+    let found = vault.item_named(&ws.id, "hero", ItemKind::Asset).unwrap();
+    assert_eq!(found, Some(hero));
+    let elsewhere = vault.item_named(&ws.id, "chest", ItemKind::Asset).unwrap();
+    assert_eq!(elsewhere, None);
+}
+
+/// Two peers each made a "hero" offline; after sync both hold both, and both must pick the
+/// same one — the oldest, and the lower id on a tie.
+#[test]
+fn duplicate_names_resolve_to_the_oldest_then_the_lower_id() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let ws = vault.create_workspace("ws").unwrap();
+    for (id, created) in [('c', 5), ('b', 3), ('d', 9)] {
+        vault
+            .adopt_item(&adopted(&ws.id, id, "hero", created))
+            .unwrap();
+    }
+    let pick = |v: &Vault| {
+        v.item_named(&ws.id, "hero", ItemKind::Asset)
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    assert_eq!(pick(&vault), "b".repeat(32));
+
+    vault.adopt_item(&adopted(&ws.id, 'a', "hero", 3)).unwrap();
+    assert_eq!(pick(&vault), "a".repeat(32));
+}
+
+#[test]
+fn finding_by_name_requires_an_unlocked_account() {
+    let (vault, _tmp) = fresh();
+    let got = vault.item_named(&"a".repeat(32), "hero", ItemKind::Asset);
+    assert!(matches!(got, Err(VaultError::Locked)));
 }

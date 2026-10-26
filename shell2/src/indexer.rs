@@ -147,7 +147,7 @@ impl ItemIndex {
 
 /// Plan and stage `names`, reading each from the live core when the app has it open — no copy
 /// of a large doc per flush — and from the vault's snapshot when it does not. One commit.
-fn reindex<M: 'static>(shared: &Shared, app: &LuaApp<M>, names: Vec<String>) -> Result<(), String> {
+fn reindex<M: Clone + 'static>(shared: &Shared, app: &LuaApp<M>, names: Vec<String>) -> Result<(), String> {
     let home = shared.borrow().home.clone();
     let mut notes = Vec::new();
     // Bound first: in the `for` header the borrow would live for the whole loop.
@@ -174,7 +174,7 @@ fn reindex<M: 'static>(shared: &Shared, app: &LuaApp<M>, names: Vec<String>) -> 
 
 /// Every covered doc the item has — open now, or only in the vault. Fingerprints make this
 /// cheap when nothing changed, which is what lets it run at every open and every spec edit.
-fn catch_up<M: 'static>(shared: &Shared, app: &LuaApp<M>) -> Result<(), String> {
+fn catch_up<M: Clone + 'static>(shared: &Shared, app: &LuaApp<M>) -> Result<(), String> {
     let mut names = app.open_doc_names();
     if let Some((vault, ws, item)) = &shared.borrow().home {
         names.extend(vault.doc_names(ws, item).map_err(|e| e.to_string())?);
@@ -185,7 +185,7 @@ fn catch_up<M: 'static>(shared: &Shared, app: &LuaApp<M>) -> Result<(), String> 
 }
 
 /// Wire an opened app to its index: load `index.lua`, catch up, and answer `search.query`.
-pub fn attach<M: 'static>(shared: &Shared, app: &mut LuaApp<M>) -> Result<(), String> {
+pub fn attach<M: Clone + 'static>(shared: &Shared, app: &mut LuaApp<M>) -> Result<(), String> {
     if let Err(e) = shared.borrow_mut().sync_spec(app.read_source_file("index.lua")) {
         app.note(e);
     }
@@ -200,7 +200,7 @@ pub fn attach<M: 'static>(shared: &Shared, app: &mut LuaApp<M>) -> Result<(), St
 }
 
 /// After a flush: re-plan the docs it saved, or every covered doc if `index.lua` changed.
-pub fn index_dirty<M: 'static>(shared: &Shared, app: &LuaApp<M>, dirtied: &[String]) -> Result<(), String> {
+pub fn index_dirty<M: Clone + 'static>(shared: &Shared, app: &LuaApp<M>, dirtied: &[String]) -> Result<(), String> {
     let changed = shared.borrow_mut().sync_spec(app.read_source_file("index.lua"));
     match changed {
         Err(e) => {

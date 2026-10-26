@@ -1043,7 +1043,7 @@ fn fling(material: Material, wall_x: Option<f64>, after: usize) -> (Vec<(f64, f6
 #[test]
 fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
     let rebound = |bounce| {
-        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None }, Some(52.0), 20);
+        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None, density: 1.0 }, Some(52.0), 20);
         trace.iter().map(|&(_, vx)| vx).fold(f64::MAX, f64::min)
     };
     // Let go at 100/s, 4 short of the wall: it hits almost at once, then comes back.
@@ -1055,7 +1055,7 @@ fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
 #[test]
 fn friction_decides_how_far_a_loose_thing_slides() {
     let slid = |friction| {
-        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None }, None, 60);
+        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None, density: 1.0 }, None, 60);
         trace.last().unwrap().0
     };
     let (ball, crate_) = (slid(0.5), slid(8.0));
@@ -1157,7 +1157,7 @@ fn a_line_stops_only_the_group_it_blocks() {
             ..solid("line", (30.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d)
         };
         let thing = EntitySpec {
-            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
+            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
             ..solid("box", (12.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
         };
         let mut world = World2d::default();
@@ -1195,7 +1195,7 @@ fn a_fast_loose_thing_does_not_pass_through_a_thin_wall() {
             pivot: (0.0, 0.0),
             turn: false,
         }),
-        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
         ..solid("puck", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
     let wall = || solid("wall", (320.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
@@ -1245,7 +1245,7 @@ fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() 
         ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None }),
+        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }),
         ..solid("puck", (5.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     world.reconcile(vec![hero, puck]).unwrap();
@@ -1262,7 +1262,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     let specs = || {
         let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
         let puck = EntitySpec {
-            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None }),
+            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None, density: 1.0 }),
             ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
         };
         vec![wall, puck]
@@ -1364,7 +1364,7 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
     let d = drawing();
     let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1443,7 +1443,7 @@ fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
         ..solid("paddle", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None }),
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density: 1.0 }),
         ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1470,7 +1470,7 @@ fn spun(
     let d = drawing();
     let floor = solid("floor", (-500.0, 40.0), Shape::Rect(1000.0, 4.0), (0.0, 0.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction, grip }),
+        loose: Some(Material { bounce: 0.5, friction, grip, density: 1.0 }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1622,7 +1622,7 @@ fn run_at(fps: f64) -> ((f64, f64), (f64, f64), u64) {
     let d = drawing();
     let wall = solid("wall", (300.0, -100.0), Shape::Rect(4.0, 200.0), (0.0, 0.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.3) }),
+        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.3), density: 1.0 }),
         ..solid("puck", (0.0, 40.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let hero = EntitySpec {
@@ -1700,7 +1700,7 @@ fn crowd(d: &Arc<Drawing>, grass: usize) -> Vec<EntitySpec> {
     for i in 0..200 {
         let at = ((i % 20) as f64 * 200.0 + 100.0, (i / 20) as f64 * 400.0 + 120.0);
         specs.push(EntitySpec {
-            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None }),
+            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None, density: 1.0 }),
             ..solid(&format!("ball{i}"), at, Shape::Circle(4.0), (4.0, 4.0), &d)
         });
     }
@@ -2156,4 +2156,515 @@ fn bench_world_frame_camera() {
     bench("world_frame_20000_camera", 20, || {
         world.frame(VIEW.0, VIEW.1).unwrap();
     });
+}
+
+// ── gravity ────────────────────────────────────────────────────────────────────────────────────
+
+/// A loose ball (radius 4, box 8) and a fixed floor whose top is at `floor_y`.
+fn ball_over_floor(floor_y: f64, ball: Material) -> (Vec<EntitySpec>, Arc<Drawing>) {
+    let d = drawing();
+    let ball = EntitySpec {
+        loose: Some(ball),
+        ..solid("ball", (50.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let floor = solid("floor", (0.0, floor_y), Shape::Rect(400.0, 20.0), (0.0, 0.0), &d);
+    (vec![ball, floor], d)
+}
+
+const DEAD: Material = Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 };
+
+/// Ticks `secs` of 1/60 s frames from `*clock`.
+fn run(world: &mut World2d, clock: &mut f64, secs: f64) {
+    for _ in 0..(secs * 60.0).round() as usize {
+        *clock += 1.0 / 60.0;
+        world.tick(*clock, 1.0 / 60.0);
+    }
+}
+
+fn ball_of(world: &World2d) -> EntityInspection {
+    world.inspect().into_iter().find(|e| e.id == "ball").expect("a ball")
+}
+
+#[test]
+fn gravity_pulls_a_loose_thing_down_and_it_rests_on_the_floor() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    // Free fall: about ½·g·t² = 112.5 in half a second.
+    let fallen = ball_of(&world).pos.1;
+    assert!((fallen - 112.5).abs() < 15.0, "fell {fallen}");
+    run(&mut world, &mut clock, 3.0);
+    let b = ball_of(&world);
+    assert!((b.pos.1 + 8.0 - 500.0).abs() < 2.0, "rests on the floor: {b:?}");
+    assert_eq!((b.body, b.velocity), ("loose", (0.0, 0.0)), "asleep and still: {b:?}");
+}
+
+#[test]
+fn no_gravity_set_keeps_the_old_top_down_behaviour() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.reconcile(specs).unwrap();
+    assert_eq!(world.gravity(), (0.0, 0.0));
+    world.set("ball", Set { velocity: Some((100.0, 0.0)), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let b = ball_of(&world);
+    assert!((b.pos.0 - 150.0).abs() < 3.0 && b.pos.1.abs() < 0.5, "glided straight: {b:?}");
+}
+
+#[test]
+fn a_thing_spawned_in_a_gravity_world_starts_awake_and_falls() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    assert!(world.needs_ticks(), "a falling world needs the clock");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.3);
+    assert!(ball_of(&world).pos.1 > 20.0, "it fell: {:?}", ball_of(&world));
+}
+
+#[test]
+fn changing_gravity_wakes_the_sleepers() {
+    let (specs, _) = ball_over_floor(500.0, DEAD);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 3.0);
+    let rested = ball_of(&world).pos.1;
+    assert!(!world.needs_ticks(), "at rest, no clock");
+    world.set_gravity((0.0, -900.0)).unwrap();
+    assert!(world.needs_ticks(), "a flip wakes the world: the frame clock has to start");
+    run(&mut world, &mut clock, 0.5);
+    assert!(ball_of(&world).pos.1 < rested - 20.0, "it rose: {rested} -> {:?}", ball_of(&world));
+}
+
+#[test]
+fn a_bad_gravity_is_refused_and_the_last_good_one_kept() {
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    for bad in [(f64::NAN, 0.0), (0.0, f64::INFINITY), (0.0, 1.0e9)] {
+        let err = world.set_gravity(bad).unwrap_err().to_string();
+        assert!(err.contains("gravity"), "{err}");
+        assert_eq!(world.gravity(), (0.0, 900.0));
+    }
+}
+
+// ── density ────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_denser_thing_flings_a_lighter_one_further_than_it_slows() {
+    let d = drawing();
+    let ball = |id: &str, x: f64, density: f64| EntitySpec {
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density }),
+        ..solid(id, (x, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![ball("heavy", 0.0, 10.0), ball("light", 30.0, 1.0)]).unwrap();
+    world.set("heavy", Set { velocity: Some((200.0, 0.0)), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    let vx = |id: &str| world.inspect().into_iter().find(|e| e.id == id).unwrap().velocity.0;
+    // An elastic head-on meeting of 10 and 1: the light one leaves at 20/11 of the heavy one's
+    // speed, the heavy one at 9/11 of it.
+    assert!(vx("light") > 300.0, "flung: {}", vx("light"));
+    assert!(vx("heavy") > 130.0, "hardly slowed: {}", vx("heavy"));
+}
+
+#[test]
+fn a_bad_density_is_refused() {
+    let d = drawing();
+    let crate_ = |density| EntitySpec {
+        loose: Some(Material { density, ..Material::default() }),
+        ..solid("crate", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let err = world.reconcile(vec![crate_(bad)]).unwrap_err().to_string();
+        assert!(err.contains("density must be above 0"), "{bad}: {err}");
+    }
+}
+
+// ── forces: push, blast, wells ─────────────────────────────────────────────────────────────────
+
+/// Loose balls (radius 4) by their centres, at rest and friction-free, in a world with no gravity.
+fn balls_at(centres: &[(&str, f64, f64)]) -> World2d {
+    let d = drawing();
+    let specs = centres
+        .iter()
+        .map(|&(id, x, y)| EntitySpec {
+            loose: Some(DEAD),
+            ..solid(id, (x - 4.0, y - 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+        })
+        .collect();
+    let mut world = World2d::default();
+    world.reconcile(specs).unwrap();
+    world
+}
+
+fn entity(world: &World2d, id: &str) -> EntityInspection {
+    world.inspect().into_iter().find(|e| e.id == id).unwrap_or_else(|| panic!("no {id}"))
+}
+
+#[test]
+fn a_push_adds_to_a_loose_things_velocity_and_wakes_it() {
+    let mut world = balls_at(&[("ball", 50.0, 50.0)]);
+    assert!(!world.needs_ticks(), "asleep");
+    world.push("ball", (100.0, 0.0)).unwrap();
+    assert_eq!(entity(&world, "ball").velocity, (100.0, 0.0));
+    world.push("ball", (0.0, -40.0)).unwrap();
+    assert_eq!(entity(&world, "ball").velocity, (100.0, -40.0), "adds, not sets");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let b = entity(&world, "ball");
+    assert!((b.pos.0 - 146.0).abs() < 3.0 && (b.pos.1 - 6.0).abs() < 3.0, "went on: {b:?}");
+}
+
+#[test]
+fn a_push_needs_a_loose_thing() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)]).unwrap();
+    let err = world.push("wall", (1.0, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("push needs a loose thing"), "{err}");
+    let err = world.push("ghost", (1.0, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("there is no such entity"), "{err}");
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    let err = world.push("ball", (f64::NAN, 0.0)).unwrap_err().to_string();
+    assert!(err.contains("finite"), "{err}");
+}
+
+#[test]
+fn a_blast_throws_what_is_near_away_and_leaves_the_rest() {
+    let mut world = balls_at(&[
+        ("near", 220.0, 200.0),  // 20 right of the blast
+        ("above", 200.0, 150.0), // 50 above it
+        ("far", 350.0, 200.0),   // beyond the radius
+        ("centre", 200.0, 200.0), // exactly on it
+    ]);
+    let moved = world.blast((200.0, 200.0), 300.0, 100.0).unwrap();
+    assert_eq!(moved, 3, "near, above and the one on it");
+    let (near, above) = (entity(&world, "near").velocity, entity(&world, "above").velocity);
+    assert!((near.0 - 240.0).abs() < 1e-6 && near.1.abs() < 1e-6, "300·(1 − 20/100), away: {near:?}");
+    assert!(above.0.abs() < 1e-6 && (above.1 + 150.0).abs() < 1e-6, "300·(1 − 50/100), up: {above:?}");
+    assert_eq!(entity(&world, "far").velocity, (0.0, 0.0));
+    let on = entity(&world, "centre").velocity;
+    assert!(on.0.is_finite() && on.1 < -100.0, "nudged up, never NaN: {on:?}");
+}
+
+#[test]
+fn a_bad_blast_is_refused() {
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    for (at, speed, radius, wanted) in [
+        ((f64::NAN, 0.0), 1.0, 1.0, "finite"),
+        ((0.0, 0.0), f64::INFINITY, 1.0, "finite"),
+        ((0.0, 0.0), 1.0, 0.0, "radius must be above 0"),
+        ((0.0, 0.0), 1.0, -5.0, "radius must be above 0"),
+    ] {
+        let err = world.blast(at, speed, radius).unwrap_err().to_string();
+        assert!(err.contains(wanted), "{err}");
+    }
+}
+
+#[test]
+fn a_well_pulls_what_is_inside_its_radius_toward_its_centre() {
+    let mut world = balls_at(&[("in", 260.0, 200.0), ("out", 350.0, 200.0), ("edge", 200.0, 110.0)]);
+    world.set_wells(vec![Well { at: (200.0, 200.0), radius: 100.0, pull: 600.0 }]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    // At 60 away the pull is 600·(1 − 0.6) = 240, so about −24 a tenth of a second on, and more
+    // as it nears the centre.
+    let v = entity(&world, "in").velocity;
+    assert!(v.0 < -20.0 && v.1.abs() < 1.0, "pulled left: {v:?}");
+    assert_eq!(entity(&world, "out").velocity, (0.0, 0.0), "beyond the radius: untouched");
+    let top = entity(&world, "edge").velocity;
+    assert!(top.1 > 0.0 && top.0.abs() < 1.0, "90 above is near the edge: pulled down, weakly: {top:?}");
+}
+
+#[test]
+fn a_negative_well_repels_and_removing_it_ends_the_pull() {
+    let mut world = balls_at(&[("ball", 230.0, 200.0)]);
+    world.set_wells(vec![Well { at: (200.0, 200.0), radius: 100.0, pull: -600.0 }]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    let v = entity(&world, "ball").velocity;
+    assert!(v.0 > 20.0, "pushed away: {v:?}");
+    world.set_wells(vec![]).unwrap();
+    run(&mut world, &mut clock, 0.2);
+    let after = entity(&world, "ball").velocity;
+    assert!((after.0 - v.0).abs() < 1.0, "no well, no more change (friction-free): {v:?} -> {after:?}");
+}
+
+#[test]
+fn a_bad_well_is_refused_and_the_last_good_ones_kept() {
+    let mut world = balls_at(&[("ball", 0.0, 0.0)]);
+    let fine = Well { at: (0.0, 0.0), radius: 10.0, pull: 5.0 };
+    world.set_wells(vec![fine]).unwrap();
+    for (bad, wanted) in [
+        (Well { radius: 0.0, ..fine }, "radius must be above 0"),
+        (Well { pull: f64::NAN, ..fine }, "finite"),
+        (Well { at: (f64::INFINITY, 0.0), ..fine }, "finite"),
+    ] {
+        let err = world.set_wells(vec![fine, bad]).unwrap_err().to_string();
+        assert!(err.contains("well 2") && err.contains(wanted), "{err}");
+        assert_eq!(world.wells().len(), 1, "kept");
+    }
+}
+
+// ── grabbing ───────────────────────────────────────────────────────────────────────────────────
+
+fn centre_of(world: &World2d, id: &str) -> (f64, f64) {
+    let e = entity(world, id);
+    (e.pos.0 + 4.0, e.pos.1 + 4.0)
+}
+
+#[test]
+fn a_grabbed_thing_is_brought_to_the_point_even_under_gravity() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world.grab("ball", (300.0, 200.0)).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let (x, y) = centre_of(&world, "ball");
+    assert!((x - 300.0).abs() < 3.0 && (y - 200.0).abs() < 3.0, "held at the point: {x},{y}");
+    // Let go, it falls: the hand was what held it.
+    world.release("ball").unwrap();
+    run(&mut world, &mut clock, 0.3);
+    assert!(centre_of(&world, "ball").1 > 220.0, "{:?}", centre_of(&world, "ball"));
+}
+
+#[test]
+fn letting_go_of_a_moving_grab_is_a_throw() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    let mut clock = 0.0;
+    // The hand drags it right at 200 a second for a second.
+    for i in 0..60 {
+        world.grab("ball", (100.0 + 200.0 * (i as f64 / 60.0), 100.0)).unwrap();
+        run(&mut world, &mut clock, 1.0 / 60.0);
+    }
+    world.release("ball").unwrap();
+    let thrown = entity(&world, "ball").velocity;
+    assert!((thrown.0 - 200.0).abs() < 40.0, "it leaves at about the hand's speed: {thrown:?}");
+    let at = centre_of(&world, "ball").0;
+    run(&mut world, &mut clock, 0.5);
+    assert!(centre_of(&world, "ball").0 > at + 70.0, "and goes on: {at} -> {:?}", centre_of(&world, "ball"));
+}
+
+#[test]
+fn a_grab_is_refused_for_what_cannot_be_held_and_dropped_with_the_entity() {
+    let d = drawing();
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    let wall = || solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![wall(), EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (96.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    }]).unwrap();
+    let err = world.grab("wall", (1.0, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("grab needs a loose thing"), "{err}");
+    let err = world.grab("ghost", (1.0, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("there is no such entity"), "{err}");
+    let err = world.grab("ball", (f64::NAN, 1.0)).unwrap_err().to_string();
+    assert!(err.contains("finite"), "{err}");
+
+    // Two grabs of one thing: the last point wins.
+    world.grab("ball", (10.0, 10.0)).unwrap();
+    world.grab("ball", (200.0, 50.0)).unwrap();
+    assert_eq!(world.grabs(), 1);
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let (x, y) = centre_of(&world, "ball");
+    assert!((x - 200.0).abs() < 3.0 && (y - 50.0).abs() < 3.0, "{x},{y}");
+
+    // The entity goes: the grab goes with it, and letting go of it is no error.
+    world.reconcile(vec![wall()]).unwrap();
+    run(&mut world, &mut clock, 0.1);
+    assert_eq!(world.grabs(), 0);
+    world.release("ball").unwrap();
+}
+
+// ── joints ─────────────────────────────────────────────────────────────────────────────────────
+
+const GRIPPY: Material = Material { bounce: 0.0, friction: 0.0, grip: Some(0.5), density: 1.0 };
+
+fn joint(id: &str, kind: JointKind, a: &str, a_at: (f64, f64), b: Option<&str>, b_at: (f64, f64)) -> JointSpec {
+    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false }
+}
+
+/// A plank (100 × 8, loose, with grip so it can turn) whose box top-left is `pos`.
+fn plank(id: &str, pos: (f64, f64), d: &Arc<Drawing>) -> EntitySpec {
+    EntitySpec {
+        loose: Some(GRIPPY),
+        ..solid(id, pos, Shape::Rect(100.0, 8.0), (0.0, 0.0), d)
+    }
+}
+
+fn swing_world() -> World2d {
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 900.0)).unwrap();
+    world
+}
+
+#[test]
+fn a_pin_lets_a_plank_swing_about_a_fixed_point() {
+    let d = drawing();
+    let mut world = swing_world();
+    world.reconcile(vec![plank("plank", (100.0, 100.0), &d)]).unwrap();
+    // Its left end, (0, 4) in its own box, pinned to the world at (100, 104).
+    let pin = joint("hinge", JointKind::Pin { limits: None }, "plank", (0.0, 4.0), None, (100.0, 104.0));
+    world.set_joints(vec![pin]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.6);
+    let p = entity(&world, "plank");
+    assert!(p.rot.abs() > 60.0, "it swung down: {p:?}");
+    // The pinned end stayed where it was pinned.
+    let (cx, cy) = (p.pos.0 + 50.0, p.pos.1 + 4.0);
+    let a = p.rot.to_radians();
+    let end = (cx - 50.0 * a.cos(), cy - 50.0 * a.sin());
+    assert!((end.0 - 100.0).abs() < 2.0 && (end.1 - 104.0).abs() < 2.0, "pinned end at {end:?}");
+}
+
+#[test]
+fn a_rope_never_lets_a_thing_past_its_length() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball]).unwrap();
+    let rope = joint("rope", JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope]).unwrap();
+    world.set("ball", Set { velocity: Some((300.0, -200.0)), ..Set::default() }).unwrap();
+    let (mut clock, mut farthest) = (0.0, 0.0f64);
+    for _ in 0..240 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        let (x, y) = centre_of(&world, "ball");
+        farthest = farthest.max(((x - 200.0).powi(2) + (y - 100.0).powi(2)).sqrt());
+    }
+    assert!(farthest < 81.5, "never farther than the rope: {farthest}");
+    assert!(farthest > 60.0, "and it did swing out: {farthest}");
+    // Hanging at last (damped by nothing but the solver, so allow some swing).
+    let (x, y) = centre_of(&world, "ball");
+    assert!(y > 100.0, "below the anchor: {x},{y}");
+}
+
+#[test]
+fn a_spring_bobs_about_its_rest_length() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (196.0, 196.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball]).unwrap();
+    let spring = joint(
+        "spring",
+        JointKind::Spring { length: 50.0, stiffness: 400.0, damping: 2.0 },
+        "ball", (4.0, 4.0), None, (200.0, 100.0),
+    );
+    world.set_joints(vec![spring]).unwrap();
+    let (mut clock, mut crossings, mut last) = (0.0, 0, 0.0f64);
+    for _ in 0..180 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        let (x, y) = centre_of(&world, "ball");
+        let stretch = ((x - 200.0).powi(2) + (y - 100.0).powi(2)).sqrt() - 50.0;
+        if stretch * last < 0.0 {
+            crossings += 1;
+        }
+        if stretch != 0.0 {
+            last = stretch;
+        }
+    }
+    assert!(crossings >= 2, "it bobbed through its rest length: {crossings}");
+}
+
+#[test]
+fn a_joint_is_kept_across_descriptions_and_ends_with_its_entity_or_its_line() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = || EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    world.reconcile(vec![ball()]).unwrap();
+    let rope = || joint("rope", JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope()]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.4);
+    let before = centre_of(&world, "ball");
+    // The same description again, as every frame does: nothing restarts.
+    world.reconcile(vec![ball()]).unwrap();
+    world.set_joints(vec![rope()]).unwrap();
+    assert_eq!(centre_of(&world, "ball"), before, "not reset");
+    assert_eq!(world.joint_count(), 1);
+    run(&mut world, &mut clock, 0.4);
+    let on = centre_of(&world, "ball");
+    assert!(((on.0 - 200.0).powi(2) + (on.1 - 100.0).powi(2)).sqrt() < 81.5, "still held: {on:?}");
+
+    // The line gone, the ball is free and falls past it.
+    world.set_joints(vec![]).unwrap();
+    assert_eq!(world.joint_count(), 0);
+    run(&mut world, &mut clock, 1.0);
+    assert!(centre_of(&world, "ball").1 > 190.0, "fell free: {:?}", centre_of(&world, "ball"));
+
+    // Joined again, then the entity goes: its joint goes with it, quietly.
+    world.reconcile(vec![ball()]).unwrap();
+    world.set_joints(vec![rope()]).unwrap();
+    world.reconcile(vec![]).unwrap();
+    world.set_joints(vec![]).unwrap();
+    assert_eq!(world.joint_count(), 0);
+    run(&mut world, &mut clock, 0.1);
+}
+
+#[test]
+fn a_bad_joint_is_refused_and_the_last_good_ones_kept() {
+    let d = drawing();
+    let mut world = swing_world();
+    let ball = EntitySpec {
+        loose: Some(DEAD),
+        ..solid("ball", (256.0, 96.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let wall = solid("wall", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d);
+    world.reconcile(vec![ball, wall, plank("plank", (100.0, 200.0), &d)]).unwrap();
+    let rope = |id: &str| joint(id, JointKind::Rope { length: 80.0 }, "ball", (4.0, 4.0), None, (200.0, 100.0));
+    world.set_joints(vec![rope("good")]).unwrap();
+    let cases: Vec<(Vec<JointSpec>, &str)> = vec![
+        (vec![joint("j", JointKind::Rope { length: 80.0 }, "ghost", (0.0, 0.0), None, (0.0, 0.0))], "there is no such entity \"ghost\""),
+        (vec![joint("j", JointKind::Rope { length: 80.0 }, "ball", (0.0, 0.0), Some("ghost"), (0.0, 0.0))], "there is no such entity \"ghost\""),
+        (vec![joint("j", JointKind::Pin { limits: None }, "ball", (4.0, 4.0), None, (200.0, 100.0))], "needs grip"),
+        (vec![joint("j", JointKind::Rope { length: 0.0 }, "ball", (4.0, 4.0), None, (0.0, 0.0))], "length must be above 0"),
+        (vec![joint("j", JointKind::Spring { length: 5.0, stiffness: -1.0, damping: 0.0 }, "ball", (4.0, 4.0), None, (0.0, 0.0))], "stiffness must be 0 or more"),
+        (vec![joint("j", JointKind::Pin { limits: Some((90.0, 10.0)) }, "plank", (0.0, 4.0), None, (0.0, 0.0))], "limits must be low then high"),
+        (vec![rope("a"), rope("a")], "duplicate joint id \"a\""),
+        (vec![joint("", JointKind::Rope { length: 1.0 }, "ball", (0.0, 0.0), None, (0.0, 0.0))], "joint id must not be empty"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "wall", (0.0, 0.0), None, (0.0, 0.0))], "joins nothing that moves"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "ball", (0.0, 0.0), Some("ball"), (0.0, 0.0))], "a thing cannot be joined to itself"),
+        (vec![joint("j", JointKind::Rope { length: 5.0 }, "ball", (f64::NAN, 0.0), None, (0.0, 0.0))], "finite"),
+    ];
+    for (specs, wanted) in cases {
+        let err = world.set_joints(specs).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        assert_eq!(world.joint_count(), 1, "{wanted}: the last good kept");
+    }
+}
+
+#[test]
+fn a_world_with_a_well_or_a_hand_keeps_asking_for_ticks_even_when_all_is_asleep() {
+    let mut world = balls_at(&[("ball", 100.0, 100.0)]);
+    assert!(!world.needs_ticks(), "a world of sleepers needs no clock");
+    world.set_wells(vec![Well { at: (0.0, 0.0), radius: 10.0, pull: 1.0 }]).unwrap();
+    assert!(world.needs_ticks(), "a well can only work on a ticking world");
+    world.set_wells(vec![]).unwrap();
+    assert!(!world.needs_ticks());
+    world.grab("ball", (50.0, 50.0)).unwrap();
+    assert!(world.needs_ticks(), "a hand moves what it holds a step at a time");
+    world.release("ball").unwrap();
+    // Let go, it is awake and sliding until it rests again; the clock stops once it does.
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 3.0);
+    assert!(!world.needs_ticks(), "and at rest again, it needs none");
 }

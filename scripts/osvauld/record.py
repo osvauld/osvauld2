@@ -38,11 +38,15 @@ class Recorder:
     ZOOM_LINE = 1.1  # runtime/src/zoom.rs — one 30pt wheel line multiplies the scale by this
 
     def __init__(self, rpc, item_id: str, out: Path, *, fps: int = 24,
-                 start: Point | None = None, gif: bool = False, crf: int = 18):
+                 start: Point | None = None, gif: bool = False, crf: int = 18,
+                 crop_top: int = 0, upscale: int = 1):
         if not shutil.which("ffmpeg"):
             raise RuntimeError("the recorder needs ffmpeg on PATH")
         self.rpc, self.item, self.out, self.fps = rpc, item_id, Path(out), fps
-        self.start, self.gif, self.crf = start, gif, crf
+        self.start, self.gif, self.crf, self.crop_top = start, gif, crf, crop_top
+        self.upscale = upscale
+        self.captions: list[tuple[int, int, str]] = []
+        self._caption: tuple[int, str] | None = None
         self.frames = 0
         self.pos: Point | None = None
         self.ffmpeg: subprocess.Popen | None = None
@@ -54,7 +58,8 @@ class Recorder:
             ["ffmpeg", "-y", "-v", "error", "-f", "image2pipe", "-framerate", str(self.fps),
              "-c:v", "png", "-i", "-",
              # yuv420p wants even dimensions; the shell's viewport need not be.
-             "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+             "-vf", (f"crop=iw:ih-{self.crop_top}:0:{self.crop_top}," if self.crop_top else "")
+             + "pad=ceil(iw/2)*2:ceil(ih/2)*2",
              "-c:v", "libx264", "-preset", "medium", "-crf", str(self.crf),
              "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(self.out)],
             stdin=subprocess.PIPE,
@@ -70,6 +75,8 @@ class Recorder:
         self.ffmpeg.stdin.close()
         if self.ffmpeg.wait() != 0 and exc_type is None:
             raise RuntimeError(f"ffmpeg failed writing {self.out}")
+        if exc_type is None and (self.captions or self.upscale > 1):
+            self._finish()
         if self.gif and exc_type is None:
             gif = self.out.with_suffix(".gif")
             subprocess.run(
@@ -118,6 +125,42 @@ class Recorder:
         """Script nothing; the app's own springs, fades and timers are what gets recorded."""
         for _ in range(self.count(secs)):
             self.step()
+
+    def caption(self, text: str | None) -> None:
+        """Label the frames from here on (None clears). Drawn in a bar under the app at the end."""
+        if self._caption:
+            self.captions.append((self._caption[0], self.frames, self._caption[1]))
+        self._caption = (self.frames, text) if text else None
+
+    def _finish(self) -> None:
+        """Second pass: upscale, and add the caption bar. Costs a re-encode, so only when asked."""
+        self.caption(None)
+        font = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
+        bar = 96 if self.captions else 0
+        vf = [f"scale=iw*{self.upscale}:ih*{self.upscale}:flags=lanczos"] if self.upscale > 1 else []
+        vf.append(f"pad=iw:ih+{bar}:0:0:color=#0a0c10")
+        tmp = self.out.with_suffix(".src.mp4")
+        files = []
+        for i, (a, b, text) in enumerate(self.captions):
+            f = self.out.with_suffix(f".cap{i}.txt")
+            f.write_text(text)
+            files.append(f)
+            vf.append(f"drawtext=fontfile={font}:textfile={f}:expansion=none:fontcolor=#e6edf3:"
+                      f"fontsize=19:line_spacing=6:x=16:y=h-{bar - 14}:enable='between(n,{a},{b - 1})'")
+        self.out.rename(tmp)
+        try:
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(tmp), "-vf", ",".join(vf),
+                            "-c:v", "libx264", "-preset", "medium", "-crf", str(self.crf),
+                            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(self.out)], check=True)
+        finally:
+            tmp.unlink(missing_ok=True)
+            for f in files:
+                f.unlink(missing_ok=True)
+
+    def rebase(self) -> None:
+        """Call after work done between frames (an edit, a reload): the video doesn't show it as
+        elapsed time, the next frame is simply one tick later."""
+        self.t0 = self.clock() - self.frames / self.fps
 
     # ── machinery ────────────────────────────────────────────────────────────
     def aim(self, target: str | Point) -> Point:

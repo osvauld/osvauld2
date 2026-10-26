@@ -25,7 +25,7 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, Material, Shape};
+pub use crate::physics::{Collider, JointKind, Material, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -60,6 +60,45 @@ pub struct Set {
     /// Degrees a second; only a loose thing with grip turns.
     pub spin: Option<f64>,
 }
+
+/// A joint between two entities, or one and the world. An anchor is a point in its entity's
+/// drawing box; with no `b`, `b_at` is a point of the world, fixed there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JointSpec {
+    pub id: String,
+    pub kind: JointKind,
+    pub a: String,
+    pub a_at: (f64, f64),
+    pub b: Option<String>,
+    pub b_at: (f64, f64),
+    /// Whether the two bodies collide with each other: not, unless asked.
+    pub contacts: bool,
+}
+
+/// A joint as the world holds it, and the bodies it was made for: a rebuilt body ends it.
+struct Joined {
+    spec: JointSpec,
+    handle: rapier2d::prelude::ImpulseJointHandle,
+    bodies: (rapier2d::prelude::RigidBodyHandle, Option<rapier2d::prelude::RigidBodyHandle>),
+}
+
+/// A radial field: a loose body within `radius` of `at` accelerates toward it, at `pull` in the
+/// middle fading to nothing at the edge; a negative `pull` pushes away. Units a second squared.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Well {
+    pub at: (f64, f64),
+    pub radius: f64,
+    pub pull: f64,
+}
+
+/// How fast a held thing closes on its point: a share of the distance a second.
+const GRAB_PULL: f64 = 15.0;
+
+/// The most a hand moves a thing, a second.
+const GRAB_MAX_SPEED: f64 = 3000.0;
+
+/// Past this a body crosses a world in a step and Rapier's solver goes wild.
+const MAX_GRAVITY: f64 = 100_000.0;
 
 /// Bit 0 is the common group, everything not named into another.
 const COMMON: u32 = 1;
@@ -331,6 +370,10 @@ pub struct World2d {
     groups: Vec<String>,
     timers: Vec<Timer>,
     camera: Option<Camera>,
+    wells: Vec<Well>,
+    /// Loose things a hand holds: where each is being brought to.
+    grabs: HashMap<Entity, (f64, f64)>,
+    joints: HashMap<String, Joined>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -354,6 +397,14 @@ pub enum WorldError {
     Group(String),
     #[error("camera: {0}")]
     Camera(String),
+    #[error("gravity: {0}")]
+    Gravity(String),
+    /// A joint described wrongly, as `"joint id: why"`.
+    #[error("{0}")]
+    Joint(String),
+    /// A blast or a well described wrongly.
+    #[error("{0}")]
+    Force(String),
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
@@ -652,7 +703,8 @@ impl World2d {
                 let owner = entity.to_bits();
                 let body = self.physics.add(solid, zone, (t.x, t.y), kind, owner, groups);
                 // Loose from the start, it waits asleep; let go, it is on the move.
-                if dynamic && !dropped {
+                // Not under gravity: a body that is not at rest has to fall.
+                if dynamic && !dropped && self.physics.gravity() == (0.0, 0.0) {
                     self.physics.sleep_if_clear(body);
                 }
                 if let (true, Some(from), Some(c)) = (dynamic, carrier, solid) {
@@ -930,6 +982,8 @@ impl World2d {
 
     /// One fixed step: bodies, then zones and hits, then walkers.
     fn step(&mut self, dt: f64) {
+        self.hold();
+        self.pull(dt);
         let before = self.velocities();
         self.physics.step(dt);
         self.steps += 1;
@@ -1032,6 +1086,292 @@ impl World2d {
         self.held.clear();
     }
 
+    /// The world's gravity, in units a second squared; none unless described.
+    pub fn gravity(&self) -> (f64, f64) {
+        self.physics.gravity()
+    }
+
+    /// Checked without touching the world, so a description is refused whole.
+    pub fn check_gravity(g: (f64, f64)) -> Result<(), WorldError> {
+        let fine = |v: f64| v.is_finite() && v.abs() <= MAX_GRAVITY;
+        if fine(g.0) && fine(g.1) {
+            return Ok(());
+        }
+        Err(WorldError::Gravity(format!("must be finite numbers within {MAX_GRAVITY} either way")))
+    }
+
+    /// Falling is the description's to say every view, so only a change wakes the bodies.
+    pub fn set_gravity(&mut self, g: (f64, f64)) -> Result<(), WorldError> {
+        Self::check_gravity(g)?;
+        if g != self.physics.gravity() {
+            self.physics.set_gravity(g);
+            // Awake now, so followed until each rests again: a world only ticks for those.
+            for (_, e) in self.by_id.iter() {
+                if let Some(mut s) = self.ecs.get_mut::<Solid>(*e).filter(|s| s.loose.is_some()) {
+                    s.sliding = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checked whole, so a description with one bad well is refused whole.
+    pub fn check_wells(wells: &[Well]) -> Result<(), WorldError> {
+        for (i, w) in wells.iter().enumerate() {
+            let n = i + 1;
+            if ![w.at.0, w.at.1, w.radius, w.pull].iter().all(|v| v.is_finite()) {
+                return Err(WorldError::Force(format!("well {n}: at, radius and pull must be finite numbers")));
+            }
+            if w.radius <= 0.0 {
+                return Err(WorldError::Force(format!("well {n}: radius must be above 0, got {}", w.radius)));
+            }
+        }
+        Ok(())
+    }
+
+    /// The fields in the world, as described: what is not there has none. Bodies in one are kept
+    /// moving, so one that rested wakes when a well opens over it.
+    pub fn set_wells(&mut self, wells: Vec<Well>) -> Result<(), WorldError> {
+        Self::check_wells(&wells)?;
+        self.wells = wells;
+        Ok(())
+    }
+
+    pub fn wells(&self) -> &[Well] {
+        &self.wells
+    }
+
+    /// Adds to a loose thing's velocity: a kick, whatever it weighs.
+    pub fn push(&mut self, id: &str, by: (f64, f64)) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
+        let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
+        if !(by.0.is_finite() && by.1.is_finite()) {
+            return Err(err("push must be finite numbers"));
+        }
+        let loose = self.ecs.get::<Solid>(entity).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        if !loose {
+            return Err(err("push needs a loose thing: Rapier moves only those"));
+        }
+        self.kick(entity, by);
+        Ok(())
+    }
+
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// The joints in the world, as described: what is not there is not held. Checked whole before
+    /// anything changes; a joint kept as it was keeps swinging, and one whose body was rebuilt is
+    /// made again.
+    pub fn set_joints(&mut self, specs: Vec<JointSpec>) -> Result<(), WorldError> {
+        struct Made {
+            spec: JointSpec,
+            a: (rapier2d::prelude::RigidBodyHandle, (f64, f64)),
+            b: (Option<rapier2d::prelude::RigidBodyHandle>, (f64, f64)),
+        }
+        let mut made: Vec<Made> = Vec::new();
+        let mut seen = HashSet::new();
+        for spec in specs {
+            let id = spec.id.clone();
+            let bad = |why: String| WorldError::Joint(format!("joint {id:?}: {why}"));
+            if id.is_empty() {
+                return Err(WorldError::Joint("joint id must not be empty".into()));
+            }
+            if !seen.insert(id.clone()) {
+                return Err(WorldError::Joint(format!("duplicate joint id {id:?}")));
+            }
+            let (a_at, b_at) = (spec.a_at, spec.b_at);
+            if ![a_at.0, a_at.1, b_at.0, b_at.1].iter().all(|v| v.is_finite()) {
+                return Err(bad("anchors must be finite numbers".into()));
+            }
+            match spec.kind {
+                JointKind::Rope { length } if !(length.is_finite() && length > 0.0) => {
+                    return Err(bad(format!("length must be above 0, got {length}")));
+                }
+                JointKind::Spring { length, stiffness, damping } => {
+                    if !(length.is_finite() && length > 0.0) {
+                        return Err(bad(format!("length must be above 0, got {length}")));
+                    }
+                    if !(stiffness.is_finite() && stiffness >= 0.0) {
+                        return Err(bad(format!("stiffness must be 0 or more, got {stiffness}")));
+                    }
+                    if !(damping.is_finite() && damping >= 0.0) {
+                        return Err(bad(format!("damping must be 0 or more, got {damping}")));
+                    }
+                }
+                JointKind::Pin { limits: Some((lo, hi)) } if !(lo.is_finite() && hi.is_finite() && lo < hi) => {
+                    return Err(bad(format!("limits must be low then high, got {lo} and {hi}")));
+                }
+                _ => {}
+            }
+            // What an end is: its body, where the anchor sits in the body's frame, whether it moves.
+            let end = |name: &str, at: (f64, f64)| -> Result<_, WorldError> {
+                let entity = self.by_id.get(name).copied();
+                let solid = entity.and_then(|e| self.ecs.get::<Solid>(e)).filter(|s| s.collider.is_some());
+                let Some(s) = solid else {
+                    let why = if entity.is_some() { "has no body: give it a collider" } else { "there is no such entity" };
+                    return Err(bad(format!("{why} {name:?}")));
+                };
+                let (cx, cy) = s.collider.as_ref().expect("filtered").centre();
+                Ok((s.body, (at.0 - cx, at.1 - cy), s.loose))
+            };
+            if spec.b.as_deref() == Some(spec.a.as_str()) {
+                return Err(bad("a thing cannot be joined to itself".into()));
+            }
+            let a = end(&spec.a, a_at)?;
+            let b = spec.b.as_deref().map(|name| end(name, b_at)).transpose()?;
+            if a.2.is_none() && b.is_none_or(|b| b.2.is_none()) {
+                return Err(bad("it joins nothing that moves: one end must be loose".into()));
+            }
+            if matches!(spec.kind, JointKind::Pin { .. }) {
+                let ends = [(&spec.a, a.2)].into_iter().chain(spec.b.as_ref().zip(b.map(|b| b.2)));
+                for (name, loose) in ends {
+                    if loose.is_some_and(|m| m.grip.is_none()) {
+                        return Err(bad(format!("a pin needs grip on {name:?}: nothing else turns")));
+                    }
+                }
+            }
+            made.push(Made { a: (a.0, a.1), b: (b.map(|b| b.0), b.map_or(b_at, |b| b.1)), spec });
+        }
+        let wanted: HashSet<&str> = made.iter().map(|m| m.spec.id.as_str()).collect();
+        // Sorted: removal order decides which slots a later joint reuses, and so the solver's order.
+        let mut gone: Vec<String> = self.joints.keys().filter(|id| !wanted.contains(id.as_str())).cloned().collect();
+        gone.sort();
+        for gone in gone {
+            let j = self.joints.remove(&gone).expect("listed");
+            self.physics.unjoin(j.handle);
+        }
+        for m in made {
+            let bodies = (m.a.0, m.b.0);
+            let id = m.spec.id.clone();
+            if let Some(old) = self.joints.get(&id) {
+                if old.spec == m.spec && old.bodies == bodies && self.physics.joined(old.handle) {
+                    continue;
+                }
+                let old = self.joints.remove(&id).expect("just seen");
+                self.physics.unjoin(old.handle);
+            }
+            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts);
+            self.joints.insert(id, Joined { spec: m.spec, handle, bodies });
+        }
+        Ok(())
+    }
+
+    /// Takes hold of a loose thing: each step it is driven toward `to`, so what it meets still
+    /// stops it, and gravity no longer pulls it. Again, with another point, moves the hand.
+    pub fn grab(&mut self, id: &str, to: (f64, f64)) -> Result<(), WorldError> {
+        let err = |why: &str| WorldError::Set(id.to_string(), why.to_string());
+        let entity = *self.by_id.get(id).ok_or_else(|| err("there is no such entity"))?;
+        if !(to.0.is_finite() && to.1.is_finite()) {
+            return Err(err("grab must be finite numbers"));
+        }
+        let loose = self.ecs.get::<Solid>(entity).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        if !loose {
+            return Err(err("grab needs a loose thing: Rapier moves only those"));
+        }
+        self.grabs.insert(entity, to);
+        Ok(())
+    }
+
+    /// Lets go: it keeps the velocity the hand gave it. Nothing held, or nothing there, is fine —
+    /// a drag may end after what it held is gone.
+    pub fn release(&mut self, id: &str) -> Result<(), WorldError> {
+        if let Some(&entity) = self.by_id.get(id) {
+            self.grabs.remove(&entity);
+        }
+        Ok(())
+    }
+
+    /// How many things a hand holds.
+    pub fn grabs(&self) -> usize {
+        self.grabs.len()
+    }
+
+    /// Drives each held thing toward its point, dropping a grab whose thing is gone.
+    fn hold(&mut self) {
+        let held = |this: &Self, e: Entity| this.ecs.get::<Solid>(e).is_some_and(|s| s.loose.is_some() && s.collider.is_some());
+        let gone: Vec<Entity> = self.grabs.keys().copied().filter(|&e| !held(self, e)).collect();
+        for e in gone {
+            self.grabs.remove(&e);
+        }
+        let hands: Vec<(Entity, (f64, f64))> = self.grabs.iter().map(|(&e, &p)| (e, p)).collect();
+        for (entity, to) in hands {
+            let body = self.ecs.get::<Solid>(entity).expect("held above").body;
+            let (x, y) = self.physics.centre_of(body);
+            let (mut vx, mut vy) = ((to.0 - x) * GRAB_PULL, (to.1 - y) * GRAB_PULL);
+            let speed = (vx * vx + vy * vy).sqrt();
+            if speed > GRAB_MAX_SPEED {
+                (vx, vy) = (vx / speed * GRAB_MAX_SPEED, vy / speed * GRAB_MAX_SPEED);
+            }
+            self.physics.set(body, None, Some((vx, vy)), None);
+            self.ecs.get_mut::<Solid>(entity).expect("held above").sliding = true;
+        }
+    }
+
+    /// Adds `by` to a loose body's velocity and keeps it followed until it rests again.
+    fn kick(&mut self, entity: Entity, by: (f64, f64)) {
+        let s = self.ecs.get::<Solid>(entity).expect("checked loose");
+        let body = s.body;
+        let (vx, vy) = self.physics.velocity(body);
+        self.physics.set(body, None, Some((vx + by.0, vy + by.1)), None);
+        self.ecs.get_mut::<Solid>(entity).expect("checked above").sliding = true;
+    }
+
+    /// Where every loose body's centre is, as of the last step.
+    fn loose_centres(&self) -> Vec<(Entity, (f64, f64))> {
+        let centre = |&entity: &Entity| {
+            let s = self.ecs.get::<Solid>(entity).filter(|s| s.loose.is_some() && s.collider.is_some())?;
+            Some((entity, self.physics.centre_of(s.body)))
+        };
+        self.order.iter().filter_map(centre).collect()
+    }
+
+    /// An explosion: every loose body within `radius` of `at` is thrown directly away from it at
+    /// `speed` fading to nothing at the edge (straight up for one right on it). Says how many.
+    pub fn blast(&mut self, at: (f64, f64), speed: f64, radius: f64) -> Result<usize, WorldError> {
+        if ![at.0, at.1, speed].iter().all(|v| v.is_finite()) {
+            return Err(WorldError::Force("blast: the point and speed must be finite numbers".into()));
+        }
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err(WorldError::Force(format!("blast: radius must be above 0, got {radius}")));
+        }
+        let mut moved = 0;
+        for (entity, (x, y)) in self.loose_centres() {
+            let (dx, dy) = (x - at.0, y - at.1);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d >= radius {
+                continue;
+            }
+            let (ux, uy) = if d < 1e-9 { (0.0, -1.0) } else { (dx / d, dy / d) };
+            let v = speed * (1.0 - d / radius);
+            self.kick(entity, (ux * v, uy * v));
+            moved += 1;
+        }
+        Ok(moved)
+    }
+
+    /// Every well's pull on each loose body for `dt`, before Rapier moves anything.
+    fn pull(&mut self, dt: f64) {
+        if self.wells.is_empty() {
+            return;
+        }
+        for (entity, (x, y)) in self.loose_centres() {
+            let mut dv = (0.0, 0.0);
+            for w in &self.wells {
+                let (dx, dy) = (w.at.0 - x, w.at.1 - y);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d >= w.radius || d < 1e-9 {
+                    continue;
+                }
+                let a = w.pull * (1.0 - d / w.radius) * dt;
+                dv = (dv.0 + dx / d * a, dv.1 + dy / d * a);
+            }
+            if dv != (0.0, 0.0) {
+                self.kick(entity, dv);
+            }
+        }
+    }
+
     pub fn set_order(&mut self, order: Order) {
         self.stacking = order;
     }
@@ -1040,7 +1380,9 @@ impl World2d {
     pub fn needs_ticks(&self) -> bool {
         let sliding = |&e: &Entity| self.ecs.get::<Solid>(e).is_some_and(|s| s.sliding);
         let behind = (self.camera.as_ref()).is_some_and(|c| self.goal().is_some_and(|g| !c.arrived(g)));
-        self.ticking || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
+        // A well works on sleepers and a hand holds still ones, so either needs the clock.
+        let forces = !self.wells.is_empty() || !self.grabs.is_empty();
+        self.ticking || forces || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take

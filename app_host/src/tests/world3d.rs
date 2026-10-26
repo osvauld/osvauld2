@@ -68,6 +68,20 @@ fn world3d_lua_native_ticks_resolved_scene_reset_and_settle() {
 }
 
 #[test]
+fn staged_source_cannot_commit_changes_into_the_running_3d_solver() {
+    let mut running = app(SOURCE);
+    fall(&mut running);
+    let before = state(&running);
+    let candidate = LoroDoc::new();
+    candidate.get_map("files")
+        .insert_container("main.lua", LoroText::new()).unwrap()
+        .insert(0, "return function() return ui.text({'candidate'}) end").unwrap();
+    let staged = running.stage_source(candidate).unwrap();
+    assert_eq!(staged.view().info().text.as_deref(), Some("candidate"));
+    assert_eq!(state(&running), before);
+}
+
+#[test]
 fn world3d_reload_failure_preserves_pose_clock_recipe_and_running_vm() {
     let mut app = app(SOURCE);
     fall(&mut app);
@@ -181,6 +195,35 @@ fn world3d_zone_callbacks_are_ordered_tick_stamped_and_views_are_observational()
     assert_eq!(state(&app), before);
     assert_eq!(app.view().info().children[0].text, trace);
     assert!(app.console(10).is_empty());
+}
+
+#[test]
+fn world3d_zone_callbacks_scope_host_permissions_even_on_error() {
+    let src = LoroDoc::new();
+    src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap()
+        .insert(0, &zone_source("host_record(); error('zone failed')")).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let recorded = calls.clone();
+    let setup: crate::host::VmSetup = Rc::new(move |vm, context| {
+        let recorded = recorded.clone();
+        vm.globals().set("host_record", vm.create_function(move |_, ()| {
+            context.require_handler()?;
+            recorded.set(recorded.get() + 1);
+            Ok(())
+        })?)
+    });
+    let mut app = LuaApp::open_with_setup(
+        src, Rc::new(|_| Ok(None)), noop_wake(), identity(), Some(setup),
+    ).unwrap();
+    app.view();
+    app.advance_simulation(0.0, true);
+    for frame in 1..=100 {
+        app.advance_simulation(f64::from(frame) / 60.0, true);
+        app.view();
+    }
+    assert!(calls.get() > 0, "zone handler did not receive host permission");
+    assert!(app.console(10).iter().any(|line| line.contains("zone failed")));
+    app.vm.load("assert(not pcall(host_record))").exec().unwrap();
 }
 
 #[test]

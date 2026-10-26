@@ -13,6 +13,7 @@
 use mlua::Lua;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 const MAX_FIRES: u64 = 1_000_000;
 /// Read the clock every this many interrupts: reading it on each would cost ~25 ms at the
@@ -43,7 +44,10 @@ pub struct Budget {
     fires: AtomicU64,
     /// CPU nanoseconds at the arm, plus one; 0 = unarmed.
     armed_at: AtomicU64,
-    cpu_ms: u64,
+    cpu_ns: AtomicU64,
+    load_cpu_ns: AtomicU64,
+    interrupts: AtomicU64,
+    armed_limit_ns: AtomicU64,
 }
 
 impl Budget {
@@ -54,9 +58,42 @@ impl Budget {
 
     /// Refill the count and start the clock; it stops when the guard drops.
     pub fn arm(self: &Arc<Self>) -> Armed {
+        self.arm_for(self.cpu_ns.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn arm_load(self: &Arc<Self>) -> Armed {
+        self.arm_for(self.load_cpu_ns.load(Ordering::Relaxed))
+    }
+
+    fn arm_for(self: &Arc<Self>, limit_ns: u64) -> Armed {
         self.fires.store(0, Ordering::Relaxed);
+        self.armed_limit_ns.store(limit_ns, Ordering::Relaxed);
         self.armed_at.store(cpu_now(), Ordering::Relaxed);
         Armed(self.clone())
+    }
+
+    /// Trusted setup changes policy, not the installed interrupt hook.
+    pub(crate) fn configure(
+        &self,
+        vm: &Lua,
+        memory_bytes: usize,
+        interrupts: u64,
+        cpu: Duration,
+        load_cpu: Duration,
+    ) -> mlua::Result<()> {
+        if memory_bytes == 0 || interrupts == 0 {
+            return Err(mlua::Error::runtime("VM limits must be nonzero"));
+        }
+        let nanos = |time: Duration| {
+            u64::try_from(time.as_nanos())
+                .map_err(|_| mlua::Error::runtime("VM CPU limit is too large"))
+        };
+        let (cpu, load_cpu) = (nanos(cpu)?, nanos(load_cpu)?);
+        vm.set_memory_limit(memory_bytes)?;
+        self.cpu_ns.store(cpu, Ordering::Relaxed);
+        self.load_cpu_ns.store(load_cpu, Ordering::Relaxed);
+        self.interrupts.store(interrupts, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Stop the clock until the guard drops — for a native call whose time is not this VM's,
@@ -67,15 +104,16 @@ impl Budget {
 
     fn check(&self) -> mlua::Result<mlua::VmState> {
         let n = self.fires.fetch_add(1, Ordering::Relaxed);
-        if n > MAX_FIRES {
+        if n >= self.interrupts.load(Ordering::Relaxed) {
             return Err(mlua::Error::runtime("interrupt budget exceeded"));
         }
         if n % CLOCK_EVERY == 0 {
             let at = self.armed_at.load(Ordering::Relaxed);
-            if at != 0 && cpu_now().saturating_sub(at) > self.cpu_ms * 1_000_000 {
+            let limit = self.armed_limit_ns.load(Ordering::Relaxed);
+            if at != 0 && cpu_now().saturating_sub(at) >= limit {
                 return Err(mlua::Error::runtime(format!(
                     "CPU-time budget exceeded: ran over {} ms without returning",
-                    self.cpu_ms
+                    limit as f64 / 1_000_000.0
                 )));
             }
         }
@@ -86,7 +124,7 @@ impl Budget {
 /// This thread's CPU time in nanoseconds, plus one so 0 can mean unarmed. A VM runs on one
 /// thread, so arm, check and pause all read the same clock.
 #[cfg(unix)]
-fn cpu_now() -> u64 {
+pub(crate) fn cpu_now() -> u64 {
     let mut t = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -98,7 +136,7 @@ fn cpu_now() -> u64 {
 
 /// No thread clock wired up here yet: the wall, as before.
 #[cfg(not(unix))]
-fn cpu_now() -> u64 {
+pub(crate) fn cpu_now() -> u64 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static BASE: OnceLock<Instant> = OnceLock::new();
@@ -139,11 +177,20 @@ pub fn install(vm: &Lua, policy: Policy) -> mlua::Result<Arc<Budget>> {
     let budget = Arc::new(Budget {
         fires: AtomicU64::new(0),
         armed_at: AtomicU64::new(0),
-        cpu_ms: policy.cpu_ms,
+        cpu_ns: AtomicU64::new(0),
+        load_cpu_ns: AtomicU64::new(0),
+        interrupts: AtomicU64::new(MAX_FIRES),
+        armed_limit_ns: AtomicU64::new(0),
     });
     let b = budget.clone();
     vm.set_interrupt(move |_| b.check());
-    vm.set_memory_limit((policy.memory_mb * 1024 * 1024) as usize)?;
+    let memory_bytes = policy
+        .memory_mb
+        .checked_mul(1024 * 1024)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| mlua::Error::runtime("VM memory limit is too large"))?;
+    let cpu = Duration::from_millis(policy.cpu_ms);
+    budget.configure(vm, memory_bytes, MAX_FIRES, cpu, cpu)?;
     Ok(budget)
 }
 
@@ -191,7 +238,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("CPU-time budget"), "{err}");
-        assert!(t0.elapsed() < Duration::from_millis(500), "{:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t0.elapsed()
+        );
     }
 
     #[test]
@@ -232,7 +283,14 @@ mod tests {
     #[test]
     fn memory_cap_is_an_error_not_an_abort() {
         let vm = Lua::new();
-        install(&vm, Policy { cpu_ms: 1_000, memory_mb: 8 }).unwrap();
+        install(
+            &vm,
+            Policy {
+                cpu_ms: 1_000,
+                memory_mb: 8,
+            },
+        )
+        .unwrap();
         let err = vm
             .load("local t = {} for i = 1, 64 do t[i] = string.rep('x', 1024 * 1024) .. i end")
             .exec()

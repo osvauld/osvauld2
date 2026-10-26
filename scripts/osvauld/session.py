@@ -65,7 +65,7 @@ def shell_binary(release: bool = False) -> Path:
 class Session:
     def __init__(
         self,
-        shell_binary: Path = DEFAULT_SHELL_BINARY,
+        shell_binary: Path | None = None,
         startup_timeout: float = 15.0,
         data_dir: str | None = None,
         socket_path: str | None = None,
@@ -76,7 +76,9 @@ class Session:
         self.tmp = tempfile.mkdtemp(prefix="osvauld-test-")
         self.data_dir = data_dir or os.path.join(self.tmp, "data")
         self.socket_path = socket_path or os.path.join(self.tmp, "bridge.sock")
-        self.shell_binary = shell_binary
+        self.shell_binary = shell_binary or Path(
+            os.environ.get("OSVAULD_SHELL_BINARY") or DEFAULT_SHELL_BINARY
+        )
         self.startup_timeout = startup_timeout
         self.show_shell_output = show_shell_output
         # (w, h) runs the shell with no window: same layout, same pixels, but a virtual clock that

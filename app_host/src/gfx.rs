@@ -17,8 +17,8 @@ use runtime::frame::{
     MAX_STROKE_DASHES, Path, StrokeCap, StrokeJoin, StrokeStyle,
 };
 use runtime::scene3d::{Camera3d, Object3d, Scene3d, TextSurface, mesh::MeshData};
-use runtime::vello::kurbo::{Affine, PathEl, Point};
-use runtime::vello::peniko::Fill;
+use runtime::vello::kurbo::{Affine, PathEl, Point, Rect};
+use runtime::vello::peniko::{Color, Fill};
 use world::clip::{Clip, Easing, Key, Prop, Track};
 
 #[derive(Clone)]
@@ -69,7 +69,29 @@ impl UserData for LuaDrawing {
 
 #[derive(Clone)]
 pub(crate) struct LuaClip(pub Arc<Clip>);
-impl UserData for LuaClip {}
+impl UserData for LuaClip {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("length", |_, c| Ok(c.0.length()));
+        fields.add_field_method_get("loop", |_, c| Ok(c.0.looped()));
+    }
+
+    /// `clip:at(t)`: each tracked part's pose `t` seconds in, as the world samples it — for a
+    /// frame that animates without a world, through `drawing:pose`.
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("at", |lua, this, t: f64| {
+            let poses = lua.create_table()?;
+            for (part, p) in this.0.sample(t) {
+                let pose = lua.create_table()?;
+                pose.set("x", p.x)?;
+                pose.set("y", p.y)?;
+                pose.set("rot", p.rot)?;
+                pose.set("scale", p.scale)?;
+                poses.set(part, pose)?;
+            }
+            Ok(poses)
+        });
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct LuaScene3d(pub Arc<Scene3d>);
@@ -90,8 +112,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
     gfx.set(
         "drawing",
-        lua.create_function(|lua, spec: Table| {
-            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec)?)))
+        lua.create_function(|lua, (spec, options): (Table, Option<Table>)| {
+            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec, options.as_ref())?)))
         })?,
     )?;
     gfx.set(
@@ -110,44 +132,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     gfx.set(
         "linear_gradient",
         lua.create_function(|lua, spec: Table| {
-            named_fields(&spec, "linear_gradient", &["from", "to", "stops", "extend"])?;
-            let start = point(
-                need(&spec, "linear_gradient", "from")?,
-                "linear_gradient.from",
-            )?;
-            let end = point(need(&spec, "linear_gradient", "to")?, "linear_gradient.to")?;
-            let stop_table: Table = need(&spec, "linear_gradient", "stops")?;
-            let len = positional_len(&stop_table, "linear_gradient.stops")?;
-            if len > MAX_GRADIENT_STOPS {
-                return Err(Error::runtime(format!(
-                    "linear_gradient has too many stops: {len}"
-                )));
-            }
-            let mut stops = Vec::with_capacity(len);
-            for index in 1..=len {
-                let stop: Table = stop_table.get(index)?;
-                if positional_len(&stop, &format!("linear_gradient stop {index}"))? != 2 {
-                    return Err(Error::runtime(format!(
-                        "linear_gradient stop {index} needs offset and color"
-                    )));
-                }
-                stops.push(
-                    GradientStop::new(stop.get(1)?, crate::parse_color(&stop.get::<String>(2)?)?)
-                        .map_err(Error::external)?,
-                );
-            }
-            let extend = match spec.get::<Option<String>>("extend")?.as_deref() {
-                None | Some("pad") => Extend::Pad,
-                Some("repeat") => Extend::Repeat,
-                Some("reflect") => Extend::Reflect,
-                Some(value) => {
-                    return Err(Error::runtime(format!("unknown gradient extend {value:?}")));
-                }
-            };
-            let brush = Brush::linear(start, end, stops, extend).map_err(Error::external)?;
+            let brush = gradient("linear", &spec, &Vars::default(), "linear_gradient")?;
             lua.create_userdata(LuaBrush(Arc::new(brush)))
         })?,
     )?;
+    for kind in ["radial", "sweep"] {
+        let name = format!("{kind}_gradient");
+        let owner = name.clone();
+        let make = lua.create_function(move |lua, spec: Table| {
+            let brush = gradient(kind, &spec, &Vars::default(), &owner)?;
+            lua.create_userdata(LuaBrush(Arc::new(brush)))
+        })?;
+        gfx.set(name, make)?;
+    }
     gfx.set(
         "text_surface",
         lua.create_function(|lua, spec: Table| {
@@ -212,6 +209,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         function gfx.stroke(t) t._gfx = "stroke" return t end
         function gfx.group(t) t._gfx = "group" return t end
         function gfx.instance(t) t._gfx = "instance" return t end
+        function gfx.shadow(t) t._gfx = "shadow" return t end
         "#,
     )
     .exec()
@@ -315,8 +313,19 @@ fn path(commands: &Table, owner: &str) -> mlua::Result<Path> {
 
 /// A drawing module is pure data — paths are command lists, not `gfx.path` handles — so the same
 /// table can be rewritten by an editor or moved into a document without changing shape.
-fn drawing(spec: &Table) -> mlua::Result<Drawing> {
-    named_fields(spec, "drawing", &["size", "parts"])?;
+/// `options.vars` makes a variant: values for some of the drawing's own vars, by name.
+fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
+    named_fields(spec, "drawing", &["size", "parts", "vars"])?;
+    let mut vars = match spec.get::<Option<Table>>("vars")? {
+        Some(t) => Vars::read(&t, "drawing.vars")?,
+        None => Vars::default(),
+    };
+    if let Some(options) = options {
+        named_fields(options, "drawing options", &["vars"])?;
+        if let Some(t) = options.get::<Option<Table>>("vars")? {
+            vars.overridden_by(Vars::read(&t, "drawing options.vars")?, "drawing options.vars")?;
+        }
+    }
     let size = point(need(spec, "drawing", "size")?, "drawing.size")?;
     let parts: Table = need(spec, "drawing", "parts")?;
     let mut specs = Vec::new();
@@ -329,7 +338,7 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
             Some(list) => {
                 let mut shapes = Vec::new();
                 for i in 1..=positional_len(&list, &format!("{owner}.shapes"))? {
-                    shapes.extend(shape(list.get(i)?, &format!("{owner} shape {i}"))?);
+                    shapes.extend(shape(list.get(i)?, &vars, &format!("{owner} shape {i}"))?);
                 }
                 shapes
             }
@@ -342,6 +351,103 @@ fn drawing(spec: &Table) -> mlua::Result<Drawing> {
         });
     }
     Drawing::new(size.x, size.y, specs).map_err(Error::external)
+}
+
+/// A drawing's `vars`: named colours and numbers its shapes use as `"@name"`, so one edit reaches
+/// every shape that names it. Resolved once, as the drawing compiles; outside a drawing it's empty.
+#[derive(Default)]
+struct Vars(HashMap<String, Var>);
+
+enum Var {
+    Colour(Color),
+    Number(f64),
+}
+
+impl Vars {
+    fn read(t: &Table, at: &str) -> mlua::Result<Self> {
+        let mut vars = HashMap::new();
+        for pair in t.pairs::<String, Value>() {
+            let (name, value) = pair?;
+            let owner = format!("{at}.{name}");
+            let var = match value {
+                Value::String(c) => Var::Colour(
+                    crate::parse_color(&c.to_str()?)
+                        .map_err(|e| Error::runtime(format!("{owner}: {e}")))?,
+                ),
+                Value::Integer(n) => Var::Number(n as f64),
+                Value::Number(n) => Var::Number(n),
+                other => {
+                    let what = other.type_name();
+                    return Err(Error::runtime(format!(
+                        "{owner} must be a colour or a number, got {what}"
+                    )));
+                }
+            };
+            vars.insert(name, var);
+        }
+        Ok(Self(vars))
+    }
+
+    /// A variant's values over the drawing's own. A variant may only change what the drawing
+    /// declares, and keep its kind: a misspelt name or a colour for a width is an error.
+    fn overridden_by(&mut self, over: Vars, at: &str) -> mlua::Result<()> {
+        for (name, var) in over.0 {
+            match (self.0.get(&name), &var) {
+                (None, _) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing has no var {name}")));
+                }
+                (Some(Var::Colour(_)), Var::Number(_)) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing's is a colour")));
+                }
+                (Some(Var::Number(_)), Var::Colour(_)) => {
+                    return Err(Error::runtime(format!("{at}.{name}: the drawing's is a number")));
+                }
+                _ => {
+                    self.0.insert(name, var);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The var `"@name"` names, or `None` for a literal.
+    fn named(&self, value: &Value, owner: &str) -> mlua::Result<Option<&Var>> {
+        let Value::String(s) = value else {
+            return Ok(None);
+        };
+        let Some(name) = s.to_str()?.strip_prefix('@').map(str::to_owned) else {
+            return Ok(None);
+        };
+        let found = self.0.get(&name);
+        found
+            .map(Some)
+            .ok_or_else(|| Error::runtime(format!("{owner}: no var @{name}")))
+    }
+
+    fn colour(&self, value: Value, owner: &str) -> mlua::Result<Color> {
+        match (self.named(&value, owner)?, value) {
+            (Some(Var::Colour(c)), _) => Ok(*c),
+            (Some(Var::Number(_)), _) => Err(Error::runtime(format!("{owner}: that var is a number"))),
+            (None, Value::String(c)) => crate::parse_color(&c.to_str()?),
+            (None, other) => Err(Error::runtime(format!(
+                "{owner} must be a colour, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn number(&self, value: Value, owner: &str) -> mlua::Result<f64> {
+        match (self.named(&value, owner)?, value) {
+            (Some(Var::Number(n)), _) => Ok(*n),
+            (Some(Var::Colour(_)), _) => Err(Error::runtime(format!("{owner}: that var is a colour"))),
+            (None, Value::Integer(n)) => Ok(n as f64),
+            (None, Value::Number(n)) => Ok(n),
+            (None, other) => Err(Error::runtime(format!(
+                "{owner} must be a number, got {}",
+                other.type_name()
+            ))),
+        }
+    }
 }
 
 /// One `ui.world` entity. `pos` is its spawn position only — the world owns placement after.
@@ -396,6 +502,38 @@ impl UserData for WorldHandle {
             let spin = maybe_number(&fields, &owner, "spin")?;
             let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")?, spin };
             this.command(&owner, |w| w.set(&entity, to))
+        });
+        // `rink:push("ball", { vx, vy })` adds to a loose thing's velocity.
+        methods.add_method("push", |_, this, (entity, by): (String, Value)| {
+            let owner = format!("world {:?}:push {entity:?}", this.id);
+            let Value::Table(by) = by else {
+                return Err(Error::runtime(format!("{owner} must be {{ x, y }}, got {}", by.type_name())));
+            };
+            let by = point(by, &owner)?;
+            this.command(&owner, |w| w.push(&entity, (by.x, by.y)))
+        });
+        // `rink:blast({ x, y }, { speed = 400, radius = 150 })`: how many loose things it threw.
+        methods.add_method("blast", |_, this, (at, opts): (Table, Table)| {
+            let owner = format!("world {:?}:blast", this.id);
+            named_fields(&opts, &owner, &["speed", "radius"])?;
+            let at = point(at, &format!("{owner} point"))?;
+            let (speed, radius): (f64, f64) = (need(&opts, &owner, "speed")?, need(&opts, &owner, "radius")?);
+            this.command(&owner, |w| w.blast((at.x, at.y), speed, radius))
+        });
+        // `rink:grab("puck", { x, y })` holds a loose thing and brings it to the point; call it
+        // again as the pointer moves, `rink:release("puck")` to let go: a throw if it was moving.
+        methods.add_method("grab", |_, this, (entity, to): (String, Value)| {
+            let owner = format!("world {:?}:grab {entity:?}", this.id);
+            let Value::Table(to) = to else {
+                return Err(Error::runtime(format!("{owner} must be {{ x, y }}, got {}", to.type_name())));
+            };
+            let to = point(to, &owner)?;
+            this.command(&owner, |w| w.grab(&entity, (to.x, to.y)))
+        });
+        methods.add_method("release", |_, this, entity: Value| {
+            let owner = format!("world {:?}:release", this.id);
+            let entity = entity_arg(entity, &owner)?;
+            this.command(&owner, |w| w.release(&entity))
         });
         // `rink:after(1.5, "faceoff")`: `on_timer` gets `e.name` then.
         methods.add_method("after", |_, this, (secs, name): (Value, Value)| {
@@ -518,6 +656,13 @@ fn entity_id(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<Str
     }
 }
 
+fn entity_arg(value: Value, owner: &str) -> mlua::Result<String> {
+    match value {
+        Value::String(s) => Ok(s.to_str()?.to_string()),
+        other => Err(Error::runtime(format!("{owner} must be an entity id, got {}", other.type_name()))),
+    }
+}
+
 fn timer_name(value: Value, owner: &str) -> mlua::Result<String> {
     match value {
         Value::String(s) => Ok(s.to_str()?.to_string()),
@@ -615,7 +760,7 @@ fn maybe_number(table: &Table, owner: &str, field: &str) -> mlua::Result<Option<
     }
 }
 
-/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n }` with any
+/// `loose = true` for the default stuff, or `{ bounce = 0..1, friction = n, grip = n, density = n }` with any
 /// left to its default (no grip: it never turns); `false` or absent, it is not loose. The world
 /// checks the ranges.
 fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
@@ -629,14 +774,115 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction", "grip"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip", "density"])?;
     let d = world::Material::default();
     let number = |field: &str| maybe_number(&m, &owner, field);
     Ok(Some(world::Material {
         bounce: number("bounce")?.unwrap_or(d.bounce),
         friction: number("friction")?.unwrap_or(d.friction),
         grip: number("grip")?,
+        density: number("density")?.unwrap_or(d.density),
     }))
+}
+
+/// `wells = { { at = { x, y }, radius = r, pull = a }, … }`: left out or empty, none.
+pub(crate) fn wells(node: &Table, owner: &str) -> mlua::Result<Vec<world::Well>> {
+    let list = match node.get::<Value>("wells")? {
+        Value::Nil => return Ok(vec![]),
+        Value::Table(t) => t,
+        _ => return Err(Error::runtime(format!("{owner}: world wells must be a list"))),
+    };
+    let mut wells = Vec::new();
+    for i in 1..=positional_len(&list, &format!("{owner}.wells"))? {
+        let here = format!("{owner}: well {i}");
+        let Value::Table(w) = list.get::<Value>(i)? else {
+            return Err(Error::runtime(format!("{here} must be a table")));
+        };
+        named_fields(&w, &here, &["at", "radius", "pull"])?;
+        let at = point(need(&w, &here, "at")?, &format!("{here}.at"))?;
+        let (radius, pull) = (need(&w, &here, "radius")?, need(&w, &here, "pull")?);
+        wells.push(world::Well { at: (at.x, at.y), radius, pull });
+    }
+    Ok(wells)
+}
+
+/// `joints = { { id, kind = "pin" | "rope" | "spring", a, a_at, b, b_at, … }, … }`: what holds
+/// things together, described again each view and kept while it is the same. Left out or empty,
+/// none.
+pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::JointSpec>> {
+    let list = match node.get::<Value>("joints")? {
+        Value::Nil => return Ok(vec![]),
+        Value::Table(t) => t,
+        _ => return Err(Error::runtime(format!("{owner}: world joints must be a list"))),
+    };
+    let mut joints = Vec::new();
+    for i in 1..=positional_len(&list, &format!("{owner}.joints"))? {
+        let Value::Table(j) = list.get::<Value>(i)? else {
+            return Err(Error::runtime(format!("{owner}: joint {i} must be a table")));
+        };
+        let id: Option<String> = j.get("id")?;
+        let Some(id) = id else {
+            return Err(Error::runtime(format!("{owner}: joint {i} needs id")));
+        };
+        let here = format!("{owner}: joint {id:?}");
+        named_fields(&j, &here, &[
+            "id", "kind", "a", "a_at", "b", "b_at", "limits", "length", "stiffness", "damping", "contacts",
+        ])?;
+        let kind: String = need(&j, &here, "kind")?;
+        let has = |field: &str| j.get::<Value>(field).map(|v| !v.is_nil());
+        let only = |field: &str, kinds: &str| -> mlua::Result<()> {
+            Err(Error::runtime(format!("{here}: {field} is for {kinds}")))
+                .or_else(|e| if has(field)? { Err(e) } else { Ok(()) })
+        };
+        let kind = match kind.as_str() {
+            "pin" => {
+                only("length", "rope and spring, not pin")?;
+                only("stiffness", "spring, not pin")?;
+                only("damping", "spring, not pin")?;
+                let limits = match maybe_table(&j, &here, "limits")? {
+                    Some(t) => {
+                        if positional_len(&t, &format!("{here}.limits"))? != 2 {
+                            return Err(Error::runtime(format!("{here}: limits needs low and high")));
+                        }
+                        Some((t.get(1)?, t.get(2)?))
+                    }
+                    None => None,
+                };
+                world::JointKind::Pin { limits }
+            }
+            "rope" => {
+                only("limits", "pin, not rope")?;
+                only("stiffness", "spring, not rope")?;
+                only("damping", "spring, not rope")?;
+                world::JointKind::Rope { length: need(&j, &here, "length")? }
+            }
+            "spring" => {
+                only("limits", "pin, not spring")?;
+                world::JointKind::Spring {
+                    length: need(&j, &here, "length")?,
+                    stiffness: need(&j, &here, "stiffness")?,
+                    damping: need(&j, &here, "damping")?,
+                }
+            }
+            other => {
+                return Err(Error::runtime(format!(
+                    "{here}: kind must be \"pin\", \"rope\" or \"spring\", got {other:?}"
+                )));
+            }
+        };
+        let a_at = point(need(&j, &here, "a_at")?, &format!("{here}.a_at"))?;
+        let b_at = point(need(&j, &here, "b_at")?, &format!("{here}.b_at"))?;
+        joints.push(world::JointSpec {
+            kind,
+            a: need(&j, &here, "a")?,
+            a_at: (a_at.x, a_at.y),
+            b: entity_id(&j, &here, "b")?,
+            b_at: (b_at.x, b_at.y),
+            contacts: j.get::<Option<bool>>("contacts")?.unwrap_or(false),
+            id,
+        });
+    }
+    Ok(joints)
 }
 
 /// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
@@ -780,17 +1026,143 @@ fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
     Ok(Key { time: spec.get(1)?, value: spec.get(2)?, easing })
 }
 
+/// The fields every gradient shares: `stops = { {offset, color}, … }` and `extend`.
+fn stops_and_extend(
+    spec: &Table,
+    vars: &Vars,
+    owner: &str,
+) -> mlua::Result<(Vec<GradientStop>, Extend)> {
+    let stop_table: Table = need(spec, owner, "stops")?;
+    let len = positional_len(&stop_table, &format!("{owner}.stops"))?;
+    if len > MAX_GRADIENT_STOPS {
+        return Err(Error::runtime(format!("{owner} has too many stops: {len}")));
+    }
+    let mut stops = Vec::with_capacity(len);
+    for index in 1..=len {
+        let stop: Table = stop_table.get(index)?;
+        if positional_len(&stop, &format!("{owner} stop {index}"))? != 2 {
+            return Err(Error::runtime(format!(
+                "{owner} stop {index} needs offset and color"
+            )));
+        }
+        let color = vars.colour(stop.get(2)?, &format!("{owner} stop {index}"))?;
+        stops.push(GradientStop::new(stop.get(1)?, color).map_err(Error::external)?);
+    }
+    let extend = match spec.get::<Option<String>>("extend")?.as_deref() {
+        None | Some("pad") => Extend::Pad,
+        Some("repeat") => Extend::Repeat,
+        Some("reflect") => Extend::Reflect,
+        Some(value) => return Err(Error::runtime(format!("unknown gradient extend {value:?}"))),
+    };
+    Ok((stops, extend))
+}
+
+/// The three gradients, from the fields of `gfx.linear_gradient` / `radial_gradient` /
+/// `sweep_gradient` — also what a drawing's `fill = { linear | radial | sweep = … }` holds.
+/// `owner` names it in errors.
+fn gradient(kind: &str, spec: &Table, vars: &Vars, owner: &str) -> mlua::Result<Brush> {
+    let at = |field: &str| -> mlua::Result<Point> {
+        point(need(spec, owner, field)?, &format!("{owner}.{field}"))
+    };
+    let tail = ["stops", "extend"];
+    let brush = match kind {
+        "linear" => {
+            named_fields(spec, owner, &[&["from", "to"][..], &tail].concat())?;
+            let (stops, extend) = stops_and_extend(spec, vars, owner)?;
+            Brush::linear(at("from")?, at("to")?, stops, extend)
+        }
+        // `focus` and `focus_radius` are the start circle: by default a point at the centre.
+        "radial" => {
+            let fields = [&["center", "radius", "focus", "focus_radius"][..], &tail].concat();
+            named_fields(spec, owner, &fields)?;
+            let (stops, extend) = stops_and_extend(spec, vars, owner)?;
+            let center = at("center")?;
+            let focus = match spec.get::<Option<Table>>("focus")? {
+                Some(f) => point(f, &format!("{owner}.focus"))?,
+                None => center,
+            };
+            let focus_radius = spec.get::<Option<f64>>("focus_radius")?.unwrap_or(0.0);
+            let end = (center, need(spec, owner, "radius")?);
+            Brush::radial((focus, focus_radius), end, stops, extend)
+        }
+        // Angles in degrees, like `rot` everywhere else; a full turn by default.
+        "sweep" => {
+            let fields = [&["center", "from_angle", "to_angle"][..], &tail].concat();
+            named_fields(spec, owner, &fields)?;
+            let (stops, extend) = stops_and_extend(spec, vars, owner)?;
+            let from: f64 = spec.get::<Option<f64>>("from_angle")?.unwrap_or(0.0);
+            let to: f64 = spec.get::<Option<f64>>("to_angle")?.unwrap_or(360.0);
+            let (from, to) = (from.to_radians(), to.to_radians());
+            Brush::sweep(at("center")?, from, to, stops, extend)
+        }
+        _ => unreachable!("callers pass a known kind"),
+    };
+    brush.map_err(|e| Error::runtime(format!("{owner}: {e}")))
+}
+
+/// A drawing's `fill`: a colour string, or one gradient as data — `{ linear = {…} }`,
+/// `{ radial = {…} }` or `{ sweep = {…} }` — not a `gfx` handle, so a drawing stays pure data.
+/// Gradient geometry is in the drawing's own space and moves with the part.
+fn paint(value: Value, vars: &Vars, owner: &str) -> mlua::Result<Brush> {
+    match value {
+        Value::String(_) => Brush::solid(vars.colour(value, owner)?).map_err(Error::external),
+        Value::Table(t) => {
+            named_fields(&t, owner, &["linear", "radial", "sweep"])?;
+            let mut kinds = ["linear", "radial", "sweep"].into_iter();
+            let Some(kind) = kinds.find(|k| t.contains_key(*k).unwrap_or(false)) else {
+                let wanted = "needs linear, radial or sweep";
+                return Err(Error::runtime(format!("{owner} {wanted}")));
+            };
+            if t.pairs::<Value, Value>().count() > 1 {
+                return Err(Error::runtime(format!("{owner} takes one gradient")));
+            }
+            gradient(kind, &need(&t, owner, kind)?, vars, &format!("{owner}.{kind}"))
+        }
+        other => Err(Error::runtime(format!(
+            "{owner} must be a color or a gradient, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// A soft shadow from `{ rect = {x, y, w, h}, radius?, blur, color }` — `gfx.shadow`'s fields,
+/// also a drawing shape's `shadow`. Paint only: the pointer goes through it.
+fn shadow(spec: &Table, vars: &Vars, owner: &str) -> mlua::Result<Item> {
+    let r: Table = need(spec, owner, "rect")?;
+    if positional_len(&r, &format!("{owner}.rect"))? != 4 {
+        return Err(Error::runtime(format!("{owner}.rect needs x, y, w and h")));
+    }
+    let (x, y, w, h): (f64, f64, f64, f64) = (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+    let radius = match spec.get::<Value>("radius")? {
+        Value::Nil => 0.0,
+        r => vars.number(r, &format!("{owner}.radius"))?,
+    };
+    let blur = vars.number(need(spec, owner, "blur")?, &format!("{owner}.blur"))?;
+    let color = vars.colour(need(spec, owner, "color")?, &format!("{owner}.color"))?;
+    Item::shadow(Rect::new(x, y, x + w, y + h), radius, blur, color)
+        .map_err(|e| Error::runtime(format!("{owner}: {e}")))
+}
+
 /// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
-fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
+fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
+    if let Some(s) = spec.get::<Option<Table>>("shadow")? {
+        named_fields(&spec, owner, &["shadow"])?;
+        let owner = format!("{owner}.shadow");
+        named_fields(&s, &owner, &["rect", "radius", "blur", "color"])?;
+        return Ok(vec![shadow(&s, vars, &owner)?]);
+    }
     named_fields(&spec, owner, &["path", "fill", "stroke"])?;
     let path = Arc::new(path(
         &need(&spec, owner, "path")?,
         &format!("{owner}.path"),
     )?);
     let mut items = Vec::new();
-    if let Some(color) = spec.get::<Option<String>>("fill")? {
-        let brush = Brush::solid(crate::parse_color(&color)?).map_err(Error::external)?;
-        items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+    match spec.get::<Value>("fill")? {
+        Value::Nil => {}
+        fill => {
+            let brush = paint(fill, vars, &format!("{owner}.fill"))?;
+            items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+        }
     }
     if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
         if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
@@ -798,10 +1170,10 @@ fn shape(spec: Table, owner: &str) -> mlua::Result<Vec<Item>> {
                 "{owner}.stroke needs width and color"
             )));
         }
-        let brush = Brush::solid(crate::parse_color(&stroke.get::<String>(2)?)?)
-            .map_err(Error::external)?;
+        let ink = vars.colour(stroke.get(2)?, &format!("{owner}.stroke color"))?;
+        let brush = Brush::solid(ink).map_err(Error::external)?;
         let style = StrokeStyle::new(
-            stroke.get(1)?,
+            vars.number(stroke.get(1)?, &format!("{owner}.stroke width"))?,
             StrokeCap::Round,
             StrokeJoin::Round,
             4.0,
@@ -914,6 +1286,11 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
             )?;
             let instance = Item::instance(transform(&spec)?, frame).map_err(Error::external)?;
             named(&spec, instance)
+        }
+        "shadow" => {
+            let fields = ["_gfx", "id", "rect", "radius", "blur", "color"];
+            named_fields(&spec, "shadow", &fields)?;
+            named(&spec, shadow(&spec, &Vars::default(), "shadow")?)
         }
         _ => Err(Error::runtime(format!(
             "Frame item {index}: unknown kind {kind:?}"

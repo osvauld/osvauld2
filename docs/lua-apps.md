@@ -36,6 +36,93 @@ return function()
 end
 ```
 
+## Bundled workspace launcher
+
+The shell's default item grid lives in `shell2/src/launcher/` and runs as a separate Lua VM.
+It alone receives `shell.snapshot()` (fresh `{workspace = {id, name}, items = {{id, name, kind}, …}}`
+metadata) and `shell.open_item(id)` (handler-only, scoped to that workspace). Rust revalidates
+commands and opens or focuses the existing item instance. Ordinary uploaded apps do **not**
+receive `shell`. The default workspace title/Back/Add item header is also Lua-described.
+`shell.back()` and `shell.import_item()` enqueue handler-only, workspace-scoped requests;
+Rust rechecks unlocked-account membership and Home before navigating or opening its native
+folder picker/import path. No filesystem access is granted to Lua.
+
+The workspace list is also Lua-described, through `spaces_view.lua` → `spaces.lua` in the
+same sealed source document. That entry receives `shell.snapshot()` → `{workspaces = {{id,
+name}, …}}` and handler-only `shell.select_workspace(id)`. Rust rechecks Home, account membership
+and current listing before selecting; it preserves open app threads. The workspace entry remains
+`main.lua`, with its original snapshot/capabilities. No fake workspace or app VM is injected.
+Workspace creation presentation is Lua too (`workspace_create.lua`), through handler-only
+`shell.create_workspace(name)`. The submitting draft is bounded to 256 UTF-8 bytes (including
+surrounding whitespace); Rust trims it and rejects an empty name before queuing the operation.
+`shell.snapshot().creation` copies `{pending, generation, error}`: generation advances on a
+matched completion, error is absent on success. The form keeps its draft in `ui.state`, blocks
+submission/Cancel while pending, retains it on failure and dismisses after success.
+Rust owns the sealed write on a worker and wakes the loop with an account/job-scoped completion.
+Account checking and writing share the vault lock. An accepted write may finish in its original
+account after navigation; stale completions refresh same-account list metadata without changing
+another draft/job's feedback. Navigation/lock/reset discard Lua drafts, not accepted writes.
+Auth, invitations/publishing and tabs remain Rust-side in this slice.
+
+The reserved element ID `launcher:workspace-header` opts into Lua header presentation. If the
+rendered tree lacks it (older customized sources, initialization or view failure), Rust supplies
+its navigation/import header. Detection only inspects the Rust description; no handler executes.
+Rust recovery controls remain independent of this marker. On the list, the corresponding marker
+is `launcher:workspace-list`: a failed/non-list description keeps Rust cards. Missing list modules
+in older overrides are filled from the bundle in memory, without replacing `main.lua`/`theme.lua`
+or writing the saved record. `launcher:workspace-create` separately opts into Lua creation UI;
+older/custom lists without it keep the native creation control. Invalid list overrides fall back independently; selecting a
+workspace still evaluates its original override.
+
+Launcher source (including `theme.lua` configuration and the reused `cursor.lua` component) is
+saved as an account-owned sealed vault entry. On Home, use `rpc.select_workspace(ws_id)`,
+`rpc.read_launcher_file_versioned(path)` and `rpc.edit_launcher_file(path, revision, edits)`.
+Edits are staged through load/view/tree validation, persisted, then activated; a rejected edit
+or failed save changes neither the working source nor the saved override. Viewer `ui.state`
+is carried through successful reloads. `rpc.dump_launcher_tree()`, `rpc.read_launcher_console()`
+and `rpc.save_shell_screenshot(path)` provide feedback. Launcher senses require Home focus and can inspect the workspace list too. Edits/Customize
+still require selecting a workspace; candidate validation covers the current entry, so changes
+to an inactive entry can fail when next mounted (Rust fallback remains available). Reset (`rpc.reset_launcher()` or the Rust strip's two-step Reset launcher button) also
+works from the workspace listing. Invalid saved source falls back to the bundle with a warning,
+without deleting the override. Ordinary app `WriteFile`/`EditFile` never target launcher source.
+
+**Customize** opens the bundled Lua editor for `theme.lua`, `main.lua`, `cursor.lua`, `spaces.lua`
+and `spaces_view.lua`, plus `workspace_create.lua`.
+Its draft lives in `ui.state`, not the vault: failed saves retain it; Save validates and persists
+before applying; Cancel or changing files discards it. Lock/navigation/restart do not preserve
+unsaved drafts. The editor uses a plain `ui.text_area`, without syntax highlighting. Tabs display
+as four spaces; the input projection retains raw tabs outside the edited span.
+
+The launcher alone also receives `shell.read_launcher_file(path)` →
+`{content, revision, generation}` (copies of committed source) and handler-only
+`shell.edit_launcher_file(path, revision, {{old_text = ..., new_text = ...}})`.
+Edits enqueue plain data; Rust rechecks Home/workspace, validates, saves, then activates.
+`generation` changes after activation/reset so an open editor can dismiss without mutating in
+view. During a staging trial, reads still describe the committed source, not the candidate.
+`rpc.click_launcher(id)` and `rpc.type_launcher(id, text)` invoke current launcher handlers;
+use `rpc.click_at(*rpc.centre_of(id))` to test actual hit eligibility. Bridge `Keyboard` drives
+game-key events, not native field typing/IME; `TypeLauncher` exercises `on_input` directly.
+
+The launcher alone has a 32 MiB Lua heap cap and a 20,000-interrupt ceiling per execution,
+with cooperative thread-CPU limits of 100 ms for source load and 10 ms for view/handlers.
+The shared budget hook is configured before source evaluation and reinstalled in staged VMs;
+ordinary uploaded apps keep the app-thread defaults, not the launcher's stricter limits. Resource-exhausting candidates reject without changing committed or working source.
+These limits are not a hard frame-time or process-memory bound: Rust bindings, state copying,
+tree walking, layout, GPU resources and presentation are not preempted or covered by the Lua
+heap cap. On Unix, descheduling and sleeping do not spend the CPU budget; non-Unix targets
+currently fall back to wall time. Limits are armed only around execution, including staged state
+export/import and trial view/sweep; handler permission remains an independent capability guard.
+
+*Revised 2026-10-04: the initial wall deadlines counted descheduling and rejected valid loads
+under concurrent builds/heavy tests. Thread-CPU accounting replaces them; limits remain
+cooperative and cannot interrupt a blocked native call.*
+A runtime failure can still damage viewer scratch; Rust Reset starts a fresh bundled
+VM, discards scratch and does not execute the old VM, even to export state.
+
+The bundled custom pointer is active inside the workspace launcher; the list and Rust chrome
+keep the native cursor.
+Shell-wide pointer mounting and Lua auth/tabs remain unbuilt.
+
 ## The model — Elm, in Lua
 
 The architecture is **Elm's**: state, view, update.
@@ -88,11 +175,14 @@ implicit clip or scale.
 | `gfx.path(commands)` | positional list of commands | up to 65536; drawing before `move` is an error |
 | `gfx.solid(color)` | a CSS color string | |
 | `gfx.linear_gradient({…})` | `from = {x, y}` · `to = {x, y}` · `stops = {{offset, color}, …}` · `extend` | 2–64 stops, offsets 0–1; `extend` is `pad` (default), `repeat`, `reflect` |
+| `gfx.radial_gradient({…})` | `center` · `radius` · (`focus` · `focus_radius`) · `stops` · `extend` | colour spreads from the focus circle (a point at the centre by default) out to `radius`; an off-centre `focus` moves the light |
+| `gfx.sweep_gradient({…})` | `center` · (`from_angle` · `to_angle`) · `stops` · `extend` | colour turns around `center`; angles in degrees from +x towards +y, a full turn (0–360) by default |
 | `gfx.frame({…items})` | `width` · `height` · (`baseline`) + items as positional children | `width`/`height` required; the result reads them back (`f.width`, `f.height`) |
 | `gfx.fill({…})` | `path` · `brush` · (`rule`) | `rule` is `nonzero` (default) or `evenodd` |
 | `gfx.stroke({…})` | `path` · `brush` · `width` · (`cap` · `join` · `miter_limit` · `dashes` · `dash_offset`) | `cap`: `butt` (default) · `square` · `round`. `join`: `miter` (default) · `bevel` · `round`. `miter_limit` 4, `dashes` `{}` (max 64), `dash_offset` 0 |
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
 | `gfx.instance({…})` | `visual` (another frame) · `transform` | placed by its local origin — account for a centered shape's radius |
+| `gfx.shadow({…})` | `rect = {x, y, w, h}` · `blur` · `color` · (`radius`) | a blurred rounded rect; paint only, never hit, even with an `id` |
 
 `fill`, `stroke`, `group` and `instance` take an optional **`id`** — and that is what makes the
 drawing touchable. Put the pointer handler on the `ui.frame` itself, and `on_click`/`on_hover`
@@ -157,8 +247,27 @@ ui.frame({ id = "hero", visual = waving })
   follow. Naming a part that doesn't exist is an error.
 - Each posed part is a named group, so `on_hover`/`on_click` on the `ui.frame` report the part id
   as `e.shape`.
-- `pose` builds a new frame: pose once at module scope, not in `view`. Clips, `use` and paint
-  beyond solid colours are not built yet — `clips = …` and `use = …` are errors.
+- A shape's `fill` is a colour string or one gradient as data — `{ linear = {…} }`,
+  `{ radial = {…} }` or `{ sweep = {…} }`, each holding the fields of the matching `gfx.*_gradient`
+  (e.g. `fill = { linear = { from = {x, y}, to = {x, y}, stops = { {0, "#4aa3ff"}, {1, "#1b2a6b"} } } }`).
+  Points and radii are in the drawing's space, so the gradient moves with its part. A stroke's
+  colour is solid only.
+- A shape can instead be a **soft shadow**: `{ shadow = { rect = {x, y, w, h}, radius = 16,
+  blur = 6, color = "#00000066" } }` — a rounded rectangle blurred by `blur` (the gaussian's
+  standard deviation; positive), `radius` 0 by default. A circle is a rect with `radius` half its
+  width. List it before the shape it falls under; the pointer goes through it. Only rounded
+  rectangles blur — a soft shadow of any other outline is not built.
+- **Vars** name values once: `vars = { skin = "#e8b894", line = 2 }` beside `size` and `parts`,
+  then `"@skin"` wherever a colour goes (fill, stroke colour, gradient stop, shadow colour) and
+  `"@line"` wherever a lone number goes (stroke width, shadow `radius` and `blur`). A var is a
+  colour string or a number; an unknown name or the wrong kind is an error naming the shape.
+  Path points stay literal. Outside a drawing (`gfx.linear_gradient`, `gfx.shadow`) there are no
+  vars.
+- A **variant** is `gfx.drawing(module, { vars = { shirt = "#2ec4b6" } })`: the module's vars with
+  those few replaced — another team's shirt, a dark toggle — compiled once like any drawing. It
+  may only replace vars the module declares, with the same kind (a colour for a colour).
+- `pose` builds a new frame: pose once at module scope, not in `view`. Clips and `use` are not
+  built yet — `clips = …` and `use = …` are errors.
 
 `demo_apps/hero` is the reference.
 
@@ -274,6 +383,12 @@ ui.world({ id = "room", width = 720, height = 400,
   errors — `events`, speed, transitions and layers are not built yet.
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
+- **Without a world**, `clip:at(t)` gives each tracked part's pose `t` seconds in — `{ knob = { x,
+  y, rot, scale }, … }`, sampled exactly as the world samples it (a looped clip wraps, a once clip
+  holds its ends) — and `drawing:pose(clip:at(t))` draws it on a plain `ui.frame`. Lua keeps `t`:
+  declare `on_frame` only while a clip moves, so a resting widget asks for no frames.
+  `clip.length` and `clip.loop` read back the spec. This is how a UI asset is a widget —
+  `demo_apps/toggle_demo/toggle.lua` plays the toggle asset's `to_night` and rests on `night`.
 
 ### Controllers
 
@@ -369,6 +484,65 @@ on_timer = function(e) if e.name == "faceoff" then put_puck_back() end end,   --
   again starts it over — a cooldown is `after` on every press.
 - A pending timer keeps the world ticking; it only runs while the world is on screen. The dump
   lists them as `timers = { { name, left } }` beside `entities`.
+
+### Gravity, forces, hands and joints — a side-on world
+
+A world has no gravity until its description gives it some, so every top-down world above is
+unchanged. `demo_apps/gravity_lab` is all of this at once: a slingshot, a castle that collapses,
+dominoes, a pendulum on a chain, a seesaw.
+
+```lua
+ui.world({
+    id = "lab", width = 960, height = 520,
+    gravity = { 0, 900 },                                   -- units a second squared; +y is down
+    wells = { { at = { 490, 330 }, radius = 200, pull = 1700 } },
+    joints = {
+        { id = "chain0", kind = "rope", a = "link0", a_at = { 5, 5 }, b_at = { 390, 24 }, length = 30 },
+        { id = "see",    kind = "pin",  a = "plank", a_at = { 80, 5 }, b_at = { 270, 451 }, limits = { -12, 12 } },
+    },
+    -- entities …
+})
+```
+
+- **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
+  changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
+  falls; it comes to rest asleep on what holds it, as before.
+- **`friction` is not the floor's.** A loose thing's `friction` is *damping* — speed lost a
+  second, in the air too — so under gravity keep it small (0 to 0.1) or things fall slowly, and
+  let `grip` (surface friction) stop the sliding. `grip` is also what lets a thing tumble.
+- **`loose = { density = n }`** (default 1, above 0): mass is density × area, so a stone block
+  outweighs a wooden one the same size and flings what it hits.
+- **`wells = { { at, radius, pull }, … }`** are standing fields, described like `gravity`: a loose
+  thing whose centre is within `radius` of `at` accelerates toward it at `pull`, fading to nothing
+  at the edge; a negative `pull` pushes away. They wake what they reach.
+- **`joints`** hold things together, described every view and kept while they are the same (a
+  swinging pendulum is not reset by the next view). `id`, `kind`, `a` and `a_at` (a point in the
+  entity's own drawing box), and `b` and `b_at` — with no `b`, `b_at` is a point of the world,
+  fixed. By kind:
+  - `"pin"`: a hinge. Optional `limits = { low, high }` in degrees. A loose end needs `grip`, or
+    it cannot turn.
+  - `"rope"`: never farther apart than `length`, free to come closer — a chain is ropes between links.
+  - `"spring"`: pulls toward `length` apart; needs `stiffness` and `damping`.
+  - `contacts = true` lets the two bodies collide with each other (off by default); one end at
+    least must be loose. A joint naming something not in the description is an error, and the
+    previous joints stay.
+
+Commands, in handlers only like `set`:
+
+```lua
+world("lab"):push("ball", { 300, -120 })                  -- adds to a loose thing's velocity
+local n = world("lab"):blast({ 480, 400 }, { speed = 600, radius = 200 })   -- an explosion; n moved
+world("lab"):grab("block", { e.x, e.y })                  -- a hand: bring it to the point …
+world("lab"):release("block")                             -- … let go: it keeps its speed (a throw)
+```
+
+- `push` is a velocity change, whatever the mass — a kick. `blast` throws every loose thing
+  within `radius` straight away from the point at `speed`, fading to nothing at the edge (one
+  right on it goes up).
+- `grab` drives a loose thing toward the point each step: call it again from `on_drag`'s
+  `"move"` with the pointer, and `release` on `"end"`. What it meets still stops it; gravity does
+  not pull a held thing. Drags that end after the thing has gone are no error.
+- `e.shape` of an `on_drag` on a world is the entity's id — it says which body was taken.
 
 ### Questions — `world(id):ray` and `:at`
 
@@ -609,8 +783,14 @@ children keep their natural size there. A scrolling container with `grow` uses t
 main-axis space instead of letting its content enlarge its viewport. **Needs an `id`.**
 
 **Overlay positioning** — `absolute` takes the element out of the flow; `top`/`left`/
-`right`/`bottom` position it in viewport coordinates. This is how kanban draws its drag ghost
-and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
+`right`/`bottom` position it relative to its containing parent. At a viewport-sized root this
+is the app viewport; a nested launcher root uses its own local coordinates, matching `on_hover`.
+
+*Corrected 2026-10-03: this previously said “position it in viewport coordinates” without the
+root qualification. The launcher mounts below Rust chrome; an offset-root headless test pins
+local pointer coordinates against the final painted position.*
+
+This is how kanban draws its drag ghost and its modal scrim. A portal popover uses `ui.overlay`: exactly two positional children, the
 anchor then the root-painted panel. `side` is `bottom` (default), `top`, `left`, or `right`;
 `align` is `start` (default), `center`, or `end`; `on_dismiss` adds a click-away catcher and,
 like every handler, needs an `id`:
@@ -710,7 +890,10 @@ before `fade`.
 | pointer | `system_cursor` | bool — `false` hides the system pointer while over this element, for an app that draws its own (`demo_apps/pointer/cursor.lua`) |
 | | `cursor` | a look name (`"grab"`, `"text"`, any string your cursor knows) or a `gfx.frame` to draw — hover handlers get the topmost declared one as `e.look` |
 | viewport | `zoomable` · `zoom_x` | bool — Ctrl+wheel zooms children around the pointer, both axes or x only. **Needs `id`.** |
+| | `zoom_min` · `zoom_max` | number — how far that camera zooms out and in, as a scale; 0.4 and 3 by default. Only beside `zoomable`/`zoom_x`; `zoom_min` below `zoom_max`. |
+| | `on_zoom` | `function(e)` — `e.scale` is the camera's zoom, told on the first frame and on each change. Divide by it to keep a mark (a selection outline, a handle) its size on screen. Only beside `zoomable`/`zoom_x`. |
 | scroll | `scroll_x` · `scroll_y` | bool. **Needs `id`.** |
+| drag | `drag_on_shapes` | bool — `on_drag` takes only a press on one of the frame's named shapes; a press beside them falls through, so a camera around it still pans. Only beside `on_drag`. |
 | input | `value` · `autofocus` | string · bool |
 
 Four props need an `id` because the shell keys state by it: `scroll_*` (offset), `zoomable` /
@@ -869,6 +1052,19 @@ The rules that bite, once each:
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
 
+### Assets
+
+`local hero = asset:open("hero")` opens a **workspace asset** by name — data that belongs to the
+workspace, not to your app, so any app in it can read and write the same one
+([design](design/assets.md)). The mirror and the writes are exactly `doc:open`'s.
+`asset:open("board")` and `doc:open("board")` are two different documents.
+
+An asset that does not exist yet opens empty, and your first write creates it.
+
+*2026-10-01: assets save and load locally. Not yet: syncing them to other devices, and two open
+apps seeing each other's edits live — today each app holds its own copy, and the last to save
+wins. Slices 2c and 3 of the design close these.*
+
 ## Signals
 
 A **signal** is app state whose value is frozen: reading it is plain and fast, and the only way
@@ -936,8 +1132,34 @@ ui.world({ id = "map", width = 720, height = 400,
   100, ~1.4 ms. Walking past them costs no coin work at all.
 - Inside a group's function, as in `view`, signals cannot be written. An error in it names the
   group and keeps the last good world; the group runs again next view.
-- A group inside a group is an error, and so is `ui.group` outside a world (UI-tree groups are not
-  built yet).
+- A group inside a group is an error in a world. In the UI tree they nest (below).
+
+### Groups in the UI tree
+
+The same `ui.group(id, fn)` among ordinary elements. Its function returns **one element**, and
+runs again only when a signal it read has changed; otherwise the app is handed what the group built
+last time — the same element, with its handlers, so a click inside it still lands. Use it for a
+row of a long list or a panel that changes rarely, not around everything.
+
+```lua
+for _, m in messages() do
+  rows[#rows + 1] = ui.group("msg:" .. m.id, function()   -- one group per message
+    return ui.row({ ui.text({ m.author }), ui.text({ m.body }) })
+  end)
+end
+```
+
+- **Ids are unique in the whole UI tree**, not only among siblings: two groups named alike in one
+  view is an error. Key them by your data (`"msg:" .. m.id`).
+- **A group that reads no signal runs every view**, as in a world. So does any group that holds a
+  `ui.world`, a retained `ui.scene3d`, or another group that cannot be kept — a world's frame
+  moves without a signal. Put everything the group shows in signals.
+- **Nested groups:** what an inner group read counts for the group around it. Change a signal the
+  inner group read and both re-run; change one only the outer read and the inner is kept.
+- A group the view stops describing is forgotten; shown again, it runs again. A reload runs every
+  group again.
+- Writing a signal inside the function is an error, as in `view`. A bad element inside it shows
+  its error card and the group is not kept, so the next view tries again.
 
 ## Search
 

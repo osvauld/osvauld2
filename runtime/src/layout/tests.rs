@@ -114,6 +114,7 @@ fn element_overlay_anchors_to_its_stable_transformed_screen_rect() {
     *store.get_or(&Id::from("zoom"), Slot::Zoom) = Zoom {
         scale: 0.5,
         pan: (30.0, 20.0),
+        ..Zoom::default()
     };
     let popover_rect = |placed: &[Placed<()>]| {
         placed

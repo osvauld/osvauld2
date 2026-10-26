@@ -93,7 +93,7 @@ return function()
 			ui.text({ "Lua Frame · orbital study", color = "#eef5ff", no_wrap = true }),
 		}),
 		ui.col({
-			id = "orbit-camera", grow = true, zoomable = true,
+			id = "orbit-camera", grow = true, zoomable = true, zoom_max = 12, -- close on an orbit
 			-- A zoom viewport stabilizes its direct child's content origin. Center inside a
 			-- viewport-sized child rather than asking the camera to move that origin.
 			ui.col({

@@ -24,6 +24,7 @@ pub mod scene3d;
 mod scroll;
 mod state;
 mod text;
+mod timing;
 mod tile;
 mod windows;
 mod zoom;
@@ -39,11 +40,13 @@ use crate::id::Id;
 use crate::layout::PlacedKind;
 use crate::state::Slot;
 use crate::zoom::Zoom;
+pub use crate::zoom::DEFAULT_RANGE as DEFAULT_ZOOM_RANGE;
 use editor::Field;
 use scroll::*;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Fn;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use vello::Scene;
@@ -379,6 +382,21 @@ struct Grabbed {
 }
 
 impl Grabbed {
+    /// Whether a drag region takes a press at `p`, and with what shape; `None` lets it fall
+    /// through. One with `drag_on_shapes` takes only a press on a shape.
+    fn press(
+        g: &Geometry,
+        shapes: &Option<Shapes>,
+        on_shapes: bool,
+        p: Point,
+    ) -> Option<Option<Self>> {
+        if !g.contains(p) {
+            return None;
+        }
+        let shape = Self::take(shapes, g.node_point(ScreenPoint::new(p.x, p.y)));
+        (shape.is_some() || !on_shapes).then_some(shape)
+    }
+
     fn take(shapes: &Option<Shapes>, local: NodePoint) -> Option<Self> {
         let s = shapes.as_ref()?;
         let hit = s.at(local)?;
@@ -430,13 +448,20 @@ struct Hits<M> {
     /// The last field is the element's nearest zoomable ancestor.
     click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, PickContent)>,
     input: Vec<(Geometry, Id, Insets)>,
-    input_maps: Vec<(Id, Box<dyn Fn(String) -> M>)>,
-    context: Vec<(Rect, Box<dyn Fn((f32, f32)) -> M>)>,
-    drag: Vec<(Geometry, Id, Box<dyn Fn(DragEvent) -> M>, Option<Shapes>)>,
-    drop: Vec<(Geometry, Id, Box<dyn Fn(DropEvent) -> M>)>,
-    hover: Vec<(Geometry, Id, Box<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
-    wheel: Vec<(Geometry, Id, Box<dyn Fn(WheelEvent) -> M>)>,
-    key: Vec<(Id, Box<dyn Fn(KeyInput) -> M>)>,
+    input_maps: Vec<(Id, Rc<dyn Fn(String) -> M>)>,
+    context: Vec<(Rect, Rc<dyn Fn((f32, f32)) -> M>)>,
+    /// The last field is `drag_on_shapes`.
+    drag: Vec<(
+        Geometry,
+        Id,
+        Rc<dyn Fn(DragEvent) -> M>,
+        Option<Shapes>,
+        bool,
+    )>,
+    drop: Vec<(Geometry, Id, Rc<dyn Fn(DropEvent) -> M>)>,
+    hover: Vec<(Geometry, Id, Rc<dyn Fn(HoverEvent) -> M>, Option<Shapes>)>,
+    wheel: Vec<(Geometry, Id, Rc<dyn Fn(WheelEvent) -> M>)>,
+    key: Vec<(Id, Rc<dyn Fn(KeyInput) -> M>)>,
     scroll: Vec<ScrollHit>,
     enter: Vec<(Id, M)>,
     esc: Vec<(Id, M)>,
@@ -444,7 +469,7 @@ struct Hits<M> {
     zoom: Vec<(Rect, Id, (f32, f32), (bool, bool))>,
     no_cursor: Vec<Geometry>,
     looks: Vec<(Geometry, CursorLook)>,
-    tile: Vec<(Geometry, Id, Box<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
+    tile: Vec<(Geometry, Id, Rc<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -703,7 +728,7 @@ impl<A: App> Runner<A> {
                 found.push((id, r, "hover"));
             }
         }
-        for (g, id, _, _) in &self.hits.drag {
+        for (g, id, _, _, _) in &self.hits.drag {
             if let Some(r) = g.visible_rect_kurbo() {
                 found.push((id, r, "drag"));
             }
@@ -780,6 +805,7 @@ impl<A: App> Runner<A> {
             (None, Some(v)) => (v, 1.0, Affine::IDENTITY),
             (None, None) => return,
         };
+        let mut timing = timing::FrameTiming::start();
         let screenshot = self.app.take_screenshot();
         let mut done_msgs = Vec::new();
         let now = self.now();
@@ -819,12 +845,19 @@ impl<A: App> Runner<A> {
         let safe = usable_rect(viewport, surface_scale,
             if custom_capture { [0; 4] } else { self.content_insets });
         let layout_viewport = (safe.width() as f32, safe.height() as f32);
-        let mut placed = layout::solve(self.app.view(), &mut self.text, layout_viewport, &self.store);
+        timing.mark(0);
+        let view = self.app.view();
+        timing.mark(1);
+        let mut placed = layout::solve(view, &mut self.text, layout_viewport, &self.store);
+        timing.mark(2);
         let sizes = layout::tile_sizes(&placed);
         if sizes != self.tile_sizes {
             self.tile_sizes = sizes;
             if self.app.tiles_sized(&self.tile_sizes) {
-                placed = layout::solve(self.app.view(), &mut self.text, layout_viewport, &self.store);
+                timing.mark(2);
+                let view = self.app.view();
+                timing.mark(1);
+                placed = layout::solve(view, &mut self.text, layout_viewport, &self.store);
             }
         }
         if self.content_insets != [0; 4] && !custom_capture {
@@ -840,6 +873,7 @@ impl<A: App> Runner<A> {
             }));
             placed.push(layout::clip_marker(PlacedKind::PopClip));
         }
+        timing.mark(2);
         let pointer = self.pointer;
         let hits = &mut self.hits;
         let store = &mut self.store;
@@ -922,7 +956,14 @@ impl<A: App> Runner<A> {
             if let Some(axes) = p.behaviour.zoom
                 && let Some(id) = &p.id
             {
-                store.get_or::<Zoom>(id, Slot::Zoom);
+                let zoom = store.get_or::<Zoom>(id, Slot::Zoom);
+                zoom.range = p.behaviour.zoom_range;
+                if let Some(map) = &p.behaviour.on_zoom
+                    && zoom.told != Some(zoom.scale)
+                {
+                    zoom.told = Some(zoom.scale);
+                    done_msgs.push(map(zoom.scale));
+                }
                 if let Some(hit_rect) = visible {
                     hits.zoom.push((hit_rect, id.clone(), p.content_size, axes));
                 }
@@ -990,7 +1031,9 @@ impl<A: App> Runner<A> {
             if let Some((id, handler)) = p.behaviour.on_drag.take()
                 && visible.is_some()
             {
-                hits.drag.push((geometry, id, handler, shapes.clone()));
+                let on_shapes = p.behaviour.drag_on_shapes;
+                hits.drag
+                    .push((geometry, id, handler, shapes.clone(), on_shapes));
             }
 
             if let Some((id, handler)) = p.behaviour.on_drop.take()
@@ -1126,6 +1169,7 @@ impl<A: App> Runner<A> {
             }
         }
         store.sweep();
+        text.sweep();
         focused.clear_if_gone(store);
         let ime_allowed = focused.get().is_some();
         if self.ime_allowed != ime_allowed {
@@ -1156,6 +1200,7 @@ impl<A: App> Runner<A> {
             .as_ref()
             .and_then(Capture::thumb)
             .map(|t| (&t.id, t.axis));
+        timing.mark(3);
         paint::draw(
             &mut self.scene,
             &placed,
@@ -1171,6 +1216,7 @@ impl<A: App> Runner<A> {
             paint::debug_boxes(&mut self.scene, &placed, t, pointer, text, viewport);
         }
         self.view3d = scene3d.clone();
+        timing.mark(4);
         let captured = if self.render.is_none() {
             None // nothing to present to, and a screenshot request just goes unanswered
         } else if custom_capture {
@@ -1204,6 +1250,8 @@ impl<A: App> Runner<A> {
                 }
             })
         };
+        timing.mark(5);
+        timing.finish(screenshot.is_some());
         let mut dispatched = !done_msgs.is_empty();
         if let (Some(request), Some(image)) = (screenshot, captured) {
             self.app.update((request.complete)(image));
@@ -1303,18 +1351,20 @@ impl<A: App> Runner<A> {
             self.redraw();
             return;
         }
-        if let Some((geometry, id, _handler, shapes)) = self
-            .hits
-            .drag
-            .iter()
-            .rev()
-            .find(|(geometry, _, _, _)| geometry.contains(p))
+        if let Some((geometry, id, shape)) =
+            self.hits
+                .drag
+                .iter()
+                .rev()
+                .find_map(|(g, id, _, shapes, on_shapes)| {
+                    Some((g, id, Grabbed::press(g, shapes, *on_shapes, p)?))
+                })
         {
             let content = geometry.content_point(ScreenPoint::new(p.x, p.y));
             self.drag = Some(Capture::Pending {
                 id: id.clone(),
                 geometry: *geometry,
-                shape: Grabbed::take(shapes, geometry.node_point(ScreenPoint::new(p.x, p.y))),
+                shape,
                 local_press: (content.x as f32, content.y as f32),
                 screen_grab: (
                     px - geometry.screen_rect.min_x() as f32,
@@ -1584,11 +1634,11 @@ impl<A: App> Runner<A> {
             shape: shape.as_ref().map(|g| g.at(node)),
             t: self.event_at,
         };
-        if let Some((_, _, handler, _)) = self
+        if let Some((_, _, handler, _, _)) = self
             .hits
             .drag
             .iter()
-            .find(|(_, id, _, _)| *id == handle_id.clone())
+            .find(|(_, id, _, _, _)| *id == handle_id.clone())
         {
             self.app.update(handler(event));
             self.redraw();
@@ -1656,8 +1706,8 @@ impl<A: App> Runner<A> {
                             };
                             self.app.update(handler(drop_event));
                         }
-                        if let Some((_, _, handler, _)) =
-                            self.hits.drag.iter().find(|(_, hid, _, _)| *hid == id)
+                        if let Some((_, _, handler, _, _)) =
+                            self.hits.drag.iter().find(|(_, hid, _, _, _)| *hid == id)
                         {
                             let node = geometry.node_point(ScreenPoint::new(px as f64, py as f64));
                             let event = DragEvent {
@@ -1835,8 +1885,8 @@ impl<A: App> Runner<A> {
                             .hits
                             .drag
                             .iter()
-                            .find(|(_, drag_id, _, _)| drag_id == id)
-                            .map(|(_, _, handler, _)| handler);
+                            .find(|(_, drag_id, _, _, _)| drag_id == id)
+                            .map(|(_, _, handler, _, _)| handler);
                         if let Some(handler) = handler {
                             self.app.update(handler(event));
                             self.on_drag_move(
@@ -1872,7 +1922,9 @@ impl<A: App> Runner<A> {
         let over_input = self.hits.input.iter().any(|(g, _, _)| g.contains(p));
         Some(if self.drag.as_ref().is_some_and(Capture::is_grab) {
             CursorIcon::Grabbing
-        } else if self.hits.drag.iter().any(|(r, _, _, _)| r.contains(p)) {
+        } else if (self.hits.drag.iter())
+            .any(|(g, _, _, shapes, on)| Grabbed::press(g, shapes, *on, p).is_some())
+        {
             CursorIcon::Grab
         } else if over_input {
             CursorIcon::Text

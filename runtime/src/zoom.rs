@@ -1,10 +1,18 @@
 use crate::coords::{CameraMap, ScreenPoint, ViewportVector};
 use vello::kurbo::{Point, Rect};
 
+/// How far a camera zooms out and in unless its element says otherwise: enough for a chart, too
+/// little for drawing a finger.
+pub const DEFAULT_RANGE: (f32, f32) = (0.4, 3.0);
+
 #[derive(Clone, Copy)]
 pub(crate) struct Zoom {
     pub scale: f32,
     pub pan: (f32, f32),
+    /// The element's `(min, max)` scale, refreshed every layout.
+    pub range: (f32, f32),
+    /// The scale `on_zoom` was last told, so it hears each change once.
+    pub told: Option<f32>,
 }
 
 impl Default for Zoom {
@@ -12,6 +20,8 @@ impl Default for Zoom {
         Self {
             scale: 1.0,
             pan: (0.0, 0.0),
+            range: DEFAULT_RANGE,
+            told: None,
         }
     }
 }
@@ -19,7 +29,8 @@ impl Default for Zoom {
 impl Zoom {
     pub fn at(&mut self, rect: Rect, _content: (f32, f32), pointer: Point, lines: f32) {
         let old = self.scale;
-        let next = (old * 1.1_f32.powf(lines)).clamp(0.4, 3.0);
+        // `max` then `min`, not `clamp`: a reversed range from a Rust caller must not panic.
+        let next = (old * 1.1_f32.powf(lines)).max(self.range.0).min(self.range.1);
         if (next - old).abs() < f32::EPSILON {
             return;
         }

@@ -152,6 +152,307 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   clamped bounds, floating ghost outside every scroll clip, always-reserved drop guides.
   `demo_apps/tally` and `demo_apps/scratch` are the small examples.
 
+### Lua shell groundwork
+- Launcher clicks and RPC `OpenItem` now share `open_tab`'s open-or-focus check: reopening
+  focuses the existing tab without replacing its VM. `scripts/smoke_open_or_focus.py`,
+  registered in `SMOKES`, checks Lua-local state survival, a single tab after repeated opens,
+  and missing-source refusal through both paths. Lua shell presentation remains unbuilt.
+- `app_host::LuaApp::open_with_setup` accepts a trusted Rust binding installer, rerun in
+  each staged VM before source evaluation. Ordinary `open` installs no extra bindings.
+  VM-local `HostContext::require_handler` lets command bindings reject load/view/trial calls;
+  dispatch scopes reset even on handler errors.
+- `shell2::shell_api` now builds launcher-only `shell.snapshot()` and `shell.open_item(id)`
+  bindings: fresh metadata copies, a read-only API table, handler-only commands checked against
+  current inventory and carrying workspace/item IDs. The eventual receiver must revalidate
+  account/workspace access. `ItemsScreen` now mounts the bundled launcher with these bindings;
+  Shell accepts its messages only on the active workspace Home screen, resolves commands
+  against current vault inventory, then uses the shared open-or-focus path.
+- The default Lua launcher source is in `shell2/src/launcher/`: palette/per-kind accents,
+  card hover/press feedback, wrapped scrolling inventory and empty state. Shell unit tests
+  run it with the real bindings and check inventory refresh and card reachability at
+  320/393/900pt. Rust navigation/import chrome remains, and launcher initialization failures
+  fall back to the Rust grid. The canonical Lua pointer component is embedded in the bundle
+  and mounted inside the launcher; an offset-root headless test verifies its coordinates.
+  Rust chrome retains the native cursor. Auth/tabs/tiling remain Rust-side.
+- Personal launcher source/config now lives in the account-owned sealed entry
+  `shell/launcher/v1`. Launcher-specific versioned reads/exact edits stage an independent
+  source and VM, validate load/view/tree, persist, then activate. Failed validation/save
+  keeps both working and saved source intact; successful reload carries `ui.state`.
+  Transactional trials block world commands during module load/view/state sweep and use
+  isolated walk geometry, so failed candidate validation cannot cancel running world timers.
+  Invalid saved overrides fall back to the bundle with a warning and are retained until reset.
+- The Rust strip owns a two-step Reset launcher control (available from Items and Spaces),
+  and `ResetLauncher` provides the same recovery over the bridge. `SelectWorkspace`,
+  `DumpLauncherTree`, `ReadLauncherConsole` and `ScreenshotShell` complete the agent feedback
+  loop without pretending the launcher is an app item. Launcher senses/edits require Home.
+  `scripts/check_launcher_customization.py` passed the real socket/pixels loop: edit,
+  bad-edit rollback, restart/unlock, pointer opening/open-or-focus and durable reset.
+  Full smokes were not rerun at the user's request. Shell-wide pointer mounting and Android
+  integration/testing of this branch remain pending. The live
+  Wayland preview refresh stalled after unlock; restarting the preview on X11/XWayland
+  (unset `WAYLAND_DISPLAY`/`WAYLAND_SOCKET`) restored responsiveness. Root cause is not yet
+  established; the default-backend offscreen acceptance loop passed.
+
+- The bundled launcher now has a Lua **Customize** editor for `theme.lua`, `main.lua` and
+  `cursor.lua`: temporary `ui.state` drafts, validated durable Save & apply, and Cancel.
+  Failed saves retain the draft and current source; successful activation/reset dismisses the
+  editor. File switches and lock/navigation/restart discard unsaved drafts. The plain text area
+  projects tabs to spaces while preserving unedited raw bytes, including tabs inside strings.
+  Launcher-only source bindings enqueue scoped plain-data edits through the same Rust authority
+  as RPC edits. Instance tokens reject queued input/save events from a recreated launcher even
+  when workspace IDs match. `ClickLauncher`/`TypeLauncher` extend Home-only feedback actions.
+  `scripts/check_launcher_editor.py` passed real pixel/input-action/pointer save/cancel checks
+  at 320/900pt; customization restart/recovery acceptance also passed. Shell tests: 65 passed,
+  one ignored. Native keyboard/IME is not covered: bridge `Keyboard` drives game-key events.
+  Reviews are deferred to the final combined pass at the user's request.
+
+### Lua workspace header (2026-10-04)
+- Default workspace title, Back and Add item presentation moved into launcher Lua. Handler-only
+  `shell.back()` / `shell.import_item()` enqueue plain-data workspace actions; Rust revalidates
+  unlocked-account membership, selected workspace and Home, then uses the existing navigation
+  and native folder-picker/import paths. App open-or-focus and VM hosting are unchanged.
+- `launcher:workspace-header` is the reserved opt-in marker. Rust renders navigation/import
+  fallback when it is absent, preserving older overrides and restoring controls on view failure.
+  `El::contains_id` is an allocation-free, read-only tree query (including overlay panels), not
+  a callback/VM probe. Rust recovery remains available regardless of the marker.
+- `scripts/check_launcher_navigation.py` passed real-pointer Back at 320pt, long-title wrapping,
+  old-source fallback and view-failure/Rust-reset recovery; screenshot:
+  `/tmp/lua-workspace-header-320.png`. Import enqueue/guards are unit-tested; native picker
+  interaction is still manual. Workspace listing/creation, auth, tabs and tiling remain Rust or
+  unbuilt. Bounded-concurrency suites passed: app-host 233 (two ignored), runtime 126 (one
+  ignored), shell 69 (one ignored); workspace check and editor/persistence focused acceptance
+  passed. No app-thread integration changes; final reviews/full smokes remain deferred.
+
+### Text shaping cache, cloneable El, UI groups (2026-10-05, tests and all 26 smokes green)
+- `TextEngine` remembers the parley layouts of this frame and the last (`runtime/src/text.rs`),
+  so a label that did not change is shaped once, not at measure and again at paint every frame.
+  Workspace-list idle frame, release, one quiet core: 8 cards 2.7 → 0.52 ms, 40 cards
+  13.8 → 2.4 ms. Plan and revision note: [design/ui-reuse.md](design/ui-reuse.md) §2a. Signals
+  steps 3–4 and layout reuse are re-justified only if the next measurement still shows a cost.
+  Tables will still need row virtualization; the cache does not bound 100k cells.
+- `El` clones (handler closures behind `Rc`) and `ui.group` works in the UI tree
+  (`app_host/src/ui_group.rs`): a group whose signals hold still hands back the `El` and handlers
+  it built. 300 chat rows, one edited: view 5.4 → 2.2 ms in a real window. Offscreen
+  `python3 scripts/smoke.py` (26) passed after all three changes. Windowed numbers and the next
+  steps (shared virtualization core, `ui.virtual_list`; the grid island belongs to
+  `sharded-datasets`): [design/ui-reuse.md](design/ui-reuse.md) §2b.
+
+### Assets merged with dev (2026-10-18, validated in the `assets` worktree; dev not yet advanced)
+- `dev` `90d22ec` merged into `assets`: the asset editor, `asset:open`, `clip:at`, world fields and
+  `drag_on_shapes` now sit on top of cloneable `El`, `ui.group` and the text cache. Textual
+  conflicts: `runtime/src/el.rs` and `lib.rs` (handlers are `Rc` and `drag_on_shapes` kept),
+  `frame/tests.rs` (gradient/shadow tests and dev's benchmarks both kept), `scripts/smoke.py`
+  (dev's list plus `smoke_asset_editor.py`), `docs/lua-apps.md` (Assets and Signals sections).
+- Two breaks the merge did not flag: `Behaviour::on_zoom` was a `Box`, so the now-`Clone`
+  behaviour needed `Rc`; and `LuaApp::replace_doc` (sync rollback) looked docs up by name while
+  assets key them by `DocKey`, so it now uses `DocKey::Own`.
+- Verified: `cargo check --workspace --tests` clean; runtime 168 passed (6 ignored), app_host 307
+  (7 ignored), shell2 86 (2 ignored); offscreen `python3 scripts/smoke.py` 27/27 against the
+  merged release binary. Not run: `cargo test` for the other crates, native keyboard/IME,
+  windowed checks, and a fresh expert review of the merge diff.
+
+### World-gravity merged with dev, reviewed (2026-10-18, in the `world-gravity` worktree; dev not advanced)
+- `dev` `737c02b` (assets) merged into `world-gravity`. Text conflicts were only `docs/status.md`
+  (both notes kept) and `scripts/smoke.py` (`smoke_asset_editor.py` and `smoke_gravity_lab.py`).
+  `cargo check --workspace --tests` was clean: no semantic breaks, though both branches touch
+  `app_host/src/{gfx,lib}.rs`.
+- Fresh review of the gravity Rust diff (expert-runtime / expert-app-host checklists). Fixed:
+  `Physics::joined` scanned every joint, so redescribing N joints each view was O(N²) — now
+  `impulse_joints.contains`; joints dropped from a description were removed in HashMap order, which
+  decides slot reuse and so the solver's order — now sorted. Checked and fine: a joint kept as
+  described survives redescription, a hand on a deleted body is dropped in `hold`, `release`
+  without a grab is a no-op, a gravity change wakes bodies only when it differs, every new surface
+  is refused whole. Notes, not defects: a joint to a kinematic walker is accepted (its pose is
+  driven by the controller, not the joint); `hold` and `pull` allocate per frame only when a hand
+  or a well exists.
+- Verified: `cargo test` world 149 (6 ignored), app_host 313 (7 ignored), runtime 168 (6 ignored),
+  shell2 86 (2 ignored); offscreen `python3 scripts/smoke.py` 28/28 on the merged release binary.
+  Not run: other crates' tests, native keyboard/IME, windowed checks.
+
+### 2D gravity, forces, hands and joints (2026-10-18, branch `world-gravity`, not landed) — [plan](design/2d-gravity.md)
+- `ui.world` takes `gravity = { gx, gy }` (none by default, so every top-down world is unchanged),
+  `wells` (radial pull fields) and `joints` (`pin` hinge with limits, `rope`, `spring`; kept across
+  views, one end loose); `loose.density`; handler-only `world:push`, `:blast`, `:grab`, `:release`
+  (drag then let go is a throw). All strict, all refused whole with the last good world kept.
+- A gravity change, a well or a hand keeps the world's frame clock running: two bugs the real-path
+  smoke found (unit tests tick directly) — now pinned by world tests.
+- `demo_apps/gravity_lab` ("Siege"): slingshot with a live dotted arc, a stone/wood/glass castle, a
+  domino run, a marble into a lighting bucket, a pendulum chain on rope joints, a seesaw on a pin,
+  bomb, moon/flip gravity, a gravity well, drag-to-throw of anything. `scripts/smoke_gravity_lab.py`
+  (registered): the full chain by a real pointer, run twice to the same positions, then the toys.
+  Clip: `scripts/demo_gravity_lab.py` (`shots/reel/gravity_lab.{mp4,gif}`).
+- Verified: `cargo test -p world` 149, `-p app_host` 294 (7 ignored); offscreen `smoke.py` all 27.
+  Not run: `-p shell2`/workspace suites (no shell2 source changed). Not built: Lua read-back of a
+  body's position (so no hit-position dust), joint motors, per-body gravity, 3D.
+
+### Lua shell dev integration (2026-10-05, validation in progress)
+- Checkpoint `becddb0` preserves the validated session/list/creation slices on `lua-shell`.
+  Merging dev `aa844b3` brings signals steps 1–2, cameras and the latest app-thread/sync work;
+  dev itself is unchanged. Host setup/entry scopes coexist with fresh per-VM signal tracking.
+- Both smoke lists are retained: 26 scripts. Workspace check, integrated suites, full smokes
+  and fresh merge review are pending. UI-tree groups/root-view skipping and layout reuse
+  remain unbuilt; signals alone do not remove the launcher's layout work.
+
+### Lua workspace creation (2026-10-05, validated working slice)
+- The workspace list now mounts `workspace_create.lua`: Lua New workspace/name/Create/Cancel,
+  pending/error feedback and ephemeral drafts. Handler-only `shell.create_workspace(name)`
+  queues plain data; the copied list snapshot includes creation pending/generation/error.
+  Submission is bounded to 256 UTF-8 bytes before trim; Rust normalizes and revalidates it.
+- Rust performs sealed creation off-thread via `Vault::create_workspace_for`. The expected DID
+  check and write hold the same account mutex; a lock/switch before the write rejects. Writes
+  already accepted may finish in their original account. Completion wakes the main loop and
+  matches account/job before updating feedback. Duplicate pending UI submissions are ignored.
+- A successful old job refreshes same-account metadata after a list rebuild/navigation without
+  altering a new draft/job's feedback; duplicate metadata and stale errors are ignored. This
+  closes the fresh review's lost-list-refresh finding. Cancel is disabled while pending,
+  failures retain the draft, and success dismisses/clears the form. The raw-draft length bound
+  is deliberate and documented, not a stored-name-only bound.
+- `launcher:workspace-create` suppresses duplicate native creation controls only when rendered;
+  older/custom list descriptions keep their native control. The helper joins Customize's file
+  chooser and is backfilled in memory for older source without replacing saved list entries.
+- Vault suite: 30 passed. Shell suite: 83 passed, one ignored. Workspace check passed after
+  rebuilding local runtime/world metadata (the shared target had reused another worktree's
+  runtime without contains_id; no source/process changes to other worktrees).
+- `check_launcher_creation.py`, registered in SMOKES, passes real-pointer validation/Cancel,
+  Unicode normalization, worker wakeup, persistence after unlock and legacy controls at
+  320/900pt. List, editor, header/navigation and threaded/Home focused checks pass too.
+  Unit gates cover load/view/trial capability refusal, bounds, pending duplication, failed
+  draft/retry, wrong-account/job completions and stale-success metadata-only refresh.
+- Fresh reviews covered shell/Lua/secure-core/architecture; findings addressed in code/contracts.
+  All 23 registered smokes passed via `python3 scripts/smoke.py` against `/tmp/lua-create-shell`;
+  final combined review and latest-dev reconciliation/landing remain separate pending gates. Native keyboard/IME
+  remains unverified (TypeLauncher drives on_input). Preview `/tmp/lua-create-{320,900}.png`;
+  logs `/tmp/lua-create-*.log`. Nothing in this slice has landed on dev.
+
+### Lua workspace list (2026-10-05, initial list checkpoint; creation superseded above)
+- The actual workspace-list screen now mounts `spaces_view.lua` → `spaces.lua`, alongside
+  Rust creation/invitation/publishing controls. Account-list and workspace views share the
+  sealed source document but have distinct entries/capabilities; the workspace entry stays
+  `main.lua`. The Customize file chooser includes both list scripts.
+- Trusted `LuaApp::open_with_entry` selects a source-map file and carries it through staging
+  and reload; ordinary apps retain `main.lua`. Copied list metadata plus handler-only
+  `shell.select_workspace(id)` queue plain data. Rust rechecks listing/Home/account membership
+  through the same selection path as RPC; no app instances, vault or filesystem enter Lua.
+- Older overrides gain missing list modules in memory without replacing main/theme or saving
+  during navigation. Invalid saved list entries fall back independently; a runtime list failure
+  keeps native cards and Rust reset reachable. Long names grow cards rather than spilling out.
+- Suites passed: app-host 257 (two ignored), shell 77 (one ignored). Workspace check passed.
+  Real-socket list tests at 320/900pt cover empty state, pointer selection, legacy workspace
+  preservation and startup/runtime list fallback/reset. Existing navigation, threaded/Home,
+  editor, persistence, limits, bundled launcher and open-or-focus gates passed. Old pointer
+  tests were updated for `launcher:space:<id>` instead of native card IDs.
+- `check_launcher_spaces.py` is registered in SMOKES. Runnable pinned binary:
+  `/tmp/lua-list-shell`; screenshots `/tmp/lua-workspaces-{320,900}.png`; logs
+  `/tmp/lua-list-*.log`. Full smokes/review and landing on dev remain deferred.
+
+### Workspace list component (2026-10-05, initial component; mounting superseded above)
+- `shell2/src/launcher/spaces.lua` is a pure themed workspace-card/list component: copied rows
+  and a selection callback in, wrapping/scrolling description out. It writes no documents and
+  grants no capabilities. The bundle contains it, but current workspace views remain unchanged.
+- Test-first component regressions cover independent card IDs/callback selection, no selection
+  during load/view, empty state and 320/900pt layout. Shell suite now passes 75 tests (one ignored).
+- Next slice: account-list metadata, a handler-only Rust-validated select command, and mounting
+  the component on the workspace-list screen with Rust fallback for older overrides/failures.
+  Creation/auth/networking UI and final merge gates remain separate.
+
+### Launcher hosting preparation (2026-10-04, validated working slice)
+- `Shell` now owns a launcher session; `ItemsScreen` supplies a shared Rust metadata snapshot,
+  not a VM. Rendering, handler dispatch, bridge editing and independent reset use that session.
+  This is hosting preparation only: workspace listing/creation remain Rust, and the launcher
+  still mounts only inside a selected workspace. No new Lua capabilities or source format.
+- Inventory updates share the existing snapshot without recreating the VM. New screen identity,
+  lock or account changes discard it; workspace/instance/Home guards remain in place. Binding
+  compares metadata handles and account DID, avoiding per-input inventory copies.
+- Four session regressions pass: refresh preserves VM/live inventory; re-entry rejects old
+  input; lock/account changes discard the VM; reset bypasses poisoned state export and keeps
+  the metadata binding with a fresh instance. Shell suite: 73 passed, one ignored. Initial direct
+  test execution used the wrong cwd for ten chat fixtures; rerunning from `shell2/` passes.
+- Workspace check and focused real-socket thread/Home, navigation/fallback, editor (320/900pt),
+  persistence/restart, limits/reset and open-or-focus checks pass. Full smokes/review remain
+  deferred; native picker/IME remain manual. This slice is not landed on dev.
+- Shared-target contention/memory pressure initially timed out builds. A binary-local low-memory
+  link (one linker thread, stripped debug info; no source/profile changes) completed. Acceptance
+  used `/tmp/lua-session-shell`, a pinned binary copy. A subsequent workspace check reused old
+  `world` metadata from another worktree; forcing local world/runtime source metadata rebuilds
+  fixes it. Other processes/worktrees were not modified. Logs: `/tmp/lua-session-*.log`.
+
+### Lua shell/thread integration (2026-10-04, validated in worktree; not landed on dev)
+- Checkpoint `bd7f9b7` integrates `dev` baseline `cbf0458`; checkpoint `dd4da16` completes
+  the validated follow-up merge of `dd40053` in `lua-shell`, not landed on dev. Apps keep thread-owned VM/docs/index/Tile;
+  Home keeps its own launcher VM and scoped plain-data command queue. Open-or-focus,
+  transactional customization/editor, Home senses and Rust reset are preserved.
+- One shared interrupt hook now serves app and launcher policies. Launcher setup configures
+  32 MiB, 20,000 interrupts and 100/10 ms load/execution thread-CPU limits without replacing
+  that hook. RAII covers load, view/update and staged state export/import/trial view/sweep;
+  handler permission is independent. Non-Unix retains the wall-time fallback. This supersedes
+  the wall-deadline contention caveat in the initial limits section below.
+- Transactional source validation has an independent 3D host, avoiding a candidate commit into
+  the live solver. Ordinary reload preserves its existing staged retained-world behavior.
+- Frame timings now identify each thread; the summarizer groups by log/thread rather than
+  mixing chrome and app frames. Repeated resize view/layout passes accumulate. Preparation
+  and layout can include offscreen tile barriers: elapsed stages, not summed CPU or latency.
+- `check_launcher_threads.py`, registered in SMOKES, passed real-socket split/Home scoping,
+  pointer opens retaining both app instances, editing and active hot-loop Rust fallback/reset.
+  Open-or-focus, bundled launcher, limits, editor (320/900pt), persistence/restart, navigation
+  and viewer/kanban interaction focused checks passed against the integrated binary. Viewer
+  screenshot shows the 3D tile; native picker/IME and full smokes/final reviews remain deferred.
+- Initial baseline suites passed: app-host 251, runtime 152, shell 69, RPC six; its first
+  combined run timed out during shell and the separate bounded run completed. Thread T1/T2/T7/T8,
+  a GPU tile pixel test and four Python harness/timing tests passed. Session now honors the
+  selected binary override by default, avoiding a stale worktree-local binary in acceptance.
+- The newer merge adds rotation/zones/commands and rendered-pixel game gates. 3D zone callbacks
+  now enter the same host handler-permission scope as ordinary/2D handlers, with error cleanup:
+  the new regression failed before the one-line fix and passes after. No new app capabilities.
+- Latest bounded suites passed: app-host 256 (two ignored), runtime 152 (three ignored),
+  shell 69 (one ignored), world 112 (one ignored), RPC six. Workspace check passed. Focused
+  launcher thread/limits/editor/persistence checks and mesh-math, marble-gates and marble-play
+  rendered-pixel checks passed against the rebuilt binary. Logs: `/tmp/lua-dev-latest-*.log`.
+  Full smokes, native keyboard/IME and final combined review remain deferred.
+
+### Chrome VM limits (2026-10-04, initial wall-time policy; superseded above)
+- Launcher-only policy: 32 MiB Lua heap, 20,000 Luau interrupts per execution, cooperative
+  deadlines of 100 ms for source load and 10 ms for view/handlers. Trusted setup installs
+  `HostContext::set_limits` in each fresh/staged VM; ordinary apps retain their existing policy.
+  A 10 ms load deadline rejected normal module compilation in debug, so load has its own cap.
+- Failed load/view/allocation candidates preserve working source and the durable override.
+  Handler failures are recorded and the next execution starts a fresh budget. These are VM
+  limits, not a hard UI-frame/process bound: native bindings, state copying, Rust tree walk,
+  layout, GPU allocations and presentation remain outside preemption/Lua heap accounting.
+- Reset now constructs a fresh bundled launcher and validates it before deleting the override;
+  no old-VM state export, no saved-source evaluation, no scratch carry. A poisoned `_dump_state`
+  regression failed before this correction and passes after; new instance tokens discard stale
+  events from the old launcher. Normal customization still carries viewer state.
+- `scripts/check_launcher_limits.py` is registered in `SMOKES` and passed the real-socket loop
+  for runaway load/view/handler, heap rejection, source rollback and Rust pointer reset after
+  poisoned state export. Editor (320/900pt) and customization/restart focused checks also pass.
+  Full smokes and combined reviews remain deferred by request. No app-thread hosting changes.
+- Validation caveat: the full parallel shell suite had three valid-load deadline failures during
+  concurrent builds/heavy auth tests. Bounded concurrency (`--test-threads=2`) passed 67 tests
+  (one ignored); app-host passed 233 (two ignored). Wall-clock accounting includes descheduling;
+  CPU-time budgets were recommended but are not implemented. Limits are not finalized.
+
+### Interaction/performance diagnostic (2026-10-04)
+- `scripts/check_app_interaction.py` passes against release: current model viewer's real-pointer
+  picking, orbit drag and wheel zoom; kanban cross-column card drag commits to its document.
+  The user's stored viewer was the older pre-picking source (no viewport handlers); rebuilding
+  the binary does not replace uploaded source. No user app was overwritten. A live update was
+  blocked by the Wayland session's bridge timing out before any write; cause not established.
+  Later that day, bringing the window to the foreground restored the bridge; the verified
+  interactive demo was added as a separate item and opened, preserving the original viewer.
+- Opt-in `OSVAULD_FRAME_TIMINGS=1` emits CPU frame stages to stderr: preparation, view (including
+  Lua walk), layout, state/hit reconciliation, paint encoding and presentation/capture call.
+  Disabled mode performs no per-frame clock reads or allocations. Timing ends before post-frame
+  callback dispatch and does not include input-handler timing, GPU timestamps or display scanout.
+  `scripts/summarize_frame_timings.py` excludes captures and reports p50/p95/max. Offscreen normal
+  frames do not present to a window, so their present stage is effectively empty.
+- A 59-normal-frame mixed viewer/kanban diagnostic at 1000×800 measured debug CPU work
+  p50/p95 20.402/65.449 ms; release 1.117/4.663 ms. Layout dominated (debug 15.455/53.971 ms,
+  release 0.795/3.419 ms); release view was 0.099/0.521 ms. These are one-run diagnostic samples,
+  not input-to-display latency, a native/custom cursor comparison or a steady-state benchmark.
+  Logs: `/tmp/app-interaction-timings-{debug,release}.log`. Windowed measurements remain pending.
+  Runtime tests passed (125 passed, one ignored); full smokes and combined review remain deferred
+  by request.
+
 ### Voice POC (`voice/`, 2026-10-01)
 - standalone binary, not wired into the shell: mic (`cpal`) → capture cleaning → Opus 20 ms
   mono 48 kHz → iroh QUIC datagram `[seq u32][level u8][opus]` → Opus → playout buffer
@@ -256,7 +557,8 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - `app_host::budget`: every app and index VM has a memory cap (512 MB) and, besides the 1 M
   interrupt count, a limit of 1 s of the thread's CPU time that runs only while app Lua is
   entered (`view`, `update`, module load, tests, index calls). `OSVAULD_APP_BUDGET_MS` /
-  `_MEMORY_MB` override; another host (the launcher) passes its own `budget::Policy`. Was wall
+  `_MEMORY_MB` override; trusted launcher setup configures its stricter limits on the same budget.
+  Was wall
   time until 2026-10-04: valid loads failed under build contention.
 - `runtime::Tile`: a windowless runtime whose frame is a `Scene` the host shows with the
   `tile` element; `.on_tile` forwards pointer/wheel/keys as `TileInput`. No threads yet.
@@ -841,6 +1143,67 @@ temporary app tab, runs a separate test VM with `t.expect`, Runner-driven `t.ste
 bridge-test-pushes as the route to app behaviour assertions. Next for tests: deterministic stepping
 and `t.world()` snapshots. Soft bodies (rope, cape)
 are the assets session's own verlet solver, not Rapier joints.
+
+### Assets — shared drawings, an asset editor, stages
+
+**Design draft 2026-09-29:** [assets.md](design/assets.md) — a drawing with its clips is data in a
+workspace asset that any app opens by name; editors are many and disposable; stages place assets
+together; sockets and plugs are the interface for swappable pieces. **Landed 2026-10-01 (branch
+`assets`):**
+- **Storage and `asset:open`.** `ItemKind::Asset` (its content is the item's doc `asset`) and
+  `Vault::item_named` (oldest wins on duplicate names). `app_host` keys open docs by
+  `DocKey::Own | Asset`; `asset:open(name)` shares `doc:open`'s mirror, writes, reload and flush.
+  The shell routes an asset's reads and saves to its own item, creating it on first save. A doc
+  mirror goes straight into `gfx.drawing`. Not built: syncing assets through the node (2c), and one
+  shared doc per asset across open apps (chunk 3) — two apps editing one asset, the last save wins.
+- **Paint.** Drawing fills take `linear`, `radial` and `sweep` gradients as data, and
+  `gfx.radial_gradient` / `gfx.sweep_gradient` join `gfx.linear_gradient` (one parser for all).
+  A shape can be a soft shadow — `Item::Shadow`, Vello's blurred rounded rect, paint only, never
+  hit — also as `gfx.shadow`. Not built: blurring other outlines, part-level clipping, opacity.
+- **The asset editor** (`demo_apps/asset_editor`): opens `hero`, `toggle` (a detailed day/night
+  toggle: gradients, glow, shadows, a knob that rolls and becomes a moon), `chest` and `hat`, each
+  seeded per missing root; selects parts on a zoomable canvas drawn from a scaled copy of the data;
+  plays any clip in place (the canvas becomes a `ui.world`). **Stage edit:** the `room` scene
+  places hero, chest and a hat; entities drag, one write on release. Dragging a plug near a socket
+  of its kind rings every fitting socket and snaps to the near one: release there **equips**
+  (`mount = { to, socket }`, no position), and dragging a mounted entity away unequips it.
+  **Inspector:** the selected part's pivot and each shape's fill, stroke width and ink (a shadow's
+  blur and colour) are inputs — Enter writes one value if it parses, a bad one turns red and writes
+  nothing, the canvas redraws from the edit. **Vars:** a drawing's `vars = { skin = "#…", line = 2 }`
+  stand in as `"@skin"` for any colour and `"@line"` for a lone number (stroke width, shadow radius
+  and blur), resolved once by `gfx.drawing`; the editor and stage pass the asset's `vars` through.
+  A **variant** is `gfx.drawing(module, { vars = { shirt = … } })` — only declared vars, same
+  kind. The hero seed's colours and stroke width are vars, and a stage entity's own `vars` make a
+  variant: the room's `rival` is the hero in teal. The inspector lists the asset's vars (swatch and
+  value: one edit recolours every shape naming it); a shape's colour and width fields take
+  `@name` of a var of the right kind, and typing a plain value unlinks it. A zoomable takes
+  `zoom_min` / `zoom_max` (default 0.4–3, the old fixed clamp); the editor's viewport zooms to
+  20×, 50× the asset. **Point editing (E2b):** a selected part shows its path points as dots
+  (`pt:<shape>:<command>:<k>`; controls hollow, with guides); dragging one moves it live and
+  writes that one point on release. It snaps to the finest step the zoom shows (whole units at
+  1×, twentieths up close), and an end point carries the cubic controls either side of it. The
+  camera's `on_zoom` tells Lua its scale, so the dots and the selection outline keep their screen
+  size. The canvas sets `drag_on_shapes`, so a drag from a part or a dot is the editor's and one
+  from empty canvas pans. **Part moves:** dragging a part selects it and moves it with every part
+  under it, by snapped steps — pivots, path points, gradient points and shadow corners — and the
+  sockets on them; release writes each path whole.
+  **Stage play:** "play" turns the scene into a `ui.world` at drawing scale — each entity plays
+  its `clip`, and a mounted one rides its socket's part as `attach = { at = socket.at,
+  pivot = plug.at, turn = true }`, so the hat nods with the hero's head; "edit" drops the world.
+  **World fields** ([maker-parity.md](design/maker-parity.md) step 1, 2026-10-05): an asset's
+  `world` root gives its `collider`, `sensor`, `loose`, `group` and `blocks`; a stage entity's own
+  field replaces one whole, `false` removes it, and `controller` comes only from the entity. Stage
+  edit outlines each collider and dashes each sensor; in play the room's hero walks on WASD, stops
+  at the chest and pushes a loose `crate`.
+  **UI assets as widgets** (step 2, 2026-10-05): `clip:at(t)` samples a clip as the world does,
+  and `drawing:pose` draws it on a plain `ui.frame`; `clip.length` and `clip.loop` read back.
+  `demo_apps/toggle_demo` uses the toggle asset as a switch — `on_frame` only while it moves, no
+  world.
+  Not built: picking a var from a list (type `@name` for now), editing gradients, editing stage
+  entity fields in the editor, reparenting and reordering, adding parts, the clip timeline,
+  behaviour preview. App tests cover it headlessly; `smoke_asset_editor.py` drives it over the
+  bridge — a point and a part dragged by the real pointer (the socket rides the head), the room
+  played, the toggle switched in another app.
 
 ### Environment — composable 3D interfaces and worlds
 

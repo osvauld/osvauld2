@@ -12,7 +12,7 @@ fn workspace_popovers_fit_phones_and_keep_desktop_widths() {
         for (claim, id, cap) in [(false, "workspace_name", 320.0), (true, "claim_ticket", 360.0)] {
             screen.show_claim = claim;
             screen.add_space = !claim;
-            let rects = screen_rects(|| screen.view(), width);
+            let rects = screen_rects(|| screen.view(None, None), width);
             let field = rects.iter().find(|r| r.id == id).unwrap();
             assert_fits(field, width);
             assert!((field.w - (width * 0.9).min(cap) + 24.0).abs() <= 0.5, "{field:?}");

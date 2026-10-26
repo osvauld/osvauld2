@@ -28,6 +28,7 @@ vault.signup(label, pass)  -> (did, Mnemonic)     // mnemonic shown ONCE, by the
 vault.login(did, pass)                            // unlock → active
 vault.lock() / current() / store()                // the active account's Store
 vault.create_workspace(name) / workspaces()       // newest first
+vault.create_workspace_for(did, name)             // worker write scoped to submitting account
 vault.create_item(ws, name, kind) / items(ws)     // ItemKind::{Doc, Table, App, Canvas}
 vault.get_src / put_src(ws, item, snapshot)       // an .app's source doc (Loro snapshot)
 vault.get_doc / put_doc(ws, item, snapshot, name) // its state docs, name-keyed
@@ -51,6 +52,13 @@ The Argon2 halves (`prepare_*`/`commit_*`) are split so hashing can run off the 
 and only the commit needs `&mut`. They are private today: `shell2` spawns a worker that
 runs the composed `signup`/`login` (`Vault` is `Clone`; all state sits behind one mutex,
 so the clone is the same vault) and pokes the event loop when done.
+
+**Account-scoped workspace creation** (2026-10-05): `create_workspace_for` checks the expected
+DID under the same mutex as sealing/storage. Locked or mismatched accounts return `Locked`;
+there is no check-then-write account-switch gap. It reuses the active store/identity, never
+opens another handle or exports keys. A write already holding that mutex completes in its
+original account; this is not cancellation or an account-session-generation fence. UI job
+feedback/navigation scopes belong to the shell, and workspace-name policy remains caller-owned.
 
 ## On disk
 

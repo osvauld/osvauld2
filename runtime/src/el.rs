@@ -28,6 +28,7 @@ use crate::text::Run;
 /// even when it is not: an input drives `PlainEditor` from them, and they are the fallback for any
 /// byte no run covers. A non-empty `runs` routes both measuring and painting through the rich
 /// path, so the two never disagree about which shaping a leaf got.
+#[derive(Clone)]
 pub(crate) struct TextSpec {
     pub text: String,
     pub family: &'static str,
@@ -41,12 +42,13 @@ pub(crate) struct TextSpec {
 /// Escape hatch: draw arbitrary vello (shapes and/or text) into the element's computed rect — e.g.
 /// the identicon, or the wordmark's offset-shadow double-draw.
 pub(crate) type CustomFn =
-    Box<dyn Fn(&mut Scene, &mut crate::text::TextEngine, vello::kurbo::Rect, Affine)>;
+    Rc<dyn Fn(&mut Scene, &mut crate::text::TextEngine, vello::kurbo::Rect, Affine)>;
 
 /// Marks an `El` as an editable text field. The display text + face live in the element's `text`
 /// (`TextSpec`); this only carries the focus identity and how to message an edit.
+#[derive(Clone)]
 pub(crate) struct InputSpec<M> {
-    pub map: Option<Box<dyn Fn(String) -> M>>,
+    pub map: Option<Rc<dyn Fn(String) -> M>>,
     pub multiline: bool,
     pub autofocus: bool,
     pub on_enter: Option<M>,
@@ -63,7 +65,7 @@ pub(crate) struct Border {
 }
 
 /// Visual decoration with hover variants, resolved against pointer-inside at paint time
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Look {
     pub fill: Option<Color>,
     pub stroke: Option<Border>,
@@ -135,7 +137,7 @@ pub struct ScrollSpec {
     pub y: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Appearance {
     pub look: Look,
     pub text: Option<TextSpec>,
@@ -146,17 +148,20 @@ pub(crate) struct Appearance {
     pub tile: Option<crate::tile::TileFrame>,
     pub repaint: bool,
 }
+#[derive(Clone)]
 pub struct Overlay<M> {
     pub panel: Box<El<M>>,
     pub dismiss: Option<M>,
     pub placement: Placement,
     pub anchor: Anchor,
 }
+#[derive(Clone)]
 pub enum Anchor {
     Element,
     Point(f32, f32),
 }
 
+#[derive(Clone)]
 pub struct Placement {
     pub side: PlacementSide,
     pub align: PlacementAlign,
@@ -233,18 +238,21 @@ impl Placement {
         (x, y)
     }
 }
+#[derive(Clone)]
 pub enum PlacementSide {
     Top,
     Bottom,
     Left,
     Right,
 }
+#[derive(Clone)]
 pub enum PlacementAlign {
     Start,
     Center,
     End,
 }
 
+#[derive(Clone)]
 pub(crate) struct Binding<M> {
     pub driver: Driver,
     pub duration: f32,
@@ -305,23 +313,31 @@ impl<M> Click<M> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Behaviour<M> {
     pub on_click: Option<Click<M>>,
-    pub on_frame: Option<(Id, Box<dyn Fn(FrameTick) -> M>)>,
-    pub on_wheel: Option<(Id, Box<dyn Fn(WheelEvent) -> M>)>,
-    pub on_key: Option<(Id, Box<dyn Fn(KeyInput) -> M>)>,
+    pub on_frame: Option<(Id, Rc<dyn Fn(FrameTick) -> M>)>,
+    pub on_wheel: Option<(Id, Rc<dyn Fn(WheelEvent) -> M>)>,
+    pub on_key: Option<(Id, Rc<dyn Fn(KeyInput) -> M>)>,
     pub input: Option<InputSpec<M>>,
     pub scroll: Option<ScrollSpec>,
-    pub on_drag: Option<(Id, Box<dyn Fn(DragEvent) -> M>)>,
-    pub on_drop: Option<(Id, Box<dyn Fn(DropEvent) -> M>)>,
-    pub on_hover: Option<(Id, Box<dyn Fn(HoverEvent) -> M>)>,
-    pub on_tile: Option<(Id, Box<dyn Fn(crate::tile::TileEvent) -> M>)>,
+    pub on_drag: Option<(Id, Rc<dyn Fn(DragEvent) -> M>)>,
+    /// `on_drag` takes only a press on one of the element's named shapes; any other falls
+    /// through, so a camera around it can still pan.
+    pub drag_on_shapes: bool,
+    pub on_drop: Option<(Id, Rc<dyn Fn(DropEvent) -> M>)>,
+    pub on_hover: Option<(Id, Rc<dyn Fn(HoverEvent) -> M>)>,
+    pub on_tile: Option<(Id, Rc<dyn Fn(crate::tile::TileEvent) -> M>)>,
     pub overlay: Option<Overlay<M>>,
-    pub on_right_click: Option<Box<dyn Fn((f32, f32)) -> M>>,
+    pub on_right_click: Option<Rc<dyn Fn((f32, f32)) -> M>>,
     pub offset: (f32, f32), // for animation
     pub opacity: f32,
     pub scale: f32,
     pub zoom: Option<(bool, bool)>,
+    /// A zoomable's `(min, max)` scale.
+    pub zoom_range: (f32, f32),
+    /// Told a zoomable's scale whenever it differs from the last one told, first frame included.
+    pub on_zoom: Option<Rc<dyn Fn(f32) -> M>>,
     /// The app draws its own pointer here, so the system one is hidden while over this element.
     pub hide_cursor: bool,
     pub cursor: Option<crate::hover::CursorLook>,
@@ -357,12 +373,15 @@ impl<M> Default for Behaviour<M> {
             input: None,
             scroll: None,
             on_drag: None,
+            drag_on_shapes: false,
             overlay: None,
             on_right_click: None,
             offset: (0.0, 0.0),
             opacity: 1.0,
             scale: 1.0,
             zoom: None,
+            zoom_range: crate::zoom::DEFAULT_RANGE,
+            on_zoom: None,
             hide_cursor: false,
             cursor: None,
             slide: None,
@@ -433,7 +452,7 @@ pub fn input<M>(
     let mut e = text(value);
     e.id = Some(id.into());
     e.behaviour.input = Some(InputSpec {
-        map: Some(Box::new(map)),
+        map: Some(Rc::new(map)),
         multiline,
         autofocus: false,
         on_enter: None,
@@ -484,12 +503,13 @@ pub fn custom<M>(
     f: impl Fn(&mut Scene, &mut crate::text::TextEngine, vello::kurbo::Rect, Affine) + 'static,
 ) -> El<M> {
     let mut e = El::new(Style::default());
-    e.appearance.custom = Some(Box::new(f));
+    e.appearance.custom = Some(Rc::new(f));
     e
 }
 
 /// One node of the view tree. Layout style + paint decoration + optional text/Frame/custom content
 /// + optional click message + children. Built via the free fns below and chained setters.
+#[derive(Clone)]
 pub struct El<M> {
     pub(crate) id: Option<Id>,
     pub(crate) layout: Style,
@@ -506,6 +526,13 @@ impl<M> El<M> {
             appearance: Appearance::default(),
             children: Vec::new(),
         }
+    }
+
+    /// Query the description without allocating an inspection tree or invoking behaviours.
+    pub fn contains_id(&self, id: &str) -> bool {
+        self.id.as_ref().is_some_and(|own| &**own == id)
+            || self.children.iter().any(|child| child.contains_id(id))
+            || self.behaviour.overlay.as_ref().is_some_and(|overlay| overlay.panel.contains_id(id))
     }
 
     pub fn id(mut self, id: impl Into<Id>) -> Self {
@@ -762,6 +789,22 @@ impl<M> El<M> {
         self.behaviour.zoom = Some((true, false));
         self
     }
+    /// The furthest a zoomable zooms out, as a scale (0.4 by default). Keep it below `zoom_max`.
+    pub fn zoom_min(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.0 = scale;
+        self
+    }
+    /// The furthest a zoomable zooms in, as a scale (3 by default).
+    pub fn zoom_max(mut self, scale: f32) -> Self {
+        self.behaviour.zoom_range.1 = scale;
+        self
+    }
+    /// What a zoomable's content needs to know to draw at a fixed screen size: its scale, told
+    /// on the first frame and on every change after. Needs the zoomable's id, as zoom does.
+    pub fn on_zoom(mut self, map: impl Fn(f32) -> M + 'static) -> Self {
+        self.behaviour.on_zoom = Some(Rc::new(map));
+        self
+    }
 
     pub fn slide_in(mut self, (dx, dy): (f32, f32), ms: f32) -> Self {
         self.behaviour.slide = Some((
@@ -859,17 +902,17 @@ impl<M> El<M> {
     }
 
     pub fn on_frame(mut self, id: impl Into<Id>, map: impl Fn(FrameTick) -> M + 'static) -> Self {
-        self.behaviour.on_frame = Some((id.into(), Box::new(map)));
+        self.behaviour.on_frame = Some((id.into(), Rc::new(map)));
         self
     }
 
     pub fn on_wheel(mut self, id: impl Into<Id>, map: impl Fn(WheelEvent) -> M + 'static) -> Self {
-        self.behaviour.on_wheel = Some((id.into(), Box::new(map)));
+        self.behaviour.on_wheel = Some((id.into(), Rc::new(map)));
         self
     }
 
     pub fn on_key(mut self, id: impl Into<Id>, map: impl Fn(KeyInput) -> M + 'static) -> Self {
-        self.behaviour.on_key = Some((id.into(), Box::new(map)));
+        self.behaviour.on_key = Some((id.into(), Rc::new(map)));
         self
     }
 
@@ -880,29 +923,35 @@ impl<M> El<M> {
         id: impl Into<Id>,
         map: impl Fn(crate::tile::TileEvent) -> M + 'static,
     ) -> Self {
-        self.behaviour.on_tile = Some((id.into(), Box::new(map)));
+        self.behaviour.on_tile = Some((id.into(), Rc::new(map)));
         self
     }
 
     pub fn on_drag(mut self, id: impl Into<Id>, map: impl Fn(DragEvent) -> M + 'static) -> Self {
-        self.behaviour.on_drag = Some((id.into(), Box::new(map)));
+        self.behaviour.on_drag = Some((id.into(), Rc::new(map)));
+        self
+    }
+
+    /// See [`Behaviour::drag_on_shapes`].
+    pub fn drag_on_shapes(mut self) -> Self {
+        self.behaviour.drag_on_shapes = true;
         self
     }
 
     pub fn on_drop(mut self, id: impl Into<Id>, map: impl Fn(DropEvent) -> M + 'static) -> Self {
-        self.behaviour.on_drop = Some((id.into(), Box::new(map)));
+        self.behaviour.on_drop = Some((id.into(), Rc::new(map)));
         self
     }
 
     /// Pointer enter, move and leave, element-local. Fires on pointer movement only, so an element
     /// that slides under a still pointer enters on the next move.
     pub fn on_hover(mut self, id: impl Into<Id>, map: impl Fn(HoverEvent) -> M + 'static) -> Self {
-        self.behaviour.on_hover = Some((id.into(), Box::new(map)));
+        self.behaviour.on_hover = Some((id.into(), Rc::new(map)));
         self
     }
 
     pub fn on_right_click(mut self, ctx: impl Fn((f32, f32)) -> M + 'static) -> Self {
-        self.behaviour.on_right_click = Some(Box::new(ctx));
+        self.behaviour.on_right_click = Some(Rc::new(ctx));
         self
     }
     pub fn child(mut self, c: El<M>) -> Self {
@@ -1003,6 +1052,9 @@ impl<M> El<M> {
         }
         if self.behaviour.on_wheel.is_some() {
             handlers.push("on_wheel");
+        }
+        if self.behaviour.on_zoom.is_some() {
+            handlers.push("on_zoom");
         }
         if self.behaviour.on_key.is_some() {
             handlers.push("on_key");
@@ -1159,6 +1211,7 @@ pub enum Action<'a> {
 }
 
 /// The plain-data view description [`El::info`] produces. `text` on an input is its value.
+#[derive(Debug)]
 pub struct ElInfo {
     pub kind: &'static str,
     pub id: Option<String>,

@@ -10,10 +10,12 @@ mod app_thread;
 mod bridge;
 mod indexer;
 mod item;
+mod launcher;
 mod login;
 mod mnemonic;
 mod names;
 mod node;
+mod shell_api;
 mod signup;
 mod space;
 #[cfg(test)]
@@ -39,7 +41,7 @@ use crate::{
     space::{SpaceScreen, SpaceScreenMsg},
 };
 use app_host::{
-    LuaApp, LuaTest, LuaTestApi, Resolve, SourceEdit,
+    DocKey, LuaApp, LuaTest, LuaTestApi, Resolve, SourceEdit,
     edit_source_file as edit_source_doc_file,
     read_source_file_versioned as read_source_doc_file_versioned, run_lua_tests,
     run_lua_tests_with, write_source_file as write_source_doc_file,
@@ -58,7 +60,10 @@ use runtime::{
     Action, App, CapturedImage, DriverOp, DriverReport, DriverRequest, El, ElInfo, EventLoopProxy,
     KeyInput, Mods, ScreenshotRequest, TileEvent, WindowFrame, WindowIn, col, row, text, tile,
 };
-use vault::{ItemKind, PreparedAccount, UnlockedAccount, Vault, WorkspaceItem, WorkspaceMeta};
+use vault::{
+    ASSET_DOC, ItemKind, PreparedAccount, UnlockedAccount, Vault, VaultError, WorkspaceItem,
+    WorkspaceMeta,
+};
 
 use crate::signup::{SignupForm, SignupMsg};
 
@@ -86,6 +91,8 @@ pub enum Msg {
     Login(LoginMsg),
     Space(SpaceScreenMsg),
     Items(ItemsScreenMsg),
+    Launcher(u64, app_host::LuaMsg),
+    WorkspaceCreated { account: String, job: u64, result: Result<WorkspaceMeta, String> },
     /// Pointer, wheel or keys for an app's tile, in its coordinates — forwarded to its thread.
     TileInput(Arc<str>, TileEvent),
     /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
@@ -104,6 +111,8 @@ pub enum Msg {
     /// Keyed by item id, not index: closing is destructive, and a stale index would tear down
     /// the wrong app's VM. `Focus` can stay positional because being wrong there is harmless.
     Close(Arc<str>),
+    ResetLauncher,
+    CancelLauncherReset,
     /// One bridge request (`bridge.rs` is pure transport). Executed here, on the UI thread —
     /// the single authority — and the sender is how the reply travels back to the socket.
     Rpc(
@@ -236,7 +245,18 @@ fn resolver(vault: &Vault, ws_id: &str, item_id: &str) -> Resolve {
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
     // Not `.ok().flatten()`: a vault read failure must not masquerade as "no doc yet", or the
     // app opens empty and the first flush writes that emptiness over the real board.
-    Rc::new(move |name| v.get_doc(&ws, &it, name).map_err(|e| e.to_string()))
+    Rc::new(move |key| {
+        let found = match key {
+            DocKey::Own(name) => v.get_doc(&ws, &it, name),
+            // An asset not created yet reads as never saved; its first save creates it.
+            DocKey::Asset(name) => match v.item_named(&ws, name, ItemKind::Asset) {
+                Ok(Some(asset)) => v.get_doc(&ws, &asset.id, ASSET_DOC),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            },
+        };
+        found.map_err(|e| e.to_string())
+    })
 }
 
 /// [`resolver`], plus one more thing to check first: if the local vault has nothing yet *and*
@@ -254,10 +274,13 @@ fn resolver_with_node(
 ) -> Resolve {
     let local = resolver(vault, ws_id, item_id);
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
-    Rc::new(move |name| {
-        if let Some(bytes) = local(name)? {
+    Rc::new(move |key| {
+        if let Some(bytes) = local(key)? {
             return Ok(Some(bytes));
         }
+        let DocKey::Own(name) = key else {
+            return Ok(None); // pulling an asset from the node is slice 2c
+        };
         let socket = kunki::bridge::socket_path();
         Ok(node::pull_doc(
             &socket,
@@ -344,7 +367,7 @@ fn spawn_push_listener(
 /// Builds a `SyncHello` against one open doc and, if that succeeds, sends it off-thread —
 /// the one piece `SyncTick` and an immediate post-flush push (a local edit reaching the node
 /// without waiting for the next tick) both need, so it exists once rather than twice.
-fn sync_doc<M: 'static>(
+fn sync_doc<M: Clone + 'static>(
     proxy: &EventLoopProxy<Msg>,
     vault: &Vault,
     desktop_did: &str,
@@ -435,7 +458,7 @@ fn subscribe_if_new(
 
 /// Open an app's index and wire it in. A failure is the app's to see — in its console, and in
 /// `search.query`'s error — never a reason not to open the app.
-fn attach_index<M: 'static>(
+fn attach_index<M: Clone + 'static>(
     app: &mut LuaApp<M>,
     opened: Result<indexer::ItemIndex, String>,
 ) -> Option<indexer::Shared> {
@@ -455,7 +478,7 @@ fn attach_index<M: 'static>(
     }
 }
 
-fn reindex<M: 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
+fn reindex<M: Clone + 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
     if let Some(ix) = index {
         if let Err(e) = indexer::index_dirty(ix, app, dirtied) {
             app.note(format!("search: {e}"));
@@ -631,9 +654,26 @@ fn persist(
     vault: &Vault,
     ws_id: &str,
     item_id: &str,
-) -> impl FnMut(&str, &[u8]) -> Result<(), String> {
+) -> impl FnMut(&DocKey, &[u8]) -> Result<(), String> {
     let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
-    move |name, bytes| v.put_doc(&ws, &it, bytes, name).map_err(|e| e.to_string())
+    move |key, bytes| {
+        let saved = match key {
+            DocKey::Own(name) => v.put_doc(&ws, &it, bytes, name),
+            DocKey::Asset(name) => asset_item(&v, &ws, name)
+                .and_then(|asset| v.put_doc(&ws, &asset.id, bytes, ASSET_DOC)),
+        };
+        saved.map_err(|e| e.to_string())
+    }
+}
+
+/// The asset named `name` in `ws_id`, created on its first save — an app makes an asset by
+/// writing to it. Two peers doing so at once each make one; [`Vault::item_named`]'s
+/// oldest-wins picks the same one everywhere.
+fn asset_item(vault: &Vault, ws_id: &str, name: &str) -> Result<WorkspaceItem, VaultError> {
+    match vault.item_named(ws_id, name, ItemKind::Asset)? {
+        Some(asset) => Ok(asset),
+        None => vault.create_item(ws_id, name, ItemKind::Asset),
+    }
 }
 
 /// The auth family's second half, as a free function so tests can drive it without a
@@ -686,7 +726,10 @@ fn kind_from_str(kind: &str) -> Result<ItemKind, String> {
         "table" => Ok(ItemKind::Table),
         "app" => Ok(ItemKind::App),
         "canvas" => Ok(ItemKind::Canvas),
-        other => Err(format!("unknown kind {other:?} (doc, table, app, canvas)")),
+        "asset" => Ok(ItemKind::Asset),
+        other => Err(format!(
+            "unknown kind {other:?} (doc, table, app, canvas, asset)"
+        )),
     }
 }
 
@@ -717,8 +760,7 @@ fn refresh_after_workspace(screen: &mut Screen, vault: &Vault) {
 fn refresh_after_item(screen: &mut Screen, vault: &Vault, ws_id: &str) {
     if let Screen::Items(i) = screen {
         if i.ws().id == ws_id {
-            let ws = i.ws().clone();
-            *screen = Screen::Items(ItemsScreen::new(vault, ws));
+            i.refresh(vault);
         }
     }
 }
@@ -881,10 +923,14 @@ fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value 
 
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
     let entities = world.entities.iter().map(|e| {
-        let clip = e.clip.as_ref().map(|c| {
-            serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped })
-        });
-        let attached = e.attached.as_ref().map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
+        let clip = e
+            .clip
+            .as_ref()
+            .map(|c| serde_json::json!({ "time": c.time, "length": c.length, "looped": c.looped }));
+        let attached = e
+            .attached
+            .as_ref()
+            .map(|(to, part)| serde_json::json!({ "to": to, "part": part }));
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
             "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
@@ -1010,7 +1056,7 @@ struct PendingDriver {
 
 struct PendingScreenshot {
     reply: std::sync::mpsc::Sender<Response>,
-    item_id: String,
+    item_id: Option<String>,
     viewport: Option<(f32, f32)>,
     scale: Option<f32>,
 }
@@ -1032,6 +1078,8 @@ pub struct Shell {
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
     clock: f64,
     error: Option<String>,
+    reset_launcher_pending: bool,
+    launcher: launcher::session::Session,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
     /// Mirrors whatever `SpaceScreen` last claimed — kept here too because `SyncTick` has to
@@ -1264,17 +1312,50 @@ impl Shell {
     fn reset_tabs(&mut self) {
         self.tabs = vec![Tab::Home];
         self.apps.clear();
+        self.launcher = Default::default();
+        self.reset_launcher_pending = false;
         self.focused = 0;
         self.split = None;
         self.popped.clear();
         self.error = None;
     }
+    fn sync_launcher(&mut self) {
+        match &self.screen {
+            Screen::Items(screen) => self.launcher.bind(&self.vault, Some(screen.inventory())),
+            Screen::Spaces(screen) => self.launcher.bind_context(&self.vault,
+                Some(launcher::context::Context::Spaces(screen.inventory()))),
+            _ => self.launcher.bind(&self.vault, None),
+        }
+    }
+
     /// The bridge's stateful family: these touch tabs/apps/screens, so they are methods
     /// rather than the windowless `answer`. All are fast — seal plus a local write, no
     /// KDF — so they run inline on the UI thread (the single authority) and rebuild any
     /// screen that shows what they changed.
     fn answer_mut(&mut self, req: Request) -> Response {
-        match req {
+        let response = match req {
+            Request::SelectWorkspace { ws_id } => {
+                let workspace =
+                    self.vault
+                        .workspaces()
+                        .map_err(|e| e.to_string())
+                        .and_then(|workspaces| {
+                            workspaces
+                                .into_iter()
+                                .find(|w| w.id == ws_id)
+                                .ok_or_else(|| "workspace is not in this account".to_string())
+                        });
+                match workspace {
+                    Ok(ws) => {
+                        self.screen = Screen::Items(ItemsScreen::new(&self.vault, ws));
+                        self.focused = 0;
+                        self.error = None;
+                        self.reset_launcher_pending = false;
+                        Response::ok("selected")
+                    }
+                    Err(error) => Response::err(error),
+                }
+            }
             Request::CreateWorkspace { name } => {
                 if name.trim().is_empty() {
                     return Response::err("name is required");
@@ -1324,6 +1405,13 @@ impl Shell {
                     .map(Response::ok)
                     .unwrap_or_else(Response::err),
             },
+            req @ (Request::ReadLauncherFile { .. }
+            | Request::EditLauncherFile { .. }
+            | Request::ResetLauncher {}
+            | Request::DumpLauncherTree {}
+            | Request::ClickLauncher { .. }
+            | Request::TypeLauncher { .. }
+            | Request::ReadLauncherConsole { .. }) => self.answer_launcher(req),
             Request::ReadFileVersioned { item_id, path } => {
                 match find_item(&self.vault, &item_id) {
                     Err(e) => Response::err(e),
@@ -1454,7 +1542,9 @@ impl Shell {
             // item's data is what ReadFile sees, and its console no longer exists.
             Request::ReadConsole { .. } => Response::err("item is not open"),
             // Screenshot is handled by the deferred `Msg::Rpc` arm, never synchronously.
-            Request::Screenshot { .. } => Response::err("screenshot was not deferred"),
+            Request::Screenshot { .. } | Request::ScreenshotShell { .. } => {
+                Response::err("screenshot was not deferred")
+            }
             // Same: the Runner owns the clock and the frame, so these cannot be answered here.
             Request::Frame { .. }
             | Request::Advance { .. }
@@ -1528,7 +1618,9 @@ impl Shell {
                     .collect::<Vec<_>>(),
             ),
             req => answer(&self.vault, req),
-        }
+        };
+        self.sync_launcher();
+        response
     }
 
     /// The apps on screen: the focused tab's, and the one split beside it. Home shows alone.
@@ -1708,6 +1800,8 @@ impl Shell {
             offscreen,
             clock: 0.0,
             error: None,
+            reset_launcher_pending: false,
+            launcher: Default::default(),
             screenshot: None,
             driver: None,
             node: node.clone(),
@@ -1725,7 +1819,7 @@ impl Shell {
         if let Some(pos) = self
             .tabs
             .iter()
-            .position(|t| matches!(t, Tab::App((tid, _)) if tid.as_ref() == wi.id))
+            .position(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == wi.id.as_str()))
         {
             self.focused = pos;
             return Ok(());
@@ -1891,6 +1985,42 @@ impl Shell {
             .align_center()
             .fill(theme::bg_1())
             .children(tabs)
+            .child(col().grow())
+            .child(
+                row()
+                    .h(28.0)
+                    .px(8.0)
+                    .radius(6.0)
+                    .no_shrink()
+                    .align_center()
+                    .id("shell:reset-launcher")
+                    .hover_fill(theme::bg_2())
+                    .on_click(Msg::ResetLauncher)
+                    .child(
+                        text(if self.reset_launcher_pending {
+                            "Confirm reset"
+                        } else {
+                            "Reset launcher"
+                        })
+                        .font_size(11.0)
+                        .no_wrap()
+                        .color(theme::fg_3()),
+                    ),
+            )
+            .children(self.reset_launcher_pending.then(|| {
+                row()
+                    .h(28.0)
+                    .px(8.0)
+                    .align_center()
+                    .id("shell:cancel-launcher-reset")
+                    .on_click(Msg::CancelLauncherReset)
+                    .child(
+                        text("Cancel")
+                            .font_size(11.0)
+                            .no_wrap()
+                            .color(theme::fg_3()),
+                    )
+            }))
     }
 }
 
@@ -1916,8 +2046,8 @@ impl App for Shell {
                 Screen::Signup(f) => f.view(),
                 Screen::Mnemonic(m) => m.view(),
                 Screen::Login(a) => a.view(),
-                Screen::Spaces(s) => s.view(),
-                Screen::Items(i) => i.view(),
+                Screen::Spaces(s) => s.view(self.launcher.get().ok(), self.launcher.warning()),
+                Screen::Items(i) => i.view(self.launcher.get().ok(), self.launcher.warning()),
             },
             Tab::App((id, _)) if self.popped.contains(id) => col()
                 .w_full()
@@ -1961,7 +2091,12 @@ impl App for Shell {
                     .py(10.0)
                     .fill(theme::bg_1())
                     .align_center()
-                    .child(text(e).font_size(12.0).color(theme::error())),
+                    // Full launcher validation diagnostics remain in its console.
+                    .child(
+                        text(e.lines().next().unwrap_or(e))
+                            .font_size(12.0)
+                            .color(theme::error()),
+                    ),
             );
         }
 
@@ -1978,9 +2113,113 @@ impl App for Shell {
             self.start_listener();
         }
         let next = match msg {
+            Msg::ResetLauncher => {
+                if self.reset_launcher_pending {
+                    self.error = self.reset_launcher().err();
+                    self.reset_launcher_pending = false;
+                } else if self.vault.current().is_some() {
+                    self.reset_launcher_pending = true;
+                }
+                None
+            }
+            Msg::CancelLauncherReset => {
+                self.reset_launcher_pending = false;
+                None
+            }
             Msg::Items(ItemsScreenMsg::Open(wi)) => {
                 self.error = self.open_tab(wi).err();
                 None
+            }
+            Msg::WorkspaceCreated { account, job, result } => {
+                if let Screen::Spaces(screen) = &mut self.screen {
+                    screen.finish_creation(&self.vault, &account, job, result);
+                }
+                None
+            }
+            Msg::Launcher(instance, msg) => {
+                let commands = if self.focused == 0 && self.vault.current().is_some()
+                    && matches!(self.screen, Screen::Spaces(_)) {
+                    self.launcher.get_mut().map(|launcher| launcher.update(instance, msg))
+                        .unwrap_or_default()
+                } else { Vec::new() };
+                for command in commands {
+                    match command {
+                        launcher::Command::SelectWorkspace(ws_id) => {
+                            self.error = match self.answer_mut(Request::SelectWorkspace { ws_id }) {
+                                Response::Ok { .. } => None,
+                                Response::Err { message } => Some(message),
+                            };
+                            break;
+                        }
+                        launcher::Command::CreateWorkspace(name) => {
+                            if let Screen::Spaces(screen) = &mut self.screen {
+                                self.error = screen.create_workspace(&self.vault, &self.proxy, &name).err();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Msg::Items(ItemsScreenMsg::Launcher(ws_id, instance, msg)) => {
+                let commands = match &mut self.screen {
+                    Screen::Items(i) if self.focused == 0 && i.ws().id == ws_id => {
+                        self.launcher.get_mut()
+                            .map(|launcher| launcher.update(instance, msg)).unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                };
+                let mut next = None;
+                for command in commands {
+                    self.error = match command {
+                        launcher::Command::SelectWorkspace(_) | launcher::Command::CreateWorkspace(_) => Err("focus the workspace list to select or create".into()),
+                        launcher::Command::Workspace { ws_id, action } => {
+                            let home_ws = match &self.screen {
+                                Screen::Items(i) => Some(i.ws().id.as_str()),
+                                _ => None,
+                            };
+                            launcher::navigation::validate(&self.vault, home_ws, self.focused, &ws_id)
+                                .and_then(|_| {
+                                    let Screen::Items(i) = &mut self.screen else {
+                                        return Err("launcher workspace changed".into());
+                                    };
+                                    let msg = match action {
+                                        launcher::WorkspaceAction::Back => ItemsScreenMsg::Back,
+                                        launcher::WorkspaceAction::Import => ItemsScreenMsg::Upload,
+                                    };
+                                    next = i.update(msg, &self.vault, &self.proxy);
+                                    Ok(())
+                                })
+                        }
+                        launcher::Command::OpenItem(command) => {
+                            let item = self
+                                .vault
+                                .items(&ws_id)
+                                .map_err(|e| e.to_string())
+                                .and_then(|items| {
+                                    items
+                                        .into_iter()
+                                        .find(|i| command.ws_id == ws_id && i.id == command.item_id)
+                                        .ok_or_else(|| "item is not in this workspace".to_string())
+                                });
+                            item.and_then(|wi| self.open_tab(wi))
+                        }
+                        launcher::Command::EditSource {
+                            ws_id,
+                            path,
+                            revision,
+                            edits,
+                        } => self
+                            .edit_launcher(Some(&ws_id), &path, &revision, &edits)
+                            .map(|_| ()),
+                    }
+                    .err();
+                    if next.is_some() {
+                        self.reset_launcher_pending = false;
+                        break;
+                    }
+                }
+                next
             }
             Msg::TileInput(id, e) => {
                 if let Some(a) = self.apps.get(&id) {
@@ -2384,23 +2623,36 @@ impl App for Shell {
                 None
             }
             Msg::Rpc(
-                Request::Screenshot {
-                    item_id,
-                    width,
-                    height,
-                    scale,
-                },
+                req @ (Request::Screenshot { .. } | Request::ScreenshotShell { .. }),
                 reply,
             ) => {
+                let (item_id, width, height, scale) = match req {
+                    Request::Screenshot {
+                        item_id,
+                        width,
+                        height,
+                        scale,
+                    } => (Some(item_id), width, height, scale),
+                    Request::ScreenshotShell {
+                        width,
+                        height,
+                        scale,
+                    } => (None, width, height, scale),
+                    _ => unreachable!(),
+                };
                 let spec = screenshot_spec(width, height, scale);
-                let focused = self
-                    .tabs
-                    .get(self.focused)
-                    .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
-                let error = if !self.apps.contains_key(item_id.as_str()) {
-                    Some("item is not open".to_string())
-                } else if !focused {
-                    Some("item is not focused; call OpenItem first".to_string())
+                let item_error = item_id.as_ref().and_then(|item_id| {
+                    if !self.apps.contains_key(item_id.as_str()) {
+                        return Some("item is not open".to_string());
+                    }
+                    let focused = self
+                        .tabs
+                        .get(self.focused)
+                        .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
+                    (!focused).then(|| "item is not focused; call OpenItem first".to_string())
+                });
+                let error = if item_error.is_some() {
+                    item_error
                 } else if self.screenshot.is_some() {
                     Some("a screenshot is already pending".to_string())
                 } else {
@@ -2671,6 +2923,7 @@ impl App for Shell {
         if let Some(next) = next {
             self.screen = next;
         }
+        self.sync_launcher();
     }
 
     /// Wakes on wall-clock time or from a subscriber, never a request: offscreen they must not move
@@ -2762,11 +3015,14 @@ impl App for Shell {
 
     fn take_screenshot(&mut self) -> Option<ScreenshotRequest<Msg>> {
         let pending = self.screenshot.take()?;
-        let still_focused = self
-            .tabs
-            .get(self.focused)
-            .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == pending.item_id));
-        if !still_focused || !self.apps.contains_key(pending.item_id.as_str()) {
+        let item_unavailable = pending.item_id.as_ref().is_some_and(|item_id| {
+            let focused = self
+                .tabs
+                .get(self.focused)
+                .is_some_and(|t| matches!(t, Tab::App((id, _)) if id.as_ref() == item_id));
+            !focused || !self.apps.contains_key(item_id.as_str())
+        });
+        if item_unavailable {
             let _ = pending
                 .reply
                 .send(Response::err("item stopped being focused before capture"));

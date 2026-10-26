@@ -1,6 +1,8 @@
 use crate::item::ItemsScreen;
 use crate::node;
 use crate::{Msg, Screen, theme};
+use crate::launcher::{Launcher, context::Spaces};
+use std::{cell::RefCell, rc::Rc};
 use courier::DesktopNodeRecord;
 use courier::publish::{PublishedItem, PublishedWorkspace};
 use courier::token::Scope;
@@ -12,6 +14,7 @@ use vault::{Vault, WorkspaceMeta};
 
 pub struct SpaceScreen {
     spaces: Vec<WorkspaceMeta>,
+    inventory: Spaces,
     space_name: String,
     add_space: bool,
     error: Option<String>,
@@ -28,7 +31,6 @@ pub enum SpaceScreenMsg {
     ToggleAddSpace,
     SpaceName(String),
     OpenSpace(String),
-    WorkspaceCreation(Result<WorkspaceMeta, String>),
     ToggleClaim,
     ClaimTicket(String),
     ClaimNode,
@@ -51,8 +53,12 @@ impl SpaceScreen {
             Err(e) => (Vec::<WorkspaceMeta>::new(), Some(e.to_string())),
         };
         let node = node::load_relationship(vault).ok().flatten();
+        let inventory = Rc::new(RefCell::new(crate::launcher::context::List {
+            rows: spaces.clone(), ..Default::default()
+        }));
         SpaceScreen {
             spaces,
+            inventory,
             error,
             space_name: String::new(),
             add_space: false,
@@ -62,6 +68,50 @@ impl SpaceScreen {
             claim_error: None,
             publish_status: None,
             invite_status: None,
+        }
+    }
+
+    pub(crate) fn inventory(&self) -> Spaces { self.inventory.clone() }
+
+    pub(crate) fn create_workspace(&mut self, vault: &Vault, proxy: &EventLoopProxy<Msg>, value: &str) -> Result<(), String> {
+        let name = crate::launcher::creation::name(value)?;
+        let account = vault.current().ok_or("vault is locked")?.did;
+        let Some(job) = self.inventory.borrow_mut().creation.begin() else { return Ok(()); };
+        self.error = None;
+        let vault = vault.clone();
+        let proxy = proxy.clone();
+        if let Err(error) = std::thread::Builder::new().name("workspace-create".into()).spawn(move || {
+            let result = vault.create_workspace_for(&account, &name).map_err(|e| e.to_string());
+            let _ = proxy.send_event(Msg::WorkspaceCreated { account, job, result });
+        }) {
+            let error = error.to_string();
+            self.inventory.borrow_mut().creation.finish(job, Some(error.clone()));
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_creation(&mut self, vault: &Vault, account: &str, job: u64, result: Result<WorkspaceMeta, String>) {
+        if !vault.current().is_some_and(|current| current.did == account) { return; }
+        if !self.inventory.borrow_mut().creation.finish(job, result.as_ref().err().cloned()) {
+            // An accepted write survives navigation, but its feedback must not touch a new draft/job.
+            if let Ok(workspace) = result {
+                if !self.spaces.iter().any(|row| row.id == workspace.id) {
+                    self.spaces.insert(0, workspace);
+                    self.inventory.borrow_mut().rows = self.spaces.clone();
+                }
+            }
+            return;
+        }
+        match result {
+            Ok(workspace) => {
+                self.spaces.insert(0, workspace);
+                self.inventory.borrow_mut().rows = self.spaces.clone();
+                self.space_name.clear();
+                self.add_space = false;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -209,8 +259,10 @@ impl SpaceScreen {
         .hover_stroke(1.0, theme::bd_3())
     }
 
-    pub fn view(&self) -> El<Msg> {
-        if self.spaces.is_empty() {
+    pub fn view(&self, launcher: Option<&Launcher>, warning: Option<&str>) -> El<Msg> {
+        let body = launcher.map(Launcher::view)
+            .filter(|body| body.contains_id("launcher:workspace-list"));
+        if self.spaces.is_empty() && body.is_none() {
             return col()
                 .full()
                 .center()
@@ -218,13 +270,14 @@ impl SpaceScreen {
                 .gap(10.0)
                 .child(self.name_input().w_full().max_w(420.0))
                 .child(
-                    text("press ⏎ to create")
+                    text(self.error.as_deref().unwrap_or("press ⏎ to create"))
                         .font_size(11.0)
                         .no_wrap()
                         .color(theme::fg_3()),
                 );
         }
 
+        let lua_creation = body.as_ref().is_some_and(|body| body.contains_id("launcher:workspace-create"));
         let mut add_btn = row()
             .h(36.0)
             .px(14.0)
@@ -280,8 +333,14 @@ impl SpaceScreen {
                 .child(self.invite_widget())
                 .child(self.publish_widget());
         }
-        header = header.child(self.claim_widget()).child(add_btn);
+        header = header.child(self.claim_widget());
+        if !lua_creation { header = header.child(add_btn); }
 
+        let page = col().full().pad(40.0).gap(24.0).child(header)
+            .children(self.error.as_deref().or(warning).map(|message| {
+                text(message).font_size(12.0).color(theme::error())
+            }));
+        if let Some(body) = body { return page.child(body); }
         let mut grid = row().wrap().gap(20.0);
         for space in &self.spaces {
             let workspace_el: El<Msg> = col()
@@ -301,7 +360,7 @@ impl SpaceScreen {
             grid = grid.child(workspace_el);
         }
 
-        col().full().pad(40.0).gap(24.0).child(header).child(grid)
+        page.child(grid)
     }
 
     pub fn update(
@@ -312,16 +371,7 @@ impl SpaceScreen {
     ) -> Option<Screen> {
         match msg {
             SpaceScreenMsg::AddSpace => {
-                if self.space_name.trim().is_empty() {
-                    return None;
-                }
-                let vault = vault.clone();
-                let proxy = proxy.clone();
-                let name = self.space_name.clone();
-                std::thread::spawn(move || {
-                    let result = vault.create_workspace(&name).map_err(|e| e.to_string());
-                    let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::WorkspaceCreation(result)));
-                });
+                self.error = self.create_workspace(vault, proxy, &self.space_name.clone()).err();
                 None
             }
             SpaceScreenMsg::ToggleAddSpace => {
@@ -335,22 +385,6 @@ impl SpaceScreen {
             SpaceScreenMsg::OpenSpace(id) => {
                 let meta = self.spaces.iter().find(|s| s.id == id).cloned();
                 meta.map(|ws| Screen::Items(ItemsScreen::new(vault, ws)))
-            }
-            SpaceScreenMsg::WorkspaceCreation(result) => {
-                match result {
-                    Ok(_w) => {
-                        self.space_name.clear();
-                        self.add_space = false;
-                        match vault.workspaces() {
-                            Ok(w) => self.spaces = w,
-                            Err(e) => self.error = Some(e.to_string()),
-                        }
-                    }
-                    Err(e) => {
-                        self.error = Some(e);
-                    }
-                };
-                None
             }
             SpaceScreenMsg::ToggleClaim => {
                 self.show_claim = !self.show_claim;

@@ -96,6 +96,9 @@ class Bridge:
     def create_workspace(self, name: str) -> dict:
         return self.request("CreateWorkspace", name=name)
 
+    def select_workspace(self, ws_id: str) -> str:
+        return self.request("SelectWorkspace", ws_id=ws_id)
+
     def list_items(self, ws_id: str) -> list:
         return self.request("ListItems", ws_id=ws_id)
 
@@ -110,6 +113,27 @@ class Bridge:
 
     def read_file(self, item_id: str, path: str) -> str:
         return self.request("ReadFile", item_id=item_id, path=path)
+
+    def read_launcher_file_versioned(self, path: str) -> dict:
+        return self.request("ReadLauncherFile", path=path)
+
+    def edit_launcher_file(self, path: str, expected_revision: str, edits: list[dict]) -> dict:
+        return self.request("EditLauncherFile", path=path, expected_revision=expected_revision, edits=edits)
+
+    def reset_launcher(self) -> str:
+        return self.request("ResetLauncher")
+
+    def click_launcher(self, el_id: str) -> str:
+        return self.request("ClickLauncher", el_id=el_id)
+
+    def type_launcher(self, el_id: str, content: str) -> str:
+        return self.request("TypeLauncher", el_id=el_id, content=content)
+
+    def dump_launcher_tree(self) -> dict:
+        return self.request("DumpLauncherTree")
+
+    def read_launcher_console(self, last: int = 100) -> list[str]:
+        return self.request("ReadLauncherConsole", last=last)
 
     def read_file_versioned(self, item_id: str, path: str) -> dict:
         """Read source plus the opaque revision required by edit_file."""
@@ -236,6 +260,14 @@ class Bridge:
         from pathlib import Path
 
         result = self.screenshot(item_id, **size)
+        Path(path).write_bytes(base64.b64decode(result["png_base64"], validate=True))
+        return {k: result[k] for k in ("width_px", "height_px")}
+
+    def save_shell_screenshot(self, path, width=None, height=None, scale=None) -> dict:
+        """Capture the whole shell, including Home and recovery controls."""
+        from pathlib import Path
+
+        result = self.request("ScreenshotShell", width=width, height=height, scale=scale)
         Path(path).write_bytes(base64.b64decode(result["png_base64"], validate=True))
         return {k: result[k] for k in ("width_px", "height_px")}
 

@@ -1,6 +1,7 @@
 //! Text engine: registers the fonts we ship and shapes strings into vello glyph runs via parley.
 //! This is the reusable "string → positioned glyphs" service every screen/widget calls.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -94,6 +95,55 @@ impl Run {
 pub struct TextEngine {
     font_cx: FontContext,
     layout_cx: LayoutContext<[u8; 4]>,
+    shaped: Shaped,
+}
+
+/// Everything that shapes a string, so two equal keys are the same picture. Sizes and widths are
+/// their bits: the same `f32` shapes the same, and a key must hash.
+#[derive(Hash, PartialEq, Eq)]
+enum Key {
+    Plain { text: Box<str>, family: Box<str>, size: u32, width: Option<u32> },
+    Rich { text: Box<str>, runs: Vec<RunKey>, width: Option<u32> },
+}
+
+type RunKey = (usize, usize, &'static str, u32, u32, [bool; 3], [u8; 4]);
+
+fn run_key(r: &Run) -> RunKey {
+    let flags = [r.italic, r.underline, r.strike];
+    (r.range.start, r.range.end, r.family, r.size.to_bits(), r.weight.to_bits(), flags, r.color.to_rgba8().to_u8_array())
+}
+
+/// The layouts shaped this frame and last, so a label that did not change is not shaped again
+/// (`docs/design/ui-reuse.md` §3, layer 0). A hit in `last` moves to `now`; [`TextEngine::sweep`]
+/// at each frame's end makes `now` the new `last` and drops what neither frame used.
+#[derive(Default)]
+struct Shaped {
+    now: HashMap<Key, Arc<Layout<[u8; 4]>>>,
+    last: HashMap<Key, Arc<Layout<[u8; 4]>>>,
+    /// How many layouts were built, not fetched.
+    #[cfg(test)]
+    built: usize,
+}
+
+impl Shaped {
+    fn get(&mut self, key: &Key) -> Option<Arc<Layout<[u8; 4]>>> {
+        if let Some(hit) = self.now.get(key) {
+            return Some(hit.clone());
+        }
+        let (key, hit) = self.last.remove_entry(key)?;
+        self.now.insert(key, hit.clone());
+        Some(hit)
+    }
+
+    fn keep(&mut self, key: Key, layout: Layout<[u8; 4]>) -> Arc<Layout<[u8; 4]>> {
+        #[cfg(test)]
+        {
+            self.built += 1;
+        }
+        let layout = Arc::new(layout);
+        self.now.insert(key, layout.clone());
+        layout
+    }
 }
 
 impl TextEngine {
@@ -110,7 +160,44 @@ impl TextEngine {
         Self {
             font_cx,
             layout_cx: LayoutContext::new(),
+            shaped: Shaped::default(),
         }
+    }
+
+    /// Ends a frame: what it did not use, nor the one before, is forgotten.
+    pub(crate) fn sweep(&mut self) {
+        self.shaped.last = std::mem::take(&mut self.shaped.now);
+    }
+
+    #[cfg(test)]
+    fn shaped(&self) -> usize {
+        self.shaped.built
+    }
+
+    /// A plain string's layout, aligned `Start` (which changes neither its width nor its height)
+    /// so measuring and painting share it.
+    fn plain(&mut self, text: &str, family: &str, size: f32, width: Option<f32>) -> Arc<Layout<[u8; 4]>> {
+        let key = Key::Plain {
+            text: text.into(),
+            family: family.into(),
+            size: size.to_bits(),
+            width: width.map(f32::to_bits),
+        };
+        if let Some(hit) = self.shaped.get(&key) {
+            return hit;
+        }
+        let mut layout = self.build_layout(text, family, size, width);
+        layout.align(Alignment::Start, AlignmentOptions::default());
+        self.shaped.keep(key, layout)
+    }
+
+    fn rich(&mut self, text: &str, runs: &[Run], width: Option<f32>) -> Arc<Layout<[u8; 4]>> {
+        let key = Key::Rich { text: text.into(), runs: runs.iter().map(run_key).collect(), width: width.map(f32::to_bits) };
+        if let Some(hit) = self.shaped.get(&key) {
+            return hit;
+        }
+        let layout = self.build_rich(text, runs, width);
+        self.shaped.keep(key, layout)
     }
 
     /// Lend parley's two contexts together — `PlainEditor::driver`/`refresh_layout` need both, and a
@@ -153,7 +240,7 @@ impl TextEngine {
         size: f32,
         max_width: Option<f32>,
     ) -> (f32, f32) {
-        let layout = self.build_layout(text, family, size, max_width);
+        let layout = self.plain(text, family, size, max_width);
         (layout.width(), layout.height())
     }
 
@@ -208,7 +295,7 @@ impl TextEngine {
 
     /// Shape a rich string and report `(width, height)` after breaking lines at `max_width`.
     pub fn measure_rich(&mut self, text: &str, runs: &[Run], max_width: Option<f32>) -> (f32, f32) {
-        let layout = self.build_rich(text, runs, max_width);
+        let layout = self.rich(text, runs, max_width);
         (layout.width(), layout.height())
     }
 
@@ -238,7 +325,7 @@ impl TextEngine {
                 .collect();
             &faded
         };
-        let layout = self.build_rich(text, runs, max_width);
+        let layout = self.rich(text, runs, max_width);
         self.draw_layout(scene, &layout, transform, None);
     }
 
@@ -248,9 +335,7 @@ impl TextEngine {
     /// `MaxContent` — the two questions a flex container asks a leaf before it can decide how much
     /// room to give it. `min` takes every soft break, `max` takes none.
     pub fn content_widths(&mut self, text: &str, family: &str, size: f32) -> (f32, f32) {
-        let w = self
-            .build_layout(text, family, size, None)
-            .calculate_content_widths();
+        let w = self.plain(text, family, size, None).calculate_content_widths();
         (w.min, w.max)
     }
 
@@ -267,8 +352,7 @@ impl TextEngine {
         brush: Color,
         max_width: Option<f32>,
     ) {
-        let mut layout = self.build_layout(text, family, size, max_width);
-        layout.align(Alignment::Start, AlignmentOptions::default());
+        let layout = self.plain(text, family, size, max_width);
         self.draw_layout(scene, &layout, transform, Some(brush))
     }
 
@@ -351,6 +435,11 @@ impl TextEngine {
 /// *relational* — no absolute pixel counts. The default family is the OS's sans-serif, so every
 /// number here differs between machines; what cannot differ is that wrapping makes text narrower
 /// and taller, and that it stops at the longest word.
+#[cfg(test)]
+mod bench_tests;
+#[cfg(test)]
+mod cache_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,7 +18,7 @@ pub use storage::Store;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
-pub use item::{ItemKind, WorkspaceItem};
+pub use item::{ASSET_DOC, ItemKind, WorkspaceItem};
 pub use workspace::WorkspaceMeta;
 
 use account::{did_to_filename, scan_dids};
@@ -215,8 +215,19 @@ impl Vault {
     /// to `ws/<id>/meta`; no registry doc is touched — the workspace exists by virtue of that
     /// key. Errs with [`VaultError::Locked`] when no account is unlocked.
     pub fn create_workspace(&self, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(None, name)
+    }
+
+    /// Workers must check their submitting account under the same lock as the write.
+    /// A lock/switch before this call rejects; a started write completes in its original account.
+    pub fn create_workspace_for(&self, did: &str, name: &str) -> Result<WorkspaceMeta, VaultError> {
+        self.create_workspace_checked(Some(did), name)
+    }
+
+    fn create_workspace_checked(&self, did: Option<&str>, name: &str) -> Result<WorkspaceMeta, VaultError> {
         let guard = self.active.lock().unwrap();
         let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        if did.is_some_and(|did| did != active.did) { return Err(VaultError::Locked); }
         let meta = WorkspaceMeta {
             id: workspace::new_id(),
             name: name.to_string(),
@@ -335,6 +346,21 @@ impl Vault {
             b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id))
         });
         Ok(out)
+    }
+    /// The item named `name` of `kind` in `ws_id`. Names are not unique — two peers can each
+    /// create one offline — so the oldest wins (created, then id): every peer picks the same
+    /// item without asking the others.
+    pub fn item_named(
+        &self,
+        ws_id: &str,
+        name: &str,
+        kind: ItemKind,
+    ) -> Result<Option<WorkspaceItem>, VaultError> {
+        Ok(self
+            .items(ws_id)?
+            .into_iter()
+            .filter(|i| i.name == name && i.kind == kind)
+            .min_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id))))
     }
     /// `ws_id`/`item_id` come from a caller synced or published from elsewhere — never minted
     /// here — and both become part of the key, so they're checked the same way

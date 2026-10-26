@@ -7,13 +7,17 @@
 //! failure stays a failure. Every bug this file can catch is a bug in that agreement.
 
 use super::{persist, resolver, screenshot_spec};
-use app_host::{LuaApp, LuaMsg, Resolve, Wake};
+use app_host::{DocKey, LuaApp, LuaMsg, Resolve, Wake};
 use loro::{LoroDoc, LoroText, LoroValue, ValueOrContainer};
 use std::rc::Rc;
 use tempfile::TempDir;
-use vault::{ItemKind, Vault, WorkspaceMeta};
+use vault::{ASSET_DOC, ItemKind, Vault, WorkspaceMeta};
 
 /// No window to repaint — the poke itself is covered in `app_host`.
+fn board() -> DocKey {
+    DocKey::Own("board".to_string())
+}
+
 fn noop_wake() -> Wake {
     std::sync::Arc::new(|| {})
 }
@@ -29,7 +33,7 @@ fn folder_import_button_follows_build_capability() {
         id: "0123456789abcdef0123456789abcdef".into(),
         name: "test".into(), created: 0,
     });
-    assert_eq!(has_upload(&screen.view().info()),
+    assert_eq!(has_upload(&screen.view(None, None).info()),
         cfg!(all(feature = "folder-picker", not(target_os = "android"))));
     #[cfg(not(all(feature = "folder-picker", not(target_os = "android"))))]
     assert_eq!(screen.upload(&vault).unwrap_err(), "folder import is unavailable in this build");
@@ -69,7 +73,7 @@ fn auth_and_empty_workspace_panels_fit_phones_and_keep_desktop_widths() {
         for (rects, fields, cap) in [
             (screen_rects(|| login.view(), width), vec!["passphrase", "login"], 460.0),
             (screen_rects(|| signup.view(), width), vec!["label", "password", "submit"], 360.0),
-            (screen_rects(|| spaces.view(), width), vec!["workspace_name"], 420.0),
+            (screen_rects(|| spaces.view(None, None), width), vec!["workspace_name"], 420.0),
         ] {
             for id in fields {
                 let rect = rects.iter().find(|r| r.id == id).unwrap();
@@ -100,7 +104,7 @@ fn workspace_header_wraps_without_squeezing_controls_or_cards() {
     let (vault, _tmp, ws_id, _) = fresh();
     let spaces = crate::space::SpaceScreen::new(&vault);
     for width in [320.0, 360.0, 393.0, 900.0] {
-        let rects = screen_rects(|| spaces.view(), width);
+        let rects = screen_rects(|| spaces.view(None, None), width);
         for id in ["claim_node", "add_space", &ws_id] {
             assert_fits(rects.iter().find(|r| r.id == id).unwrap(), width);
         }
@@ -195,10 +199,74 @@ fn a_doc_round_trips_through_the_vault() {
         .expect("flush should have written the board");
     assert_eq!(title_in(&stored).as_deref(), Some("saved"));
 
-    let read_back = resolver(&vault, &ws, &item)("board")
+    let read_back = resolver(&vault, &ws, &item)(&board())
         .expect("a healthy vault must not error")
         .expect("the doc persist just wrote must resolve");
     assert_eq!(read_back, stored);
+}
+
+fn hero() -> DocKey {
+    DocKey::Asset("hero".to_string())
+}
+
+/// `writer`, writing to the workspace asset `hero` instead of its own board.
+fn asset_writer(resolve: Resolve, title: &str) -> LuaApp<LuaMsg> {
+    let src = LoroDoc::new();
+    let main = src
+        .get_map("files")
+        .insert_container("main.lua", LoroText::new())
+        .unwrap();
+    main.insert(
+        0,
+        &format!(
+            r#"
+            local h = asset:open("hero")
+            h:set({{"meta"}}, doc.map{{ title = "{title}" }})
+            return function() return ui.text{{ "writer" }} end
+            "#
+        ),
+    )
+    .unwrap();
+    src.commit();
+    LuaApp::open(src, resolve, noop_wake(), Rc::new(|m| m)).unwrap()
+}
+
+/// The point of an asset: one app writes it, a different app reads it. Its first save creates
+/// the asset item, and its bytes live there — not under the app that wrote them.
+#[test]
+fn an_asset_one_app_saves_another_app_reads() {
+    let (vault, _tmp, ws, writer_app) = fresh();
+    let reader_app = vault.create_item(&ws, "game", ItemKind::App).unwrap().id;
+    assert_eq!(resolver(&vault, &ws, &reader_app)(&hero()).unwrap(), None);
+
+    let mut app = asset_writer(resolver(&vault, &ws, &writer_app), "drawn");
+    app.flush(persist(&vault, &ws, &writer_app)).unwrap();
+
+    let asset = vault
+        .item_named(&ws, "hero", ItemKind::Asset)
+        .unwrap()
+        .expect("the first save creates the asset");
+    let stored = vault.get_doc(&ws, &asset.id, ASSET_DOC).unwrap().unwrap();
+    assert_eq!(title_in(&stored).as_deref(), Some("drawn"));
+    assert_eq!(vault.get_doc(&ws, &writer_app, "hero").unwrap(), None);
+
+    let read = resolver(&vault, &ws, &reader_app)(&hero())
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, stored);
+}
+
+/// A second save finds the asset the first one made rather than minting another.
+#[test]
+fn saving_an_asset_twice_keeps_one_item() {
+    let (vault, _tmp, ws, item) = fresh();
+    for title in ["one", "two"] {
+        let mut app = asset_writer(resolver(&vault, &ws, &item), title);
+        app.flush(persist(&vault, &ws, &item)).unwrap();
+    }
+    let assets = vault.items(&ws).unwrap();
+    let heroes = assets.iter().filter(|i| i.kind == ItemKind::Asset).count();
+    assert_eq!(heroes, 1);
 }
 
 /// The ordinary first run. `Ok(None)` has to stay distinct from both an error and an empty
@@ -206,7 +274,7 @@ fn a_doc_round_trips_through_the_vault() {
 #[test]
 fn a_never_saved_doc_reads_as_absent() {
     let (vault, _tmp, ws, item) = fresh();
-    assert_eq!(resolver(&vault, &ws, &item)("board").unwrap(), None);
+    assert_eq!(resolver(&vault, &ws, &item)(&board()).unwrap(), None);
 }
 
 /// The regression test for `.ok().flatten()`.
@@ -223,14 +291,14 @@ fn a_read_failure_is_an_error_not_an_absent_doc() {
 
     vault.lock();
 
-    let got = resolver(&vault, &ws, &item)("board");
+    let got = resolver(&vault, &ws, &item)(&board());
     assert!(
         got.is_err(),
         "a locked vault resolved to {got:?} — the real board is still on disk, and treating \
          this as `no doc yet` is what lets the next flush overwrite it"
     );
     // The write half has to refuse for the same reason, rather than silently dropping bytes.
-    assert!(persist(&vault, &ws, &item)("board", b"snapshot").is_err());
+    assert!(persist(&vault, &ws, &item)(&board(), b"snapshot").is_err());
 }
 
 /// What `OpenApp::ws_id` exists for. Two apps in the same workspace both keep a doc called
@@ -247,7 +315,7 @@ fn docs_are_scoped_to_their_item() {
     b.flush(persist(&vault, &ws, &item_b)).unwrap();
 
     let read = |item: &str| {
-        let bytes = resolver(&vault, &ws, item)("board").unwrap().unwrap();
+        let bytes = resolver(&vault, &ws, item)(&board()).unwrap().unwrap();
         title_in(&bytes).unwrap()
     };
     assert_eq!(read(&item_a), "board A");
@@ -264,7 +332,7 @@ fn docs_are_scoped_to_their_workspace() {
     let mut app = writer(resolver(&vault, &ws_a, &item), "saved");
     app.flush(persist(&vault, &ws_a, &item)).unwrap();
 
-    assert_eq!(resolver(&vault, &ws_b, &item)("board").unwrap(), None);
+    assert_eq!(resolver(&vault, &ws_b, &item)(&board()).unwrap(), None);
 }
 
 /// Sealed to the account key, not to the session. This is the assertion `a_card_survives_a_restart`
@@ -283,7 +351,7 @@ fn a_doc_survives_a_vault_reopen() {
 
     let mut reopened = Vault::open(tmp.path().to_path_buf()).unwrap();
     reopened.login(&did, "pw").unwrap();
-    let bytes = resolver(&reopened, &ws, &item)("board")
+    let bytes = resolver(&reopened, &ws, &item)(&board())
         .unwrap()
         .expect("the board should still be on disk");
     assert_eq!(title_in(&bytes).as_deref(), Some("survives"));
