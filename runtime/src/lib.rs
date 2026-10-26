@@ -5,6 +5,8 @@
 //! vocabulary, same pipeline (docs/architecture.md).
 
 mod anim;
+#[cfg(target_os = "android")]
+mod android_insets;
 pub mod coords;
 mod drag;
 pub mod drawing;
@@ -52,8 +54,10 @@ use vello::kurbo::{Affine, Insets, Point, Rect};
 use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopBuilder};
+#[cfg(target_os = "android")]
+pub use winit::platform::android::activity::AndroidApp;
 pub use winit::event_loop::{EventLoopClosed, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey::*, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -73,6 +77,14 @@ pub use windows::{WindowFrame, WindowIn};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
+
+fn usable_rect((w, h): (f32, f32), scale: f32, insets: [i32; 4]) -> Rect {
+    let [left, top, right, bottom] = insets.map(|v| v.max(0) as f32 / scale);
+    let x0 = left.min(w);
+    let y0 = top.min(h);
+    Rect::new(x0 as f64, y0 as f64,
+        (w - right).max(x0) as f64, (h - bottom).max(y0) as f64)
+}
 
 fn pan_axes((x, y): (f32, f32), (ax, ay): (bool, bool)) -> (f32, f32) {
     (if ax { x } else { 0.0 }, if ay { y } else { 0.0 })
@@ -295,10 +307,18 @@ impl Capture {
 struct Runner<A: App> {
     app: A,
     render: Option<Render>,
+    ready_called: bool,
+    ime_allowed: bool,
+    content_insets: [i32; 4],
+    #[cfg(target_os = "android")]
+    android_insets: Option<android_insets::Adapter>,
+    #[cfg(all(target_os = "android", debug_assertions))]
+    android_content_probe: Option<([i32; 4], (i32, i32))>,
     /// Set only when there is no window: the viewport to lay out against, so `frame` still runs
     /// the whole layout/hit/paint path and fills `hits`. The scene it builds is thrown away.
     offscreen: Option<(f32, f32)>,
     pointer: Option<(f32, f32)>,
+    touch_id: Option<u64>,
     text: TextEngine,
     focused: Focus,
     modifiers: ModifiersState,
@@ -477,6 +497,21 @@ impl<M> Default for Hits<M> {
 }
 
 impl<M> Hits<M> {
+    #[cfg(any(target_os = "android", test))]
+    fn invalidate_geometry(&mut self) {
+        // Keep non-spatial handlers and field identity: inset changes are not new fields.
+        self.click.clear();
+        self.input.clear();
+        self.context.clear();
+        self.drag.clear();
+        self.drop.clear();
+        self.hover.clear();
+        self.wheel.clear();
+        self.scroll.clear();
+        self.bar.clear();
+        self.zoom.clear();
+    }
+
     pub fn clear(&mut self) {
         let Self {
             click,
@@ -807,10 +842,13 @@ impl<A: App> Runner<A> {
             );
         }
         self.app.before_frame(now);
+        let safe = usable_rect(viewport, surface_scale,
+            if custom_capture { [0; 4] } else { self.content_insets });
+        let layout_viewport = (safe.width() as f32, safe.height() as f32);
         timing.mark(0);
         let view = self.app.view();
         timing.mark(1);
-        let mut placed = layout::solve(view, &mut self.text, viewport, &self.store);
+        let mut placed = layout::solve(view, &mut self.text, layout_viewport, &self.store);
         timing.mark(2);
         let sizes = layout::tile_sizes(&placed);
         if sizes != self.tile_sizes {
@@ -819,8 +857,21 @@ impl<A: App> Runner<A> {
                 timing.mark(2);
                 let view = self.app.view();
                 timing.mark(1);
-                placed = layout::solve(view, &mut self.text, viewport, &self.store);
+                placed = layout::solve(view, &mut self.text, layout_viewport, &self.store);
             }
+        }
+        if self.content_insets != [0; 4] && !custom_capture {
+            let origin = Affine::translate((safe.x0, safe.y0));
+            for p in &mut placed {
+                p.transform = origin * p.transform;
+                if let PlacedKind::PushClip { transform, .. } = &mut p.kind {
+                    *transform = origin * *transform;
+                }
+            }
+            placed.insert(0, layout::clip_marker(PlacedKind::PushClip {
+                rect: safe, transform: Affine::IDENTITY,
+            }));
+            placed.push(layout::clip_marker(PlacedKind::PopClip));
         }
         timing.mark(2);
         let pointer = self.pointer;
@@ -1120,6 +1171,18 @@ impl<A: App> Runner<A> {
         store.sweep();
         text.sweep();
         focused.clear_if_gone(store);
+        let ime_allowed = focused.get().is_some();
+        if self.ime_allowed != ime_allowed {
+            #[cfg(target_os = "android")]
+            if let Some(adapter) = &self.android_insets {
+                adapter.keyboard(ime_allowed);
+            }
+            #[cfg(not(target_os = "android"))]
+            if let Some(render) = &self.render {
+                render.set_ime_allowed(ime_allowed);
+            }
+            self.ime_allowed = ime_allowed;
+        }
         if !self.held_keys.is_empty()
             && (focused.get().is_some()
                 || hits.key.last().map(|(id, _)| id) != self.held_owner.as_ref())
@@ -1320,6 +1383,9 @@ impl<A: App> Runner<A> {
         match hit {
             Some((geometry, id, pad)) => {
                 self.focused.set(id.clone());
+                // Android dismissal doesn't change Rust focus; a fresh tap must re-show IME.
+                #[cfg(target_os = "android")]
+                { self.ime_allowed = false; }
                 let (lx, ly) = self.local_point(id, *geometry, *pad, px, py);
                 let field = self.store.get_mut::<Field>(id, Slot::Editor);
                 if let Some(field) = field {
@@ -1680,6 +1746,39 @@ impl<A: App> Runner<A> {
         self.redraw();
     }
 
+    fn clear_touch(&mut self) {
+        if let Some(id) = self.tile_grab.take() {
+            self.to_tile(&id, TileInput::Cancel);
+        }
+        self.button_down = false;
+        self.touch_id = None;
+        self.drag = None;
+        self.pressed = None;
+        self.on_cursor_left();
+    }
+
+    fn on_touch(&mut self, phase: TouchPhase, id: u64, position: PhysicalPosition<f64>) {
+        if self.render.is_none() && self.offscreen.is_none() {
+            return;
+        }
+        match phase {
+            TouchPhase::Started if self.touch_id.is_none() => {
+                // Only the first finger owns capture; other fingers never become pinch or clicks.
+                self.touch_id = Some(id);
+                self.on_cursor_moved(position);
+                self.button(true);
+            }
+            TouchPhase::Moved if self.touch_id == Some(id) => self.on_cursor_moved(position),
+            TouchPhase::Ended if self.touch_id == Some(id) => {
+                self.on_cursor_moved(position);
+                self.button(false);
+                self.clear_touch();
+            }
+            TouchPhase::Cancelled if self.touch_id == Some(id) => self.clear_touch(),
+            _ => {}
+        }
+    }
+
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
         self.event_at = self.now();
         let scale = self.render.as_ref().map_or(1.0, |r| r.scale());
@@ -1971,7 +2070,8 @@ impl<A: App> Runner<A> {
         self.redraw();
     }
 
-    fn handle_input(&mut self, event: KeyEvent) {
+    fn handle_input(&mut self, mut event: KeyEvent) {
+        event.logical_key = editing_key(&event.physical_key, &event.logical_key);
         if let Some(id) = self.keyboard_tile() {
             self.to_tile(&id, TileInput::Key(event));
             return;
@@ -2058,6 +2158,21 @@ fn cancel_key_input() -> KeyInput {
     }
 }
 
+fn editing_key(physical: &PhysicalKey, logical: &Key) -> Key {
+    use winit::keyboard::KeyCode;
+    // Android may report control keys as Unicode characters rather than NamedKey values.
+    let named = match (physical, logical) {
+        (PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter), Key::Character(s))
+            if matches!(s.as_str(), "\r" | "\n") => Some(Enter),
+        (PhysicalKey::Code(KeyCode::Backspace), Key::Character(s)) if s.as_str() == "\u{8}" => Some(Backspace),
+        (PhysicalKey::Code(KeyCode::Delete), Key::Character(s)) if s.as_str() == "\u{7f}" => Some(Delete),
+        (PhysicalKey::Code(KeyCode::Tab), Key::Character(s)) if s.as_str() == "\t" => Some(Tab),
+        (PhysicalKey::Code(KeyCode::Escape), Key::Character(s)) if s.as_str() == "\u{1b}" => Some(Escape),
+        _ => None,
+    };
+    named.map(Key::Named).unwrap_or_else(|| logical.clone())
+}
+
 fn describe_key(event: &KeyEvent, mods: ModifiersState) -> Option<KeyInput> {
     describe_key_parts(&event.physical_key, &event.logical_key,
         event.state == ElementState::Pressed, event.repeat, mods)
@@ -2094,6 +2209,39 @@ fn describe_key_parts(physical: &PhysicalKey, logical: &Key, down: bool,
 }
 
 impl<A: App> Runner<A> {
+    #[cfg(any(target_os = "android", test))]
+    fn update_content_insets(&mut self, insets: [i32; 4]) {
+        if self.content_insets == insets { return; }
+        self.content_insets = insets;
+        self.clear_touch();
+        self.hits.invalidate_geometry();
+        self.redraw();
+    }
+
+    fn suspend(&mut self) {
+        self.clear_touch();
+        if let Some(id) = self.tile_keys.take() {
+            self.to_tile(&id, TileInput::Blur);
+        }
+        // Android requires the native surface to be released before this callback returns.
+        self.render = None;
+        self.ime_allowed = false;
+        #[cfg(target_os = "android")]
+        { self.android_insets = None; }
+        #[cfg(all(target_os = "android", debug_assertions))]
+        { self.android_content_probe = None; }
+        self.cancel_keys();
+        self.modifiers = ModifiersState::empty();
+        #[cfg(target_os = "android")]
+        self.hits.invalidate_geometry();
+        #[cfg(not(target_os = "android"))]
+        { self.hits = Hits::default(); }
+        self.last_frame = None;
+        if let Some(field) = self.focused.focused_field(&mut self.store) {
+            field.on_ime_disabled(&mut self.text);
+        }
+    }
+
     fn on_cursor_left(&mut self) {
         if let Some(id) = self.tile_over.take() {
             self.to_tile(&id, TileInput::Leave);
@@ -2228,6 +2376,10 @@ impl<A: App> Runner<A> {
 }
 
 impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
+    fn suspended(&mut self, _: &ActiveEventLoop) {
+        self.suspend();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_some() {
             return;
@@ -2241,11 +2393,19 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
                 let render = pollster::block_on(Render::new(window));
                 render.request_redraw(); // paint the first frame; after that only on demand
-                render.set_ime_allowed(true);
                 render
             }
         });
-        self.app.ready();
+        #[cfg(target_os = "android")]
+        if self.android_insets.is_none() {
+            use winit::platform::android::ActiveEventLoopExtAndroid;
+            self.android_insets = Some(android_insets::Adapter::install(event_loop.android_app())
+                .expect("Android inset adapter: build APK with scripts/build_android.py"));
+        }
+        if !self.ready_called {
+            self.app.ready();
+            self.ready_called = true;
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -2277,26 +2437,27 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                     r.request_redraw();
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
+            WindowEvent::Touch(touch) => self.on_touch(touch.phase, touch.id, touch.location),
+            WindowEvent::CursorMoved { position, .. } if self.touch_id.is_none() => {
                 self.on_cursor_moved(position);
                 // Physical → logical: hit-testing and rects are all in logical points.
             }
-            WindowEvent::CursorLeft { .. } => self.on_cursor_left(),
+            WindowEvent::CursorLeft { .. } if self.touch_id.is_none() => self.on_cursor_left(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.button(true),
+            } if self.touch_id.is_none() => self.button(true),
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
                 state: ElementState::Pressed,
                 ..
-            } => self.right_click(),
+            } if self.touch_id.is_none() => self.right_click(),
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } => {
+            } if self.touch_id.is_none() => {
                 self.button(false);
             }
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
@@ -2309,21 +2470,29 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                     self.to_tile(&id, TileInput::Blur);
                 }
                 self.cancel_keys();
+                if self.touch_id.is_some() {
+                    self.clear_touch();
+                }
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
             }
             WindowEvent::Ime(ime) => self.on_ime(ime),
-            WindowEvent::MouseWheel { delta, .. } => self.on_wheel_moved(delta),
+            WindowEvent::MouseWheel { delta, .. } if self.touch_id.is_none() => self.on_wheel_moved(delta),
             _ => {}
         }
     }
     fn user_event(&mut self, _: &ActiveEventLoop, msg: A::Msg) {
+        // Debug automation can wake the loop to get a fresh, unchanged geometry sample.
+        #[cfg(all(target_os = "android", debug_assertions))]
+        { self.android_content_probe = None; }
         self.deliver(msg);
     }
 
     /// After every batch of events: the host's windows follow what it now names.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        self.android_about_to_wait(event_loop);
         let wanted = self.app.windows();
         if wanted.is_empty() && self.windows.keys().next().is_none() {
             return;
@@ -2338,6 +2507,27 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
 }
 
 impl<A: App> Runner<A> {
+    #[cfg(target_os = "android")]
+    fn android_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.render.is_none() { return; }
+        if let Some(insets) = self.android_insets.as_ref().and_then(|adapter| adapter.latest()) {
+            self.update_content_insets(insets);
+        }
+        #[cfg(debug_assertions)]
+        {
+            use winit::platform::android::ActiveEventLoopExtAndroid;
+            let activity = event_loop.android_app();
+            let Some(window) = activity.native_window() else { return };
+            let rect = activity.content_rect();
+            let sample = ([rect.left, rect.top, rect.right, rect.bottom],
+                (window.width(), window.height()));
+            if self.android_content_probe != Some(sample) {
+                eprintln!("ANDROID_CONTENT_PROBE content_px={:?} surface_px={:?}", sample.0, sample.1);
+                self.android_content_probe = Some(sample);
+            }
+        }
+    }
+
     fn deliver(&mut self, msg: A::Msg) {
         self.app.update(msg);
         // A driver op is answered here rather than by the app, because only this side owns the
@@ -2372,7 +2562,21 @@ pub fn run<A: App + 'static>(app: A) {
 }
 
 pub fn run_with<A: App + 'static>(build: impl FnOnce(EventLoopProxy<A::Msg>) -> A) {
-    run_loop(None, build);
+    run_loop(None, EventLoop::<A::Msg>::with_user_event(), build);
+}
+
+/// Run the shared runtime from an Android activity entry point.
+/// The activity must be the one supplied to `android_main`, not a separate glue instance.
+#[cfg(target_os = "android")]
+pub fn run_android_with<A: App + 'static>(
+    activity: AndroidApp,
+    build: impl FnOnce(EventLoopProxy<A::Msg>) -> A,
+) {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    let mut builder = EventLoop::<A::Msg>::with_user_event();
+    builder.with_android_app(activity);
+    run_loop(None, builder, build);
 }
 
 /// The same loop with no window: real layout, real pixels through `capture_scene`, and a virtual
@@ -2389,18 +2593,18 @@ pub fn run_offscreen<A: App + 'static>(
     viewport: (f32, f32),
     build: impl FnOnce(EventLoopProxy<A::Msg>) -> A,
 ) {
-    run_loop(Some(viewport), build);
+    run_loop(Some(viewport), EventLoop::<A::Msg>::with_user_event(), build);
 }
 
 fn run_loop<A: App + 'static>(
     offscreen: Option<(f32, f32)>,
+    mut builder: EventLoopBuilder<A::Msg>,
     build: impl FnOnce(EventLoopProxy<A::Msg>) -> A,
 ) {
-    env_logger::init();
+    // An Android activity can be recreated in the same process; the logger is process-global.
+    let _ = env_logger::try_init();
 
-    let event_loop = EventLoop::<A::Msg>::with_user_event()
-        .build()
-        .expect("event loop");
+    let event_loop = builder.build().expect("event loop");
     let app = build(event_loop.create_proxy());
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut runner = Runner::new(app, offscreen);
@@ -2412,8 +2616,16 @@ impl<A: App> Runner<A> {
         Self {
             app,
             render: None,
+            ready_called: false,
+            ime_allowed: false,
+            content_insets: [0; 4],
+            #[cfg(target_os = "android")]
+            android_insets: None,
+            #[cfg(all(target_os = "android", debug_assertions))]
+            android_content_probe: None,
             offscreen,
             pointer: None,
+            touch_id: None,
             hits: Hits::default(),
             held_keys: HashSet::new(),
             held_owner: None,

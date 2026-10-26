@@ -91,9 +91,11 @@ impl LoginScreen {
             .id("accounts")
             .scroll_y()
             .h(360.0)
+            .min_h(0.0)
             .gap(8.0)
             .children(accounts);
-        let panel = col().w(PANEL_W).gap(8.0).child(wordmark()).child(acc_list);
+        let panel = col().w_full().max_w(PANEL_W).min_h(0.0).gap(8.0)
+            .child(wordmark().no_shrink()).child(acc_list);
         let passphrase_label = row()
             .gap(4.0)
             .child(text("Passphrase.").no_wrap().color(theme::fg_3()))
@@ -141,12 +143,14 @@ impl LoginScreen {
                 .press_fill(theme::accent_press())
         };
         let passphrase_col = col()
+            .no_shrink()
             .gap(8.0)
-            .w(PANEL_W)
+            .w_full()
+            .max_w(PANEL_W)
             .child(passphrase_label)
             .child(passphrase_input)
             .child(login_button);
-        let mut error_panel: El<Msg> = row().center().h(44.0).pad(20.0);
+        let mut error_panel: El<Msg> = row().center().h(44.0).pad(20.0).no_shrink();
         if let Some(error) = &self.error {
             error_panel = error_panel
                 .child(text(error).font_size(13.0))
@@ -154,6 +158,7 @@ impl LoginScreen {
         }
         let add_account = row()
             .h(32.0)
+            .no_shrink()
             .px(12.0)
             .radius(6.0)
             .align_center()
@@ -172,6 +177,7 @@ impl LoginScreen {
         // Root fills the window and centers the panel.
         col()
             .full()
+            .px(16.0)
             .center()
             .child(panel)
             .child(passphrase_col)

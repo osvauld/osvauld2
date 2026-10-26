@@ -47,7 +47,7 @@ struct Mapped<M> {
     zoom_children: Vec<El<M>>,
 }
 
-fn clip_marker<M>(kind: PlacedKind) -> Placed<M> {
+pub(crate) fn clip_marker<M>(kind: PlacedKind) -> Placed<M> {
     Placed {
         kind,
         id: None,

@@ -205,7 +205,8 @@ impl SpaceScreen {
                 theme::fg_3()
             };
             let panel = col()
-                .w(360.0)
+                .w_pct(0.9)
+                .max_w(360.0)
                 .pad(12.0)
                 .gap(8.0)
                 .fill(theme::bg_2())
@@ -265,6 +266,7 @@ impl SpaceScreen {
             return col()
                 .full()
                 .center()
+                .px(16.0)
                 .gap(10.0)
                 .child(self.name_input().w_full().max_w(420.0))
                 .child(
@@ -298,7 +300,8 @@ impl SpaceScreen {
             );
         if self.add_space {
             let panel = col()
-                .w(320.0)
+                .w_pct(0.9)
+                .max_w(320.0)
                 .pad(12.0)
                 .gap(8.0)
                 .fill(theme::bg_2())
@@ -499,3 +502,6 @@ pub(crate) fn publish_one(
         .collect();
     node::publish(socket, vault, token, workspace, published_items).map(|_ack| ())
 }
+
+#[cfg(test)]
+mod tests;

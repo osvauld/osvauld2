@@ -58,6 +58,47 @@ fn drain(host: &mut Headless<Host>) -> Vec<TileInput> {
 }
 
 #[test]
+fn a_touch_tap_reaches_the_tile_app() {
+    let mut host = Runner::new(Host::default(), Some((300.0, 100.0)));
+    let mut guest = Tile::new(Guest::default(), (200.0, 100.0));
+    host.frame();
+    guest.frame();
+    let at = PhysicalPosition::new(150.0, 50.0);
+    host.on_touch(winit::event::TouchPhase::Started, 1, at);
+    host.on_touch(winit::event::TouchPhase::Ended, 1, at);
+    for input in std::mem::take(&mut host.app.got) {
+        guest.input(TileEvent { input, at: 0.0, mods: Default::default() });
+    }
+    assert_eq!(guest.app().clicks, 1);
+}
+
+#[test]
+fn touch_cancellation_and_suspend_cancel_the_tile_without_release() {
+    for suspend in [false, true] {
+        let mut host = Runner::new(Host::default(), Some((300.0, 100.0)));
+        let mut guest = Tile::new(Guest::default(), (200.0, 100.0));
+        host.frame();
+        guest.frame();
+        let at = PhysicalPosition::new(150.0, 50.0);
+        host.on_touch(winit::event::TouchPhase::Started, 1, at);
+        if suspend {
+            host.suspend();
+        } else {
+            host.on_touch(winit::event::TouchPhase::Cancelled, 1, at);
+        }
+        host.on_touch(winit::event::TouchPhase::Ended, 1, at);
+        let got = std::mem::take(&mut host.app.got);
+        assert!(got.iter().any(|i| matches!(i, TileInput::Cancel)), "{got:?}");
+        assert!(!got.iter().any(|i| matches!(i, TileInput::Button(false))), "{got:?}");
+        for input in got {
+            guest.input(TileEvent { input, at: 0.0, mods: Default::default() });
+        }
+        assert_eq!(guest.app().clicks, 0);
+        assert!(guest.runner.drag.is_none() && guest.runner.pressed.is_none());
+    }
+}
+
+#[test]
 fn what_crosses_is_send() {
     fn send<T: Send + 'static>() {}
     send::<Scene>();

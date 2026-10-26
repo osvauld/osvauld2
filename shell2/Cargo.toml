@@ -7,6 +7,11 @@ license.workspace = true
 # shell2 is pure UI: it defines the screens (login, …) and their logic, and hands the first one to
 # the runtime. All GPU/window/event-loop/input plumbing lives in `runtime`. vello is a direct dep
 # only because screens still draw with raw scene commands (until the element vocab lands).
+[features]
+default = ["folder-picker"]
+folder-picker = ["dep:rfd"]
+adb-debug = []
+
 [dependencies]
 runtime = { path = "../runtime" }
 app_host = { path = "../app_host" }
@@ -17,7 +22,6 @@ search = { path = "../search" }
 identity = { path = "../identity/" }
 vello = "0.9.0"
 loro = "1.13.9"
-rfd = "0.17.2"
 osvauld-rpc = { path = "../osvauld-rpc" }
 kunki = { path = "../kunki" }
 courier = { path = "../courier" }
@@ -25,5 +29,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
 ureq = { version = "3", features = ["json"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { version = "0.17.2", optional = true }
+
 [dev-dependencies]
 tempfile = "3"

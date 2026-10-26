@@ -1,6 +1,7 @@
 //! Workspace items: Lua navigation/import presentation, with Rust authority and fallback chrome.
 //! Keeps the Rust grid as a fallback if the launcher cannot initialize.
 
+#[cfg(all(feature = "folder-picker", not(target_os = "android")))]
 use crate::app_src::{app_name, read_app_folder, snapshot};
 use crate::launcher::{Launcher, session::Inventory};
 use crate::space::SpaceScreen;
@@ -68,6 +69,7 @@ impl ItemsScreen {
     }
 
     pub fn view(&self, launcher: Option<&Launcher>, warning: Option<&str>) -> El<Msg> {
+        #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
         let upload_btn = row()
             .h(36.0)
             .px(14.0)
@@ -105,8 +107,9 @@ impl ItemsScreen {
             .align_center()
             .child(back)
             .child(text(&self.ws.name).font_size(15.0).color(theme::fg_1()))
-            .child(col().grow())
-            .child(upload_btn);
+            .child(col().grow());
+        #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
+        let header = header.child(upload_btn);
 
         let body = if let Some(launcher) = launcher {
             launcher.view()
@@ -171,6 +174,12 @@ impl ItemsScreen {
         }
     }
 
+    #[cfg(not(all(feature = "folder-picker", not(target_os = "android"))))]
+    pub fn upload(&mut self, _vault: &Vault) -> Result<(), String> {
+        Err("folder import is unavailable in this build".into())
+    }
+
+    #[cfg(all(feature = "folder-picker", not(target_os = "android")))]
     pub fn upload(&mut self, vault: &Vault) -> Result<(), String> {
         let Some(root) = rfd::FileDialog::new().pick_folder() else {
             return Ok(());

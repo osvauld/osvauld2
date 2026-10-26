@@ -115,6 +115,155 @@ impl App for Recorder {
     }
 }
 
+#[test]
+fn touch_taps_use_release_position_and_ignore_other_fingers() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+    r.frame();
+    let at = |x, y| PhysicalPosition::new(x, y);
+    r.on_touch(TouchPhase::Started, 1, at(50.0, 50.0));
+    r.on_touch(TouchPhase::Started, 2, at(80.0, 80.0));
+    r.on_touch(TouchPhase::Moved, 2, at(100.0, 100.0));
+    r.on_touch(TouchPhase::Ended, 2, at(100.0, 100.0));
+    assert_eq!(r.touch_id, Some(1));
+    assert_eq!(r.pointer, Some((50.0, 50.0)));
+    r.on_touch(TouchPhase::Ended, 1, at(53.0, 52.0));
+    assert_eq!(&*log.borrow(), &["click 53,52"]);
+    assert!(r.touch_id.is_none() && r.pointer.is_none());
+}
+
+#[test]
+fn touch_drag_uses_normal_slop_and_cancel_never_commits() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+    r.frame();
+    let at = |x, y| PhysicalPosition::new(x, y);
+    r.on_touch(TouchPhase::Started, 1, at(50.0, 50.0));
+    r.on_touch(TouchPhase::Moved, 1, at(140.0, 120.0));
+    r.on_touch(TouchPhase::Cancelled, 1, at(140.0, 120.0));
+    r.on_touch(TouchPhase::Ended, 1, at(140.0, 120.0));
+    assert_eq!(log.borrow().first().map(String::as_str), Some("drag start"));
+    assert!(!log.borrow().iter().any(|m| m == "drag end" || m.starts_with("click")));
+    assert!(r.drag.is_none() && r.pressed.is_none() && r.touch_id.is_none());
+    log.borrow_mut().clear();
+    r.on_touch(TouchPhase::Started, 3, at(50.0, 50.0));
+    r.on_touch(TouchPhase::Ended, 3, at(140.0, 120.0));
+    assert_eq!(log.borrow().last().map(String::as_str), Some("drag end"));
+    assert!(!log.borrow().iter().any(|m| m.starts_with("click")));
+}
+
+#[test]
+fn a_cancelled_tap_and_suspended_touch_do_not_click() {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut r = Runner::new(Recorder { log: log.clone() }, Some((400.0, 400.0)));
+    r.frame();
+    let at = PhysicalPosition::new(50.0, 50.0);
+    r.on_touch(TouchPhase::Started, 1, at);
+    r.on_touch(TouchPhase::Cancelled, 1, at);
+    r.on_touch(TouchPhase::Ended, 1, at);
+    assert!(log.borrow().is_empty());
+    r.on_touch(TouchPhase::Started, 2, at);
+    r.suspend();
+    r.on_touch(TouchPhase::Ended, 2, at);
+    assert!(log.borrow().is_empty());
+    assert!(r.touch_id.is_none());
+}
+
+#[test]
+fn inset_changes_do_not_autofocus_a_field_after_blur() {
+    struct Input;
+    impl App for Input {
+        type Msg = ();
+        fn update(&mut self, _: ()) {}
+        fn view(&self) -> El<()> {
+            col().full().child(text_input("draft", "field", |_| ())
+                .w(200.0).h(40.0).autofocus())
+        }
+    }
+    let mut r = Runner::new(Input, Some((400.0, 700.0)));
+    r.frame();
+    assert!(r.ime_allowed);
+    r.update_content_insets([0, 20, 0, 300]);
+    r.frame();
+    let outside = PhysicalPosition::new(300.0, 150.0);
+    r.on_touch(TouchPhase::Started, 1, outside);
+    r.on_touch(TouchPhase::Ended, 1, outside);
+    r.frame();
+    assert!(r.focused.get().is_none());
+    assert!(!r.ime_allowed);
+    r.update_content_insets([0, 20, 0, 0]);
+    r.frame();
+    assert!(r.focused.get().is_none());
+    assert!(!r.ime_allowed);
+    let inside = PhysicalPosition::new(20.0, 30.0);
+    r.on_touch(TouchPhase::Started, 2, inside);
+    r.on_touch(TouchPhase::Ended, 2, inside);
+    r.frame();
+    assert_eq!(r.focused.get(), Some(&Id::from("field")));
+    assert!(r.ime_allowed);
+}
+
+#[test]
+fn safe_area_uses_physical_insets_and_clamps_to_the_surface() {
+    assert_eq!(usable_rect((400.0, 700.0), 2.0, [20, 40, 60, 400]),
+        Rect::new(10.0, 20.0, 370.0, 500.0));
+    assert_eq!(usable_rect((400.0, 700.0), 1.0, [900, 800, 900, 800]),
+        Rect::new(400.0, 700.0, 400.0, 700.0));
+    assert_eq!(usable_rect((400.0, 700.0), 1.0, [-1, -1, -1, -1]),
+        Rect::new(0.0, 0.0, 400.0, 700.0));
+}
+
+#[test]
+fn safe_area_translates_and_clips_paint_and_touch_geometry_together() {
+    struct Input;
+    impl App for Input {
+        type Msg = ();
+        fn update(&mut self, _: ()) {}
+        fn view(&self) -> El<()> {
+            col().full().id("scroll").scroll_y()
+                .child(text_input("draft", "field", |_| ()).w_full().h(800.0))
+        }
+    }
+    let mut r = Runner::new(Input, Some((400.0, 700.0)));
+    r.content_insets = [10, 20, 30, 200];
+    r.frame();
+    let rect = r.reachable().into_iter().find(|r| r.id == "field").unwrap();
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (10.0, 20.0, 360.0, 480.0));
+    let outside = PhysicalPosition::new(5.0, 30.0);
+    r.on_touch(TouchPhase::Started, 1, outside);
+    r.on_touch(TouchPhase::Ended, 1, outside);
+    assert!(r.focused.get().is_none());
+    let inside = PhysicalPosition::new(20.0, 30.0);
+    r.on_touch(TouchPhase::Started, 2, inside);
+    r.on_touch(TouchPhase::Ended, 2, inside);
+    assert_eq!(r.focused.get(), Some(&Id::from("field")));
+    r.content_insets = [0; 4];
+    r.frame();
+    let rect = r.reachable().into_iter().find(|r| r.id == "field").unwrap();
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (0.0, 0.0, 400.0, 700.0));
+    assert_eq!(r.focused.get(), Some(&Id::from("field")));
+}
+
+#[test]
+fn touch_focuses_existing_text_fields() {
+    struct Input;
+    impl App for Input {
+        type Msg = ();
+        fn update(&mut self, _: ()) {}
+        fn view(&self) -> El<()> {
+            col().full().child(text_input("draft", "field", |_| ()).w(200.0).h(40.0))
+        }
+    }
+    let mut r = Runner::new(Input, Some((400.0, 400.0)));
+    r.frame();
+    let at = PhysicalPosition::new(20.0, 20.0);
+    r.on_touch(TouchPhase::Started, 1, at);
+    r.on_touch(TouchPhase::Ended, 1, at);
+    r.frame();
+    assert_eq!(r.focused.get(), Some(&Id::from("field")));
+    assert!(r.ime_allowed);
+}
+
 fn gesture(run: impl FnOnce(&mut Headless<Recorder>)) -> Vec<String> {
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut h = Headless::new(Recorder { log: log.clone() }, (400.0, 400.0));
@@ -328,6 +477,29 @@ impl App for Keyed {
 }
 
 #[test]
+fn android_control_characters_reach_named_editing_actions() {
+    use winit::keyboard::KeyCode;
+    for (code, character, named) in [
+        (KeyCode::Enter, "\r", Enter),
+        (KeyCode::Enter, "\n", Enter),
+        (KeyCode::NumpadEnter, "\n", Enter),
+        (KeyCode::Backspace, "\u{8}", Backspace),
+        (KeyCode::Delete, "\u{7f}", Delete),
+        (KeyCode::Tab, "\t", Tab),
+        (KeyCode::Escape, "\u{1b}", Escape),
+    ] {
+        assert_eq!(editing_key(&PhysicalKey::Code(code), &Key::Character(character.into())),
+            Key::Named(named));
+    }
+    let typed = Key::Character("z".into());
+    assert_eq!(editing_key(&PhysicalKey::Code(KeyCode::KeyW), &typed), typed);
+    let named = Key::Named(Enter);
+    assert_eq!(editing_key(&PhysicalKey::Code(KeyCode::Enter), &named), named);
+    let unrelated = Key::Character("\n".into());
+    assert_eq!(editing_key(&PhysicalKey::Code(KeyCode::KeyW), &unrelated), unrelated);
+}
+
+#[test]
 fn key_description_keeps_physical_and_layout_meanings_separate() {
     let key = describe_key_parts(&PhysicalKey::Code(winit::keyboard::KeyCode::KeyW),
         &Key::Character("z".into()), true, false,
@@ -391,6 +563,52 @@ fn keyboard_driver_uses_live_key_eligibility_and_rejects_shortcuts() {
     let reserved = KeyInput { code: Some("F12".into()), key: "F12".into(), ..event };
     assert!(r.run_driver(DriverOp::Keyboard(reserved)).is_err());
     assert_eq!(r.app.received.len(), 1);
+}
+
+#[test]
+fn suspension_cancels_runtime_input_but_keeps_retained_state() {
+    let mut r = Runner::new(Keyed { child: true, received: Vec::new() }, Some((400.0, 400.0)));
+    r.frame();
+    let id: Id = "kept".into();
+    r.store.get_or::<Scroll>(&id, Slot::Scroll).x = 42.0;
+    r.pointer = Some((10.0, 10.0));
+    r.modifiers = ModifiersState::SHIFT;
+    r.on_game_key(KeyInput {
+        code: Some("KeyW".into()), key: "w".into(), down: true,
+        repeat: false, cancelled: false,
+        mods: Mods { shift: false, ctrl: false, alt: false, super_: false },
+    });
+    r.suspend();
+    assert!(r.app.child);
+    assert!(r.app.received.last().unwrap().1.cancelled);
+    assert!(r.held_keys.is_empty());
+    assert!(r.pointer.is_none() && r.pressed.is_none() && r.drag.is_none());
+    assert!(r.hits.key.is_empty());
+    assert!(r.modifiers.is_empty());
+    assert!(r.last_frame.is_none());
+    assert_eq!(r.store.get::<Scroll>(&id, Slot::Scroll).unwrap().x, 42.0);
+    let count = r.app.received.len();
+    r.suspend();
+    assert_eq!(r.app.received.len(), count, "repeated suspension is harmless");
+}
+
+#[test]
+fn ime_is_requested_only_for_a_focused_editor() {
+    struct Input;
+    impl App for Input {
+        type Msg = ();
+        fn update(&mut self, _: ()) {}
+        fn view(&self) -> El<()> {
+            col().full().child(text_input("draft", "field", |_| ()).autofocus())
+        }
+    }
+    let mut r = Runner::new(Input, Some((400.0, 400.0)));
+    assert!(!r.ime_allowed);
+    r.frame();
+    assert!(r.ime_allowed);
+    r.focused.blur();
+    r.frame();
+    assert!(!r.ime_allowed);
 }
 
 #[test]
@@ -1066,4 +1284,3 @@ fn hover_reports_the_topmost_declared_cursor_look() {
     h.move_to(50.0, 150.0); // plain
     assert_eq!(*log.borrow(), ["enter grab", "move grab", "move -"]);
 }
-

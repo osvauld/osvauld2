@@ -135,6 +135,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
+name = "android_app"
+version = "0.1.0"
+dependencies = [
+ "runtime",
+ "shell2",
+ "vault",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6145,6 +6154,7 @@ dependencies = [
  "env_logger",
  "euclid",
  "glam 0.30.10",
+ "jni 0.21.1",
  "kurbo",
  "parley",
  "peniko",

@@ -50,6 +50,8 @@ pub enum TileInput {
     Move(f32, f32),
     Leave,
     Button(bool),
+    /// Discard a held pointer gesture without committing a click or drag release.
+    Cancel,
     RightClick,
     /// Logical pixels, already scaled.
     Wheel(f32, f32),
@@ -102,6 +104,7 @@ impl<A: App> Tile<A> {
             TileInput::Move(x, y) => r.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64)),
             TileInput::Leave => r.on_cursor_left(),
             TileInput::Button(down) => r.button(down),
+            TileInput::Cancel => r.clear_touch(),
             TileInput::RightClick => r.right_click(),
             TileInput::Wheel(dx, dy) => r.on_wheel_moved(MouseScrollDelta::PixelDelta(
                 PhysicalPosition::new(dx as f64, dy as f64),
