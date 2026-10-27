@@ -10,6 +10,59 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Jetpack Arena — review worktree (2026-10-26)
+
+Implemented in `jetpack-arena`, not committed or merged: original Lua vector arena, two flying
+bots, swept shots/cover collisions, fuel, health, score, respawn and independent mobile controls.
+Match state stays ephemeral. The user has played it on the physical Pixel 3a. Generic Rust
+additions are captured per-finger touch routing through tiles/Lua, frame box dimensions and
+bridge touch injection. Live rect inspection samples stamped last-painted app geometry and
+rejects stale account/app/layout scopes.
+
+Android uses Area AA: MSAA16 produced horizontal corruption on the Pixel; Area AA clears it.
+Fullscreen hides shell chrome and native system bars, with an Exit control; physical landscape
+pixels are verified. Android suspend releases the native surface while retaining compiled GPU
+pipelines; one retained-process Pixel wake answered the bridge in 0.26 seconds. Private Vulkan
+pipeline caching is verified for cold opening: on Pixel the first launch reached the bridge in
+7.26 seconds (6.28 seconds renderer initialization), and the cached next cold launch in 1.31
+seconds (0.664 seconds renderer initialization). These are individual debug-build measurements.
+
+NixOS verification: workspace tests, the 32-smoke sweep, phone/landscape gameplay acceptance,
+native emulator simultaneous touch/background-resume, and 196 runtime tests including GPU pixel
+and cache save/reload checks. The full 32-smoke sweep passes after the cache refactor.
+Following physical play feedback, gentler thrust and a three-screen-wide camera-follow map
+are under validation; generic `clip` is exposed in both Rust and Lua for the map viewport.
+**2026-10-27 militia step 7 ([jetpack-militia.md](design/jetpack-militia.md)):** the game plays three big arenas
+(Outpost, Catacombs, Rooftops) plus the yard, chosen on the start/pause overlay, with a themed parallax background; a
+stateful camera (zoomed so a soldier is ~110-135 px, look-ahead, safe band clear of the sticks); dual floating sticks with
+proportional thrust (the JET button is gone). Verified: `test_jetpack_{camera,controls,format,maps}.lua`, `smoke_jetpack.py`,
+`smoke_jetpack_editors.py` (nixos).
+**2026-10-27 landscape only ([jetpack-militia.md](design/jetpack-militia.md) step 7 note):** a playfield taller than wide pauses the match and shows `rotate:card` ("Rotate your phone to play", no sticks or buttons); rotating back shows the pause overlay, resume is a tap. Portrait tuning is gone (camera view size, HUD wrap); sticks and slots are tuned for a 780x360 landscape phone. No OS orientation lock yet (follow-up). Verified: `test_jetpack_{camera,controls}.lua`, `smoke_jetpack.py` (780x440 window, portrait rows), `smoke_jetpack_pickups.py` (nixos).
+**2026-10-27 zoom levels ([jetpack-militia.md](design/jetpack-militia.md) step 7 note):** per-gun `zooms` lists, `button:zoom` / `Z` / wheel, camera eases and leads further, resets on gun change; gun editor edits the list. Verified: `test_jetpack_*.lua`, `smoke_jetpack{,_pickups,_guns,_editors}.py` (nixos, job 1146).
+**2026-10-27 militia step 5 ([jetpack-militia.md](design/jetpack-militia.md)):** weapon spawns (pools, respawn),
+loose guns and death drops, a two-gun loadout with swap (`Q`/button) and pickup (`E`/button, only over a gun), bots upgrading
+guns; the map editor places and edits weapon spawns. Verified: `test_jetpack_pickups.lua`, `smoke_jetpack_pickups.py` (nixos).
+
+**2026-10-26 editors ([jetpack-editors.md](design/jetpack-editors.md)), steps 1–4:** the
+`jetpack_map_editor` app edits the `jetpack-maps` workspace asset (platforms by kind, spawns,
+map size; place, drag, resize, delete, one write per gesture). The game validates it through a
+shared `format.lua` and plays it, falling back to `jetpack/baked/maps.lua`; its camera now also
+follows vertically. Verified: `test_jetpack_format.lua`, `test_jetpack_model.lua`,
+`smoke_jetpack_editors.py` (editor by pointer → game lands on the edited ledge; no asset → baked)
+and `smoke_jetpack.py`. `scripts/bake_jetpack.py` writes the assets an open editor holds into
+each app's `baked/` (step 3).
+**Step 4, pilots (2026-10-26):** `jetpack_pilot_editor` edits the `jetpack-pilots` asset — a list
+of pilots, each a `gfx.drawing` module (parts `leg_back`/`leg_front`/`body`, shapes with ids,
+vars with team slots `main`/`dark`) plus `grip`/`jet` points. Add rect/ellipse/triangle to a
+part, drag to move, corner grip to scale, dots to reshape, swatches to fill, hex fields recolour,
+up/down/delete, grip/jet/pivot markers, new pilot = copy, in-game previews per team. The game
+draws every actor from it (player = first pilot, bots cycle; poses cached by leg step; the gun
+mounts at `grip`, the flame at `jet`, both mirrored with facing). The bake takes several
+editors. Verified: `test_jetpack_format.lua` (pilot validation), `smoke_jetpack_editors.py`
+(visor var, shape moved, rect added and scaled, grip moved, second pilot, reopen; game and baked
+copy show the edited pilot by pixels). Not yet: gun/effects/props/backdrop editors, live
+cross-app refresh (the game reads assets when it opens), desktop-to-phone delivery.
+
 ### M0 — runtime plumbing (done, W1)
 - Android startup seam: Android-only `run_android_with(AndroidApp, build)` configures
   Winit's NativeActivity backend and enters the shared Runner. Desktop windowed and
@@ -29,9 +82,10 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   emulator and rendered real text/vectors (`shots/android-first-launch.png`). Release packaging and
   a reproducible 16KB alignment guarantee remain open.
   `cargo-apk` is prototype tooling (deprecated upstream), not a release-tooling decision.
-- Android lifecycle: Runner drops rendering resources on suspend while retaining app,
+- Android lifecycle: the original implementation drops rendering resources on suspend while retaining app,
   text and keyed state, rebuilding rendering on resume. `App::ready` runs once per Runner;
   logger initialization tolerates activity recreation and IME follows focused editors.
+  The Jetpack review worktree retains GPU pipelines and releases only the native surface; see above.
   Three background/resume cycles on the API 35 x86_64 emulator preserved the process,
   rebuilt surfaces and restored the probe (`shots/android-resumed.png`), with IME hidden.
 - Single-finger touch routes Winit touch positions through existing logical pointer,
@@ -44,6 +98,8 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   soft-keyboard IME: NativeActivity lacks text-state/editor-info support, and Winit 0.30
   ignores Android text-state events. A proper Android text-input adapter remains unbuilt.
   Pinch and finger-scroll gestures remain unbuilt.
+  The Jetpack review worktree adds explicit independent `on_touch` surfaces while preserving
+  ordinary pointer controls; the earlier single-finger restriction remains the merged baseline.
 - Android debug content-area probe reads `AndroidApp::content_rect()` and native surface
   dimensions at `about_to_wait`, logging changed geometry and fresh samples after external
   event wakes. It is Android/debug-only, changes no layout or control flow, and resets on

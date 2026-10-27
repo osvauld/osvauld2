@@ -335,7 +335,7 @@ pub enum Request {
     /// Where every reachable element is, in logical points — the *clipped* rect a pointer must
     /// land in, which is what the hit-test actually checks. Fully clipped elements are absent:
     /// they cannot be hit at any coordinate. `DumpTree` says what exists; this says what is
-    /// reachable. Offscreen only.
+    /// reachable. Read-only geometry sensing is also available in a live window.
     Rects {},
     /// Move the pointer to a logical point, firing hover — and drag, while a button is down.
     /// Answers with what is under the pointer afterwards, so a miss reports as a miss instead of
@@ -348,6 +348,8 @@ pub enum Request {
     PointerPress {},
     /// Release it. Offscreen only.
     PointerRelease {},
+    /// One finger through native touch routing. Logical coordinates; offscreen only.
+    Touch { id: u64, phase: String, x: f32, y: f32 },
     /// One bounded physical/logical key transition through the normal offscreen keyboard path.
     /// Separate from `Key`, which invokes Enter/Esc on a named text input.
     Keyboard {

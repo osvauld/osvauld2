@@ -7,6 +7,7 @@
 
 mod app_src;
 mod app_thread;
+mod native_rects;
 mod bridge;
 mod indexer;
 mod item;
@@ -113,6 +114,7 @@ pub enum Msg {
     Close(Arc<str>),
     ResetLauncher,
     CancelLauncherReset,
+    SetFullscreen(bool),
     /// One bridge request (`bridge.rs` is pure transport). Executed here, on the UI thread —
     /// the single authority — and the sender is how the reply travels back to the socket.
     Rpc(
@@ -126,6 +128,11 @@ pub enum Msg {
     AuthDone(std::sync::mpsc::Sender<osvauld_rpc::Response>, AuthOutcome),
     /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
     DriverDone(DriverReply, Result<runtime::DriverReport, String>),
+    NativeRects(
+        std::sync::mpsc::Sender<osvauld_rpc::Response>,
+        u64,
+        Result<Vec<native_rects::Snapshot>, String>,
+    ),
     TestDriver(
         DriverOp,
         std::sync::mpsc::Sender<Result<runtime::DriverReport, String>>,
@@ -188,6 +195,7 @@ pub enum Msg {
 #[derive(Clone)]
 enum DriverReply {
     Rpc(std::sync::mpsc::Sender<Response>),
+    NativeRects(std::sync::mpsc::Sender<Response>, u64, Vec<native_rects::Snapshot>),
     Test(std::sync::mpsc::Sender<Result<DriverReport, String>>),
 }
 
@@ -1079,9 +1087,11 @@ pub struct Shell {
     clock: f64,
     error: Option<String>,
     reset_launcher_pending: bool,
+    fullscreen: bool,
     launcher: launcher::session::Session,
     screenshot: Option<PendingScreenshot>,
     driver: Option<PendingDriver>,
+    native_rects_pending: bool,
     /// Mirrors whatever `SpaceScreen` last claimed — kept here too because `SyncTick` has to
     /// read it regardless of which screen is currently showing, and `SpaceScreen` itself is
     /// dropped the moment the user navigates away from Spaces.
@@ -1205,6 +1215,7 @@ impl Shell {
         let Some(pos) = found else {
             return false;
         };
+        if self.focused == pos { self.fullscreen = false; }
         self.node_vv.retain(|(item, _), _| *item != id);
         self.tabs.remove(pos);
         self.split = self.split.take().filter(|s| *s != id);
@@ -1309,7 +1320,14 @@ impl Shell {
         self.sync_gen.load(Ordering::SeqCst)
     }
 
+    fn validate_native_rects(&self, generation: u64, snapshots: &[native_rects::Snapshot]) -> Result<(), String> {
+        native_rects::validate(generation, self.gen_(), snapshots, |id| {
+            self.apps.get(id).filter(|a| a.is_shown()).map(AppThread::rect_scope)
+        })
+    }
+
     fn reset_tabs(&mut self) {
+        self.fullscreen = false;
         self.tabs = vec![Tab::Home];
         self.apps.clear();
         self.launcher = Default::default();
@@ -1549,6 +1567,7 @@ impl Shell {
             Request::Frame { .. }
             | Request::Advance { .. }
             | Request::Rects { .. }
+            | Request::Touch { .. }
             | Request::PointerMove { .. }
             | Request::PointerPress { .. }
             | Request::PointerRelease { .. }
@@ -1801,9 +1820,11 @@ impl Shell {
             clock: 0.0,
             error: None,
             reset_launcher_pending: false,
+            fullscreen: false,
             launcher: Default::default(),
             screenshot: None,
             driver: None,
+            native_rects_pending: false,
             node: node.clone(),
             subscribed: HashMap::new(),
             failed_subs: Vec::new(),
@@ -1816,6 +1837,7 @@ impl Shell {
     /// Open-or-focus, the one path every opener takes: an open item's tab is focused, never
     /// given a second thread.
     fn open_tab(&mut self, wi: WorkspaceItem) -> Result<(), String> {
+        self.fullscreen = false;
         if let Some(pos) = self
             .tabs
             .iter()
@@ -1986,6 +2008,12 @@ impl Shell {
             .fill(theme::bg_1())
             .children(tabs)
             .child(col().grow())
+            .children((!self.on_screen().is_empty()).then(|| {
+                row().h(28.0).px(8.0).radius(6.0).align_center().no_shrink()
+                    .id("shell:fullscreen").hover_fill(theme::bg_2())
+                    .on_click(Msg::SetFullscreen(true))
+                    .child(text("Full screen").font_size(11.0).no_wrap().color(theme::fg_3()))
+            }))
             .child(
                 row()
                     .h(28.0)
@@ -2026,6 +2054,10 @@ impl Shell {
 
 impl App for Shell {
     type Msg = Msg;
+
+    fn fullscreen(&self) -> bool {
+        self.fullscreen && !self.on_screen().is_empty()
+    }
 
     fn ready(&mut self) {
         // Publishing the socket before `run_app` begins polling loses rapid startup events on
@@ -2100,6 +2132,17 @@ impl App for Shell {
             );
         }
 
+        if self.fullscreen() {
+            return page.child(content).overlay(
+                row().h(32.0).px(8.0).center().radius(6.0).fill(theme::bg_2())
+                    .id("shell:exit-fullscreen").on_click(Msg::SetFullscreen(false))
+                    .child(text("Exit").font_size(11.0).no_wrap().color(theme::fg_2())),
+                None,
+                runtime::Placement { side: runtime::PlacementSide::Bottom,
+                    align: runtime::PlacementAlign::Start },
+                runtime::Anchor::Point(8.0, 80.0),
+            );
+        }
         if matches!(self.screen, Screen::Spaces(_) | Screen::Items(_)) {
             page = page.child(self.strip());
         }
@@ -2113,6 +2156,11 @@ impl App for Shell {
             self.start_listener();
         }
         let next = match msg {
+            Msg::SetFullscreen(enabled) => {
+                self.fullscreen = enabled && !self.on_screen().is_empty();
+                if self.fullscreen { self.split = None; }
+                None
+            }
             Msg::ResetLauncher => {
                 if self.reset_launcher_pending {
                     self.error = self.reset_launcher().err();
@@ -2245,6 +2293,7 @@ impl App for Shell {
                 None
             }
             Msg::Focus(idx) => {
+                self.fullscreen = false;
                 if idx < self.tabs.len() {
                     self.focused = idx;
                 }
@@ -2671,10 +2720,45 @@ impl App for Shell {
                 }
                 None
             }
+            Msg::Rpc(Request::Rects {}, reply) if self.offscreen.is_none() => {
+                if self.native_rects_pending || self.driver.is_some() {
+                    let _ = reply.send(Response::err("a geometry inspection is already pending"));
+                    return;
+                }
+                self.native_rects_pending = true;
+                let requests: Vec<_> = self.apps.iter().filter(|(_, a)| a.is_shown())
+                    .map(|(id, a)| native_rects::Request { id: id.clone(), scope: a.rect_scope(), reply: a.rects() }).collect();
+                let proxy = self.proxy.clone();
+                let generation = self.gen_();
+                std::thread::spawn(move || {
+                    let result = native_rects::collect(requests, std::time::Duration::from_secs(3));
+                    let _ = proxy.send_event(Msg::NativeRects(reply, generation, result));
+                });
+                None
+            }
+            Msg::NativeRects(reply, generation, result) => {
+                self.native_rects_pending = false;
+                let result = result.and_then(|snapshots| {
+                    self.validate_native_rects(generation, &snapshots)?;
+                    Ok(snapshots)
+                });
+                match result {
+                    _ if self.driver.is_some() => { let _ = reply.send(Response::err("a driver op is already pending")); }
+                    Err(e) => { let _ = reply.send(Response::err(e)); }
+                    Ok(snapshots) => {
+                        for snapshot in &snapshots {
+                            if let Some(a) = self.apps.get_mut(&snapshot.id) { a.frame.rects = snapshot.rects.clone(); }
+                        }
+                        self.driver = Some(PendingDriver { reply: DriverReply::NativeRects(reply, generation, snapshots), op: DriverOp::Rects });
+                    }
+                }
+                None
+            }
             Msg::Rpc(
                 req @ (Request::Frame { .. }
                 | Request::Advance { .. }
                 | Request::Rects { .. }
+                | Request::Touch { .. }
                 | Request::PointerMove { .. }
                 | Request::PointerPress { .. }
                 | Request::PointerRelease { .. }
@@ -2687,6 +2771,7 @@ impl App for Shell {
                     Request::Frame { count } => DriverOp::Frame(count),
                     Request::Advance { secs } => DriverOp::Advance(secs),
                     Request::Rects {} => DriverOp::Rects,
+                    Request::Touch { id, phase, x, y } => DriverOp::Touch { id, phase, at: (x, y) },
                     Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
                     Request::PointerPress {} => DriverOp::PointerPress,
                     Request::PointerRelease {} => DriverOp::PointerRelease,
@@ -2790,7 +2875,18 @@ impl App for Shell {
                 if let Ok(report) = &result {
                     self.before_frame(report.clock);
                 }
+                let (reply, result) = match reply {
+                    DriverReply::NativeRects(tx, generation, snapshots) => {
+                        let result = result.and_then(|report| {
+                            self.validate_native_rects(generation, &snapshots)?;
+                            Ok(report)
+                        });
+                        (DriverReply::Rpc(tx), result)
+                    }
+                    other => (other, result),
+                };
                 match reply {
+                    DriverReply::NativeRects(..) => unreachable!("normalized above"),
                     DriverReply::Test(tx) => {
                         let _ = tx.send(result);
                     }

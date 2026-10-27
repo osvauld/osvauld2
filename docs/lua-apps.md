@@ -876,6 +876,7 @@ before `fade`.
 | | `offset` | `{dx, dy}` — shifts paint, not layout |
 | | `scale` | number — scales this subtree, layout unchanged |
 | paint | `fill` · `color` | a CSS color string (`color` is the text one) |
+| | `clip` | bool — clip child painting and hits to this element's rectangular box, without scroll behavior |
 | | `radius` · `opacity` · `font_size` | number |
 | | `stroke` | `{width, color}` |
 | | `stroke_dash` | `{width, color, dash, gap}` |
@@ -992,10 +993,24 @@ end
   keys on blur, text focus or surface change. Otherwise it is false. Text fields take priority;
   shell F5/F12 shortcuts do not reach the app. Typed text and IME are not game-key events.
   **Needs an `id`.**
+- `on_touch(e)` — independent captured fingers: `e.finger` is an opaque **string** ID;
+  `e.phase` is `"start"`, `"move"`, `"end"` or `"cancel"`. `e.x`, `e.y` are local coordinates
+  in the target's coordinate space at the initial touch, including moves outside its bounds.
+  The last painted eligible touch handler captures each finger independently (at most 16).
+  An explicit touch surface consumes touches instead of synthesizing clicks/drags. Ordinary UI
+  keeps its single-finger pointer behavior. Suspend, focus loss, window resize and inset changes cancel
+  captures; cancellation must clear app-owned held input without committing an action.
+  No mouse events are synthesized for explicit touch surfaces. **Needs an `id`.**
+  Ordinary buttons, fields and drag targets painted above a touch surface keep their normal
+  pointer behavior; this also applies to ordinary interactive children of a touch-enabled parent.
 - `on_frame(e)` — an **experimental visual/prototyping loop**. `e.elapsed` is monotonic Runner
   time and `e.dt` is clamped to 0.1 seconds after stalls; only Runner's first frame is guaranteed
   zero. Presence keeps repainting, so omit it to stop that request. Custom screenshots currently
   dispatch it too; it is not a fixed-step world scheduler. **Needs an `id`.**
+  `e.width` and `e.height` report this element's laid-out box in local logical points, before
+  authored scale. Responsive canvas apps can use these to fit their visual on the next view.
+  Inspection/capture callbacks may repeat the same elapsed time; authored simulations should
+  gate integration on elapsed-time changes, rather than consuming `e.dt` on every callback.
 
 Handlers run after the frame. A gesture should accumulate in your own state during
 `"start"`/`"move"` and commit to the document once at the end — a drag is **one write**, not
@@ -1397,6 +1412,13 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
 
 `OSVAULD_OFFSCREEN=900x700` makes *every* script in `scripts/` windowless without editing it, and
 `python3 scripts/smoke.py` runs the smokes. `print()` from a handler reaches `read_console`.
+
+`rects()` also works in a live Android/desktop window, for aiming native touch or mouse input.
+Clock-moving and synthetic-input driver requests remain offscreen-only.
+Hosted-app geometry is collected on demand from app threads, without blocking the UI thread.
+Live windows keep running while inspected. A resize, close/reopen or account change during
+sampling refuses that observation; retry after the new layout settles. Only one native
+inspection may be pending, with a three-second deadline across all shown apps.
 
 **Never guess a coordinate.** `rects()` answers with every reachable element and the rect a pointer
 must land in — the *clipped* rect, which is what the hit-test tests, so an element scrolled half

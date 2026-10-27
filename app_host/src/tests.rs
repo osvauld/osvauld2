@@ -1317,7 +1317,7 @@ fn on_frame_delivers_runtime_time_to_lua() {
         0,
         r#"return function()
             return ui.col({ id="sim", on_frame=function(e)
-                _tick = { e.dt, e.elapsed }
+                _tick = { e.dt, e.elapsed, e.width, e.height }
             end })
         end"#,
     )
@@ -1326,11 +1326,13 @@ fn on_frame_delivers_runtime_time_to_lua() {
     let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
     let _ = app.view();
 
-    app.update(LuaMsg::CallFrame(Key::new("sim", "on_frame"), 0.025, 3.5));
+    app.update(LuaMsg::CallFrame(Key::new("sim", "on_frame"), 0.025, 3.5, (640.0, 480.0)));
 
     let tick: Table = app.vm.globals().get("_tick").unwrap();
     assert_eq!(tick.get::<f32>(1).unwrap(), 0.025);
     assert_eq!(tick.get::<f64>(2).unwrap(), 3.5);
+    assert_eq!(tick.get::<f32>(3).unwrap(), 640.0);
+    assert_eq!(tick.get::<f32>(4).unwrap(), 480.0);
 }
 
 #[test]
@@ -1345,6 +1347,27 @@ fn on_frame_requires_a_stable_element_id() {
 
     let error = walk(node, &mut ctx).err().expect("missing id was accepted");
     assert!(error.to_string().contains("on_frame needs an id"));
+}
+
+#[test]
+fn on_touch_delivers_lossless_finger_identity_and_named_local_coordinates() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    let main = files.insert_container("main.lua", LoroText::new()).unwrap();
+    main.insert(0, r#"return function()
+        return ui.col({id="pad", on_touch=function(e) _touch = e end})
+    end"#).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    assert!(app.view().info().handlers.contains(&"on_touch".into()));
+    app.update(LuaMsg::CallTouch(Key::new("pad", "on_touch"), runtime::TouchInput {
+        id: u64::MAX, phase: runtime::TouchPhase::Cancelled, pos: (17.0, -5.0),
+    }));
+    let got: Table = app.vm.globals().get("_touch").unwrap();
+    assert_eq!(got.get::<String>("finger").unwrap(), u64::MAX.to_string());
+    assert_eq!(got.get::<String>("phase").unwrap(), "cancel");
+    assert_eq!(got.get::<f32>("x").unwrap(), 17.0);
+    assert_eq!(got.get::<f32>("y").unwrap(), -5.0);
 }
 
 #[test]

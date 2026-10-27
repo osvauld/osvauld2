@@ -264,6 +264,7 @@ pub(crate) struct Binding<M> {
 /// `dt` is clamped after stalls so integrators do not teleport.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameTick {
+    pub size: (f32, f32),
     pub dt: f32,
     pub elapsed: f64,
 }
@@ -315,6 +316,8 @@ impl<M> Click<M> {
 
 #[derive(Clone)]
 pub(crate) struct Behaviour<M> {
+    pub clip: bool,
+    pub on_touch: Option<(Id, Rc<dyn Fn(crate::TouchInput) -> M>)>,
     pub on_click: Option<Click<M>>,
     pub on_frame: Option<(Id, Rc<dyn Fn(FrameTick) -> M>)>,
     pub on_wheel: Option<(Id, Rc<dyn Fn(WheelEvent) -> M>)>,
@@ -366,6 +369,8 @@ impl<M> Behaviour<M> {
 impl<M> Default for Behaviour<M> {
     fn default() -> Self {
         Self {
+            clip: false,
+            on_touch: None,
             on_click: None,
             on_frame: None,
             on_wheel: None,
@@ -716,6 +721,11 @@ impl<M> El<M> {
         self.appearance.look.radius = r;
         self
     }
+    /// Clip child painting and hit regions to this element's rectangular box.
+    pub fn clip(mut self) -> Self {
+        self.behaviour.clip = true;
+        self
+    }
     pub fn hover_fill(mut self, c: Color) -> Self {
         self.appearance.look.hover_fill = Some(c);
         self
@@ -950,6 +960,12 @@ impl<M> El<M> {
         self
     }
 
+    /// Capture each finger independently until end/cancel; positions are element-local.
+    pub fn on_touch(mut self, id: impl Into<Id>, map: impl Fn(crate::TouchInput) -> M + 'static) -> Self {
+        self.behaviour.on_touch = Some((id.into(), Rc::new(map)));
+        self
+    }
+
     pub fn on_right_click(mut self, ctx: impl Fn((f32, f32)) -> M + 'static) -> Self {
         self.behaviour.on_right_click = Some(Rc::new(ctx));
         self
@@ -1058,6 +1074,9 @@ impl<M> El<M> {
         }
         if self.behaviour.on_key.is_some() {
             handlers.push("on_key");
+        }
+        if self.behaviour.on_touch.is_some() {
+            handlers.push("on_touch");
         }
         if self.behaviour.on_drag.is_some() {
             handlers.push("on_drag");

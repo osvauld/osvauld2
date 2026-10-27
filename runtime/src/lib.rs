@@ -28,6 +28,8 @@ mod timing;
 mod tile;
 mod windows;
 mod zoom;
+#[cfg(test)]
+mod touch_tests;
 use crate::anim::{Driver, Spring, Transition};
 use crate::coords::{NodePoint, ScreenPoint};
 use crate::drag::{DropEvent, DropPhase};
@@ -44,7 +46,7 @@ pub use crate::zoom::DEFAULT_RANGE as DEFAULT_ZOOM_RANGE;
 use editor::Field;
 use scroll::*;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Fn;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,7 +56,8 @@ use vello::kurbo::{Affine, Insets, Point, Rect};
 use vello::peniko::Color;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+pub use winit::event::TouchPhase;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopBuilder};
 #[cfg(target_os = "android")]
 pub use winit::platform::android::activity::AndroidApp;
@@ -77,6 +80,28 @@ pub use windows::{WindowFrame, WindowIn};
 pub use vello;
 
 const LINE_STEP: f32 = 30.0;
+
+/// A captured finger, in the initial target's local coordinate space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchInput {
+    pub id: u64,
+    pub phase: TouchPhase,
+    pub pos: (f32, f32),
+}
+
+#[derive(Clone)]
+struct Finger {
+    target: Id,
+    geometry: Geometry,
+    tile: bool,
+    pos: (f32, f32),
+}
+
+enum TouchHit<M> {
+    Surface(Id, Rc<dyn Fn(TouchInput) -> M>),
+    Tile(Id),
+    Pointer { shapes: Option<Shapes>, on_shapes: bool },
+}
 
 fn usable_rect((w, h): (f32, f32), scale: f32, insets: [i32; 4]) -> Rect {
     let [left, top, right, bottom] = insets.map(|v| v.max(0) as f32 / scale);
@@ -106,10 +131,11 @@ pub struct ScreenshotRequest<M> {
 /// frame happens. An app cannot do these for itself at any price — which is the whole reason this
 /// seam exists rather than a method on the app.
 ///
-/// Offscreen only. With a window the clock is the OS's and the compositor schedules frames, so
-/// both of these would be lies.
+/// Clock-moving and synthetic-input operations are offscreen-only. With a window the clock is
+/// the OS's; read-only rect inspection remains available for driving native input accurately.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DriverOp {
+    Touch { id: u64, phase: String, at: (f32, f32) },
     /// Paint exactly this many frames, each moving the virtual clock on by 1/60s.
     Frame(u32),
     /// Jump the virtual clock, then paint once — the paint is what lets the app notice. Without
@@ -196,6 +222,9 @@ pub trait App {
     /// that expose an [`EventLoopProxy`] externally must start here, never in the `run_with`
     /// builder where requests can arrive before `run_app` begins polling.
     fn ready(&mut self) {}
+
+    /// Request immersive presentation; the host owns native window and system-bar changes.
+    fn fullscreen(&self) -> bool { false }
 
     /// Canvas clear color — the page background. Default opaque black.
     fn clear(&self) -> Color {
@@ -307,8 +336,11 @@ impl Capture {
 struct Runner<A: App> {
     app: A,
     render: Option<Render>,
+    #[cfg(any(target_os = "android", test))]
+    parked_render: Option<Render>,
     ready_called: bool,
     ime_allowed: bool,
+    fullscreen: bool,
     content_insets: [i32; 4],
     #[cfg(target_os = "android")]
     android_insets: Option<android_insets::Adapter>,
@@ -319,6 +351,7 @@ struct Runner<A: App> {
     offscreen: Option<(f32, f32)>,
     pointer: Option<(f32, f32)>,
     touch_id: Option<u64>,
+    fingers: HashMap<u64, Finger>,
     text: TextEngine,
     focused: Focus,
     modifiers: ModifiersState,
@@ -333,6 +366,8 @@ struct Runner<A: App> {
     virtual_clock: bool,
     /// A frame is owed. The window has its own flag; this one is for a `Tile`'s host.
     wants_frame: Cell<bool>,
+    /// Windowed: a screenshot taken out of the app to be answered now, without presenting.
+    shot_now: Option<ScreenshotRequest<A::Msg>>,
     /// The `tile` element the pointer is over, the one holding a press, and the one with the
     /// keyboard.
     tile_over: Option<Id>,
@@ -445,6 +480,8 @@ struct PickContent {
 }
 
 struct Hits<M> {
+    // One ordered list lets ordinary controls occlude touch surfaces and hosted apps.
+    touch: Vec<(Geometry, TouchHit<M>)>,
     /// The last field is the element's nearest zoomable ancestor.
     click: Vec<(Geometry, Option<Id>, Click<M>, Option<Id>, PickContent)>,
     input: Vec<(Geometry, Id, Insets)>,
@@ -475,6 +512,7 @@ struct Hits<M> {
 impl<M> Default for Hits<M> {
     fn default() -> Self {
         Self {
+            touch: Vec::new(),
             click: Vec::new(),
             input: Vec::new(),
             input_maps: Vec::new(),
@@ -499,6 +537,7 @@ impl<M> Default for Hits<M> {
 impl<M> Hits<M> {
     #[cfg(any(target_os = "android", test))]
     fn invalidate_geometry(&mut self) {
+        self.touch.clear();
         // Keep non-spatial handlers and field identity: inset changes are not new fields.
         self.click.clear();
         self.input.clear();
@@ -514,6 +553,7 @@ impl<M> Hits<M> {
 
     pub fn clear(&mut self) {
         let Self {
+            touch,
             click,
             input,
             input_maps,
@@ -532,6 +572,7 @@ impl<M> Hits<M> {
             looks,
             tile,
         } = self;
+        touch.clear();
         click.clear();
         input.clear();
         input_maps.clear();
@@ -566,11 +607,10 @@ impl<A: App> Runner<A> {
         self.clock += FRAME;
     }
 
-    /// Run a driver op and say what it did. Refused with a window, because there the clock is the
-    /// OS's: moving it is not something this can offer, and pretending otherwise would make every
-    /// test written against it machine-dependent in a way that only shows up much later.
+    /// Run a driver op and say what it did. Only read-only rect sensing works with a window:
+    /// its clock belongs to the OS, so synthetic inputs and clock drivers stay offscreen-only.
     fn run_driver(&mut self, op: DriverOp) -> Result<DriverReport, String> {
-        if self.offscreen.is_none() {
+        if self.offscreen.is_none() && !matches!(&op, DriverOp::Rects) {
             return Err(
                 "driver ops need offscreen mode; with a window the clock is the OS's".into(),
             );
@@ -580,6 +620,22 @@ impl<A: App> Runner<A> {
             | DriverOp::Wheel { .. });
         let mut rects = None;
         let frames = match op {
+            DriverOp::Touch { id, phase, at } => {
+                let phase = match phase.as_str() {
+                    "start" => TouchPhase::Started,
+                    "move" => TouchPhase::Moved,
+                    "end" => TouchPhase::Ended,
+                    "cancel" => TouchPhase::Cancelled,
+                    _ => return Err("touch phase must be start, move, end or cancel".into()),
+                };
+                if !at.0.is_finite() || !at.1.is_finite() {
+                    return Err("touch coordinates must be finite".into());
+                }
+                self.tick();
+                self.clock += POINTER;
+                self.on_touch(phase, id, PhysicalPosition::new(at.0 as f64, at.1 as f64));
+                1
+            }
             DriverOp::Rects => {
                 // `frame` and not `tick`: a readback is a look, not time passing. Painting is not
                 // optional though — `hits` is rebuilt by painting, so without it this would report
@@ -681,7 +737,7 @@ impl<A: App> Runner<A> {
             rects = Some(self.under_pointer());
         }
         Ok(DriverReport {
-            clock: self.clock,
+            clock: self.now(),
             frames,
             rects,
         })
@@ -718,6 +774,11 @@ impl<A: App> Runner<A> {
     /// `DumpTree` for what exists; this is what is reachable.
     fn reachable(&self) -> Vec<ElRect> {
         let mut found: Vec<(&str, Rect, &'static str)> = Vec::new();
+        for (g, hit) in &self.hits.touch {
+            if let TouchHit::Surface(id, _) = hit && let Some(r) = g.visible_rect_kurbo() {
+                found.push((id, r, "touch"));
+            }
+        }
         for (g, id, _, _, _) in &self.hits.click {
             if let (Some(id), Some(r)) = (id, g.visible_rect_kurbo()) {
                 found.push((id, r, "click"));
@@ -798,6 +859,17 @@ impl<A: App> Runner<A> {
     }
 
     fn frame(&mut self) {
+        let fullscreen = self.app.fullscreen();
+        if self.fullscreen != fullscreen {
+            self.clear_touch();
+            self.fullscreen = fullscreen;
+            #[cfg(target_os = "android")]
+            if let Some(adapter) = &self.android_insets {
+                if let Err(error) = adapter.fullscreen(fullscreen) { eprintln!("fullscreen: {error}"); }
+            }
+            #[cfg(not(target_os = "android"))]
+            if let Some(render) = &self.render { render.fullscreen(fullscreen); }
+        }
         // Windowed, the surface says how big and how sharp. Offscreen, we say, at 1.0 — which
         // makes physical and logical points the same number for anything driving it by hand.
         let (surface, surface_scale, surface_transform) = match (&self.render, self.offscreen) {
@@ -806,7 +878,8 @@ impl<A: App> Runner<A> {
             (None, None) => return,
         };
         let mut timing = timing::FrameTiming::start();
-        let screenshot = self.app.take_screenshot();
+        let unpresented = self.shot_now.is_some();
+        let screenshot = self.shot_now.take().or_else(|| self.app.take_screenshot());
         let mut done_msgs = Vec::new();
         let now = self.now();
         let dt = self.last_frame.map_or(0.0, |last| (now - last).min(0.1)) as f32;
@@ -1001,7 +1074,7 @@ impl<A: App> Runner<A> {
             }
 
             if let Some((_id, map)) = p.behaviour.on_frame.take() {
-                done_msgs.push(map(FrameTick { dt, elapsed: now }));
+                done_msgs.push(map(FrameTick { dt, elapsed: now, size: (p.rect.width() as f32, p.rect.height() as f32) }));
                 any_in_flight = true;
             }
 
@@ -1022,6 +1095,13 @@ impl<A: App> Runner<A> {
                     ),
                 }),
             };
+            if visible.is_some() && (p.behaviour.on_click.is_some() || p.behaviour.input.is_some()
+                || p.behaviour.on_drag.is_some() || p.behaviour.zoom.is_some() || p.behaviour.scroll.is_some())
+            {
+                let on_shapes = p.behaviour.drag_on_shapes && p.behaviour.on_click.is_none()
+                    && p.behaviour.input.is_none() && p.behaviour.zoom.is_none() && p.behaviour.scroll.is_none();
+                hits.touch.push((geometry, TouchHit::Pointer { shapes: if on_shapes { shapes.clone() } else { None }, on_shapes }));
+            }
             if let Some(click) = p.behaviour.on_click.take()
                 && geometry.visible_rect.is_some()
             {
@@ -1051,9 +1131,15 @@ impl<A: App> Runner<A> {
             {
                 hits.wheel.push((geometry, id, handler));
             }
+            if let Some((id, handler)) = p.behaviour.on_touch.take()
+                && visible.is_some()
+            {
+                hits.touch.push((geometry, TouchHit::Surface(id, handler)));
+            }
             if let Some((id, handler)) = p.behaviour.on_tile.take()
                 && visible.is_some()
             {
+                hits.touch.push((geometry, TouchHit::Tile(id.clone())));
                 let rects = p.appearance.tile.as_ref().map(|f| f.rects.clone());
                 hits.tile
                     .push((geometry, id, handler, rects.unwrap_or_else(|| Arc::new([]))));
@@ -1234,12 +1320,12 @@ impl<A: App> Runner<A> {
             Some(result)
         } else {
             let render = self.render.as_mut().unwrap();
-            let presented = render.present(clear, &self.scene, scene3d.as_ref());
+            let presented = !unpresented && render.present(clear, &self.scene, scene3d.as_ref());
             screenshot.as_ref().map(|_| {
                 if presented {
                     render.capture()
                 } else {
-                    // Surface loss must not turn a requested shot into the previous frame.
+                    // Surface loss, or a shot answered unpresented, must not return the previous frame.
                     render.capture_scene(
                         clear,
                         &self.scene,
@@ -1747,6 +1833,14 @@ impl<A: App> Runner<A> {
     }
 
     fn clear_touch(&mut self) {
+        let fingers = std::mem::take(&mut self.fingers);
+        for (id, finger) in fingers {
+            self.send_finger(id, TouchPhase::Cancelled, &finger);
+        }
+        self.clear_pointer_touch();
+    }
+
+    fn clear_pointer_touch(&mut self) {
         if let Some(id) = self.tile_grab.take() {
             self.to_tile(&id, TileInput::Cancel);
         }
@@ -1761,6 +1855,36 @@ impl<A: App> Runner<A> {
         if self.render.is_none() && self.offscreen.is_none() {
             return;
         }
+        let scale = self.render.as_ref().map_or(1.0, |r| r.scale());
+        let pos = ((position.x / scale) as f32, (position.y / scale) as f32);
+        if phase == TouchPhase::Started {
+            if self.fingers.contains_key(&id) || self.touch_id == Some(id) { return; }
+            let p = Point::new(pos.0 as f64, pos.1 as f64);
+            let target = self.touch_hit_at(p).and_then(|(g, hit)| match hit {
+                TouchHit::Surface(target, _) => Some(Finger { target: target.clone(), geometry: *g, tile: false, pos }),
+                TouchHit::Tile(target) => Some(Finger { target: target.clone(), geometry: *g, tile: true, pos }),
+                TouchHit::Pointer { .. } => None,
+            });
+            if let Some(finger) = target {
+                if self.fingers.len() >= 16 { return; }
+                let under = finger.tile.then(|| finger.target.clone());
+                if self.tile_keys != under && let Some(old) = self.tile_keys.take() {
+                    self.to_tile(&old, TileInput::Blur);
+                }
+                self.tile_keys = under;
+                self.focused.blur();
+                self.fingers.insert(id, finger);
+            }
+        }
+        if let Some(mut finger) = self.fingers.remove(&id) {
+            finger.pos = pos;
+            self.send_finger(id, phase, &finger);
+            if !matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.fingers.insert(id, finger);
+            }
+            self.redraw();
+            return;
+        }
         match phase {
             TouchPhase::Started if self.touch_id.is_none() => {
                 // Only the first finger owns capture; other fingers never become pinch or clicks.
@@ -1772,11 +1896,31 @@ impl<A: App> Runner<A> {
             TouchPhase::Ended if self.touch_id == Some(id) => {
                 self.on_cursor_moved(position);
                 self.button(false);
-                self.clear_touch();
+                self.clear_pointer_touch();
             }
-            TouchPhase::Cancelled if self.touch_id == Some(id) => self.clear_touch(),
+            TouchPhase::Cancelled if self.touch_id == Some(id) => self.clear_pointer_touch(),
             _ => {}
         }
+    }
+
+    fn send_finger(&mut self, id: u64, phase: TouchPhase, finger: &Finger) {
+        let pos = Self::tile_local(&finger.geometry, finger.pos);
+        let event = TouchInput { id, phase, pos };
+        if finger.tile {
+            self.to_tile(&finger.target, TileInput::Touch(event));
+        } else if let Some(handler) = self.hits.touch.iter().find_map(|(_, hit)| match hit {
+            TouchHit::Surface(target, handler) if target == &finger.target => Some(handler),
+            _ => None,
+        }) {
+            self.app.update(handler(event));
+        }
+    }
+
+    fn touch_hit_at(&self, p: Point) -> Option<&(Geometry, TouchHit<A::Msg>)> {
+        self.hits.touch.iter().rev().find(|(g, hit)| match hit {
+            TouchHit::Pointer { shapes, on_shapes: true } => Grabbed::press(g, shapes, true, p).is_some(),
+            _ => g.contains(p),
+        })
     }
 
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
@@ -2224,7 +2368,13 @@ impl<A: App> Runner<A> {
             self.to_tile(&id, TileInput::Blur);
         }
         // Android requires the native surface to be released before this callback returns.
-        self.render = None;
+        #[cfg(any(target_os = "android", test))]
+        if let Some(mut render) = self.render.take() {
+            render.detach_surface();
+            self.parked_render = Some(render);
+        }
+        #[cfg(not(any(target_os = "android", test)))]
+        { self.render = None; }
         self.ime_allowed = false;
         #[cfg(target_os = "android")]
         { self.android_insets = None; }
@@ -2283,12 +2433,7 @@ impl<A: App> Runner<A> {
     /// The topmost tile under a window point, and that point in the tile's coordinates.
     fn tile_at(&self, (x, y): (f32, f32)) -> Option<(Id, (f32, f32))> {
         let p = Point::new(x as f64, y as f64);
-        let (g, id, _, _) = self
-            .hits
-            .tile
-            .iter()
-            .rev()
-            .find(|(g, _, _, _)| g.contains(p))?;
+        let (g, TouchHit::Tile(id)) = self.touch_hit_at(p)? else { return None };
         Some((id.clone(), Self::tile_local(g, (x, y))))
     }
 
@@ -2360,8 +2505,8 @@ impl<A: App> Runner<A> {
         }
         let under = self
             .pointer
-            .and_then(|at| self.tile_at(at))
-            .map(|(id, _)| id);
+            .and_then(|(x, y)| self.touch_hit_at(Point::new(x as f64, y as f64)))
+            .and_then(|(_, hit)| match hit { TouchHit::Tile(id) => Some(id.clone()), _ => None });
         if self.tile_keys != under
             && let Some(old) = self.tile_keys.take()
         {
@@ -2391,6 +2536,16 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
             None => {
                 let attrs = Window::default_attributes().with_title("osvauld");
                 let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+                #[cfg(target_os = "android")]
+                let render = if let Some(mut render) = self.parked_render.take() {
+                    render.attach_surface(window);
+                    render
+                } else {
+                    use winit::platform::android::ActiveEventLoopExtAndroid;
+                    let cache = event_loop.android_app().internal_data_path().map(|p| p.join("gpu-cache"));
+                    pollster::block_on(Render::new_cached(window, cache.as_deref()))
+                };
+                #[cfg(not(target_os = "android"))]
                 let render = pollster::block_on(Render::new(window));
                 render.request_redraw(); // paint the first frame; after that only on demand
                 render
@@ -2401,6 +2556,11 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
             use winit::platform::android::ActiveEventLoopExtAndroid;
             self.android_insets = Some(android_insets::Adapter::install(event_loop.android_app())
                 .expect("Android inset adapter: build APK with scripts/build_android.py"));
+            if let Some(adapter) = &self.android_insets {
+                if let Err(error) = adapter.fullscreen(self.app.fullscreen()) {
+                    eprintln!("fullscreen: {error}");
+                }
+            }
         }
         if !self.ready_called {
             self.app.ready();
@@ -2426,38 +2586,40 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.clear_touch();
                 if let Some(r) = self.render.as_mut() {
                     r.set_scale(scale_factor);
                     r.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
+                self.clear_touch();
                 if let Some(r) = self.render.as_mut() {
                     r.resize(size);
                     r.request_redraw();
                 }
             }
             WindowEvent::Touch(touch) => self.on_touch(touch.phase, touch.id, touch.location),
-            WindowEvent::CursorMoved { position, .. } if self.touch_id.is_none() => {
+            WindowEvent::CursorMoved { position, .. } if self.touch_id.is_none() && self.fingers.is_empty() => {
                 self.on_cursor_moved(position);
                 // Physical → logical: hit-testing and rects are all in logical points.
             }
-            WindowEvent::CursorLeft { .. } if self.touch_id.is_none() => self.on_cursor_left(),
+            WindowEvent::CursorLeft { .. } if self.touch_id.is_none() && self.fingers.is_empty() => self.on_cursor_left(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if self.touch_id.is_none() => self.button(true),
+            } if self.touch_id.is_none() && self.fingers.is_empty() => self.button(true),
             WindowEvent::MouseInput {
                 button: MouseButton::Right,
                 state: ElementState::Pressed,
                 ..
-            } if self.touch_id.is_none() => self.right_click(),
+            } if self.touch_id.is_none() && self.fingers.is_empty() => self.right_click(),
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
-            } if self.touch_id.is_none() => {
+            } if self.touch_id.is_none() && self.fingers.is_empty() => {
                 self.button(false);
             }
             // Retained: paint on demand. `frame` re-requests only while the app is animating.
@@ -2470,7 +2632,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                     self.to_tile(&id, TileInput::Blur);
                 }
                 self.cancel_keys();
-                if self.touch_id.is_some() {
+                if self.touch_id.is_some() || !self.fingers.is_empty() {
                     self.clear_touch();
                 }
             }
@@ -2478,7 +2640,7 @@ impl<A: App> ApplicationHandler<A::Msg> for Runner<A> {
                 self.modifiers = m.state();
             }
             WindowEvent::Ime(ime) => self.on_ime(ime),
-            WindowEvent::MouseWheel { delta, .. } if self.touch_id.is_none() => self.on_wheel_moved(delta),
+            WindowEvent::MouseWheel { delta, .. } if self.touch_id.is_none() && self.fingers.is_empty() => self.on_wheel_moved(delta),
             _ => {}
         }
     }
@@ -2549,7 +2711,15 @@ impl<A: App> Runner<A> {
         //
         // A driver op painted its own frames and is not owed another, or `Frame(n)` would be n+1.
         match self.offscreen {
-            None => self.redraw(),
+            None => {
+                // A hidden window gets no `RedrawRequested`, so a shot waiting for one would wait
+                // until it shows. Answer it now from the scene; the surface gets its frame later.
+                if let Some(shot) = self.app.take_screenshot() {
+                    self.shot_now = Some(shot);
+                    self.frame();
+                }
+                self.redraw()
+            }
             Some(_) if !drove => self.frame(),
             Some(_) => {}
         }
@@ -2616,8 +2786,11 @@ impl<A: App> Runner<A> {
         Self {
             app,
             render: None,
+            #[cfg(any(target_os = "android", test))]
+            parked_render: None,
             ready_called: false,
             ime_allowed: false,
+            fullscreen: false,
             content_insets: [0; 4],
             #[cfg(target_os = "android")]
             android_insets: None,
@@ -2626,6 +2799,7 @@ impl<A: App> Runner<A> {
             offscreen,
             pointer: None,
             touch_id: None,
+            fingers: HashMap::new(),
             hits: Hits::default(),
             held_keys: HashSet::new(),
             held_owner: None,
@@ -2640,6 +2814,7 @@ impl<A: App> Runner<A> {
             clock: 0.0,
             virtual_clock: offscreen.is_some(),
             wants_frame: Cell::new(false),
+            shot_now: None,
             tile_over: None,
             tile_grab: None,
             tile_keys: None,

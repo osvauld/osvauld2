@@ -183,7 +183,7 @@ impl<M: 'static> Registry<M> {
             let key = cx.register("on_frame", v)?;
             let to_msg = cx.to_msg.clone();
             Ok(el.on_frame(key.id.to_string(), move |event| {
-                to_msg(LuaMsg::CallFrame(key.clone(), event.dt, event.elapsed))
+                to_msg(LuaMsg::CallFrame(key.clone(), event.dt, event.elapsed, event.size))
             }))
         }),
         ("on_wheel", |el, v, cx| {
@@ -203,6 +203,13 @@ impl<M: 'static> Registry<M> {
             let to_msg = cx.to_msg.clone();
             Ok(el.on_key(key.id.to_string(), move |event| {
                 to_msg(LuaMsg::CallKey(key.clone(), event))
+            }))
+        }),
+        ("on_touch", |el, v, cx| {
+            let key = cx.register("on_touch", v)?;
+            let to_msg = cx.to_msg.clone();
+            Ok(el.on_touch(key.id.to_string(), move |event| {
+                to_msg(LuaMsg::CallTouch(key.clone(), event))
             }))
         }),
         ("on_drag", |el, v, cx| {
@@ -285,6 +292,7 @@ impl<M: 'static> Registry<M> {
             }) as Apply<M>,
         ),
         prop!(wrap),
+        prop!(clip),
         // spacing
         prop!(pad, f32),
         prop!(px, f32),
