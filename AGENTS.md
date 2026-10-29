@@ -58,11 +58,32 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 
 ## Commands
 
+Run builds and tests through the task manager LoadTable (`~/.local/bin/loadtable`; Claude
+sessions can use the LoadTable MCP tools (server `tasks2`) instead), never bare `cargo`. Disk is tight (the
+home partition and the `~/build-cache` partition are both small); `loadtable` keeps each
+checkout's `target/` on the cache disk and, with `--anywhere`, runs the job on whichever
+machine (laptop or the nixos worker) can start it soonest. The old `tasks` is
+retired and removed: do not use it.
+
 ```sh
-cargo check --workspace     # must be clean
-cargo test  --workspace     # app_host's suite includes the kanban round-trip — keep it green
-cargo run   -p shell2       # the shell; OSVAULD_DATA_DIR=<dir> for a throwaway store
+# name yourself with --who; -j 6 is the most the worker allows
+loadtable run --who YOUR_AGENT --anywhere -- cargo check --workspace -j 6     # must be clean
+loadtable run --who YOUR_AGENT --anywhere -- cargo test  --workspace -j 6     # app_host's suite includes the kanban round-trip — keep it green
+loadtable run --who YOUR_AGENT --pin      -- cargo run -p shell2              # the shell is a GUI: stays on this machine; OSVAULD_DATA_DIR=<dir> for a throwaway store
 ```
+
+- Run from the repo (or worktree) root. `loadtable list --active` and `loadtable status` show the
+  queue; `loadtable logs ID` the output; `loadtable cancel ID` stops your own job only.
+- Name test targets (`cargo test -p X --lib FILTER` / `--test NAME`) rather than building
+  everything for one test.
+- Do not create `target/` yourself, point several worktrees at one `CARGO_TARGET_DIR`, or set
+  `RUSTC_WRAPPER`: `loadtable` links `target/` to the cache disk and uses the shared compiler cache.
+  An existing real `target/` directory is left alone, so delete a stale one (with its owner's
+  OK) instead of building into it.
+- Do not use `ssh`, `tasks-offload`, the old `tasks` or your own lock files. If `loadtable` fails,
+  report the exact error and job id; do not work around it.
+- Before you leave a worktree for good, say so: `loadtable` does not empty idle caches yet, and a
+  bare `cargo build` run outside `loadtable` writes to the home partition.
 
 ## Expert routing
 
