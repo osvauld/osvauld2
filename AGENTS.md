@@ -59,7 +59,7 @@ by our own UI runtime. Rust is the substrate; Lua is the product surface.
 ## Commands
 
 Run builds and tests through the task manager LoadTable (`~/.local/bin/loadtable`; Claude
-sessions can use the LoadTable MCP tools (server `tasks2`) instead), never bare `cargo`. Disk is tight (the
+sessions can use the LoadTable MCP tools (server `loadtable`, tools `mcp__loadtable__*`) instead), never bare `cargo`. Disk is tight (the
 home partition and the `~/build-cache` partition are both small); `loadtable` keeps each
 checkout's `target/` on the cache disk and, with `--anywhere`, runs the job on whichever
 machine (laptop or the nixos worker) can start it soonest. The old `tasks` is
