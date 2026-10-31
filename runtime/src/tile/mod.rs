@@ -46,6 +46,7 @@ pub struct TileEvent {
 /// What the host routes to a tile. Coordinates are logical points from the tile's top-left.
 #[derive(Clone, Debug)]
 pub enum TileInput {
+    Touch(crate::TouchInput),
     /// The pointer is over the tile, or outside it while a press that began inside is held.
     Move(f32, f32),
     Leave,
@@ -101,6 +102,7 @@ impl<A: App> Tile<A> {
         let r = &mut self.runner;
         r.modifiers = mods;
         match input {
+            TileInput::Touch(e) => r.on_touch(e.phase, e.id, PhysicalPosition::new(e.pos.0 as f64, e.pos.1 as f64)),
             TileInput::Move(x, y) => r.on_cursor_moved(PhysicalPosition::new(x as f64, y as f64)),
             TileInput::Leave => r.on_cursor_left(),
             TileInput::Button(down) => r.button(down),

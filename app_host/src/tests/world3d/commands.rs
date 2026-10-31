@@ -39,7 +39,7 @@ fn set_commands_are_strict_atomic_and_input_scoped() {
     ));
     blocked.view();
     let before = state(&blocked);
-    blocked.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0));
+    blocked.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0, (640.0, 480.0)));
     assert_eq!(state(&blocked), before);
     assert!(blocked.console(1)[0].contains("only allowed in input handlers"));
     let blocked =

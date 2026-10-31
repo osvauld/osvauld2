@@ -30,6 +30,7 @@ pub type Call = Box<dyn FnOnce(&mut Hosted) + Send>;
 const STUCK: Duration = Duration::from_secs(3);
 /// An animating, shown tile's frame interval with a window.
 const FRAME: Duration = Duration::from_millis(16);
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// How long a thread may stay on one batch before it counts as not responding
 /// (`OSVAULD_WATCHDOG_MS`). Past the Lua budget, so a runaway is killed before it is flagged.
@@ -162,16 +163,19 @@ pub struct Open {
 
 enum In {
     Event(TileEvent),
-    Resize((f32, f32)),
+    Resize((f32, f32), u64),
     Shown(bool),
     /// Offscreen: catch up to the host's clock, and answer with a frame if one is owed.
     Sync(f64, Sender<Option<TileFrame>>),
+    Rects(Sender<Result<crate::native_rects::Snapshot, String>>),
     Call(Call),
     Wake,
     Close,
 }
 
 pub struct AppThread {
+    instance: u64,
+    layout_revision: u64,
     tx: Sender<In>,
     pub ws_id: String,
     /// What the shell paints: the latest frame it has.
@@ -202,6 +206,7 @@ impl AppThread {
         let (done_tx, done) = channel();
         let latest = Arc::new(Mutex::new(None));
         let closed = Arc::new(AtomicBool::new(false));
+        let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
         let ws_id = open.ws_id.clone();
         let size = offscreen.unwrap_or((800.0, 600.0));
         let beat = Arc::new(Beat::default());
@@ -211,6 +216,7 @@ impl AppThread {
             proxy: proxy.clone(),
         });
         let ctx = Ctx {
+            instance,
             id: open.item_id.clone(),
             ws_id: open.ws_id.clone(),
             vault: open.vault.clone(),
@@ -247,6 +253,8 @@ impl AppThread {
             .recv()
             .map_err(|_| "the app thread ended while opening".to_string())??;
         Ok(Self {
+            instance,
+            layout_revision: 0,
             tx,
             ws_id,
             frame: TileFrame::default(),
@@ -263,6 +271,17 @@ impl AppThread {
 
     pub fn call(&self, f: impl FnOnce(&mut Hosted) + Send + 'static) {
         let _ = self.tx.send(In::Call(Box::new(f)));
+    }
+
+    /// Observe the last painted hit geometry on its owner thread, without stepping its clock.
+    pub fn rects(&self) -> Receiver<Result<crate::native_rects::Snapshot, String>> {
+        let (tx, rx) = channel();
+        let _ = self.tx.send(In::Rects(tx));
+        rx
+    }
+
+    pub fn rect_scope(&self) -> crate::native_rects::Scope {
+        crate::native_rects::Scope { instance: self.instance, revision: self.layout_revision, size: self.size }
     }
 
     pub fn is_shown(&self) -> bool {
@@ -291,7 +310,8 @@ impl AppThread {
             return false;
         }
         self.size = Some(size);
-        let _ = self.tx.send(In::Resize(size));
+        self.layout_revision += 1;
+        let _ = self.tx.send(In::Resize(size, self.layout_revision));
         self.offscreen && self.sync(now)
     }
 
@@ -318,7 +338,10 @@ impl AppThread {
     pub fn take(&mut self, asked: Option<Receiver<Option<TileFrame>>>) -> bool {
         if !self.offscreen {
             return match self.latest.lock().unwrap().take() {
-                Some(f) => {
+                Some(mut f) => {
+                    // Live frames omit inspection metadata. Keep the last requested snapshot
+                    // until the next Rects request refreshes it; ordinary paint does no scan.
+                    f.rects = self.frame.rects.clone();
                     self.frame = f;
                     true
                 }
@@ -387,6 +410,7 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
 
 /// The thread's side of everything but the app itself.
 struct Ctx {
+    instance: u64,
     id: Arc<str>,
     ws_id: String,
     vault: Vault,
@@ -401,6 +425,8 @@ struct Ctx {
 fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
     let mut shown = false;
     let mut names = Vec::new();
+    let mut requested_scope = crate::native_rects::Scope { instance: ctx.instance, revision: 0, size: None };
+    let mut painted_scope = None;
     loop {
         let animating = shown && !ctx.offscreen && tile.wants_frame();
         let first = if animating {
@@ -423,7 +449,11 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
         for msg in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match msg {
                 In::Event(e) => tile.input(e),
-                In::Resize(size) => tile.resize(size),
+                In::Resize(size, revision) => {
+                    tile.resize(size);
+                    requested_scope.size = Some(size);
+                    requested_scope.revision = revision;
+                }
                 In::Shown(s) => {
                     shown = s;
                     if s {
@@ -445,12 +475,18 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 In::Sync(now, reply) => {
                     settle(&mut tile, &ctx, &mut names);
                     tile.set_clock(now);
-                    let frame = tile.wants_frame().then(|| TileFrame {
-                        scene: Arc::new(tile.frame()),
-                        rects: tile.rects().into(),
-                        view3d: tile.view3d(),
+                    let frame = tile.wants_frame().then(|| {
+                        let scene = Arc::new(tile.frame());
+                        painted_scope = Some(requested_scope);
+                        TileFrame { scene, rects: tile.rects().into(), view3d: tile.view3d() }
                     });
                     let _ = reply.send(frame);
+                }
+                In::Rects(reply) => {
+                    let sample = painted_scope.map(|scope| crate::native_rects::Snapshot {
+                        id: ctx.id.clone(), scope, rects: tile.rects().into(),
+                    }).ok_or_else(|| "app layout changed before geometry was painted; retry".to_string());
+                    let _ = reply.send(sample);
                 }
                 In::Close => {
                     settle(&mut tile, &ctx, &mut names);
@@ -466,8 +502,10 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
             let _ = tile.app_mut().view();
         }
         if shown && !ctx.offscreen && tile.wants_frame() {
+            let scene = Arc::new(tile.frame());
+            painted_scope = Some(requested_scope);
             let frame = TileFrame {
-                scene: Arc::new(tile.frame()),
+                scene,
                 rects: Arc::new([]),
                 view3d: tile.view3d(),
             };

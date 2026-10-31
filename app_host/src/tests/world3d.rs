@@ -166,7 +166,7 @@ fn world3d_rejects_unknown_fields_bad_shapes_and_frame_or_module_resets() {
     ));
     app.view();
     let before = state(&app);
-    app.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0));
+    app.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0, (640.0, 480.0)));
     assert_eq!(state(&app), before);
     assert!(app.console(1)[0].contains("only allowed in input handlers"));
 }

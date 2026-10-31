@@ -330,7 +330,7 @@ fn emit<M>(
     }
     let node_alpha = opacity * alpha;
     let behaviour = m.behaviour;
-    let clips_children = behaviour.scroll.is_some();
+    let clips_children = behaviour.clip || behaviour.scroll.is_some();
     let appearance = m.appearance;
     out.push(Placed {
         kind: PlacedKind::Node,

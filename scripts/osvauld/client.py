@@ -205,6 +205,10 @@ class Bridge:
         """Where every reachable element is: [{id, x, y, w, h, hits}]. Clipped ones are absent."""
         return self.request("Rects")["rects"]
 
+    def touch(self, finger: int, phase: str, x: float, y: float) -> dict:
+        """Captured start/move/end/cancel through native routing; offscreen only."""
+        return self.request("Touch", id=finger, phase=phase, x=x, y=y)
+
     def move_to(self, x: float, y: float) -> list[dict]:
         """Move the pointer; returns what is under it afterwards (empty list = a miss)."""
         return self.request("PointerMove", x=x, y=y)["rects"]

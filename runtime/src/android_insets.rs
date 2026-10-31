@@ -67,6 +67,29 @@ impl Adapter {
         else { self.activity.hide_soft_input(false); }
     }
 
+    pub fn fullscreen(&self, enabled: bool) -> Result<(), String> {
+        let vm = unsafe { JavaVM::from_raw(self.activity.vm_as_ptr().cast()) }
+            .map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let result = env.with_local_frame(16, |env| -> jni::errors::Result<()> {
+            let activity = env.new_local_ref(unsafe {
+                JObject::from_raw(self.activity.activity_as_ptr().cast())
+            })?;
+            let loader = env.call_method(&activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
+            let name = env.new_string("com.osvauld.android.InsetsAdapter")?;
+            let class = JClass::from(env.call_method(&loader, "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(name.as_ref())])?.l()?);
+            env.call_static_method(&class, "fullscreen", "(Landroid/app/Activity;Z)V",
+                &[JValue::Object(&activity), JValue::Bool(enabled.into())])?;
+            Ok(())
+        });
+        if result.is_err() && env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        result.map_err(|e| e.to_string())
+    }
+
     pub fn latest(&self) -> Option<[i32; 4]> {
         self.state.insets.lock().ok().and_then(|value| *value)
     }

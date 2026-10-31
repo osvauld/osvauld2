@@ -4,6 +4,33 @@ mod el_clone;
 mod simulation;
 
 #[test]
+fn clipped_children_cannot_receive_hits_outside_the_viewport() {
+    struct Clipped(usize);
+    impl App for Clipped {
+        type Msg = ();
+        fn update(&mut self, _: ()) { self.0 += 1; }
+        fn view(&self) -> El<()> {
+            col().full().child(col().w(100.0).h(100.0).clip()
+                .child(col().absolute().left(80.0).top(0.0).w(80.0).h(80.0)
+                    .id("outside").on_click(())))
+        }
+    }
+    let mut r = Runner::new(Clipped(0), Some((200.0, 200.0)));
+    let report = r.run_driver(DriverOp::Rects).unwrap();
+    let rects = report.rects.unwrap();
+    let rect = rects.iter().find(|r| r.id == "outside").unwrap();
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (80.0, 0.0, 20.0, 80.0));
+    r.run_driver(DriverOp::PointerMove((130.0, 20.0))).unwrap();
+    r.run_driver(DriverOp::PointerPress).unwrap();
+    r.run_driver(DriverOp::PointerRelease).unwrap();
+    assert_eq!(r.app.0, 0);
+    r.run_driver(DriverOp::PointerMove((90.0, 20.0))).unwrap();
+    r.run_driver(DriverOp::PointerPress).unwrap();
+    r.run_driver(DriverOp::PointerRelease).unwrap();
+    assert_eq!(r.app.0, 1);
+}
+
+#[test]
 fn element_contains_id_is_a_read_only_tree_query() {
     let el: El<()> = col().id("root").child(row().child(text("leaf").id("nested")));
     assert!(el.contains_id("root"));
@@ -590,6 +617,21 @@ fn suspension_cancels_runtime_input_but_keeps_retained_state() {
     let count = r.app.received.len();
     r.suspend();
     assert_eq!(r.app.received.len(), count, "repeated suspension is harmless");
+}
+
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn repeated_suspension_keeps_the_gpu_for_surface_recreation() {
+    let mut r = Runner::new(Keyed { child: true, received: Vec::new() }, Some((64.0, 48.0)));
+    r.render = Some(pollster::block_on(Render::offscreen(64, 48)));
+    r.suspend();
+    assert!(r.render.is_none(), "suspended renderer must not receive paints");
+    assert!(r.parked_render.is_some(), "keep compiled pipelines across suspend");
+    r.suspend();
+    let mut render = r.parked_render.take().expect("repeated suspend must keep GPU state");
+    let image = render.capture_scene(Color::BLACK, &Scene::new(), (64.0, 48.0), 1.0, None)
+        .expect("parked device and pipelines remain usable");
+    assert_eq!((image.width, image.height), (64, 48));
 }
 
 #[test]

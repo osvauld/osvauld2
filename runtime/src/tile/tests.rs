@@ -65,11 +65,55 @@ fn a_touch_tap_reaches_the_tile_app() {
     guest.frame();
     let at = PhysicalPosition::new(150.0, 50.0);
     host.on_touch(winit::event::TouchPhase::Started, 1, at);
+    assert_eq!(host.tile_keys.as_deref(), Some("t"), "touch did not transfer keyboard ownership");
     host.on_touch(winit::event::TouchPhase::Ended, 1, at);
     for input in std::mem::take(&mut host.app.got) {
         guest.input(TileEvent { input, at: 0.0, mods: Default::default() });
     }
     assert_eq!(guest.app().clicks, 1);
+}
+
+#[test]
+fn independent_fingers_cross_tiles_and_use_handlers_from_the_current_frame() {
+    struct TouchGuest {
+        generation: u32,
+        events: Vec<(crate::TouchInput, u32)>,
+    }
+    impl App for TouchGuest {
+        type Msg = (crate::TouchInput, u32);
+        fn view(&self) -> El<Self::Msg> {
+            let generation = self.generation;
+            col().full().on_touch("controls", move |e| (e, generation))
+        }
+        fn update(&mut self, msg: Self::Msg) { self.events.push(msg); }
+    }
+    let mut host = Runner::new(Host::default(), Some((300.0, 100.0)));
+    let mut guest = Tile::new(TouchGuest { generation: 1, events: Vec::new() }, (200.0, 100.0));
+    let pump = |host: &mut Runner<Host>, guest: &mut Tile<TouchGuest>| {
+        for input in std::mem::take(&mut host.app.got) {
+            guest.input(TileEvent { input, at: 0.0, mods: Default::default() });
+        }
+    };
+    host.frame();
+    guest.frame();
+    host.on_touch(crate::TouchPhase::Started, 1, PhysicalPosition::new(120.0, 30.0));
+    host.on_touch(crate::TouchPhase::Started, 2, PhysicalPosition::new(180.0, 30.0));
+    pump(&mut host, &mut guest);
+    guest.app_mut().generation = 2;
+    guest.frame();
+    host.frame();
+    host.on_touch(crate::TouchPhase::Moved, 1, PhysicalPosition::new(450.0, 30.0));
+    host.on_touch(crate::TouchPhase::Cancelled, 2, PhysicalPosition::new(180.0, 30.0));
+    pump(&mut host, &mut guest);
+    assert_eq!(guest.app().events.len(), 4);
+    assert_eq!(guest.app().events[2].0.pos, (350.0, 30.0));
+    assert_eq!(guest.app().events[2].1, 2, "capture cached an obsolete callback");
+    assert_eq!(guest.runner.fingers.len(), 1, "cancel released the wrong finger");
+    host.suspend();
+    pump(&mut host, &mut guest);
+    assert_eq!(guest.app().events.len(), 5);
+    assert_eq!(guest.app().events[4].0.id, 1);
+    assert_eq!(guest.app().events[4].0.phase, crate::TouchPhase::Cancelled);
 }
 
 #[test]
@@ -88,7 +132,7 @@ fn touch_cancellation_and_suspend_cancel_the_tile_without_release() {
         }
         host.on_touch(winit::event::TouchPhase::Ended, 1, at);
         let got = std::mem::take(&mut host.app.got);
-        assert!(got.iter().any(|i| matches!(i, TileInput::Cancel)), "{got:?}");
+        assert!(got.iter().any(|i| matches!(i, TileInput::Cancel | TileInput::Touch(crate::TouchInput { phase: crate::TouchPhase::Cancelled, .. }))), "{got:?}");
         assert!(!got.iter().any(|i| matches!(i, TileInput::Button(false))), "{got:?}");
         for input in got {
             guest.input(TileEvent { input, at: 0.0, mods: Default::default() });

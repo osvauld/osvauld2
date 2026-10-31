@@ -16,6 +16,9 @@ use winit::window::Window;
 
 use wgpu::CurrentSurfaceTexture::*;
 
+#[cfg(any(target_os = "android", test))]
+mod pipeline_cache;
+
 /// Supersample factor (vello renders into a target this many times larger than the surface, blit
 /// downsamples). Left at 1 = native res: 2× linear-downsampled blurred edges more than it smoothed.
 /// Kept as a tunable knob; real fix is vello's analytic (Area) AA once it's past alpha.
@@ -230,8 +233,13 @@ fn render_vello(
                 base_color: clear,
                 width,
                 height,
-                // Area AA (analytic) has conflation jaggies at vello's alpha; MSAA16 is clean.
-                antialiasing_method: AaConfig::Msaa16,
+                // MSAA16 corrupts pixels on the Pixel 3a's Adreno Vulkan driver.
+                // Desktop keeps MSAA16 to avoid analytic conflation at shared edges.
+                antialiasing_method: if cfg!(target_os = "android") {
+                    AaConfig::Area
+                } else {
+                    AaConfig::Msaa16
+                },
             },
         )
         .map_err(|e| format!("vello render: {e}"))
@@ -262,8 +270,30 @@ fn physical_viewport(rect: Rect, scale: f32, width: u32, height: u32) -> [u32; 4
     [x0, y0, x1 - x0, y1 - y0]
 }
 
+fn new_renderer(device: &wgpu::Device, pipeline_cache: Option<wgpu::PipelineCache>) -> Arc<Mutex<Renderer>> {
+    Arc::new(Mutex::new(Renderer::new(device, RendererOptions {
+        antialiasing_support: if cfg!(target_os = "android") {
+            AaSupport::area_only()
+        } else {
+            AaSupport::all()
+        },
+        pipeline_cache,
+        ..Default::default()
+    }).expect("create vello renderer")))
+}
+
 impl Render {
     pub async fn new(window: Arc<Window>) -> Self {
+        Self::new_inner(window, None).await
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) async fn new_cached(window: Arc<Window>, directory: Option<&std::path::Path>) -> Self {
+        Self::new_inner(window, directory).await
+    }
+
+    async fn new_inner(window: Arc<Window>, _directory: Option<&std::path::Path>) -> Self {
+        let started = std::time::Instant::now();
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -276,13 +306,26 @@ impl Render {
             "shell2: scale_factor = {scale}, surface = {}x{}",
             config.width, config.height
         );
-        Self::assemble(
+        #[cfg(any(target_os = "android", test))]
+        let cache = _directory.and_then(|path| pipeline_cache::Cache::open(&adapter, &device, path));
+        #[cfg(any(target_os = "android", test))]
+        let renderer = cache.as_ref().map(|cache| new_renderer(&device, Some(cache.gpu.clone())));
+        #[cfg(not(any(target_os = "android", test)))]
+        let renderer = None;
+        let render = Self::assemble(
             Some(Presenter { window, surface }),
             (instance, adapter, device, queue),
             config,
             scale,
-            None,
-        )
+            renderer,
+        );
+        #[cfg(any(target_os = "android", test))]
+        if let Some(cache) = cache {
+            if let Err(error) = cache.save() { eprintln!("GPU_CACHE save: {error}"); }
+            eprintln!("GPU_CACHE loaded={}", cache.loaded);
+        }
+        eprintln!("GPU_RENDER_INIT ms={}", started.elapsed().as_millis());
+        render
     }
 
     /// Another window drawn with this one's device and renderer: only its surface and targets
@@ -337,18 +380,7 @@ impl Render {
         scale: f64,
         renderer: Option<Arc<Mutex<Renderer>>>,
     ) -> Self {
-        let renderer = renderer.unwrap_or_else(|| {
-            Arc::new(Mutex::new(
-                Renderer::new(
-                    &device,
-                    RendererOptions {
-                        antialiasing_support: AaSupport::all(),
-                        ..Default::default()
-                    },
-                )
-                .expect("create vello renderer"),
-            ))
-        });
+        let renderer = renderer.unwrap_or_else(|| new_renderer(&device, None));
         let target_width = config.width * SUPERSAMPLE;
         let target_height = config.height * SUPERSAMPLE;
         let (target, target_view) = create_targets(target_width, target_height, &device);
@@ -382,6 +414,27 @@ impl Render {
         if let Some(p) = &self.presenter {
             p.window.set_ime_allowed(allowed);
         }
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn detach_surface(&mut self) {
+        // Android requires the Surface/ANativeWindow references gone before suspend returns.
+        // Compiled pipelines and the device do not own that surface and survive independently.
+        self.presenter = None;
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn attach_surface(&mut self, window: Arc<Window>) {
+        let surface = self.instance.create_surface(window.clone()).expect("resume surface");
+        let size = window.inner_size();
+        let config = configure(&surface, &self.adapter, &self.device, size);
+        if self.config.format != config.format {
+            self.blitter = wgpu::util::TextureBlitter::new(&self.device, config.format);
+        }
+        self.config = config;
+        self.scale = window.scale_factor();
+        self.presenter = Some(Presenter { window, surface });
+        self.resize(size);
     }
 
     pub fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -426,6 +479,13 @@ impl Render {
     pub fn request_redraw(&self) {
         if let Some(p) = &self.presenter {
             p.window.request_redraw();
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn fullscreen(&self, enabled: bool) {
+        if let Some(p) = &self.presenter {
+            p.window.set_fullscreen(enabled.then_some(winit::window::Fullscreen::Borderless(None)));
         }
     }
 
@@ -529,6 +589,11 @@ impl Render {
         self.blitter
             .copy(&self.device, &mut encoder, &self.target_view, &view);
         self.queue.submit([encoder.finish()]);
+        // On Wayland this holds the next `RedrawRequested` until the compositor's frame callback,
+        // which a hidden window never gets: no frame, so no FIFO present that blocks the event loop.
+        if let Some(p) = &self.presenter {
+            p.window.pre_present_notify();
+        }
         frame.present();
         true
     }

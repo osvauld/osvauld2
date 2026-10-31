@@ -299,7 +299,8 @@ pub enum LuaMsg {
     CallDrag(Key, DragArgs),
     CallWheel(Key, f32, f32),
     CallZoom(Key, f32),
-    CallFrame(Key, f32, f64),
+    CallFrame(Key, f32, f64, (f32, f32)),
+    CallTouch(Key, runtime::TouchInput),
     CallKey(Key, runtime::KeyInput),
     /// A `ui.world`'s frame tick, `(world id, dt, elapsed)`: runs that world in Rust, no Lua.
     TickWorld(String, f64, f64),
@@ -1173,9 +1174,22 @@ impl<M: Clone + 'static> LuaApp<M> {
                 event.set("dy", dy)?;
             }
             LuaMsg::CallZoom(_, scale) => event.set("scale", scale)?,
-            LuaMsg::CallFrame(_, dt, elapsed) => {
+            LuaMsg::CallFrame(_, dt, elapsed, size) => {
                 event.set("dt", dt)?;
                 event.set("elapsed", elapsed)?;
+                event.set("width", size.0)?;
+                event.set("height", size.1)?;
+            }
+            LuaMsg::CallTouch(_, input) => {
+                event.set("finger", input.id.to_string())?;
+                event.set("phase", match input.phase {
+                    runtime::TouchPhase::Started => "start",
+                    runtime::TouchPhase::Moved => "move",
+                    runtime::TouchPhase::Ended => "end",
+                    runtime::TouchPhase::Cancelled => "cancel",
+                })?;
+                event.set("x", input.pos.0)?;
+                event.set("y", input.pos.1)?;
             }
             LuaMsg::CallKey(_, input) => {
                 event.set("cancelled", input.cancelled)?;
@@ -1293,7 +1307,8 @@ impl<M: Clone + 'static> LuaApp<M> {
             | LuaMsg::CallDrag(k, _)
             | LuaMsg::CallWheel(k, _, _)
             | LuaMsg::CallZoom(k, _)
-            | LuaMsg::CallFrame(k, _, _)
+            | LuaMsg::CallFrame(k, _, _, _)
+            | LuaMsg::CallTouch(k, _)
             | LuaMsg::CallKey(k, _) => k,
             LuaMsg::TickWorld(..) | LuaMsg::KeyWorld(..) => unreachable!("handled above"),
         };
@@ -1302,7 +1317,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         };
         let _scope = self.host_context.enter();
         self.worlds3d.commanding.set(matches!(key.name,
-            "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key"));
+            "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key" | "on_touch"));
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
