@@ -7,6 +7,7 @@
 
 mod app_src;
 mod app_thread;
+mod bundled;
 mod native_rects;
 mod bridge;
 mod indexer;
@@ -692,10 +693,18 @@ fn finish_auth(vault: &mut Vault, outcome: AuthOutcome) -> (Response, Option<Scr
     match outcome {
         AuthOutcome::Signup(job) => match job.lock().unwrap().take() {
             Some(Ok(prepared)) => match vault.commit_signup(prepared) {
-                Ok((_did, mnemonic)) => (
-                    Response::ok(serde_json::json!({ "mnemonic": mnemonic.to_string() })),
-                    Some(Screen::Spaces(SpaceScreen::new(vault))),
-                ),
+                Ok((_did, mnemonic)) => {
+                    // A failed install leaves a working account; the signup still succeeded.
+                    if let Some(dir) = bundled::dir()
+                        && let Err(e) = bundled::install(vault, &dir)
+                    {
+                        eprintln!("bundled apps from {}: {e}", dir.display());
+                    }
+                    (
+                        Response::ok(serde_json::json!({ "mnemonic": mnemonic.to_string() })),
+                        Some(Screen::Spaces(SpaceScreen::new(vault))),
+                    )
+                }
                 Err(e) => (Response::err(e.to_string()), None),
             },
             Some(Err(e)) => (Response::err(e), None),

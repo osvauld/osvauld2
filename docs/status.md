@@ -10,6 +10,20 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### iOS (2026-10-31, in progress) — [plan](design/ios.md)
+- `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable
+  `mac` peer bundles, ad-hoc signs, installs, launches and screenshots. No Xcode project.
+- Launch blockers fixed: iOS 26's UIScene requirement (stopgap: `vtool` SDK-18 stamp; winit 0.30
+  lacks UIScene), and `max_inter_stage_shader_variables` (devices now request `adapter.limits()`).
+- The simulator's Apple2 Metal has no indirect dispatch, so vello cannot draw there: the
+  simulator proves build and launch only. Drawing is tested on real iPhones with
+  `scripts/ios/run_device.sh` (own Apple account; untested as written). No iOS frame drawn yet.
+- Bundled apps (I4): `shell2::bundled` installs every app in `OSVAULD_BUNDLED_APPS` (iOS: `apps/`
+  in the `.app`, Jetpack) into an "Apps" space at signup. `smoke_bundled_apps.py` green.
+- Bridge client creates a screenshot's folder (`shots/` is gitignored, absent on workers).
+- verified: `cargo check --workspace`, `cargo test -p runtime --lib`, full `smoke.py` on nixos.
+- next: first device run (I2), a bridge for device tests (I3), safe areas, UIScene.
+
 ### Jetpack Arena — review worktree (2026-10-26)
 
 Implemented in `jetpack-arena`, not committed or merged: original Lua vector arena, two flying

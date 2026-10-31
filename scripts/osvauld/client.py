@@ -264,6 +264,8 @@ class Bridge:
         from pathlib import Path
 
         result = self.screenshot(item_id, **size)
+        # `shots/` is gitignored, so a checkout synced to a worker doesn't have it.
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(base64.b64decode(result["png_base64"], validate=True))
         return {k: result[k] for k in ("width_px", "height_px")}
 
@@ -272,6 +274,7 @@ class Bridge:
         from pathlib import Path
 
         result = self.request("ScreenshotShell", width=width, height=height, scale=scale)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(base64.b64decode(result["png_base64"], validate=True))
         return {k: result[k] for k in ("width_px", "height_px")}
 

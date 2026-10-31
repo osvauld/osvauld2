@@ -114,6 +114,9 @@ async fn open_device(
             // sweeps in experimental features that need a separate opt-in and fail to enable.
             required_features: adapter.features()
                 & (wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE),
+            // The adapter's own limits, not wgpu's defaults: the iOS simulator's Metal falls one
+            // short of the default `max_inter_stage_shader_variables` (15 < 16).
+            required_limits: adapter.limits(),
             ..Default::default()
         })
         .await
