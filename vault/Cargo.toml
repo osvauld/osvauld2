@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 identity = { path = "../identity" }
+cryptography = { path = "../cryptography" }
 storage = { path = "../storage" }
+zeroize = { workspace = true }
 workspace = { path = "../workspace" }
 dirs = "5"
 thiserror = { workspace = true }

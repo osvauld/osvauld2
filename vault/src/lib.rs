@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use identity::{Identity, Keystore, Mnemonic, Signer};
+use rand::RngCore;
 pub use storage::Store;
+use zeroize::Zeroizing;
 
 pub use account::AccountInfo;
 pub use error::VaultError;
@@ -25,6 +27,10 @@ use account::{did_to_filename, scan_dids};
 
 const KEYSTORE_KEY: &str = "identity/keystore";
 const LABEL_KEY: &str = "identity/label";
+// This install's device key, sealed like everything else below the keystore. Random, not
+// derived: the phrase-derived device key is the same on every install of one person, and
+// two installs must not share an iroh endpoint id.
+const DEVICE_KEY: &str = "identity/device";
 
 // The currently unlocked account. `did` and `label` are cached so `accounts()` never has
 // to re-open the live db (redb allows a single handle per file).
@@ -138,6 +144,7 @@ impl Vault {
             identity,
             store,
         });
+        self.ensure_device_key()?;
         Ok((did, mnemonic))
     }
 
@@ -184,7 +191,36 @@ impl Vault {
             identity,
             store,
         });
+        // An account from before device keys gets one on its first unlock here.
+        self.ensure_device_key()?;
         Ok(())
+    }
+
+    fn ensure_device_key(&self) -> Result<(), VaultError> {
+        if self.get_sealed(DEVICE_KEY)?.is_some() {
+            return Ok(());
+        }
+        let mut secret = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(&mut *secret);
+        self.put_sealed(DEVICE_KEY, &*secret)
+    }
+
+    /// This install's device key, the one iroh binds with — so unlike the identity it is
+    /// handed out, zeroized when the caller drops it. The DID vouches for it through
+    /// `courier::attest`.
+    pub fn device_secret(&self) -> Result<Zeroizing<[u8; 32]>, VaultError> {
+        let bytes = Zeroizing::new(self.get_sealed(DEVICE_KEY)?.ok_or(VaultError::NoDeviceKey)?);
+        let mut secret = Zeroizing::new([0u8; 32]);
+        if bytes.len() != secret.len() {
+            return Err(VaultError::NoDeviceKey);
+        }
+        secret.copy_from_slice(&bytes);
+        Ok(secret)
+    }
+
+    /// Its public half: the endpoint id peers dial and attestations name.
+    pub fn device_public_key(&self) -> Result<[u8; 32], VaultError> {
+        Ok(cryptography::signature::public_key(&*self.device_secret()?))
     }
 
     pub fn lock(&mut self) {

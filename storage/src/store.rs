@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StorageError;
 
@@ -9,6 +9,15 @@ use crate::error::StorageError;
 // ("space/page/layer/shard"); redb keeps keys sorted, so prefix/range scans are
 // available to add later without a schema change.
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("store");
+
+/// One step of an atomic write, see [`Store::apply`].
+#[derive(Debug, Clone)]
+pub enum Op {
+    Put(String, Vec<u8>),
+    Delete(String),
+    /// Every key that begins with the prefix.
+    DeletePrefix(String),
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -49,20 +58,39 @@ impl Store {
     }
 
     pub fn put(&self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        let txn = self.db.begin_write()?;
-        {
-            let mut table = txn.open_table(TABLE)?;
-            table.insert(key, value)?;
-        }
-        txn.commit()?;
-        Ok(())
+        self.apply(&[Op::Put(key.to_string(), value.to_vec())])
     }
 
     pub fn delete(&self, key: &str) -> Result<(), StorageError> {
+        self.apply(&[Op::Delete(key.to_string())])
+    }
+
+    pub fn delete_prefix(&self, prefix: &str) -> Result<(), StorageError> {
+        self.apply(&[Op::DeletePrefix(prefix.to_string())])
+    }
+
+    /// Every op in one transaction: after a crash either all of them happened or none did.
+    /// Ops apply in order, so a `Put` after a `DeletePrefix` of its own prefix survives.
+    pub fn apply(&self, ops: &[Op]) -> Result<(), StorageError> {
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(TABLE)?;
-            table.remove(key)?;
+            for op in ops {
+                match op {
+                    Op::Put(key, value) => {
+                        table.insert(key.as_str(), value.as_slice())?;
+                    }
+                    Op::Delete(key) => {
+                        table.remove(key.as_str())?;
+                    }
+                    Op::DeletePrefix(prefix) => {
+                        let keys = keys_under(&table, prefix)?;
+                        for key in keys {
+                            table.remove(key.as_str())?;
+                        }
+                    }
+                }
+            }
         }
         txn.commit()?;
         Ok(())
@@ -74,17 +102,40 @@ impl Store {
     pub fn list_prefixed(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(TABLE)?;
-        let mut keys = Vec::new();
+        keys_under(&table, prefix)
+    }
+
+    /// Every `(key, value)` under `prefix`, in key order — one read transaction, where
+    /// `list_prefixed` followed by a `get` per key would be many.
+    pub fn scan(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(TABLE)?;
+        let mut rows = Vec::new();
         for item in table.range(prefix..)? {
-            let (key, _value) = item?;
-            let key = key.value();
-            if !key.starts_with(prefix) {
+            let (key, value) = item?;
+            if !key.value().starts_with(prefix) {
                 break;
             }
-            keys.push(key.to_string());
+            rows.push((key.value().to_string(), value.value().to_vec()));
         }
-        Ok(keys)
+        Ok(rows)
     }
+}
+
+fn keys_under(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    prefix: &str,
+) -> Result<Vec<String>, StorageError> {
+    let mut keys = Vec::new();
+    for item in table.range(prefix..)? {
+        let (key, _value) = item?;
+        let key = key.value();
+        if !key.starts_with(prefix) {
+            break;
+        }
+        keys.push(key.to_string());
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]

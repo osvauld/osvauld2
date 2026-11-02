@@ -35,7 +35,16 @@ vault.get_doc / put_doc(ws, item, snapshot, name) // its state docs, name-keyed
 vault.put_entry / get_entry / delete_entry(name)     // opaque sealed records, reserved namespace
 vault.list_entries(prefix)                          // their names, sorted, prefix-scanned
 vault.with_signer(|signer| …)                     // sign as the account; None when locked
+vault.device_public_key() / device_secret()       // this install's key — the iroh endpoint id
 ```
+
+**The device key** (added 2026-11-02, [laptop-host](design/laptop-host.md) step 2) is random,
+made the first time an account is opened on a machine, and sealed at `identity/device`. It is
+*not* the phrase-derived `Signer::device_public_key`: that one is the same on every install of
+one person, and two installs must not share an endpoint id. Unlike the identity, the secret is
+handed out (`device_secret`, zeroized on drop) because iroh binds with it; the DID vouches for
+it through `courier::attest`. A copy of the account db to another machine carries the key with
+it — that is the same device moving, not a second one.
 
 **Entries** (added 2026-09-19) are records the account keeps for itself outside the
 workspace/item tree — the node's role tokens, lineage and revocations; a desktop's node
@@ -69,6 +78,7 @@ is sealed to the account's encryption key:**
 ```
 identity/keystore                 Argon2-passphrase-sealed identity
 identity/label                    display name (plain)
+identity/device                   this install's device key, sealed (laptop-host step 2)
 ws/<id>/meta                      WorkspaceMeta { id, name, created }
 ws/<ws>/item/<id>/meta            WorkspaceItem { id, ws, name, kind, created }
 ws/<ws>/item/<id>/src             an .app's source doc — a Loro snapshot, sealed

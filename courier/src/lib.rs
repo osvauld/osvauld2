@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod access;
+pub mod attest;
 pub mod invite;
 pub mod policy;
 pub mod proof;

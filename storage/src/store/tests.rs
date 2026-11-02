@@ -1,4 +1,4 @@
-use super::Store;
+use super::{Op, Store};
 
 fn mem() -> Store {
     Store::open_in_memory().unwrap()
@@ -76,4 +76,50 @@ fn open_readonly_missing_file_errors() {
         rand::random::<u64>()
     ));
     assert!(Store::open_readonly(&path).is_err());
+}
+
+#[test]
+fn apply_runs_ops_in_order_in_one_commit() {
+    let store = mem();
+    store.put("a/1", b"old").unwrap();
+    store.put("a/2", b"two").unwrap();
+    store.put("b/1", b"keep").unwrap();
+    store
+        .apply(&[
+            Op::DeletePrefix("a/".into()),
+            Op::Put("a/1".into(), b"new".to_vec()),
+            Op::Put("c/1".into(), b"c".to_vec()),
+            Op::Delete("c/1".into()),
+        ])
+        .unwrap();
+    assert_eq!(store.get("a/1").unwrap(), Some(b"new".to_vec()));
+    assert_eq!(store.get("a/2").unwrap(), None);
+    assert_eq!(store.get("b/1").unwrap(), Some(b"keep".to_vec()));
+    assert_eq!(store.get("c/1").unwrap(), None);
+}
+
+#[test]
+fn delete_prefix_stops_at_the_prefix() {
+    let store = mem();
+    store.put("order", b"1").unwrap();
+    store.put("orders/1", b"2").unwrap();
+    store.put("orders/2", b"3").unwrap();
+    store.delete_prefix("orders/").unwrap();
+    assert_eq!(store.list_prefixed("").unwrap(), vec!["order".to_string()]);
+}
+
+#[test]
+fn scan_returns_rows_under_prefix_in_key_order() {
+    let store = mem();
+    store.put("x/2", b"second").unwrap();
+    store.put("x/1", b"first").unwrap();
+    store.put("y/1", b"other").unwrap();
+    assert_eq!(
+        store.scan("x/").unwrap(),
+        vec![
+            ("x/1".to_string(), b"first".to_vec()),
+            ("x/2".to_string(), b"second".to_vec()),
+        ]
+    );
+    assert!(store.scan("z/").unwrap().is_empty());
 }

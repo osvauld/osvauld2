@@ -14,8 +14,15 @@ Store::open_readonly(path) // open an existing db without creating or initializi
 store.get(key)    -> Option<Vec<u8>>   // key = a sortable path string
 store.put(key, &[u8])                  // one atomic, durable commit
 store.delete(key)
+store.delete_prefix(prefix)
+store.apply(&[Op])                     // Put / Delete / DeletePrefix, in order, one commit
 store.list_prefixed(prefix) -> Vec<String>   // ordered key listing for a prefix
+store.scan(prefix) -> Vec<(String, Vec<u8>)> // the rows too, one read transaction
 ```
+
+`apply` (added 2026-11-02, laptop-host step 2) is for the writes that must land together —
+an issued token and the spent nonce it consumed — so a crash between them cannot leave one
+without the other. `put` and `delete` are one-op applies.
 
 - **Keys** are `&str` — the full hierarchical path, e.g. `"space/page/layer/shard"`.
   There is no separate "namespace" argument: the namespace is just the leading part of

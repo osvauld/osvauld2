@@ -24,6 +24,48 @@ fn delayed_workspace_creation_cannot_write_into_another_account() {
 }
 
 #[test]
+fn device_key_is_per_account_per_install_and_survives_relogin() {
+    let (mut vault, _tmp) = fresh();
+    let (alice, _) = vault.signup("alice", "pw").unwrap();
+    let key = vault.device_public_key().unwrap();
+    assert_eq!(
+        key,
+        cryptography::signature::public_key(&*vault.device_secret().unwrap())
+    );
+    vault.lock();
+    assert!(matches!(vault.device_public_key(), Err(VaultError::Locked)));
+    vault.login(&alice, "pw").unwrap();
+    assert_eq!(vault.device_public_key().unwrap(), key);
+    vault.lock();
+    vault.signup("bob", "pw").unwrap();
+    assert_ne!(vault.device_public_key().unwrap(), key);
+}
+
+#[test]
+fn device_key_is_sealed_at_rest() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("alice", "pw").unwrap();
+    let secret = vault.device_secret().unwrap();
+    let raw = vault.store().unwrap().get("identity/device").unwrap().unwrap();
+    assert_ne!(raw.as_slice(), secret.as_slice());
+    assert!(
+        !raw.windows(secret.len()).any(|w| w == secret.as_slice()),
+        "the secret is in the file in the clear"
+    );
+}
+
+#[test]
+fn an_account_from_before_device_keys_gets_one_on_login() {
+    let (mut vault, _tmp) = fresh();
+    let (alice, _) = vault.signup("alice", "pw").unwrap();
+    vault.store().unwrap().delete("identity/device").unwrap();
+    assert!(matches!(vault.device_public_key(), Err(VaultError::NoDeviceKey)));
+    vault.lock();
+    vault.login(&alice, "pw").unwrap();
+    assert!(vault.device_public_key().is_ok());
+}
+
+#[test]
 fn empty_vault_has_no_accounts() {
     let (vault, _tmp) = fresh();
     assert!(vault.is_empty());

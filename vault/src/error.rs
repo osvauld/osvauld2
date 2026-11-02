@@ -10,6 +10,8 @@ pub enum VaultError {
     NoSuchAccount(String),
     #[error("account has no keystore")]
     NoKeystore,
+    #[error("account has no device key")]
+    NoDeviceKey,
     #[error("not a valid did: {0}")]
     BadDid(String),
     #[error("vault is locked")]
