@@ -105,7 +105,7 @@ fn an_account_hosts_for_itself_without_a_socket() {
     // A listen registers with the in-process registry and never touches a socket.
     let mut pushes = listen(&link, &alice, &did, record.token.clone()).unwrap();
     assert!(matches!(pushes, Pushes::Here(_)));
-    registry().push(&did, &kunki::push::Push { ws_id: ws.id.clone(), item_id: item.id.clone(), layer: SyncLayer::Doc("notes".into()), snapshot: vec![1] });
+    registry().push(&did, &kunki::push::Push { ws_id: ws.id.clone(), item_id: item.id.clone(), layer: SyncLayer::Doc("notes".into()), snapshot: vec![1], author: String::new(), origin: String::new() });
     assert_eq!(next_push(&mut pushes).unwrap().snapshot, vec![1]);
 }
 

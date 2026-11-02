@@ -23,6 +23,13 @@ pub struct Push {
     pub item_id: String,
     pub layer: SyncLayer,
     pub snapshot: Vec<u8>,
+    /// Who wrote the update this carries, and from which of their sessions (the request id's
+    /// session part; empty for a desktop over the socket). A pusher that can tell a member's
+    /// sessions apart skips only the originating one, so their other device still hears.
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub origin: String,
 }
 
 pub trait Pusher {
@@ -30,6 +37,13 @@ pub trait Pusher {
     /// (subscriber offline, connection refused) is not an error the caller should branch on —
     /// fanout finishes the same way whether every push lands or none do.
     fn push(&self, subscriber_did: &str, update: &Push);
+
+    /// Whether fan-out should leave the author out altogether. True for a pusher with one
+    /// channel per DID (the socket's `LiveRegistry`): the author's own update back to it is
+    /// noise. False for one that can skip just the originating session.
+    fn excludes_author(&self) -> bool {
+        true
+    }
 }
 
 /// Delivers nothing. Kept for tests and any bridge path that doesn't care about push — the

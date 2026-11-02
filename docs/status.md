@@ -700,7 +700,14 @@ the gate; all red after step 1.
   notice and redial, a remembered UDP port, a shell clock `Advance` moves. The chat suite
   passes in host mode (`OSVAULD_E2E_HOST=1`: t1–t5, t8, t13, t15, t23a, t8a, t10a, t15a,
   t20a) and still in node mode. Plan §2 carries the as-built revision. Not yet: copy/paste
-  UI, idle close, the headless host (H7), mobile (H8).
+  UI, idle close, the headless host (H7), mobile (H8). Review fixes: every session message
+  carries the dial's sequence and is dropped when stale, and is generation-guarded; a
+  closed doc's merge runs inline on the UI thread (one writer per doc, never racing an
+  open); `accept_into` decodes the version vector before touching a live doc; an
+  unreachable host fails the open instead of letting the app seed; fan-out skips only the
+  author's originating *session* (`Push.author`/`origin`), so their other device hears;
+  the `Hello` admission is a pure `host::admit` with four tests (T16's host half). Carried
+  to step 7: lifting the acceptor/admission/loop out of the shell for the headless host.
 
 ### Android support — shell and physical-device validation remain
 

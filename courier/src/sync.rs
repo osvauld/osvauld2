@@ -301,6 +301,9 @@ pub fn accept_into(
         now,
         revoked,
     )?;
+    // Everything that can fail is decided before the doc changes — the version vector too,
+    // or a bad one would be answered with an error after the update had already landed.
+    let their_vv = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;
     let before = doc.oplog_vv();
     // Opening a doc syncs it before anything is written, so the node may hold an empty copy.
     if !before.is_empty() && !access.read {
@@ -336,7 +339,6 @@ pub fn accept_into(
             .map_err(|_| CourierError::Decode)?;
     }
 
-    let their_vv = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;
     let ours = doc.oplog_vv();
     let diff = doc
         .export(ExportMode::updates(&their_vv))

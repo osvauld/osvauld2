@@ -38,3 +38,4 @@ rfd = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+cryptography = { path = "../cryptography" }

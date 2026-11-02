@@ -8,6 +8,8 @@ fn push(item_id: &str) -> Push {
         item_id: item_id.to_string(),
         layer: SyncLayer::Doc("board".to_string()),
         snapshot: b"snapshot-bytes".to_vec(),
+        author: String::new(),
+        origin: String::new(),
     }
 }
 

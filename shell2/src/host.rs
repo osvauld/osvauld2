@@ -3,6 +3,9 @@
 //! space). Every update a member sends is merged by the shell's UI thread (`Msg::HostSync`):
 //! into the live doc when the owner has the app open, into the vault when not — one copy per
 //! doc. Accepted updates fan out to the other sessions on that space through [`pusher`].
+//!
+//! Step 7 lifts the acceptor, [`admit`] and the loop out of the shell for the headless host;
+//! what ties them here is `Msg`/the proxy, nothing else.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +16,7 @@ use courier::link::HostAddr;
 use courier::publish::{PublishedItem, PublishedWorkspace};
 use courier::session::{DocState, Frame};
 use courier::subscribe::SubscribeHello;
-use courier::sync::{SyncHello, SyncReply};
+use courier::sync::{SyncHello, SyncLayer, SyncReply};
 use courier::token::Token;
 use iroh::endpoint::{Connection, SendStream};
 use iroh::{Endpoint, EndpointAddr};
@@ -28,54 +31,51 @@ use vault::Vault;
 
 use crate::{Msg, Slot, clock, node};
 
+/// One live session's end, by id: the relay target.
+#[derive(Clone)]
+struct Live {
+    sid: u64,
+    tx: UnboundedSender<Frame>,
+}
+
 /// Live sessions by (member did, space), for relaying an accepted update to everyone else on
 /// that space. One member may hold several (a phone and a laptop), each its own session.
 #[derive(Clone, Default)]
-pub struct Sessions(Arc<Mutex<HashMap<(String, String), Vec<UnboundedSender<Frame>>>>>);
+pub struct Sessions(Arc<Mutex<HashMap<(String, String), Vec<Live>>>>);
 
 impl Sessions {
-    fn add(&self, did: &str, ws: &str, tx: UnboundedSender<Frame>) {
+    fn add(&self, did: &str, ws: &str, live: Live) {
         self.0
             .lock()
             .unwrap()
             .entry((did.to_string(), ws.to_string()))
             .or_default()
-            .push(tx);
+            .push(live);
     }
 
-    fn remove(&self, did: &str, ws: &str, tx: &UnboundedSender<Frame>) {
+    fn remove(&self, did: &str, ws: &str, sid: u64) {
         let mut all = self.0.lock().unwrap();
         let key = (did.to_string(), ws.to_string());
         if let Some(list) = all.get_mut(&key) {
-            list.retain(|t| !t.same_channel(tx));
+            list.retain(|l| l.sid != sid);
             if list.is_empty() {
                 all.remove(&key);
             }
         }
     }
 
-    fn send(&self, did: &str, ws: &str, frame: &Frame) {
+    /// To every session of `did` on `ws` but `except` — the one the update came in on.
+    fn send(&self, did: &str, ws: &str, frame: &Frame, except: Option<u64>) {
         if let Some(list) = self
             .0
             .lock()
             .unwrap()
             .get(&(did.to_string(), ws.to_string()))
         {
-            for tx in list {
-                let _ = tx.send(frame.clone());
+            for live in list.iter().filter(|l| Some(l.sid) != except) {
+                let _ = live.tx.send(frame.clone());
             }
         }
-    }
-
-    /// Members with a session open on `ws` right now.
-    pub fn members_on(&self, ws: &str) -> Vec<String> {
-        self.0
-            .lock()
-            .unwrap()
-            .keys()
-            .filter(|(_, w)| w == ws)
-            .map(|(d, _)| d.clone())
-            .collect()
     }
 }
 
@@ -85,22 +85,37 @@ pub fn sessions() -> &'static Sessions {
     SESSIONS.get_or_init(Sessions::default)
 }
 
-/// Where an accepted update goes: the owner's own in-process listener (`node::registry`),
-/// and every member session on the space. The owner's open app merged a live update
-/// already, so its push merges a no-op; a member gets the host's merged snapshot.
+/// The origin an owner's own fan-out carries: nothing to skip but the owner's own listener.
+pub const HERE: &str = "here";
+
+/// Where an accepted update goes: every member session on the space except the one it came
+/// in on, and the owner's own in-process listener (`node::registry`) unless the owner wrote
+/// it — its open app merged that already.
 pub struct HostPusher;
 
 impl Pusher for HostPusher {
     fn push(&self, subscriber_did: &str, update: &Push) {
-        node::registry().push(subscriber_did, update);
+        if !(update.origin == HERE && subscriber_did == update.author) {
+            node::registry().push(subscriber_did, update);
+        }
         let frame = Frame::Update {
             item_id: update.item_id.clone(),
             layer: update.layer.clone(),
             vv: Vec::new(),
             update: update.snapshot.clone(),
         };
-        sessions().send(subscriber_did, &update.ws_id, &frame);
+        let except = session_of(&update.origin).filter(|_| subscriber_did == update.author);
+        sessions().send(subscriber_did, &update.ws_id, &frame, except);
     }
+
+    fn excludes_author(&self) -> bool {
+        false
+    }
+}
+
+/// The session a request id names: `<session>/<n>`.
+fn session_of(request_id: &str) -> Option<u64> {
+    request_id.split('/').next()?.parse().ok()
 }
 
 pub fn pusher() -> &'static HostPusher {
@@ -160,6 +175,7 @@ pub fn serve(net: &net::Net, ctx: HostCtx) {
 }
 
 static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
+static SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 
 async fn serve_conn(conn: Connection, ctx: HostCtx, codes: Arc<Mutex<Codes>>) {
     let remote = *conn.remote_id().as_bytes();
@@ -186,10 +202,11 @@ async fn serve_conn(conn: Connection, ctx: HostCtx, codes: Arc<Mutex<Codes>>) {
                     claim,
                     docs,
                 } => {
-                    session(
-                        &ctx, remote, attestation, ws_id, token, claim, docs, send, frames,
-                    )
-                    .await
+                    let admin = Admin::new(ctx.vault.clone());
+                    match admit(&admin, remote, &attestation, token, claim, clock::now_secs()) {
+                        Ok(admitted) => session(&ctx, admin, admitted, ws_id, docs, send, frames).await,
+                        Err(reason) => refuse(send, &reason).await,
+                    }
                 }
                 _ => refuse(send, "a stream starts with Hello or Fetch").await,
             };
@@ -281,44 +298,60 @@ async fn fetch(
     Ok(())
 }
 
-static REQ_SEQ: AtomicU64 = AtomicU64::new(1);
+/// Who a `Hello` admitted, and with what.
+#[derive(Debug)]
+pub struct Admitted {
+    pub did: String,
+    pub token: Token,
+    /// Minted now for a claim, to be handed back in `Welcome`.
+    pub minted: Option<Token>,
+}
 
-/// A member's session: proven by the transport (the device key) and the attestation (whose
-/// device it is), admitted by a token held or an invite claimed, then updates both ways
-/// until either side closes.
-#[allow(clippy::too_many_arguments)]
-async fn session(
-    ctx: &HostCtx,
+/// The whole of a session's admission, so it can be tested without a connection: the
+/// transport proved `remote` holds the device key; the attestation must be that device's and
+/// name the account; then a token held, or an invite claimed by that same account.
+pub fn admit(
+    admin: &Admin,
     remote: [u8; 32],
-    attestation: String,
-    ws_id: String,
+    attestation: &str,
     token: Option<Token>,
     claim: Option<InviteClaimHello>,
-    docs: Vec<DocState>,
-    mut send: SendStream,
-    mut frames: FrameBuf,
-) -> Result<(), String> {
-    let now = clock::now_secs();
-    let did = match courier::attest::verify_attestation(&attestation) {
+    now: u64,
+) -> Result<Admitted, String> {
+    let did = match courier::attest::verify_attestation(attestation) {
         Ok(a) if a.device == remote => a.did,
-        Ok(_) => return refuse(send, "refused: the attestation names another device").await,
-        Err(e) => return refuse(send, &format!("refused: attestation: {e}")).await,
+        Ok(_) => return Err("refused: the attestation names another device".into()),
+        Err(e) => return Err(format!("refused: attestation: {e}")),
     };
-    let admin = Admin::new(ctx.vault.clone());
     let (token, minted) = match (token, claim) {
         (Some(token), _) => (token, None),
         (None, Some(claim)) => {
             if claim.desktop_did != did {
-                return refuse(send, "refused: the claim names another account").await;
+                return Err("refused: the claim names another account".into());
             }
-            match admin.accept_invite(claim, now) {
-                Ok(welcome) => (welcome.token.clone(), Some(welcome.token)),
-                Err(e) => return refuse(send, &format!("refused: {e}")).await,
-            }
+            let welcome = admin
+                .accept_invite(claim, now)
+                .map_err(|e| format!("refused: {e}"))?;
+            (welcome.token.clone(), Some(welcome.token))
         }
-        (None, None) => return refuse(send, "refused: no token and no claim").await,
+        (None, None) => return Err("refused: no token and no claim".into()),
     };
-    let subscribe = |item_id: &str, layer: &courier::sync::SyncLayer| {
+    Ok(Admitted { did, token, minted })
+}
+
+/// An admitted member's session: updates both ways until either side closes.
+async fn session(
+    ctx: &HostCtx,
+    admin: Admin,
+    admitted: Admitted,
+    ws_id: String,
+    docs: Vec<DocState>,
+    mut send: SendStream,
+    mut frames: FrameBuf,
+) -> Result<(), String> {
+    let Admitted { did, token, minted } = admitted;
+    let now = clock::now_secs();
+    let subscribe = |item_id: &str, layer: &SyncLayer| {
         admin.subscribe(
             &SubscribeHello {
                 desktop_did: did.clone(),
@@ -335,12 +368,14 @@ async fn session(
             return refuse(send, &format!("refused: {e}")).await;
         }
     }
+    let sid = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = unbounded_channel::<Frame>();
-    sessions().add(&did, &ws_id, tx.clone());
+    sessions().add(&did, &ws_id, Live { sid, tx });
     let welcome = Frame::Welcome {
         token: minted,
         docs: Vec::new(),
     };
+    let mut seq = 0u64;
     let result = async {
         send_frame(&mut send, &welcome, MAX_FRAME)
             .await
@@ -349,43 +384,47 @@ async fn session(
             tokio::select! {
                 incoming = frames.recv::<Frame>(MAX_FRAME) => match incoming {
                     Ok(Some(Frame::Update { item_id, layer, vv, update })) => {
-                        if let Err(e) = subscribe(&item_id, &layer) {
-                            send_frame(&mut send, &Frame::Refused { reason: e.to_string() }, MAX_FRAME).await.map_err(|e| e.to_string())?;
-                            continue;
-                        }
-                        let hello = SyncHello {
-                            request_id: format!("s{}", REQ_SEQ.fetch_add(1, Ordering::Relaxed)),
-                            desktop_did: did.clone(),
-                            token: token.clone(),
-                            ws_id: ws_id.clone(),
-                            item_id: item_id.clone(),
-                            layer: layer.clone(),
-                            vv,
-                            update,
-                        };
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        ctx.proxy
-                            .send_event(Msg::HostSync(ctx.gen_, hello, Slot::new(reply_tx)))
-                            .map_err(|_| "shell gone".to_string())?;
-                        let reply = match reply_rx.await {
-                            // The update first, always — a member pulling a doc before it
-                            // seeds waits for exactly one `Update`, empty when there is
-                            // nothing — then the ack that moves its `since`.
-                            Ok(Ok(SyncReply::Ack(ack))) => vec![
-                                Frame::Update { item_id: item_id.clone(), layer: layer.clone(), vv: ack.vv.clone(), update: ack.update },
-                                Frame::Ack { item_id, layer, vv: ack.vv, missing: ack.missing },
-                            ],
-                            Ok(Ok(SyncReply::Rejected(rejected))) => vec![Frame::Rejected { item_id, layer, rejected }],
-                            // Refused outright (a doc the member may not read, a stale
-                            // generation): still one empty `Update`, so a pull waiting on
-                            // this doc is answered rather than timed out.
-                            Ok(Err(reason)) => vec![
+                        let out = match subscribe(&item_id, &layer) {
+                            // The empty `Update` first, as for every refusal: a pull waiting
+                            // on this doc is answered, not timed out.
+                            Err(e) => vec![
                                 Frame::Update { item_id, layer, vv: Vec::new(), update: Vec::new() },
-                                Frame::Refused { reason },
+                                Frame::Refused { reason: e.to_string() },
                             ],
-                            Err(_) => return Err("reply dropped".to_string()),
+                            Ok(()) => {
+                                seq += 1;
+                                let hello = SyncHello {
+                                    request_id: format!("{sid}/{seq}"),
+                                    desktop_did: did.clone(),
+                                    token: token.clone(),
+                                    ws_id: ws_id.clone(),
+                                    item_id: item_id.clone(),
+                                    layer: layer.clone(),
+                                    vv,
+                                    update,
+                                };
+                                let (reply_tx, reply_rx) = oneshot::channel();
+                                ctx.proxy
+                                    .send_event(Msg::HostSync(ctx.gen_, hello, Slot::new(reply_tx)))
+                                    .map_err(|_| "shell gone".to_string())?;
+                                match reply_rx.await {
+                                    // The update first, always — a member pulling a doc before
+                                    // it seeds waits for exactly one `Update`, empty when there
+                                    // is nothing — then the ack that moves its `since`.
+                                    Ok(Ok(SyncReply::Ack(ack))) => vec![
+                                        Frame::Update { item_id: item_id.clone(), layer: layer.clone(), vv: ack.vv.clone(), update: ack.update },
+                                        Frame::Ack { item_id, layer, vv: ack.vv, missing: ack.missing },
+                                    ],
+                                    Ok(Ok(SyncReply::Rejected(rejected))) => vec![Frame::Rejected { item_id, layer, rejected }],
+                                    Ok(Err(reason)) => vec![
+                                        Frame::Update { item_id, layer, vv: Vec::new(), update: Vec::new() },
+                                        Frame::Refused { reason },
+                                    ],
+                                    Err(_) => return Err("reply dropped".to_string()),
+                                }
+                            }
                         };
-                        for frame in out_frames(reply) {
+                        for frame in out {
                             send_frame(&mut send, &frame, MAX_FRAME).await.map_err(|e| e.to_string())?;
                         }
                     }
@@ -420,10 +459,9 @@ async fn session(
         }
     }
     .await;
-    sessions().remove(&did, &ws_id, &tx);
+    sessions().remove(&did, &ws_id, sid);
     result
 }
 
-fn out_frames(frames: Vec<Frame>) -> Vec<Frame> {
-    frames
-}
+#[cfg(test)]
+mod tests;

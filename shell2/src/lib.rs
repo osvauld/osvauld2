@@ -144,12 +144,12 @@ pub enum Msg {
     HostSync(u64, SyncHello, Slot<tokio::sync::oneshot::Sender<Result<SyncReply, String>>>),
     /// A session to a joined space's host came up, dropped (with why), carried a frame, or
     /// brought the token the host minted for this account's claim.
-    SessionUp(u64, String),
-    /// `(generation, space, the session's sequence number, why)` — the sequence number tells
-    /// an old session's ending from the one now dialling.
+    /// Each carries `(generation, space, the dial's sequence number, …)`: a message from a
+    /// session the shell has since replaced is dropped, whatever it says.
+    SessionUp(u64, String, u64),
     SessionDown(u64, String, u64, String),
-    SessionFrame(u64, String, Frame),
-    SessionToken(u64, String, Token),
+    SessionFrame(u64, String, u64, Frame),
+    SessionToken(u64, String, u64, Token),
     /// The retry ladder says it is time to dial again.
     SessionRedial(u64, String),
     /// `JoinSpace` fetched the space from the link's host; the UI thread adopts it and opens
@@ -329,7 +329,11 @@ fn resolver_with_session(vault: &Vault, ws_id: &str, item_id: &str, pull: sessio
             Err(_) => None,
         };
         pull.waiters.lock().unwrap().remove(&slot);
-        let Some(bytes) = bytes else { return Ok(None) };
+        // Unreachable is not "nothing there": seeding now would collide with what the host
+        // holds. The item opens once the host answers.
+        let Some(bytes) = bytes else {
+            return Err("the space's host is unreachable; open this item again when it is back".into());
+        };
         let doc = LoroDoc::new();
         if doc.import(&bytes).is_err() || doc.oplog_vv().is_empty() {
             return Ok(None);
@@ -1453,12 +1457,12 @@ impl Shell {
                 });
             }),
             None => {
-                std::thread::spawn(move || {
-                    let outcome = admin
-                        .accept_sync(hello, now, host::pusher())
-                        .map_err(|e| e.to_string());
-                    let _ = reply.send(outcome);
-                });
+                // Inline, on this thread: one merge at a time, and never while an app for this
+                // doc is opening (also here) — the vault keeps one writer per doc.
+                let outcome = admin
+                    .accept_sync(hello, now, host::pusher())
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(outcome);
             }
         }
     }
@@ -1611,6 +1615,129 @@ impl Shell {
         });
     }
 
+    fn session_up(&mut self, ws: String, seq: u64) {
+        if self.sessions.get(&ws).is_none_or(|h| h.seq != seq) {
+            return; // a replaced session's hello
+        }
+        if let Some(h) = self.sessions.get_mut(&ws) {
+            h.up = true;
+        }
+        self.redial.remove(&ws);
+        // A pull of every source a join waits on; then whatever is open re-syncs.
+        if let (Some(p), Some(h)) = (self.pending_join.get(&ws), self.sessions.get(&ws)) {
+            for item_id in &p.remaining {
+                let _ = h.tx.send(Frame::Update {
+                    item_id: item_id.clone(),
+                    layer: SyncLayer::Src,
+                    vv: VersionVector::new().encode(),
+                    update: Vec::new(),
+                });
+            }
+            if p.remaining.is_empty() {
+                self.finish_join(&ws);
+            }
+        }
+        let open: Vec<(Arc<str>, Vec<String>)> = self
+            .apps
+            .iter()
+            .filter(|(_, a)| a.ws_id == ws)
+            .map(|(id, a)| (id.clone(), a.doc_names.clone()))
+            .collect();
+        for (id, names) in open {
+            // A fresh session knows nothing of what the host acked before.
+            self.node_vv.retain(|(i, _), _| *i != id);
+            self.subscribed.remove(&id);
+            self.sync_open(&id, &names);
+        }
+    }
+
+    fn session_token(&mut self, ws: String, seq: u64, token: Token) {
+        if self.sessions.get(&ws).is_none_or(|h| h.seq != seq) {
+            return;
+        }
+        if let Some(joined) = self.joined.get_mut(&ws) {
+            joined.token = Some(token);
+            let joined = joined.clone();
+            if let Err(e) = sessions::save_joined(&self.vault, &ws, &joined) {
+                eprintln!("session {ws}: could not keep the token: {e}");
+            }
+        }
+    }
+
+    fn session_frame(&mut self, ws: String, seq: u64, frame: Frame) {
+        if self.sessions.get(&ws).is_none_or(|h| h.seq != seq) {
+            return;
+        }
+        match frame {
+            Frame::Ack {
+                item_id,
+                layer: SyncLayer::Doc(name),
+                vv,
+                missing,
+            } => {
+                let id: Arc<str> = item_id.as_str().into();
+                let key = (id.clone(), name.clone());
+                if self.apps.contains_key(&id) {
+                    if missing {
+                        self.node_vv.remove(&key);
+                        self.sync_one(&id, &name);
+                    } else if newer_vv(self.node_vv.get(&key), &vv) {
+                        self.node_vv.insert(key, vv);
+                    }
+                }
+            }
+            Frame::Update {
+                item_id,
+                layer: SyncLayer::Doc(name),
+                update,
+                ..
+            } => {
+                // An app thread waiting on this doc before it opens gets it first.
+                let waiter = self
+                    .pulls
+                    .lock()
+                    .unwrap()
+                    .remove(&(ws.clone(), item_id.clone(), name.clone()));
+                match waiter {
+                    Some(tx) => {
+                        let _ = tx.send(update);
+                    }
+                    // Empty: the host's answer to a pull of a doc it holds nothing of.
+                    None if update.is_empty() => {}
+                    None => {
+                        let id: Arc<str> = item_id.as_str().into();
+                        self.import(&id, Some(&ws), name, update);
+                    }
+                }
+            }
+            Frame::RoleDone { ok, reason } => {
+                if let Some(tx) = self.pending_role.remove(&ws) {
+                    let _ = tx.send(if ok {
+                        Response::ok("done")
+                    } else {
+                        Response::err(reason)
+                    });
+                }
+            }
+            Frame::Update {
+                item_id,
+                layer: SyncLayer::Src,
+                update,
+                ..
+            } => self.src_arrived(&ws, &item_id, update),
+            Frame::Rejected {
+                item_id,
+                layer: SyncLayer::Doc(name),
+                rejected,
+            } => {
+                let id: Arc<str> = item_id.as_str().into();
+                self.roll_back(&id, name, rejected);
+            }
+            Frame::Refused { reason } => eprintln!("session {ws}: {reason}"),
+            _ => {}
+        }
+    }
+
     fn route(&self, ws: &str) -> Route {
         if self.joined.contains_key(ws) {
             return Route::Session;
@@ -1716,7 +1843,7 @@ impl Shell {
         a.call(move |h| {
             let result = h.app.with_doc(&name, |doc| -> Result<(), String> {
                 let hello = SyncHello {
-                    request_id: String::new(),
+                    request_id: host::HERE.to_string(),
                     desktop_did: did,
                     token,
                     ws_id: ws,
@@ -3725,7 +3852,15 @@ impl App for Shell {
                 self.reconcile();
                 None
             }
-            Msg::SyncDone(gen_, _, _, _) | Msg::ListenUp(gen_) | Msg::PushReceived(gen_, _) | Msg::SubscribeFailed(gen_, _, _)
+            Msg::SyncDone(gen_, _, _, _)
+            | Msg::ListenUp(gen_)
+            | Msg::PushReceived(gen_, _)
+            | Msg::SubscribeFailed(gen_, _, _)
+            | Msg::SessionUp(gen_, _, _)
+            | Msg::SessionDown(gen_, _, _, _)
+            | Msg::SessionFrame(gen_, _, _, _)
+            | Msg::SessionToken(gen_, _, _, _)
+            | Msg::SessionRedial(gen_, _)
                 if gen_ != self.gen_() =>
             {
                 None
@@ -3784,37 +3919,8 @@ impl App for Shell {
                 self.join_fetched(gen_, tx, result);
                 None
             }
-            Msg::SessionUp(_, ws) => {
-                if let Some(h) = self.sessions.get_mut(&ws) {
-                    h.up = true;
-                }
-                self.redial.remove(&ws);
-                // A pull of every source a join waits on; then whatever is open re-syncs.
-                if let (Some(p), Some(h)) = (self.pending_join.get(&ws), self.sessions.get(&ws)) {
-                    for item_id in &p.remaining {
-                        let _ = h.tx.send(Frame::Update {
-                            item_id: item_id.clone(),
-                            layer: SyncLayer::Src,
-                            vv: VersionVector::new().encode(),
-                            update: Vec::new(),
-                        });
-                    }
-                    if p.remaining.is_empty() {
-                        self.finish_join(&ws);
-                    }
-                }
-                let open: Vec<(Arc<str>, Vec<String>)> = self
-                    .apps
-                    .iter()
-                    .filter(|(_, a)| a.ws_id == ws)
-                    .map(|(id, a)| (id.clone(), a.doc_names.clone()))
-                    .collect();
-                for (id, names) in open {
-                    // A fresh session knows nothing of what the host acked before.
-                    self.node_vv.retain(|(i, _), _| *i != id);
-                    self.subscribed.remove(&id);
-                    self.sync_open(&id, &names);
-                }
+            Msg::SessionUp(_, ws, seq) => {
+                self.session_up(ws, seq);
                 None
             }
             Msg::SessionRedial(_, ws) => {
@@ -3823,85 +3929,12 @@ impl App for Shell {
                 }
                 None
             }
-            Msg::SessionToken(_, ws, token) => {
-                if let Some(joined) = self.joined.get_mut(&ws) {
-                    joined.token = Some(token);
-                    let joined = joined.clone();
-                    if let Err(e) = sessions::save_joined(&self.vault, &ws, &joined) {
-                        eprintln!("session {ws}: could not keep the token: {e}");
-                    }
-                }
+            Msg::SessionToken(_, ws, seq, token) => {
+                self.session_token(ws, seq, token);
                 None
             }
-            Msg::SessionFrame(_, ws, frame) => {
-                match frame {
-                    Frame::Ack {
-                        item_id,
-                        layer: SyncLayer::Doc(name),
-                        vv,
-                        missing,
-                    } => {
-                        let id: Arc<str> = item_id.as_str().into();
-                        let key = (id.clone(), name.clone());
-                        if self.apps.contains_key(&id) {
-                            if missing {
-                                self.node_vv.remove(&key);
-                                self.sync_one(&id, &name);
-                            } else if newer_vv(self.node_vv.get(&key), &vv) {
-                                self.node_vv.insert(key, vv);
-                            }
-                        }
-                    }
-                    Frame::Update {
-                        item_id,
-                        layer: SyncLayer::Doc(name),
-                        update,
-                        ..
-                    } => {
-                        // An app thread waiting on this doc before it opens gets it first.
-                        let waiter = self
-                            .pulls
-                            .lock()
-                            .unwrap()
-                            .remove(&(ws.clone(), item_id.clone(), name.clone()));
-                        match waiter {
-                            Some(tx) => {
-                                let _ = tx.send(update);
-                            }
-                            // Empty: the host's answer to a pull of a doc it holds nothing of.
-                            None if update.is_empty() => {}
-                            None => {
-                                let id: Arc<str> = item_id.as_str().into();
-                                self.import(&id, Some(&ws), name, update);
-                            }
-                        }
-                    }
-                    Frame::RoleDone { ok, reason } => {
-                        if let Some(tx) = self.pending_role.remove(&ws) {
-                            let _ = tx.send(if ok {
-                                Response::ok("done")
-                            } else {
-                                Response::err(reason)
-                            });
-                        }
-                    }
-                    Frame::Update {
-                        item_id,
-                        layer: SyncLayer::Src,
-                        update,
-                        ..
-                    } => self.src_arrived(&ws, &item_id, update),
-                    Frame::Rejected {
-                        item_id,
-                        layer: SyncLayer::Doc(name),
-                        rejected,
-                    } => {
-                        let id: Arc<str> = item_id.as_str().into();
-                        self.roll_back(&id, name, rejected);
-                    }
-                    Frame::Refused { reason } => eprintln!("session {ws}: {reason}"),
-                    _ => {}
-                }
+            Msg::SessionFrame(_, ws, seq, frame) => {
+                self.session_frame(ws, seq, frame);
                 None
             }
             msg => match (&mut self.screen, msg) {

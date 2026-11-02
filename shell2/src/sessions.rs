@@ -120,7 +120,7 @@ pub fn dial(
     let ws_id = dial.ws_id.clone();
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     rt.spawn(async move {
-        let outcome = run(ep, vault, proxy.clone(), gen_, dial, rx).await;
+        let outcome = run(ep, vault, proxy.clone(), gen_, seq, dial, rx).await;
         let reason = outcome.err().unwrap_or_else(|| "closed".to_string());
         let _ = proxy.send_event(Msg::SessionDown(gen_, ws_id, seq, reason));
     });
@@ -132,6 +132,7 @@ async fn run(
     vault: Vault,
     proxy: EventLoopProxy<Msg>,
     gen_: u64,
+    seq: u64,
     dial: Dial,
     mut rx: UnboundedReceiver<Frame>,
 ) -> Result<(), String> {
@@ -159,14 +160,14 @@ async fn run(
     match frames.recv::<Frame>(MAX_FRAME).await.map_err(|e| e.to_string())? {
         Some(Frame::Welcome { token, .. }) => {
             if let Some(token) = token {
-                let _ = proxy.send_event(Msg::SessionToken(gen_, dial.ws_id.clone(), token));
+                let _ = proxy.send_event(Msg::SessionToken(gen_, dial.ws_id.clone(), seq, token));
             }
         }
         Some(Frame::Refused { reason }) => return Err(reason),
         Some(_) => return Err("the host did not answer the hello".into()),
         None => return Err("the host closed before answering".into()),
     }
-    let _ = proxy.send_event(Msg::SessionUp(gen_, dial.ws_id.clone()));
+    let _ = proxy.send_event(Msg::SessionUp(gen_, dial.ws_id.clone(), seq));
     loop {
         tokio::select! {
             out = rx.recv() => match out {
@@ -186,12 +187,12 @@ async fn run(
                         }
                         None => {
                             let frame = Frame::Update { item_id, layer: courier::sync::SyncLayer::Doc(name), vv, update };
-                            let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), frame));
+                            let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), seq, frame));
                         }
                     }
                 }
                 Ok(Some(frame)) => {
-                    let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), frame));
+                    let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), seq, frame));
                 }
                 Ok(None) => return Ok(()),
                 Err(e) => return Err(e.to_string()),

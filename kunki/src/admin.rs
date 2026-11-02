@@ -405,10 +405,13 @@ impl Admin {
             item_id: hello.item_id.clone(),
             layer: hello.layer.clone(),
             snapshot: snapshot.to_vec(),
+            author: hello.desktop_did.clone(),
+            origin: hello.request_id.clone(),
         };
         let revoked = self.revoked()?;
         for subscriber in self.subscribers_for(&hello.ws_id, &hello.item_id, &hello.layer)? {
-            if subscriber == hello.desktop_did {
+            // The author's other sessions still hear, where the pusher can tell them apart.
+            if subscriber == hello.desktop_did && pusher.excludes_author() {
                 continue;
             }
             // Cost: one index scan per subscriber per push. Fine at chat scale; a live

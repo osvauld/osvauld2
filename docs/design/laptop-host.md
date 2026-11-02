@@ -1,6 +1,7 @@
 # Laptop host — collaborative artifacts without a node
 
-Status: **planned 2026-11-02, nothing built.** A long-horizon, test-first plan: §0 lists the
+Status: **steps 1–5 built 2026-11-02 (H1–H6, H9 green; H7 waits on step 7, H8 on a Pixel); steps 7–9 open.** Each
+step's as-built revision sits in §2 under a dated note. A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §5's steps make them pass.
 Supersedes the kunki-as-separate-process transport story in
 [`group-chat-sync.md`](group-chat-sync.md) §2 and the "remote transport (iroh) remains unbuilt"
