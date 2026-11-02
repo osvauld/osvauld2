@@ -1522,6 +1522,24 @@ impl Shell {
         }
     }
 
+    /// Every session, host list and request-in-flight of the account that is going away,
+    /// answered with `why`: a pending join or role change must never be replayed down the
+    /// next account's session with its credentials.
+    fn drop_pending(&mut self, why: &str) {
+        self.sessions.clear();
+        self.joined.clear();
+        self.redial.clear();
+        for (_, pending) in self.pending_join.drain() {
+            let _ = pending.reply.send(Response::err(why));
+        }
+        for (_, pending) in self.pending_role.drain() {
+            let _ = pending.reply.send(Response::err(why));
+        }
+        for (_, tx) in self.join_waiting.drain(..) {
+            let _ = tx.send(Response::err(why));
+        }
+    }
+
     /// Whether anything is waiting on a session to `ws`: an open app, or a join or role
     /// change still failing over.
     fn session_wanted(&self, ws: &str) -> bool {
@@ -2058,30 +2076,37 @@ impl Shell {
 
     /// `AppointHost`: a `host` token for `did` on a space this account hosts, then whatever
     /// `did` has live becomes a host session and everyone on the space hears the new list.
-    fn appoint_host(&self, ws_id: &str, did: &str) -> Response {
+    fn appoint_host(&self, ws_id: String, did: String, tx: std::sync::mpsc::Sender<Response>) {
         let Some(net) = &self.net else {
-            return Response::err("this device's endpoint is not up yet");
+            let _ = tx.send(Response::err("this device's endpoint is not up yet"));
+            return;
         };
         if !node::hosting(&self.vault)
             .unwrap_or_default()
             .iter()
-            .any(|w| w == ws_id)
+            .any(|w| *w == ws_id)
         {
-            return Response::err("not a space this account hosts");
+            let _ = tx.send(Response::err("not a space this account hosts"));
+            return;
         }
         let admin = Admin::new(self.vault.clone());
-        if let Err(e) = admin.appoint_host(ws_id, did, clock::now_secs()) {
-            return Response::err(e.to_string());
+        if let Err(e) = admin.appoint_host(&ws_id, &did, clock::now_secs()) {
+            let _ = tx.send(Response::err(e.to_string()));
+            return;
         }
         let ctx = kunki::host::HostCtx {
             vault: self.vault.clone(),
             ep: net.endpoint().clone(),
             sink: self.sink(),
         };
-        match kunki::host::appointed(&ctx, ws_id, did) {
-            Ok(()) => Response::ok("appointed"),
-            Err(e) => Response::err(e),
-        }
+        // Promoting a live session signs the whole ledger and reads every doc of the space:
+        // off the UI thread. The mint above is one signature and stays here.
+        std::thread::spawn(move || {
+            let _ = tx.send(match kunki::host::appointed(&ctx, &ws_id, &did) {
+                Ok(()) => Response::ok("appointed"),
+                Err(e) => Response::err(e),
+            });
+        });
     }
 
     /// Binds this device's endpoint on the unlocked account's device key — off the UI thread,
@@ -2300,7 +2325,6 @@ impl Shell {
             },
             Request::Hosts { ws_id } => self.hosts(&ws_id),
             Request::ShareSpace { ws_id } => self.share_space(&ws_id),
-            Request::AppointHost { ws_id, did } => self.appoint_host(&ws_id, &did),
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -3351,15 +3375,7 @@ impl App for Shell {
                 self.vault.lock();
                 self.node = None;
                 self.close_net();
-                self.sessions.clear();
-                self.joined.clear();
-                self.redial.clear();
-                for (_, pending) in self.pending_join.drain() {
-                    let _ = pending.reply.send(Response::err("locked"));
-                }
-                for (_, tx) in self.join_waiting.drain(..) {
-                    let _ = tx.send(Response::err("locked"));
-                }
+                self.drop_pending("locked");
                 self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
@@ -3478,6 +3494,10 @@ impl App for Shell {
             }
             Msg::Rpc(Request::JoinSpace { link }, tx) => {
                 self.join_space(link, tx);
+                None
+            }
+            Msg::Rpc(Request::AppointHost { ws_id, did }, tx) => {
+                self.appoint_host(ws_id, did, tx);
                 None
             }
             Msg::Rpc(
@@ -3944,9 +3964,10 @@ impl App for Shell {
                             .map_err(|e| eprintln!("host: could not self-claim: {e}"))
                             .ok(),
                     };
+                    // Whatever the previous account had in flight is answered, not replayed
+                    // on this one's sessions.
+                    self.drop_pending("account changed");
                     self.joined = sessions::load_joined(&self.vault);
-                    self.sessions.clear();
-                    self.redial.clear();
                     // The listener first: it bumps the generation the bind is tagged with.
                     self.start_listener();
                     self.bind_net();

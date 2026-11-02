@@ -652,7 +652,23 @@ impl Admin {
     /// owner's own admin, that keeps the `Cause::Under` lineage a re-record would flatten to
     /// `Cause::Node`.
     pub fn replay(&self, signed: &Signed) -> Result<(), NodeError> {
-        match ledger::verify(signed, &self.root()?)? {
+        self.apply(ledger::verify(signed, &self.root()?)?)
+    }
+
+    /// A whole `Frame::Ledger`: every entry verified before any is applied, so one forged
+    /// entry leaves nothing of the frame behind — not the grants before it with the
+    /// revocations after it unapplied.
+    pub fn replay_all(&self, entries: &[Signed]) -> Result<(), NodeError> {
+        let root = self.root()?;
+        let entries = entries
+            .iter()
+            .map(|signed| ledger::verify(signed, &root))
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.into_iter().try_for_each(|entry| self.apply(entry))
+    }
+
+    fn apply(&self, entry: Entry) -> Result<(), NodeError> {
+        match entry {
             Entry::Issued(token) => {
                 if self.issue(&token.id())?.is_none() {
                     // Lineage is the owner's business: its cascade ran before any `Revoked`

@@ -1,6 +1,6 @@
 # Laptop host — collaborative artifacts without a node
 
-Status: **steps 1–5 built 2026-11-02 (H1–H6, H9 green; H7 waits on step 7, H8 on a Pixel); steps 7–9 open.** Each
+Status: **steps 1–7 built 2026-11-02 (H1–H7, H9 green; H8 waits on a Pixel); steps 8–9 open.** Each
 step's as-built revision sits in §2 under a dated note. A long-horizon, test-first plan: §0 lists the
 end-to-end tests that prove it done; they are written first, then §5's steps make them pass.
 Supersedes the kunki-as-separate-process transport story in
@@ -258,6 +258,46 @@ are shared code with tests in one place.
 **Not in step 7:** issuing invites or role changes while the owner is offline (needs a
 delegated `host` with `delegable` and a code store on the host; §6), host↔host sessions,
 dismissing a host (revoking the `host` token already cuts it off at the next judgement).
+
+*Revised 2026-11-02 (step 7, as built):*
+- **A hosted admin signs nothing.** `Admin::hosted` answers every `with_signer` path with
+  `NotOwner`: a host that minted with its own key would record tokens as the owner's that
+  fail every chain check — a refusal beats silent garbage.
+- **Replay skips an issue already on record** rather than re-putting it, so the owner's own
+  `Cause::Under` lineage survives a replay of its own ledger; revocations are re-put.
+- **One merge at a time on the headless host.** `accept_sync`, `accept_trusted` and `replay`
+  run on `spawn_blocking` behind one mutex: the shell gets one writer per doc from its UI
+  thread, a tokio process has to say so.
+- **`HostHere` is sent twice**: after the first `Welcome` (dropped by the owner while the DID
+  is a plain member) and again when a replayed ledger first names this DID a host. A restart
+  seeds that flag from the hosted admin so it is not sent a third time.
+- **`Sessions::send` skips host sessions**: every fan-out ends in one `broadcast`, so a host
+  that also subscribed would otherwise hear each update twice.
+- **Failover dials the next host inline**, from the UI thread, with no pause; only a paced
+  retry goes through the sleeper thread. A list shrunk by a `Hosts` frame wraps instead of
+  indexing past its end, and `online` over the bridge matches the dialled host by DID, since
+  a `Hosts` frame can reorder the list under a live session.
+- H7 waits `PUSH × 4` for the member's post to cross: a dead owner is noticed by QUIC's
+  10 s idle, then the next host is dialled at once.
+- *(2026-11-02, step 7 review)* **`host` is never an invite role**: `issue_invite_ticket`
+  refuses it at every scope — it is in no capability table, so the capability check let it
+  through, and any member allowed to invite could have handed an accomplice a whole space.
+  Appointment is `Admin::appoint_host` alone; an app's own role named `host` stays an app role.
+- *(2026-11-02, step 7 review)* **A host session is re-judged before every broadcast and
+  ledger send** and demoted when its appointment was revoked or ran out — a member session
+  again until re-promoted. The uplink is exempt: the owner's own session.
+- *(2026-11-02, step 7 review)* **A presented token is verified at the door**: `admit` walks
+  its chain to the owner against the revoked set and requires its scope to reach the space
+  (a narrower `App` grant or the `Node` owner grant both do; another space's does not) — a
+  forged or stale token used to reach `Welcome` and hear `Hosts` before its first doc.
+- *(2026-11-02, step 7 review)* **A ledger frame is all or nothing** (`Admin::replay_all`):
+  every entry verifies before any is applied; one bad entry ends the uplink session and
+  the host keeps serving from the ledger it had.
+- *(2026-11-02, step 7 review, shell)* promoting a session on `AppointHost` runs on a
+  worker (it signs the ledger and reads every doc); a lock or account change answers every
+  pending join and role request rather than replaying them on the next account's session;
+  the failover counts hosts *tried* since the last session was up, so a drop after a
+  session on the last host tries the owner at once.
 
 ## 3. What stays, what Tinline lends
 

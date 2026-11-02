@@ -111,6 +111,31 @@ fn an_invite_cannot_grant_a_node_scope_role_that_carries_capability_once_narrowe
 }
 
 #[test]
+fn an_invite_cannot_hand_out_host_at_any_scope() {
+    let (node, desktop) = ids();
+    let app = Scope::App {
+        ws: "ws1".to_string(),
+        app: "item1".to_string(),
+    };
+    for scope in [Scope::Workspace("ws1".to_string()), Scope::Node, app] {
+        let request = InviteRequest {
+            desktop_did: desktop.did().to_string(),
+            token: node_token(&node, &desktop, "owner", 1),
+            // In no capability table, so `role_could_gain_capability` alone lets it through —
+            // and a holder is judged open on every doc of the space.
+            role: HOST.to_string(),
+            scope: scope.clone(),
+            public: false,
+        };
+        assert_eq!(
+            issue_invite_ticket(&node, &request, "kunki", 2, &HashSet::new()).unwrap_err(),
+            CourierError::NotPermitted,
+            "{scope:?}"
+        );
+    }
+}
+
+#[test]
 fn a_revoked_inviter_cannot_invite() {
     let (node, desktop) = ids();
     let token = node_token(&node, &desktop, "owner", 1);

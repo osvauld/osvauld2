@@ -97,6 +97,20 @@ fn an_undeclared_role_cannot_be_assigned_even_by_the_owner() {
 }
 
 #[test]
+fn an_app_may_declare_and_assign_its_own_role_named_host() {
+    // The appointed-host role is `host` at `Scope::Workspace` alone (`kunki::admin`'s
+    // `appoints`); an app's `host` is an app role like any other, assigned at app scope.
+    let game = Manifest::parse(
+        r#"app "game" {
+  roles host, player
+}"#,
+    )
+    .unwrap();
+    let grants = [grant("owner", Scope::Node, 1)];
+    assert!(assigning_grant(&grants, HOST, &app("item1"), &game).is_some());
+}
+
+#[test]
 fn several_grants_add_up() {
     let grants = [
         grant("member", Scope::Node, 1),

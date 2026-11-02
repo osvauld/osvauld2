@@ -486,20 +486,15 @@ impl Up<'_> {
         let u = self.u;
         match frame {
             Frame::Ledger { entries } => {
-                let admin = self.admin.clone();
-                let total = entries.len();
-                let bad = serialized(u.sink.merge.clone(), move || {
-                    entries.iter().enumerate().find_map(|(i, entry)| {
-                        admin.replay(entry).err().map(|e| (i, e.to_string()))
-                    })
+                let (admin, ws) = (self.admin.clone(), u.ws.clone());
+                // Whole or not at all, and a frame with a forged entry ends the session:
+                // the ladder redials, this host serving on from the ledger it had.
+                serialized(u.sink.merge.clone(), move || {
+                    admin
+                        .replay_all(&entries)
+                        .map_err(|e| format!("ledger of {ws}: {e}"))
                 })
-                .await?;
-                if let Some((i, e)) = bad {
-                    log(format!(
-                        "ledger of {}: entry {i} of {total}: {e}; the rest was not replayed",
-                        u.ws
-                    ));
-                }
+                .await??;
                 // The ledger is how this host learns it was appointed; the owner lists it
                 // from the `HostHere` that follows.
                 let host = self

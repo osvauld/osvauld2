@@ -275,6 +275,48 @@ fn a_ledger_signed_by_anyone_but_the_owner_is_refused_whole() {
 }
 
 #[test]
+fn a_ledger_with_one_forged_entry_among_valid_ones_records_nothing() {
+    let (_tmp, vault) = node_vault();
+    let (owner, stranger, alice) = (who(), who(), who());
+    let host = Admin::hosted(vault.clone(), owner.did());
+    let ws = minted('a');
+    let first = minted_by(&owner, alice.did(), "member", Scope::Workspace(ws.clone()));
+    let second = minted_by(&owner, alice.did(), "maintainer", Scope::Workspace(ws.clone()));
+    let entries = vec![
+        ledger::sign(&owner, &Entry::Issued(first.clone())).unwrap(),
+        ledger::sign(
+            &stranger,
+            &Entry::Revoked {
+                id: first.id(),
+                at: NOW,
+            },
+        )
+        .unwrap(),
+        ledger::sign(&owner, &Entry::Issued(second.clone())).unwrap(),
+    ];
+
+    assert!(matches!(
+        host.replay_all(&entries),
+        Err(NodeError::Courier(CourierError::BadSignature))
+    ));
+    assert!(
+        host.issue(&first.id()).unwrap().is_none(),
+        "the valid entry before the forgery was not applied either"
+    );
+    assert!(host.issue(&second.id()).unwrap().is_none());
+    assert!(host.revoked().unwrap().is_empty());
+
+    // Without the forgery the same entries go in whole, and again idempotently.
+    let honest = [entries[0].clone(), entries[2].clone()];
+    for _ in 0..2 {
+        host.replay_all(&honest).unwrap();
+        assert!(host.is_live(&first.id(), NOW).unwrap());
+        assert!(host.is_live(&second.id(), NOW).unwrap());
+        assert_eq!(host.issued_to(alice.did()).unwrap().len(), 2);
+    }
+}
+
+#[test]
 fn replaying_the_owners_own_ledger_into_itself_keeps_its_lineage() {
     let (_tmp, vault) = node_vault();
     let owner = Admin::new(vault.clone());
@@ -340,6 +382,11 @@ fn an_appointment_is_a_host_grant_on_exactly_that_space_until_revoked() {
         f.admin.hosts_of(&f.ws, NOW + 1).unwrap(),
         vec![carol.did().to_string()]
     );
+    // An app's own role named `host` is an app role, not an appointment.
+    f.admin
+        .record(&minted_in(&f.vault, bob.did(), HOST, f.app()), Cause::Node, NOW)
+        .unwrap();
+    assert!(!f.admin.is_host(bob.did(), &f.ws, NOW + 1).unwrap());
 
     assert!(matches!(
         f.admin.appoint_host(&f.ws, "not-a-did", NOW),

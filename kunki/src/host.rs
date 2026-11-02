@@ -19,7 +19,7 @@ use courier::publish::{PublishedItem, PublishedWorkspace};
 use courier::session::{DocState, Frame, HostEntry};
 use courier::subscribe::SubscribeHello;
 use courier::sync::{SyncHello, SyncLayer, SyncReply};
-use courier::token::Token;
+use courier::token::{Scope, Token};
 use iroh::endpoint::{Connection, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use net::frames::{FIRST_FRAME, FrameBuf, MAX_FRAME, send_frame};
@@ -61,6 +61,13 @@ pub struct HostCtx<S: Sink> {
     pub sink: S,
 }
 
+/// Whether a session's DID still holds `host` on its space, as the admin that admitted it
+/// reads it on the process's clock. Asked before every broadcast, since an appointment ends
+/// mid-session; `None` on the uplink, the owner's own session, a host by the link that named
+/// it. Carried by the session rather than passed by the caller because [`ledger_changed`]
+/// has an admin and no clock.
+type Judge = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// One live session's end, by id: the relay target. `host` marks a session whose DID holds
 /// `host` on the space — it hears every accepted update, not only the docs it subscribed.
 #[derive(Clone)]
@@ -69,6 +76,15 @@ struct Live {
     did: String,
     tx: UnboundedSender<Frame>,
     host: bool,
+    judge: Option<Judge>,
+}
+
+/// The re-check a session carries: `did` still holds `host` on `ws` by `admin`, now. A
+/// record that cannot be read demotes rather than vouches.
+fn judge_of<S: Sink>(sink: &S, admin: &Admin, did: &str, ws: &str) -> Judge {
+    let (sink, admin) = (sink.clone(), admin.clone());
+    let (did, ws) = (did.to_string(), ws.to_string());
+    Arc::new(move || admin.is_host(&did, &ws, sink.now_secs()).unwrap_or(false))
 }
 
 /// Live sessions by space, for relaying an accepted update to everyone else on it. One
@@ -110,11 +126,37 @@ impl Sessions {
         }
     }
 
-    /// To every host session of `ws` but `except_sid`.
+    /// To every host session of `ws` but `except_sid`, each re-judged first: one whose
+    /// appointment was revoked or ran out is demoted — a member session again, hearing
+    /// nothing more until re-promoted. Judged outside the lock: a judge reads the vault.
     pub fn broadcast(&self, ws: &str, frame: &Frame, except_sid: Option<u64>) {
-        if let Some(list) = self.0.lock().unwrap().get(ws) {
-            for live in list.iter().filter(|l| l.host && Some(l.sid) != except_sid) {
-                let _ = live.tx.send(frame.clone());
+        let hosts: Vec<(u64, UnboundedSender<Frame>, Option<Judge>)> = {
+            let all = self.0.lock().unwrap();
+            let Some(list) = all.get(ws) else {
+                return;
+            };
+            list.iter()
+                .filter(|l| l.host && Some(l.sid) != except_sid)
+                .map(|l| (l.sid, l.tx.clone(), l.judge.clone()))
+                .collect()
+        };
+        let mut demoted = Vec::new();
+        for (sid, tx, judge) in hosts {
+            if judge.is_some_and(|still_host| !still_host()) {
+                demoted.push(sid);
+            } else {
+                let _ = tx.send(frame.clone());
+            }
+        }
+        if !demoted.is_empty() {
+            self.demote(ws, &demoted);
+        }
+    }
+
+    fn demote(&self, ws: &str, sids: &[u64]) {
+        if let Some(list) = self.0.lock().unwrap().get_mut(ws) {
+            for live in list.iter_mut().filter(|l| sids.contains(&l.sid)) {
+                live.host = false;
             }
         }
     }
@@ -162,8 +204,9 @@ impl Sessions {
     }
 
     /// A headless host's own session to the owner, as a host session in its table: what it
-    /// accepts from members goes up through the same [`broadcast`](Self::broadcast). Returns
-    /// the session id, which the uplink's merges name as their origin ([`session_of`]).
+    /// accepts from members goes up through the same [`broadcast`](Self::broadcast). Never
+    /// re-judged — the owner is the root, not a holder of `host`. Returns the session id,
+    /// which the uplink's merges name as their origin ([`session_of`]).
     pub fn register_uplink(&self, ws: &str, did: &str, tx: UnboundedSender<Frame>) -> u64 {
         let sid = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
         self.add(
@@ -173,6 +216,7 @@ impl Sessions {
                 did: did.to_string(),
                 tx,
                 host: true,
+                judge: None,
             },
         );
         sid
@@ -319,7 +363,7 @@ async fn serve_conn<S: Sink>(conn: Connection, ctx: HostCtx<S>, codes: Arc<Mutex
                     None => refuse(send, "refused: not hosting this space").await,
                     Some(admin) => {
                         let now = ctx.sink.now_secs();
-                        match admit(&admin, remote, &attestation, token, claim, now) {
+                        match admit(&admin, &ws_id, remote, &attestation, token, claim, now) {
                             Ok(admitted) => {
                                 session(&ctx, admin, admitted, ws_id, docs, send, frames).await
                             }
@@ -430,9 +474,11 @@ pub struct Admitted {
 
 /// The whole of a session's admission, so it can be tested without a connection: the
 /// transport proved `remote` holds the device key; the attestation must be that device's and
-/// name the account; then a token held, or an invite claimed by that same account.
+/// name the account; then a token held — verified here, at the door, not on the first doc —
+/// or an invite claimed by that same account; and the grant must reach `ws_id`.
 pub fn admit(
     admin: &Admin,
+    ws_id: &str,
     remote: [u8; 32],
     attestation: &str,
     token: Option<Token>,
@@ -444,8 +490,15 @@ pub fn admit(
         Ok(_) => return Err("refused: the attestation names another device".into()),
         Err(e) => return Err(format!("refused: attestation: {e}")),
     };
+    let records = |e: NodeError| format!("refused: {e}");
     let (token, minted) = match (token, claim) {
-        (Some(token), _) => (token, None),
+        (Some(token), _) => {
+            let root = admin.root().map_err(records)?;
+            let revoked = admin.revoked().map_err(records)?;
+            courier::token::verify_chain(&token, &root, &did, now, &revoked)
+                .map_err(|e| format!("refused: token: {e}"))?;
+            (token, None)
+        }
         (None, Some(claim)) => {
             if claim.desktop_did != did {
                 return Err("refused: the claim names another account".into());
@@ -457,6 +510,13 @@ pub fn admit(
         }
         (None, None) => return Err("refused: no token and no claim".into()),
     };
+    // A session is on one space. A grant on it, on an app in it or on the whole node is a
+    // member's here; one on another space is a stranger's, whoever signed it.
+    let scope = token.claims().map_err(|e| format!("refused: {e}"))?.scope;
+    let space = Scope::Workspace(ws_id.to_string());
+    if !(space.contains(&scope) || scope.contains(&space)) {
+        return Err("refused: the token is for another space".into());
+    }
     Ok(Admitted { did, token, minted })
 }
 
@@ -595,6 +655,7 @@ async fn session<S: Sink>(
             did: did.clone(),
             tx,
             host,
+            judge: Some(judge_of(&ctx.sink, &admin, &did, &ws_id)),
         },
     );
     let mut seq = 0u64;

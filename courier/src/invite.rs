@@ -19,6 +19,7 @@ use identity::Signer;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::{self, Capability};
+use crate::role::HOST;
 use crate::token::{self, Scope, Token};
 use crate::{CourierError, Result, nonce, sign_blob, verify_blob};
 
@@ -120,7 +121,9 @@ fn role_could_gain_capability(role: &str, scope: &Scope) -> bool {
 /// checked exactly as `node_accept_publish` checks `WorkspaceCreate` — and `request.role` must
 /// carry no platform capability at `request.scope` or at anything it could be delegated down
 /// into (see `role_could_gain_capability`), so this cannot be used to hand out a role with real
-/// power ahead of `role.assign`'s rank check.
+/// power ahead of `role.assign`'s rank check. `host` is refused at every scope: it is in no
+/// capability table, yet a holder is judged open on a whole space, and only the owner
+/// appoints (`kunki::admin::appoint_host`).
 pub fn issue_invite_ticket(
     node: &(impl Signer + ?Sized),
     request: &InviteRequest,
@@ -137,6 +140,9 @@ pub fn issue_invite_ticket(
         now,
         revoked,
     )?;
+    if request.role == HOST {
+        return Err(CourierError::NotPermitted);
+    }
     if role_could_gain_capability(&request.role, &request.scope) {
         return Err(CourierError::RoleNotInvitable);
     }

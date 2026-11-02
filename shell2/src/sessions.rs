@@ -91,11 +91,12 @@ pub fn dial(
 }
 
 /// Where a space's next dial goes, kept per space from one drop to the next session that
-/// comes up (laptop-host §2 "Failover"): the index to dial and how many whole rounds of the
-/// host list have failed since.
+/// comes up (laptop-host §2 "Failover"): the index to dial, how many hosts have been tried
+/// since the last session was up, and how many whole rounds of the list have failed since.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Redial {
     pub next: usize,
+    pub tried: usize,
     pub round: usize,
 }
 
@@ -108,16 +109,21 @@ pub struct Failover {
 }
 
 impl Redial {
-    /// The session on host `from` of `hosts` dropped. The next host is dialled at once; when
-    /// the list wraps the round is over, and the pause is the ladder's for the rounds so far
-    /// — with one host, exactly the old retry ladder. `from` past the end (the list shrank)
-    /// wraps too.
+    /// The session on host `from` of `hosts` dropped. The next host is dialled at once; once
+    /// as many hosts have been tried as the list holds the round is over — the owner is
+    /// dialled first again, after the ladder's pause for the rounds so far. With one host
+    /// that is exactly the old retry ladder. Counted by tries, not by where the index wraps:
+    /// a session that came up on the last host and then dropped has tried nobody yet.
     pub fn after_drop(&mut self, from: usize, hosts: usize) -> Failover {
-        self.next = from + 1;
-        let wrapped = self.next >= hosts.max(1);
+        let hosts = hosts.max(1);
+        self.tried += 1;
+        let wrapped = self.tried >= hosts;
         if wrapped {
-            self.next = 0;
+            self.tried = 0;
             self.round += 1;
+            self.next = 0;
+        } else {
+            self.next = (from + 1) % hosts;
         }
         Failover {
             index: self.next,

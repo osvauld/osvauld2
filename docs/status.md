@@ -734,6 +734,38 @@ the gate; all red after step 1.
   `ShellSink`; members see what they saw. `cargo test -p kunki` 100 (9 new; the four `admit`
   tests moved from shell2), `-p shell2 --lib host:: node::` 10. Not here: the member
   failover, `AppointHost`, `Hosts` over the bridge (7c-ii), the binary (7d).
+- **Step 7c-ii + 7d (2026-11-02), H7 green:** `kunki --data DIR host --join LINK --accept WS`
+  (`kunki::headless`) joins by link, claims, prints `did: <did>` once, keeps an *uplink*
+  session to the owner (`HostHere`, then one `Update` per doc it holds, never a source),
+  replays the owner's `Ledger` into `Admin::hosted`, merges what comes down with
+  `accept_trusted`, serves members from the replayed ledger behind `HeadlessSink`, and
+  redials the owner forever with the ladder. One merge at a time on the headless host (a
+  mutex around `accept_sync`/`accept_trusted`/`replay` on `spawn_blocking`): the shell gets
+  that from its UI thread, a tokio process has to say it. `HostHere` is sent again when a
+  replayed ledger first names this DID a host — the owner drops it from a plain member.
+  Shell: `AppointHost` mints the `host` token and promotes any live session of that DID
+  (`kunki::host::appointed`); `Hosts` lists owner first then appointed hosts with a stored
+  address, `online` = a live host session; members keep the `Hosts` frame in `joined/<ws>`
+  and fail over through the list — the next host at once, a ladder pause and the `host
+  offline:` line only when a whole round failed (`sessions::Redial::after_drop`, pure, 5
+  tests; one host = the old ladder exactly). A pending join or role request survives a
+  non-wrapping failover (claim re-signed per dial, role frame resent). Verified: H7 (25 s:
+  kunki appointed while A is up, A killed, B's post reaches C through kunki with no
+  `host offline` on B, A restarts and converges), unit suites on the nix worker (courier
+  135, kunki 109, net 9, shell2 105, vault 37). Not here: issuance while the owner is
+  offline, host↔host sessions, dismissing a host, a `since` cursor on the ledger (plan §6).
+  Review fixes (shell): promoting a session on `AppointHost` (sign the ledger, read every
+  doc) runs on a worker, the mint stays on the UI thread; a lock or account change answers
+  every pending join and role request instead of replaying them on the next account's
+  session (`drop_pending`); the failover counts hosts *tried* since the last session was up,
+  so a drop after a session on the last host tries the owner at once rather than pausing
+  with the offline line. Review fixes (core): `host` is refused as an invite role at every
+  scope (it sat in no capability table, so any inviter could have handed out a whole space);
+  a host session is re-judged before every broadcast and ledger send and demoted once its
+  appointment ends (the uplink exempt); `admit` verifies a presented token's chain and that
+  its scope reaches the space; a ledger frame verifies whole before any entry is applied
+  (`replay_all`), a bad one ends the uplink. After the fixes: e2e H1–H7, H9 green (H8
+  skipped, needs the Pixel), `smoke_host` 3/3, courier 137, kunki 113, shell2 106.
 
 ### Android support — shell and physical-device validation remain
 

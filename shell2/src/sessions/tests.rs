@@ -61,6 +61,16 @@ fn a_session_that_came_up_resets_the_round() {
 #[test]
 fn a_list_that_shrank_wraps_rather_than_indexing_past_it() {
     let mut r = Redial::default();
-    assert_eq!(r.after_drop(3, 2), paused(0, 0));
-    assert_eq!(r.after_drop(0, 0), paused(0, 1));
+    assert_eq!(r.after_drop(3, 2), at_once(0));
+    assert_eq!(r.after_drop(0, 0), paused(0, 0));
+}
+
+#[test]
+fn a_drop_after_a_session_on_the_last_host_tries_the_owner_at_once() {
+    // The shell dropped the entry when the session on host 1 of 2 came up; its drop is the
+    // first try of a new round, not the end of one — no pause, no offline line.
+    let mut r = Redial::default();
+    assert_eq!(r.after_drop(1, 2), at_once(0));
+    assert_eq!(r.round, 0);
+    assert_eq!(r.after_drop(0, 2), paused(0, 0));
 }
