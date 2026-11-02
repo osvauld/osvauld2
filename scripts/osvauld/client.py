@@ -279,6 +279,35 @@ class Bridge:
         return {k: result[k] for k in ("width_px", "height_px")}
 
     # ── node (kunki) ──────────────────────────────────────────────────────────
+    # ── laptop host (docs/design/laptop-host.md) ─────────────────────────────
+
+    def whoami(self) -> dict:
+        """The unlocked account: `did`, `name`, `device` (this install's endpoint id) and
+        `hosting` — the ids of the spaces this shell serves from its own endpoint."""
+        return self.request("Whoami")
+
+    def share_space(self, ws_id: str) -> str:
+        """Mint a share link for a space this account owns or hosts: `osvauld://s/…`, the host
+        endpoint, a code and a relay hint. Returns the link text."""
+        return self.request("ShareSpace", ws_id=ws_id)
+
+    def join_space(self, link: str) -> dict:
+        """Dial the link's host, redeem its code, adopt the space and pull what it lists. Returns
+        `{"ws": {...}, "items": [{"id", "name", "kind"}, ...]}` — the ids come from the host, never
+        from the caller."""
+        return self.request("JoinSpace", link=link)
+
+    def hosts(self, ws_id: str) -> list[dict]:
+        """Who serves this space: `[{"did", "device", "online"}, ...]`."""
+        return self.request("Hosts", ws_id=ws_id)
+
+    def appoint_host(self, ws_id: str, did: str) -> str:
+        """Give `did` the `host` role on the space, as the unlocked account. Its device is a host
+        once it accepts (a headless kunki accepts what it was told to; a desktop asks)."""
+        return self.request("AppointHost", ws_id=ws_id, did=did)
+
+    # ── kunki node (pre-pivot) ───────────────────────────────────────────────
+
     def claim_node(self, ticket: str) -> str:
         """Join a kunki node — a boot ticket or an invite, told apart by prefix. Returns the
         joined node's did."""

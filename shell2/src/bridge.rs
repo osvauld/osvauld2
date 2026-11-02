@@ -75,8 +75,16 @@ fn serve(listener: UnixListener, proxy: EventLoopProxy<Msg>) {
 /// One connection, one request, one reply.
 fn handle(mut conn: UnixStream, proxy: &EventLoopProxy<Msg>) -> io::Result<()> {
     conn.set_read_timeout(Some(READ_TIMEOUT))?;
-    let req: Request = serde_json::from_slice(&read_msg(&mut conn)?)
-        .map_err(|e| io::Error::other(format!("bad request: {e}")))?;
+    // A request the shell cannot read (an op it does not have yet) is answered, not dropped:
+    // a closed connection reads as a crash to the client, an error names the op.
+    let req: Request = match serde_json::from_slice(&read_msg(&mut conn)?) {
+        Ok(req) => req,
+        Err(e) => {
+            let resp = Response::err(format!("bad request: {e}"));
+            let payload = serde_json::to_vec(&resp).map_err(io::Error::other)?;
+            return write_msg(&mut conn, &payload);
+        }
+    };
     let (tx, rx) = mpsc::channel();
     eprintln!("DBG bridge: request read, sending event");
     proxy

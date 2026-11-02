@@ -130,10 +130,16 @@ def t4(net):
     a, b = net.peer("alice"), net.peer("bob")
     _, item = net.share_app(a, [b], CHAT)
     i = item["id"]
-    net.node.stop()
-    send(a, i, "alice offline")
+    net.stop_host(a)
     send(b, i, "bob offline")
-    net.node.start()
+    if net.node:
+        send(a, i, "alice offline")
+        net.start_host(a, i)
+    else:
+        # The host is alice's shell: her "offline" post is the one she makes once she is back,
+        # before the session with bob has reconciled.
+        net.start_host(a, i)
+        send(a, i, "alice offline")
     for p in (a, b):
         p.rpc.request("SyncNow")
     sees(a, i, "bob offline")
@@ -295,16 +301,16 @@ def t13(net):
     i = item["id"]
     send(a, i, "before restart")
     sees(b, i, "before restart")
-    net.node.stop()
-    net.node.start()
-    time.sleep(3)  # one Listen retry interval
+    net.stop_host(a)
+    net.start_host(a, i)
+    time.sleep(3)  # one Listen retry interval (node mode) / one dial retry (host mode)
     send(a, i, "after restart")
     sees(b, i, "after restart")
     # A blip while a fresh peer's subscriptions are still in flight must not lose them.
     c = net.peer("carol")
     net.join(a, c, *_ws_item(a, i))
-    net.node.stop()
-    net.node.start()
+    net.stop_host(a)
+    net.start_host(a, i)
     time.sleep(3)
     send(a, i, "carol hears this")
     sees(c, i, "carol hears this")

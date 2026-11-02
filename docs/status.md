@@ -667,6 +667,12 @@ cross-app refresh (the game reads assets when it opens), desktop-to-phone delive
 
 ## Not built
 
+### Laptop host — collaborative artifacts without a node (planned 2026-11-02) — [plan](design/laptop-host.md)
+The pivot: the maker's laptop hosts the space over iroh from its own device key; a headless kunki
+is an optional appointed host, same code. Trust root moves from a node DID to the space owner's
+DID; sessions replace Sync/Subscribe/Listen/tick; kunki's unix socket and the ADB socket go.
+Prior art: Tinline (`~/p2p_chat`). Nothing built; tests H1–H9 are the gate.
+
 ### Android support — shell and physical-device validation remain
 
 Lua has no drag cancellation event yet: clearing runtime capture does not clear app-owned
