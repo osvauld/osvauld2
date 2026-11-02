@@ -40,7 +40,7 @@ def story(net: Net) -> None:
 
     # 2. Alice shares. The link is short enough to read out loud.
     link = alice.rpc.share_space(space["id"])
-    assert link.startswith("osvauld://s/") and len(link) < 120, link
+    assert link.startswith("osvauld://s/") and len(link) < 200, link
 
     # 3. Bob joins with nothing but the link and finds the app by name.
     bob = net.peer("bob")

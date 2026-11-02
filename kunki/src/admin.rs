@@ -52,6 +52,12 @@ const INVITE_CAUSES: &str = "invite-causes/";
 /// already places in one), neither is validated the way a minted id is — a crafted `item_id`
 /// containing `/` must not be able to forge a different subscription's key.
 const SUBSCRIPTIONS: &str = "subscriptions/";
+/// `codes/<code>` — a share link's code and the public invite it stands for, until it
+/// expires (laptop-host step 5). A code is a lookup key for an invite, not an authority of
+/// its own: revoking the invite's nonce kills the code with it.
+const CODES: &str = "codes/";
+/// How long a share link works. Tinline's number; a link is handed around, not kept.
+pub const CODE_TTL: u64 = 7 * 24 * 60 * 60;
 
 /// Why a token exists. Lineage, not history: the node reissues flat tokens to keep chains
 /// short, and a flat token no longer carries its issuer in `prf` — without this, revoking
@@ -75,6 +81,13 @@ pub struct Issue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {
     pub at: u64,
+}
+
+/// What a share link's code stands for while it lives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Code {
+    ticket: InviteTicket,
+    exp: u64,
 }
 
 /// The node's own records, over an unlocked account. Cloning is cheap and shares the account.
@@ -567,6 +580,49 @@ impl Admin {
         Ok(ticket)
     }
 
+    /// A share link's code: a fresh public invite at `request`'s scope, kept under a random
+    /// 12-byte code for [`CODE_TTL`] so a `Fetch { code }` can be answered with it. Public,
+    /// because a link is redeemed by everyone it was shown to.
+    pub fn issue_code(
+        &self,
+        request: &InviteRequest,
+        name: &str,
+        now: u64,
+    ) -> Result<[u8; courier::link::CODE_LEN], NodeError> {
+        let request = InviteRequest {
+            public: true,
+            ..request.clone()
+        };
+        let ticket = self.issue_invite(&request, name, now)?;
+        let code = courier::link::new_code();
+        let kept = Code {
+            ticket,
+            exp: now + CODE_TTL,
+        };
+        self.vault
+            .put_entry(&code_key(&code), &serde_json::to_vec(&kept)?)?;
+        Ok(code)
+    }
+
+    /// The invite a code stands for; `None` for a code never issued or past its time. An
+    /// expired code is forgotten on sight.
+    pub fn fetch_code(
+        &self,
+        code: &[u8; courier::link::CODE_LEN],
+        now: u64,
+    ) -> Result<Option<InviteTicket>, NodeError> {
+        let key = code_key(code);
+        let Some(bytes) = self.vault.get_entry(&key)? else {
+            return Ok(None);
+        };
+        let kept: Code = serde_json::from_slice(&bytes)?;
+        if now >= kept.exp {
+            self.vault.delete_entry(&key)?;
+            return Ok(None);
+        }
+        Ok(Some(kept.ticket))
+    }
+
     /// Every nonce this node has already redeemed an invite for. Read whole, same reasoning as
     /// `revoked()`: a per-nonce check would be a decrypt per nonce on every redemption attempt.
     pub fn redeemed_invites(&self) -> Result<HashSet<String>, NodeError> {
@@ -695,6 +751,10 @@ fn revoked_key(id: &[u8; 32]) -> String {
 
 /// The nonce is already URL-safe (courier's `nonce()` base64url-encodes it), so it is used
 /// directly as the key's last segment rather than re-encoded.
+fn code_key(code: &[u8; courier::link::CODE_LEN]) -> String {
+    format!("{CODES}{}", URL_SAFE_NO_PAD.encode(code))
+}
+
 fn invite_key(nonce: &str) -> String {
     format!("{INVITES}{nonce}")
 }

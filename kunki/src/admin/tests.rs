@@ -970,3 +970,33 @@ fn a_push_never_targets_the_desktop_that_authored_the_sync() {
         "a push back to the desktop that just pushed is a wasted round trip, not a bug caught elsewhere"
     );
 }
+
+#[test]
+fn a_share_code_stands_for_a_public_invite_until_it_expires() {
+    let (_tmp, vault) = node_vault();
+    let admin = Admin::new(vault.clone());
+    let alice = holder();
+    let record = claim(&admin, &vault, &alice).unwrap();
+    let request = InviteRequest {
+        desktop_did: alice.did().to_string(),
+        token: record.token,
+        role: "member".to_string(),
+        scope: Scope::Workspace(minted('a')),
+        public: false,
+    };
+    let code = admin.issue_code(&request, "alice's laptop", NOW).unwrap();
+    let ticket = admin.fetch_code(&code, NOW + 1).unwrap().expect("a live code");
+
+    // Public: two joiners redeem the same code.
+    for _ in 0..2 {
+        let joiner = holder();
+        let hello = desktop_start_invite_claim(ticket.clone(), &joiner, NOW + 1).unwrap();
+        let welcome = admin.accept_invite(hello, NOW + 1).unwrap();
+        let claims = verify_chain(&welcome.token, &node::did(&vault).unwrap(), joiner.did(), NOW + 1, &HashSet::new()).unwrap();
+        assert_eq!(claims.scope, Scope::Workspace(minted('a')));
+    }
+
+    assert!(admin.fetch_code(&[0u8; 12], NOW).unwrap().is_none(), "a code never issued");
+    assert!(admin.fetch_code(&code, NOW + CODE_TTL).unwrap().is_none(), "past its week");
+    assert!(admin.fetch_code(&code, NOW + 1).unwrap().is_none(), "forgotten once seen expired");
+}

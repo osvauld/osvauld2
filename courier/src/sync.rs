@@ -270,6 +270,29 @@ pub fn node_accept_sync(
     now: u64,
     revoked: &HashSet<[u8; 32]>,
 ) -> Result<(SyncAck, Vec<u8>)> {
+    let doc = LoroDoc::new();
+    if let Some(bytes) = current_snapshot {
+        doc.import(bytes).map_err(|_| CourierError::Decode)?;
+    }
+    let ack = accept_into(&doc, hello, node_did, access, now, revoked)?;
+    let snapshot = doc
+        .export(ExportMode::Snapshot)
+        .map_err(|_| CourierError::Decode)?;
+    Ok((ack, snapshot))
+}
+
+/// [`node_accept_sync`] over a doc the caller holds — the live doc of an app the host has
+/// open (laptop-host §2, "One copy per doc"), so the host and the app never hold two copies
+/// of one key. Every refusal is decided *before* `hello.update` touches `doc`: a refused
+/// write must leave a live doc as it was, where a scratch doc could simply be dropped.
+pub fn accept_into(
+    doc: &LoroDoc,
+    hello: &SyncHello,
+    node_did: &str,
+    access: Access,
+    now: u64,
+    revoked: &HashSet<[u8; 32]>,
+) -> Result<SyncAck> {
     policy::membership(
         &hello.token,
         node_did,
@@ -278,26 +301,26 @@ pub fn node_accept_sync(
         now,
         revoked,
     )?;
-    let doc = LoroDoc::new();
-    if let Some(bytes) = current_snapshot {
-        doc.import(bytes).map_err(|_| CourierError::Decode)?;
-    }
     let before = doc.oplog_vv();
     // Opening a doc syncs it before anything is written, so the node may hold an empty copy.
     if !before.is_empty() && !access.read {
         return Err(CourierError::NoRead);
     }
-    if !hello.update.is_empty() {
-        doc.import(&hello.update)
+    // Whether the update would change the doc, read off the blob rather than by importing
+    // it: changes the doc already holds change nothing.
+    let changes = if hello.update.is_empty() {
+        false
+    } else {
+        let meta = LoroDoc::decode_import_blob_meta(&hello.update, false)
             .map_err(|_| CourierError::Decode)?;
-    }
+        meta.change_num > 0 && !before.includes_vv(&meta.partial_end_vv)
+    };
     // An app's source carries its manifest — its roles and rules — so changing it is
     // installing the app, not using it. Pulling it stays open to every member.
-    let changed = doc.oplog_vv() != before;
-    if changed && !access.write {
+    if changes && !access.write {
         return Err(CourierError::NoWrite);
     }
-    if hello.layer == SyncLayer::Src && changed {
+    if hello.layer == SyncLayer::Src && changes {
         policy::authorize(
             &hello.token,
             node_did,
@@ -308,25 +331,22 @@ pub fn node_accept_sync(
             revoked,
         )?;
     }
+    if !hello.update.is_empty() {
+        doc.import(&hello.update)
+            .map_err(|_| CourierError::Decode)?;
+    }
 
     let their_vv = VersionVector::decode(&hello.vv).map_err(|_| CourierError::Decode)?;
     let ours = doc.oplog_vv();
     let diff = doc
         .export(ExportMode::updates(&their_vv))
         .map_err(|_| CourierError::Decode)?;
-    let snapshot = doc
-        .export(ExportMode::Snapshot)
-        .map_err(|_| CourierError::Decode)?;
-
-    Ok((
-        SyncAck {
-            request_id: hello.request_id.clone(),
-            update: diff,
-            vv: ours.encode(),
-            missing: !ours.includes_vv(&their_vv),
-        },
-        snapshot,
-    ))
+    Ok(SyncAck {
+        request_id: hello.request_id.clone(),
+        update: diff,
+        vv: ours.encode(),
+        missing: !ours.includes_vv(&their_vv),
+    })
 }
 
 #[cfg(test)]
