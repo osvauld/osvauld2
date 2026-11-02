@@ -8,12 +8,15 @@ license.workspace = true
 base64 = "0.22"
 courier = { path = "../courier" }
 identity = { path = "../identity" }
+iroh = "1.3"
 loro = "1.13.9"
 manifest = { path = "../manifest" }
+net = { path = "../net" }
 osvauld-rpc = { path = "../osvauld-rpc" }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 vault = { path = "../vault" }
 zeroize = { workspace = true }
 

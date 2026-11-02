@@ -1428,6 +1428,7 @@ impl Shell {
         }
         let admin = Admin::new(self.vault.clone());
         let now = clock::now_secs();
+        let pusher = self.pusher();
         let id: Arc<str> = hello.item_id.as_str().into();
         // One copy per doc: an open app's live doc is the host's copy of it.
         let live = match (&hello.layer, self.apps.get(&id)) {
@@ -1448,7 +1449,7 @@ impl Shell {
                     }
                 };
                 let result = h.app.with_doc(&name, |doc| {
-                    admin.accept_live(doc, &hello, &judged, now, host::pusher())
+                    admin.accept_live(doc, &hello, &judged, now, &pusher)
                 });
                 let _ = reply.send(match result {
                     Some(Ok(outcome)) => Ok(outcome),
@@ -1460,7 +1461,7 @@ impl Shell {
                 // Inline, on this thread: one merge at a time, and never while an app for this
                 // doc is opening (also here) — the vault keeps one writer per doc.
                 let outcome = admin
-                    .accept_sync(hello, now, host::pusher())
+                    .accept_sync(hello, now, &pusher)
                     .map_err(|e| e.to_string());
                 let _ = reply.send(outcome);
             }
@@ -1544,6 +1545,7 @@ impl Shell {
                     .map(|h| h.addr.clone())
                     .unwrap_or_else(|| fetched.link.host.clone()),
                 token: None,
+                hosts: fetched.hosts.clone(),
             };
             sessions::save_joined(&self.vault, &ws, &joined)?;
             self.joined.insert(ws.clone(), joined);
@@ -1834,6 +1836,7 @@ impl Shell {
         };
         let admin = Admin::new(self.vault.clone());
         let now = clock::now_secs();
+        let pusher = self.pusher();
         let (ws, id, name, token) = (
             a.ws_id.clone(),
             item_id.clone(),
@@ -1843,7 +1846,7 @@ impl Shell {
         a.call(move |h| {
             let result = h.app.with_doc(&name, |doc| -> Result<(), String> {
                 let hello = SyncHello {
-                    request_id: host::HERE.to_string(),
+                    request_id: kunki::host::HERE.to_string(),
                     desktop_did: did,
                     token,
                     ws_id: ws,
@@ -1857,7 +1860,7 @@ impl Shell {
                     .export(ExportMode::Snapshot)
                     .map_err(|e| e.to_string())?;
                 admin
-                    .fan_out(&hello, &snapshot, judged.rules.as_ref(), now, host::pusher())
+                    .fan_out(&hello, &snapshot, judged.rules.as_ref(), now, &pusher)
                     .map_err(|e| e.to_string())
             });
             if let Some(Err(e)) = result {
@@ -1940,7 +1943,7 @@ impl Shell {
             Ok(code) => code,
             Err(e) => return Response::err(e.to_string()),
         };
-        let host = host::host_addr_of(&net.addr(Duration::from_millis(500)));
+        let host = kunki::host::host_addr_of(&net.addr(Duration::from_millis(500)));
         match (courier::link::Link { host, code }).to_text() {
             Ok(text) => Response::ok(text),
             Err(e) => Response::err(e.to_string()),
@@ -2098,6 +2101,20 @@ impl Shell {
 
     fn gen_(&self) -> u64 {
         self.sync_gen.load(Ordering::SeqCst)
+    }
+
+    /// This process as `kunki::host` sees it, at this generation.
+    fn sink(&self) -> host::ShellSink {
+        host::ShellSink {
+            vault: self.vault.clone(),
+            proxy: self.proxy.clone(),
+            gen_: self.gen_(),
+            ep: self.net.as_ref().map(|n| n.endpoint().clone()),
+        }
+    }
+
+    fn pusher(&self) -> kunki::host::HostPusher<host::ShellSink> {
+        kunki::host::HostPusher::new(self.sink())
     }
 
     fn validate_native_rects(&self, generation: u64, snapshots: &[native_rects::Snapshot]) -> Result<(), String> {
@@ -3806,13 +3823,17 @@ impl App for Shell {
                 match bound.map(|b| b.take()) {
                     Ok(Some(bound)) if gen_ == self.gen_() => {
                         self.close_net();
-                        host::serve(
+                        kunki::host::serve(
                             &bound,
-                            host::HostCtx {
+                            kunki::host::HostCtx {
                                 vault: self.vault.clone(),
-                                proxy: self.proxy.clone(),
-                                gen_: gen_,
                                 ep: bound.endpoint().clone(),
+                                sink: host::ShellSink {
+                                    vault: self.vault.clone(),
+                                    proxy: self.proxy.clone(),
+                                    gen_,
+                                    ep: Some(bound.endpoint().clone()),
+                                },
                             },
                         );
                         self.net = Some(bound);

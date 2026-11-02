@@ -27,6 +27,7 @@ use courier::CourierError;
 use courier::access::{Access, doc_access, members_in, roles_at};
 use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelcome};
 use courier::ledger::{self, Entry, Signed};
+use courier::link::HostAddr;
 use courier::publish::{PublishAck, PublishHello};
 use courier::role::{Grant, HOST, RoleRequest};
 use courier::subscribe::SubscribeHello;
@@ -66,6 +67,10 @@ const SUBSCRIPTIONS: &str = "subscriptions/";
 const CODES: &str = "codes/";
 /// `hosted/<owner-did>/` — the prefix every record of a hosted admin lives under.
 const HOSTED: &str = "hosted/";
+/// `hostaddr/<ws_id>/<did>` — where an appointed host said it can be dialled
+/// (`Frame::HostHere`). A record, not an authority: [`Admin::hosts_of`] says whether the DID
+/// is still a host, and only then is the address listed.
+const HOST_ADDRS: &str = "hostaddr/";
 /// How long a share link works. Tinline's number; a link is handed around, not kept.
 pub const CODE_TTL: u64 = 7 * 24 * 60 * 60;
 /// How long an appointment lives. An appointment is standing — revocation, not expiry, ends
@@ -700,6 +705,19 @@ impl Admin {
         Ok(hosts.into_iter().collect())
     }
 
+    /// Keep where the appointed host `did` can be dialled for `ws_id`; the last word wins.
+    pub fn set_host_addr(&self, ws_id: &str, did: &str, addr: &HostAddr) -> Result<(), NodeError> {
+        self.put_entry(&host_addr_key(ws_id, did), &serde_json::to_vec(addr)?)
+    }
+
+    /// The address `did` last announced for `ws_id`, whether or not it is still a host.
+    pub fn host_addr(&self, ws_id: &str, did: &str) -> Result<Option<HostAddr>, NodeError> {
+        match self.get_entry(&host_addr_key(ws_id, did))? {
+            Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Whether a token this node recorded is neither revoked nor expired. An unrecorded id is
     /// not live: nothing here can vouch for it.
     pub fn is_live(&self, id: &[u8; 32], now: u64) -> Result<bool, NodeError> {
@@ -1092,6 +1110,12 @@ fn invite_key(nonce: &str) -> String {
 
 fn invite_cause_key(nonce: &str) -> String {
     format!("{INVITE_CAUSES}{nonce}")
+}
+
+/// `ws_id` is one this admin hosts (the acceptor admitted the session on it) and a DID
+/// carries no `/` — the trust `relationship_key` already places in one.
+fn host_addr_key(ws_id: &str, did: &str) -> String {
+    format!("{HOST_ADDRS}{ws_id}/{did}")
 }
 
 fn name_of(id: &[u8; 32]) -> String {

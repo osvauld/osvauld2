@@ -708,6 +708,32 @@ the gate; all red after step 1.
   author's originating *session* (`Push.author`/`origin`), so their other device hears;
   the `Hello` admission is a pure `host::admit` with four tests (T16's host half). Carried
   to step 7: lifting the acceptor/admission/loop out of the shell for the headless host.
+- **Step 7a+7b (2026-11-02), the substrate of appointed hosts (plan §2 "Appointed hosts"):**
+  `courier::ledger` — the owner's `Issued`/`Revoked` facts as entries signed by its DID key,
+  verified with `verify_strict`; `courier::role::HOST`; frames `Ledger`, `Hosts`, `HostHere`
+  and `HostEntry` in `Fetched`; the sync ack says whether a merge moved the version vector.
+  `kunki::admin`: `Admin::hosted(vault, owner)` keeps another owner's records under
+  `hosted/<owner>/` with that owner as root and signs nothing (`NotOwner`); `ledger`/
+  `signed_ledger`/`replay` (idempotent, an already-recorded issue is skipped so `Cause` is
+  kept); `appoint_host`/`is_host`/`hosts_of`; a `host` is judged `OPEN`; `accept_trusted` for
+  what the owner's own device sends down an uplink; `Pusher::broadcast` once per fan-out that
+  had something new, and no fan-out at all when nothing moved. Verified on the nix worker:
+  `cargo test -p courier` 135 (6 new), `-p kunki` 91 (9 new), `cargo check --workspace
+  --tests`. Nothing dials it yet; 7c/7d wire it.
+- **Step 7c-i (2026-11-02), the acceptor lifted (plan §2 "The acceptor moves to
+  `kunki::host`"):** `kunki::host` — `Sink` (what a serving process supplies: the admin for a
+  space, who answers `Fetch`, the clock, how an update is merged, the in-process listener,
+  the hosts to advertise), `HostCtx`, `Sessions` per space with host sessions
+  (`broadcast`/`send_all`/`promote`/`has_host`, `register_uplink` for 7d), `HostPusher`,
+  `admit`, `serve` and the session loop in its host flavour: `Hosts` after every `Welcome`;
+  a session whose DID holds `host` gets the ledger and a full copy from the vault, then every
+  accepted update; `HostHere` kept at `hostaddr/<ws>/<did>` (`Admin::set_host_addr`/
+  `host_addr`) and listed while the DID holds `host`; `ledger_changed` after a claim or a
+  role change; `appointed` for the owner's `AppointHost`. `kunki::session` holds the member
+  pieces that need no shell (`Joined`, now with `hosts`; `fetch`). `shell2::host` shrinks to
+  `ShellSink`; members see what they saw. `cargo test -p kunki` 100 (9 new; the four `admit`
+  tests moved from shell2), `-p shell2 --lib host:: node::` 10. Not here: the member
+  failover, `AppointHost`, `Hosts` over the bridge (7c-ii), the binary (7d).
 
 ### Android support — shell and physical-device validation remain
 
