@@ -109,7 +109,9 @@ pub fn hosting(vault: &Vault) -> Result<Vec<String>, String> {
 }
 
 /// Who serves `ws_id`: this account alone while it hosts (appointed hosts are step 7).
-pub fn hosts(vault: &Vault, ws_id: &str) -> Result<Vec<serde_json::Value>, String> {
+/// `online` is whether this device's endpoint is actually bound — a host nobody can dial is
+/// not one to advertise.
+pub fn hosts(vault: &Vault, ws_id: &str, online: bool) -> Result<Vec<serde_json::Value>, String> {
     if !hosting(vault)?.iter().any(|w| w == ws_id) {
         return Ok(Vec::new());
     }
@@ -117,7 +119,7 @@ pub fn hosts(vault: &Vault, ws_id: &str) -> Result<Vec<serde_json::Value>, Strin
         .with_signer(|d| d.did().to_string())
         .ok_or("account is locked")?;
     let device = URL_SAFE_NO_PAD.encode(vault.device_public_key().map_err(|e| e.to_string())?);
-    Ok(vec![serde_json::json!({ "did": did, "device": device, "online": true })])
+    Ok(vec![serde_json::json!({ "did": did, "device": device, "online": online })])
 }
 
 fn connect(socket: &Path) -> Result<UnixStream, String> {

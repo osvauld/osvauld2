@@ -128,6 +128,9 @@ pub enum Msg {
     /// bridge's reply channel come home. The arm answers the client and lands the screen
     /// transition, both on the UI thread.
     AuthDone(std::sync::mpsc::Sender<osvauld_rpc::Response>, AuthOutcome),
+    /// The device endpoint bound off-thread after an unlock (laptop-host step 4), tagged with
+    /// the sync generation it was asked for: a bind that lands after a lock is closed again.
+    NetBound(u64, Result<Bound, String>),
     /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
     DriverDone(DriverReply, Result<runtime::DriverReport, String>),
     NativeRects(
@@ -1057,23 +1060,6 @@ fn answer(vault: &Vault, req: Request) -> Response {
             ),
             Err(e) => Response::err(e.to_string()),
         },
-        Request::Whoami => match vault.current() {
-            Some(a) => {
-                let device = vault
-                    .device_public_key()
-                    .map(|k| URL_SAFE_NO_PAD.encode(k))
-                    .unwrap_or_default();
-                let hosting = node::hosting(vault).unwrap_or_default();
-                Response::ok(serde_json::json!({
-                    "did": a.did, "name": a.label, "device": device, "hosting": hosting,
-                }))
-            }
-            None => Response::err("locked"),
-        },
-        Request::Hosts { ws_id } => match node::hosts(vault, &ws_id) {
-            Ok(hosts) => Response::ok(hosts),
-            Err(e) => Response::err(e),
-        },
         req => Response::err(format!("not wired yet: {req:?}")),
     }
 }
@@ -1122,6 +1108,9 @@ pub struct Shell {
     /// This device's iroh endpoint, bound on its device key while an account is unlocked
     /// (laptop-host step 4). Nothing is served on it yet; step 5 brings the sessions.
     net: Option<net::Net>,
+    /// The DID the current push listener registered under, so the next generation can
+    /// unregister it and let that thread end.
+    listener_did: Option<String>,
     /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
@@ -1138,6 +1127,20 @@ pub struct Shell {
     /// listener whose generation has passed stops reconnecting.
     sync_gen: Arc<AtomicU64>,
 }
+/// A just-bound endpoint on its way to the UI thread. `Msg` is `Clone` and a `Net` is not
+/// (it owns a runtime), so the message carries a slot the handler takes it out of.
+#[derive(Clone)]
+pub struct Bound(Arc<Mutex<Option<net::Net>>>);
+
+impl Bound {
+    fn new(net: net::Net) -> Self {
+        Self(Arc::new(Mutex::new(Some(net))))
+    }
+    fn take(&self) -> Option<net::Net> {
+        self.0.lock().unwrap().take()
+    }
+}
+
 /// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
 /// logical points, which offscreen are also pixels. A flag rather than an env var (the other two
 /// knobs are env vars) so that `ps` answers "is this the windowless one?".
@@ -1283,13 +1286,11 @@ impl Shell {
         true
     }
 
-    /// Binds this device's endpoint on the unlocked account's device key — once per unlock,
-    /// replacing any earlier one. A failure is logged, not fatal: the shell still runs, it
-    /// just cannot be dialled.
+    /// Binds this device's endpoint on the unlocked account's device key — off the UI thread,
+    /// once per unlock, replacing any earlier one (`Msg::NetBound` lands it). A failure is
+    /// logged, not fatal: the shell still runs, it just cannot be dialled.
     fn bind_net(&mut self) {
-        if let Some(net) = self.net.take() {
-            net.close();
-        }
+        self.close_net();
         let secret = match self.vault.device_secret() {
             Ok(secret) => secret,
             Err(e) => {
@@ -1297,9 +1298,20 @@ impl Shell {
                 return;
             }
         };
-        match net::Net::bind(&secret, net::Mode::from_env(), vec![net::SPACE_ALPN.to_vec()]) {
-            Ok(bound) => self.net = Some(bound),
-            Err(e) => eprintln!("net: bind failed: {e}"),
+        let proxy = self.proxy.clone();
+        let gen_ = self.gen_();
+        std::thread::spawn(move || {
+            let bound = net::Net::bind(&secret, net::Mode::from_env(), vec![net::SPACE_ALPN.to_vec()])
+                .map(Bound::new)
+                .map_err(|e| e.to_string());
+            let _ = proxy.send_event(Msg::NetBound(gen_, bound));
+        });
+    }
+
+    /// Closing waits for the runtime, so it happens on its own thread.
+    fn close_net(&mut self) {
+        if let Some(net) = self.net.take() {
+            std::thread::spawn(move || net.close());
         }
     }
 
@@ -1310,10 +1322,16 @@ impl Shell {
         self.subscribed.clear();
         self.failed_subs.clear();
         self.node_vv.clear();
+        // The in-process registry's channel is the only thing an old `Here` listener blocks
+        // on; dropping its sender is what lets that thread see the generation has moved.
+        if let Some(did) = self.listener_did.take() {
+            node::registry().unregister(&did);
+        }
         if let (Some(record), Some(did)) = (
             &self.node,
             self.vault.with_signer(|d| d.did().to_string()),
         ) {
+            self.listener_did = Some(did.clone());
             spawn_push_listener(
                 &self.proxy,
                 did,
@@ -1398,6 +1416,26 @@ impl Shell {
     /// screen that shows what they changed.
     fn answer_mut(&mut self, req: Request) -> Response {
         let response = match req {
+            // Answered here, not in `answer`: whether this device is reachable is shell state.
+            Request::Whoami => match self.vault.current() {
+                Some(a) => {
+                    let device = self
+                        .vault
+                        .device_public_key()
+                        .map(|k| URL_SAFE_NO_PAD.encode(k))
+                        .unwrap_or_default();
+                    let hosting = node::hosting(&self.vault).unwrap_or_default();
+                    Response::ok(serde_json::json!({
+                        "did": a.did, "name": a.label, "device": device,
+                        "online": self.net.is_some(), "hosting": hosting,
+                    }))
+                }
+                None => Response::err("locked"),
+            },
+            Request::Hosts { ws_id } => match node::hosts(&self.vault, &ws_id, self.net.is_some()) {
+                Ok(hosts) => Response::ok(hosts),
+                Err(e) => Response::err(e),
+            },
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -1873,6 +1911,7 @@ impl Shell {
             native_rects_pending: false,
             node: node.clone(),
             net: None,
+            listener_did: None,
             subscribed: HashMap::new(),
             failed_subs: Vec::new(),
             node_vv: HashMap::new(),
@@ -2418,9 +2457,7 @@ impl App for Shell {
                 self.reset_tabs();
                 self.vault.lock();
                 self.node = None;
-                if let Some(net) = self.net.take() {
-                    net.close();
-                }
+                self.close_net();
                 self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
@@ -2997,10 +3034,25 @@ impl App for Shell {
                             .map_err(|e| eprintln!("host: could not self-claim: {e}"))
                             .ok(),
                     };
-                    self.bind_net();
+                    // The listener first: it bumps the generation the bind is tagged with.
                     self.start_listener();
+                    self.bind_net();
                 }
                 next
+            }
+            Msg::NetBound(gen_, bound) => {
+                match bound.map(|b| b.take()) {
+                    Ok(Some(bound)) if gen_ == self.gen_() => {
+                        self.close_net();
+                        self.net = Some(bound);
+                    }
+                    Ok(Some(stale)) => {
+                        std::thread::spawn(move || stale.close());
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("net: bind failed: {e}"),
+                }
+                None
             }
             Msg::Rpc(req, tx) => {
                 if let Some((req, tx)) = self.forward(req, tx) {
@@ -3087,6 +3139,7 @@ impl App for Shell {
             msg,
             Msg::SyncTick
                 | Msg::SyncDone(..)
+                | Msg::NetBound(..)
                 | Msg::PushReceived(..)
                 | Msg::ListenUp(_)
                 | Msg::SubscribeFailed(..)

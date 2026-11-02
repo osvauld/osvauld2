@@ -95,11 +95,12 @@ fn an_account_hosts_for_itself_without_a_socket() {
     assert!(alice.get_doc(&ws.id, &item.id, "notes").unwrap().is_some(), "the host's copy is this vault");
 
     assert_eq!(hosting(&alice).unwrap(), vec![ws.id.clone()]);
-    let who = hosts(&alice, &ws.id).unwrap();
+    let who = hosts(&alice, &ws.id, true).unwrap();
     assert_eq!(who.len(), 1);
     assert_eq!(who[0]["did"], did);
     assert_eq!(who[0]["online"], true);
-    assert!(hosts(&alice, "nope").unwrap().is_empty());
+    assert!(hosts(&alice, "nope", true).unwrap().is_empty());
+    assert_eq!(hosts(&alice, &ws.id, false).unwrap()[0]["online"], false);
 
     // A listen registers with the in-process registry and never touches a socket.
     let mut pushes = listen(&link, &alice, &did, record.token.clone()).unwrap();

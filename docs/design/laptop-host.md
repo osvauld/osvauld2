@@ -80,6 +80,18 @@ claimed another node — so `e2e_chat_sync.py`'s node mode still runs until step
 socket. A claim always goes out over the socket: it names a new node, never the one this
 account already is.
 
+**One copy per doc (step 5's first requirement, found by step 4's review).** With the host in
+the owner's process, a doc the owner has open exists twice: the app thread's live `LoroDoc`,
+flushed to the vault on every change, and the vault snapshot `Admin::accept_sync` reads,
+merges and stores. Two writers of one key: a flush can overwrite a member's just-merged
+update until the owner's app imports the push and flushes again — convergent, but a window
+in which the host's copy is behind. Unreachable in step 4 (only the owner writes, after its
+own flush); real once members' sessions arrive. The fix is Tinline's shape: the host's copy
+*is* the live doc. Every incoming session update goes through the UI thread, which merges
+into the open app's doc (`courier::sync` gains a transition over a `&LoroDoc`) and only falls
+back to the vault snapshot for a doc nobody has open. The vault then has one writer per doc
+again — the app's flush, or the host's store, never both.
+
 ### Device key = endpoint id
 
 Each install gets a **random per-install device key**, sealed in the vault beside the identity

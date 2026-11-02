@@ -688,7 +688,11 @@ the gate; all red after step 1.
   `device` and `hosting`, `Hosts{ws}` the owner. `ClaimNode` still reaches a kunki over its socket,
   so the chat suite's node mode is unchanged (t1, t4, t8, t13 re-run). `ShareSpace`/`JoinSpace`/
   `AppointHost` exist as verbs and answer "not wired yet" (H2 fails there). Verified: `cargo test
-  -p shell2 --lib node::` (10, one new), `e2e_host.py h1`.
+  -p shell2 --lib node::` (10, one new), `e2e_host.py h1`. Review fixes: the bind runs off the UI
+  thread (`Msg::NetBound`), a lock unregisters the in-process listener, `online` is whether the
+  endpoint is bound. Known, deferred to step 5 by design: with the host in the owner's process an
+  open doc has two writers (app flush, host store) — step 5 makes the live doc the host's copy
+  (plan §2, "One copy per doc").
 
 ### Android support — shell and physical-device validation remain
 
