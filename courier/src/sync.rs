@@ -64,6 +64,13 @@ pub struct SyncAck {
     /// of what the node really holds (a restored node, a causally incomplete diff). The desktop
     /// answers by pushing full history.
     pub missing: bool,
+    /// The merge moved the node's version vector: `hello.update` carried something new. A
+    /// host relays an accepted update only when this is set (laptop-host §2 "Relay only what
+    /// was new"), which is what ends owner → host → owner loops. On the ack rather than
+    /// beside it so no reply type or constructor changes; the default keeps a pre-field bridge
+    /// reply (JSON) decoding, and nothing on the wire reads it — the host that merged does.
+    #[serde(default)]
+    pub changed: bool,
 }
 
 /// What the node answers a sync with: merged, or refused with what the writer rolls back to.
@@ -346,8 +353,10 @@ pub fn accept_into(
     Ok(SyncAck {
         request_id: hello.request_id.clone(),
         update: diff,
-        vv: ours.encode(),
         missing: !ours.includes_vv(&their_vv),
+        // Observed, not `changes`: that one is a prediction read off the blob's header.
+        changed: ours != before,
+        vv: ours.encode(),
     })
 }
 

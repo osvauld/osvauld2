@@ -283,6 +283,27 @@ fn a_diff_since_the_acked_vv_carries_only_new_edits_and_converges() {
     assert_eq!(landed.get_text("t").to_string(), "one two");
 }
 
+/// A relayed update the node already holds is acked unchanged: what stops a relay loop.
+#[test]
+fn a_merge_that_moves_nothing_reports_unchanged() {
+    let (node, desktop) = ids();
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "once").unwrap();
+    let push = hello(&desktop.did(), member(&node, &desktop), "ws1", &doc);
+    let (ack, snapshot) =
+        node_accept_sync(&push, &node.did(), None, Access::OPEN, 2, &HashSet::new()).unwrap();
+    assert!(ack.changed);
+
+    let (ack, _) =
+        node_accept_sync(&push, &node.did(), Some(&snapshot), Access::OPEN, 3, &HashSet::new()).unwrap();
+    assert!(!ack.changed);
+
+    let pull = hello(&desktop.did(), member(&node, &desktop), "ws1", &LoroDoc::new());
+    let (ack, _) =
+        node_accept_sync(&pull, &node.did(), Some(&snapshot), Access::OPEN, 3, &HashSet::new()).unwrap();
+    assert!(!ack.changed);
+}
+
 #[test]
 fn a_since_the_node_never_reached_is_flagged_missing() {
     let (node, desktop) = ids();

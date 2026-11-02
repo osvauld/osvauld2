@@ -44,6 +44,12 @@ pub trait Pusher {
     fn excludes_author(&self) -> bool {
         true
     }
+
+    /// Once per fan-out, after the subscribers: an appointed host mirrors the whole space, so
+    /// it hears every accepted update whether or not it subscribed (laptop-host §2 "Appointed
+    /// hosts"). The implementor skips the host session it arrived on (`update.origin`) —
+    /// that is what ends owner → host → owner loops, together with "relay only what was new".
+    fn broadcast(&self, _update: &Push) {}
 }
 
 /// Delivers nothing. Kept for tests and any bridge path that doesn't care about push — the
@@ -109,6 +115,7 @@ impl Pusher for LiveRegistry {
 #[derive(Default)]
 pub struct MockPusher {
     received: std::sync::Mutex<Vec<(String, Push)>>,
+    broadcasts: std::sync::Mutex<Vec<Push>>,
 }
 
 #[cfg(test)]
@@ -126,6 +133,11 @@ impl MockPusher {
             .map(|(_, update)| update.clone())
             .collect()
     }
+
+    /// Every `broadcast` so far, in order — one per fan-out that had something new.
+    pub fn broadcasts(&self) -> Vec<Push> {
+        self.broadcasts.lock().unwrap().clone()
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +147,10 @@ impl Pusher for MockPusher {
             .lock()
             .unwrap()
             .push((subscriber_did.to_string(), update.clone()));
+    }
+
+    fn broadcast(&self, update: &Push) {
+        self.broadcasts.lock().unwrap().push(update.clone());
     }
 }
 

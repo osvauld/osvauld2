@@ -5,27 +5,35 @@
 //! holder's DID names its index — which adds nothing, since `vault` already names an account's
 //! file after its DID.
 //!
-//! Everything here is **this node's own authority**: `token/<id>` is the issue,
+//! Everything here is **one root's authority**: `token/<id>` is the issue,
 //! `users/<did>/tokens/<id>` indexes it by holder, `users/<did>/relationship` is the claim that
 //! made them known at all, and `users/<did>/meta` is left for profiles. `revoked/<id>` is what
-//! *this* node revoked, never what another node announced — merged, one node's revocation
+//! *this* root revoked, never what another node announced — merged, one node's revocation
 //! could shadow another's ids. The mirror image,
 //! tokens this node holds from another node, is reserved for `nodes/<node-did>/`, and is the
 //! same shape a desktop needs, since a user holds tokens from several nodes.
+//!
+//! The root is this account ([`Admin::new`]) or, for a space this account hosts on an owner's
+//! behalf, that owner ([`Admin::hosted`], laptop-host §2 "Appointed hosts"). A hosted admin's
+//! records sit under `hosted/<owner-did>/` so two owners' `Scope::Node` tokens never meet; it
+//! holds the owner's signed ledger replayed ([`Admin::replay`]) and mints nothing — the
+//! owner's key is not here to mint with.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::CourierError;
 use courier::access::{Access, doc_access, members_in, roles_at};
 use courier::invite::{InviteClaimHello, InviteRequest, InviteTicket, InviteWelcome};
+use courier::ledger::{self, Entry, Signed};
 use courier::publish::{PublishAck, PublishHello};
-use courier::role::{Grant, RoleRequest};
+use courier::role::{Grant, HOST, RoleRequest};
 use courier::subscribe::SubscribeHello;
 use courier::sync::{SyncHello, SyncLayer, SyncReply, item_scope, reaches};
-use courier::token::{Scope, Token};
+use courier::token::{Scope, Token, issue_root};
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
+use identity::{Signer, public_key_from_did};
 use manifest::{Manifest, OWNER};
 use serde::{Deserialize, Serialize};
 use vault::{ItemKind, Vault, WorkspaceItem, WorkspaceMeta};
@@ -56,8 +64,13 @@ const SUBSCRIPTIONS: &str = "subscriptions/";
 /// expires (laptop-host step 5). A code is a lookup key for an invite, not an authority of
 /// its own: revoking the invite's nonce kills the code with it.
 const CODES: &str = "codes/";
+/// `hosted/<owner-did>/` — the prefix every record of a hosted admin lives under.
+const HOSTED: &str = "hosted/";
 /// How long a share link works. Tinline's number; a link is handed around, not kept.
 pub const CODE_TTL: u64 = 7 * 24 * 60 * 60;
+/// How long an appointment lives. An appointment is standing — revocation, not expiry, ends
+/// it — so this is only a ceiling on a host the owner forgot, not a renewal cadence.
+pub const HOST_TTL: u64 = 365 * 24 * 60 * 60;
 
 /// Why a token exists. Lineage, not history: the node reissues flat tokens to keep chains
 /// short, and a flat token no longer carries its issuer in `prf` — without this, revoking
@@ -101,15 +114,83 @@ pub struct Judged {
     pub rules: Option<Manifest>,
 }
 
-/// The node's own records, over an unlocked account. Cloning is cheap and shares the account.
+/// One root's records, over an unlocked account. Cloning is cheap and shares the account.
 #[derive(Clone)]
 pub struct Admin {
     vault: Vault,
+    /// `None`: this account is the root and signs. `Some(did)`: the owner whose records these
+    /// are — every chain roots there, and this admin mints nothing.
+    owner: Option<String>,
+    /// `""` for the account's own records, `hosted/<owner-did>/` for an owner's.
+    prefix: String,
 }
 
 impl Admin {
+    /// This account's own authority.
     pub fn new(vault: Vault) -> Self {
-        Self { vault }
+        Self {
+            vault,
+            owner: None,
+            prefix: String::new(),
+        }
+    }
+
+    /// `owner_did`'s authority, held here: its ledger replayed under `hosted/<owner_did>/`,
+    /// its DID as the root every presented chain must reach.
+    pub fn hosted(vault: Vault, owner_did: &str) -> Self {
+        Self {
+            vault,
+            owner: Some(owner_did.to_string()),
+            prefix: format!("{HOSTED}{owner_did}/"),
+        }
+    }
+
+    /// The DID every token here is rooted at: this account's, or the hosted owner's.
+    pub fn root(&self) -> Result<String, NodeError> {
+        match &self.owner {
+            Some(did) => Ok(did.clone()),
+            None => node::did(&self.vault),
+        }
+    }
+
+    /// Sign as the root. A hosted admin has no key for its root — the owner's — so it mints
+    /// nothing: a token signed here would be recorded as the owner's and fail every chain
+    /// check against the owner's DID, which is worse than a refusal.
+    fn with_root_signer<R>(&self, f: impl FnOnce(&dyn Signer) -> R) -> Result<R, NodeError> {
+        if let Some(owner) = &self.owner {
+            return Err(NodeError::NotOwner(owner.clone()));
+        }
+        self.vault.with_signer(f).ok_or(NodeError::Locked)
+    }
+
+    // Every record goes through these four, so the prefix is applied in one place and the
+    // rest of this file speaks names relative to it (`token/<id>`, never `hosted/…/token/<id>`).
+
+    fn key(&self, name: &str) -> String {
+        format!("{}{name}", self.prefix)
+    }
+
+    fn put_entry(&self, name: &str, bytes: &[u8]) -> Result<(), NodeError> {
+        Ok(self.vault.put_entry(&self.key(name), bytes)?)
+    }
+
+    fn get_entry(&self, name: &str) -> Result<Option<Vec<u8>>, NodeError> {
+        Ok(self.vault.get_entry(&self.key(name))?)
+    }
+
+    fn delete_entry(&self, name: &str) -> Result<(), NodeError> {
+        Ok(self.vault.delete_entry(&self.key(name))?)
+    }
+
+    /// Names under `under`, relative to this admin's prefix.
+    fn list_entries(&self, under: &str) -> Result<Vec<String>, NodeError> {
+        Ok(self
+            .vault
+            .list_entries(&self.key(under))?
+            .iter()
+            .filter_map(|name| name.strip_prefix(&self.prefix))
+            .map(str::to_string)
+            .collect())
     }
 
     /// Holder and id come from the token itself: a record that disagrees with the token it
@@ -125,24 +206,23 @@ impl Admin {
         };
         // Record first, index second: a crash between them hides a token rather than
         // promising one that isn't there.
-        self.vault
-            .put_entry(&record_key(&id), &serde_json::to_vec(&issue)?)?;
-        self.vault.put_entry(&tokens_key(&holder, &id), &[])?;
+        self.put_entry(&record_key(&id), &serde_json::to_vec(&issue)?)?;
+        self.put_entry(&tokens_key(&holder, &id), &[])?;
         Ok(id)
     }
 
     pub fn issue(&self, id: &[u8; 32]) -> Result<Option<Issue>, NodeError> {
-        match self.vault.get_entry(&record_key(id))? {
+        match self.get_entry(&record_key(id))? {
             Some(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
             None => Ok(None),
         }
     }
 
-    /// Every token the node issued to `holder`, revoked ones included: the log keeps what it
+    /// Every token the root issued to `holder`, revoked ones included: the log keeps what it
     /// handed out, the revoked set says what still counts.
     pub fn issued_to(&self, holder: &str) -> Result<Vec<Issue>, NodeError> {
         let mut issues = Vec::new();
-        for name in self.vault.list_entries(&tokens_scan(holder))? {
+        for name in self.list_entries(&tokens_scan(holder))? {
             let id = id_in(&name)?;
             // The record is written first, so an index without one is a damaged store, not a
             // race. An audit log that quietly under-reports is the worse failure.
@@ -156,12 +236,11 @@ impl Admin {
     /// an already-claimed node.
     pub fn admins(&self) -> Result<Vec<AdminRecord>, NodeError> {
         let mut admins = Vec::new();
-        for name in self.vault.list_entries(USERS)? {
+        for name in self.list_entries(USERS)? {
             if !name.ends_with(RELATIONSHIP) {
                 continue;
             }
             let bytes = self
-                .vault
                 .get_entry(&name)?
                 .ok_or_else(|| NodeError::Damaged(name.clone()))?;
             admins.push(serde_json::from_slice(&bytes)?);
@@ -175,14 +254,11 @@ impl Admin {
     pub fn accept_claim(&self, hello: ClaimHello, now: u64) -> Result<ClaimWelcome, NodeError> {
         let mut admins = self.admins()?;
         let welcome = self
-            .vault
-            .with_signer(|node| courier::node_accept_claim(hello, node, &mut admins, now))
-            .ok_or(NodeError::Locked)??;
+            .with_root_signer(|node| courier::node_accept_claim(hello, node, &mut admins, now))??;
         // The whole list, not the tail: courier only appends today, and this does not have to
         // know that to stay correct.
         for admin in &admins {
-            self.vault
-                .put_entry(&relationship_key(&admin.did), &serde_json::to_vec(admin)?)?;
+            self.put_entry(&relationship_key(&admin.did), &serde_json::to_vec(admin)?)?;
         }
         // The node's own decision, with nothing above it — which is what `Cause::Node` is for.
         // Recorded here and not inside courier, because courier never touches storage.
@@ -194,7 +270,7 @@ impl Admin {
     /// so the ack reports what the node held *before* this call, and nothing is written until
     /// the token is proven.
     pub fn accept_publish(&self, hello: PublishHello, now: u64) -> Result<PublishAck, NodeError> {
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         let known_items = self
             .vault
             .items(&hello.workspace.id)?
@@ -240,7 +316,10 @@ impl Admin {
     /// A write the rules refuse is answered with `SyncReply::Rejected`, not an error: nothing is
     /// stored or pushed, and the writer rolls back (`group-chat-sync.md` §5).
     ///
-    /// Fans the new snapshot out to every other subscriber on this layer once it's stored.
+    /// Fans the new snapshot out to every other subscriber on this layer once it's stored —
+    /// only when the merge moved the node's copy (`SyncAck::changed`); a push of what the node
+    /// already held is acked and goes no further, which is what ends a relay loop between
+    /// hosts (laptop-host §2 "Relay only what was new").
     /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
     /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
     /// same way `accept_publish` doesn't own how a publish reached it over the wire.
@@ -263,7 +342,11 @@ impl Admin {
             Ok(_) if judged.undeclared => CourierError::Undeclared,
             Ok((ack, snapshot)) => {
                 self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
-                self.fan_out(&hello, &snapshot, judged.rules.as_ref(), now, pusher)?;
+                // Relay only what was new: a merge that moved nothing is acked and stops
+                // here, which is what ends a relay loop between hosts.
+                if ack.changed {
+                    self.fan_out(&hello, &snapshot, judged.rules.as_ref(), now, pusher)?;
+                }
                 return Ok(SyncReply::Ack(ack));
             }
             Err(CourierError::NoRead | CourierError::NoWrite) if judged.undeclared => {
@@ -283,20 +366,33 @@ impl Admin {
     /// with the doc *open* can judge here and merge on the app's own thread
     /// ([`accept_live`]) — the vault is read, never written, on this path.
     pub fn judge(&self, hello: &SyncHello, now: u64) -> Result<Judged, NodeError> {
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         let revoked = self.revoked()?;
         let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
         let grants = self.grants_given(&hello.desktop_did, now, &revoked)?;
+        let (ws, item, layer) = (&hello.ws_id, &hello.item_id, &hello.layer);
+        // An appointed host relays what another host judged already: open on every doc of
+        // its space, declared or not. The rules are still read, for the fan-out's re-check of
+        // each subscriber. The root itself needs no case here — its own `owner` grant
+        // satisfies every role rule through the manifest's `owner`.
+        let host = grants.iter().any(|g| appoints(&g.role, &g.scope, ws));
         // An undeclared doc is judged as one nobody may read or write, so membership still
         // runs first and a stranger is refused as a stranger.
-        let (access, undeclared) =
-            match self.access(rules.as_ref(), hello, &hello.desktop_did, &grants) {
+        let (access, undeclared) = if host {
+            (Access::OPEN, false)
+        } else {
+            match self.access(rules.as_ref(), ws, item, layer, &hello.desktop_did, &grants) {
                 Ok(access) => (access, false),
-                Err(NodeError::Courier(CourierError::Undeclared)) => {
-                    (Access { read: false, write: false }, true)
-                }
+                Err(NodeError::Courier(CourierError::Undeclared)) => (
+                    Access {
+                        read: false,
+                        write: false,
+                    },
+                    true,
+                ),
                 Err(e) => return Err(e),
-            };
+            }
+        };
         Ok(Judged {
             node_did,
             revoked,
@@ -332,8 +428,10 @@ impl Admin {
         ) {
             Ok(_) if judged.undeclared => CourierError::Undeclared,
             Ok(ack) => {
-                let merged = snapshot(doc)?;
-                self.fan_out(hello, &merged, judged.rules.as_ref(), now, pusher)?;
+                if ack.changed {
+                    let merged = snapshot(doc)?;
+                    self.fan_out(hello, &merged, judged.rules.as_ref(), now, pusher)?;
+                }
                 return Ok(SyncReply::Ack(ack));
             }
             Err(CourierError::NoRead | CourierError::NoWrite) if judged.undeclared => {
@@ -365,18 +463,19 @@ impl Admin {
         }
     }
 
-    /// `did`'s access to `hello`'s doc under `rules`, holding `grants`.
+    /// `did`'s access to `layer` of `item` under `rules`, holding `grants`.
     fn access(
         &self,
         rules: Option<&Manifest>,
-        hello: &SyncHello,
+        ws: &str,
+        item: &str,
+        layer: &SyncLayer,
         did: &str,
         grants: &[Grant],
     ) -> Result<Access, NodeError> {
-        let (Some(rules), SyncLayer::Doc(name)) = (rules, &hello.layer) else {
+        let (Some(rules), SyncLayer::Doc(name)) = (rules, layer) else {
             return Ok(Access::OPEN);
         };
-        let (ws, item) = (&hello.ws_id, &hello.item_id);
         let roles = roles_at(grants, ws, item, name);
         doc_access(rules, name, did, &roles, &mut |doc: &str| {
             Ok::<_, NodeError>(members_in(self.vault.get_doc(ws, item, doc)?.as_deref())?)
@@ -392,6 +491,9 @@ impl Admin {
     /// Each subscriber is re-checked against its live grants: a subscription outlives the
     /// grant that allowed it, and a revoked member must stop receiving. So is the manifest's read rule, whose inputs (a
     /// group's member list) change after the subscription was made.
+    ///
+    /// Ends with one [`Pusher::broadcast`], for the host sessions, whether or not any
+    /// subscriber was pushed to.
     pub fn fan_out(
         &self,
         hello: &SyncHello,
@@ -408,23 +510,194 @@ impl Admin {
             author: hello.desktop_did.clone(),
             origin: hello.request_id.clone(),
         };
+        self.relay(&update, rules, now, pusher)
+    }
+
+    /// [`fan_out`] over the push itself — [`accept_trusted`] has no hello to build one from.
+    fn relay(
+        &self,
+        update: &Push,
+        rules: Option<&Manifest>,
+        now: u64,
+        pusher: &impl Pusher,
+    ) -> Result<(), NodeError> {
+        let (ws, item, layer) = (&update.ws_id, &update.item_id, &update.layer);
         let revoked = self.revoked()?;
-        for subscriber in self.subscribers_for(&hello.ws_id, &hello.item_id, &hello.layer)? {
+        for subscriber in self.subscribers_for(ws, item, layer)? {
             // The author's other sessions still hear, where the pusher can tell them apart.
-            if subscriber == hello.desktop_did && pusher.excludes_author() {
+            if subscriber == update.author && pusher.excludes_author() {
                 continue;
             }
             // Cost: one index scan per subscriber per push. Fine at chat scale; a live
             // grant index is the fix when it is not.
             let grants = self.grants_given(&subscriber, now, &revoked)?;
-            let reached = grants
-                .iter()
-                .any(|g| reaches(&g.scope, &hello.ws_id, &hello.item_id, &hello.layer));
-            if reached && self.access(rules, hello, &subscriber, &grants)?.read {
-                pusher.push(&subscriber, &update);
+            let reached = grants.iter().any(|g| reaches(&g.scope, ws, item, layer));
+            if reached
+                && self
+                    .access(rules, ws, item, layer, &subscriber, &grants)?
+                    .read
+            {
+                pusher.push(&subscriber, update);
             }
         }
+        // Hosts hear everything, subscribed or not; the pusher knows which sessions those are.
+        pusher.broadcast(update);
         Ok(())
+    }
+
+    /// An update from the owner's own device over a host's uplink (laptop-host §2 "Appointed
+    /// hosts"): the link named that device, so there is no token to judge — it is merged and
+    /// relayed as the root's own write. Returns whether the stored copy moved; when it did
+    /// not, nothing is stored or relayed, which with [`accept_sync`]'s same rule is what ends
+    /// owner → host → owner loops. `origin` is the uplink session's id, for
+    /// [`Pusher::broadcast`] to leave that session out.
+    pub fn accept_trusted(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        layer: &SyncLayer,
+        update: &[u8],
+        origin: &str,
+        now: u64,
+        pusher: &impl Pusher,
+    ) -> Result<bool, NodeError> {
+        if update.is_empty() {
+            return Ok(false);
+        }
+        let doc = loro::LoroDoc::new();
+        if let Some(bytes) = self.load_layer(ws_id, item_id, layer)? {
+            doc.import(&bytes).map_err(undecodable)?;
+        }
+        let before = doc.oplog_vv();
+        doc.import(update).map_err(undecodable)?;
+        if doc.oplog_vv() == before {
+            return Ok(false);
+        }
+        let snapshot = doc
+            .export(loro::ExportMode::Snapshot)
+            .map_err(undecodable)?;
+        self.store_layer(ws_id, item_id, layer, &snapshot)?;
+        let rules = self.rules(ws_id, item_id, layer)?;
+        let push = Push {
+            ws_id: ws_id.to_string(),
+            item_id: item_id.to_string(),
+            layer: layer.clone(),
+            snapshot,
+            author: self.root()?,
+            origin: origin.to_string(),
+        };
+        self.relay(&push, rules.as_ref(), now, pusher)?;
+        Ok(true)
+    }
+
+    /// Every issue on record, in id order — one decrypt per record, for the scans that need
+    /// the whole log ([`ledger`], [`hosts_of`]) rather than one holder's slice.
+    fn issues(&self) -> Result<Vec<Issue>, NodeError> {
+        self.list_entries(RECORD)?
+            .into_iter()
+            .map(|name| {
+                let id = id_in(&name)?;
+                self.issue(&id)?.ok_or(NodeError::Damaged(name))
+            })
+            .collect()
+    }
+
+    /// The root's records for one space as the facts a host replays (laptop-host §2
+    /// "Appointed hosts"): every issue at `Scope::Node` or inside `Scope::Workspace(ws_id)`,
+    /// then every revocation. Whole, never since a cursor: [`replay`] is idempotent, so a
+    /// resend costs a few KiB. Revocations are not filtered by space — the owner's cascade
+    /// already ran, so each cascaded id is its own entry, and an id whose issue is not here
+    /// revokes nothing.
+    pub fn ledger(&self, ws_id: &str) -> Result<Vec<Entry>, NodeError> {
+        let space = Scope::Workspace(ws_id.to_string());
+        let mut entries = Vec::new();
+        for issue in self.issues()? {
+            let scope = issue.token.claims()?.scope;
+            if scope == Scope::Node || space.contains(&scope) {
+                entries.push(Entry::Issued(issue.token));
+            }
+        }
+        for name in self.list_entries(REVOKED)? {
+            let id = id_in(&name)?;
+            let bytes = self
+                .get_entry(&name)?
+                .ok_or_else(|| NodeError::Damaged(name.clone()))?;
+            let Revocation { at } = serde_json::from_slice(&bytes)?;
+            entries.push(Entry::Revoked { id, at });
+        }
+        Ok(entries)
+    }
+
+    /// [`ledger`] signed as the root, entry by entry, for a `Frame::Ledger`. Built before
+    /// signing, because `with_signer` holds the account for its closure. A hosted admin has
+    /// no key to sign with ([`NodeError::NotOwner`]): the ledger flows down from the owner.
+    pub fn signed_ledger(&self, ws_id: &str) -> Result<Vec<Signed>, NodeError> {
+        let entries = self.ledger(ws_id)?;
+        Ok(self.with_root_signer(|me| {
+            entries
+                .iter()
+                .map(|entry| ledger::sign(me, entry))
+                .collect::<Result<Vec<_>, _>>()
+        })??)
+    }
+
+    /// One entry of the root's ledger into these records, once its signature is the root's.
+    /// A bad signature is an error, never a skip: a ledger with one forged entry is not a
+    /// ledger. Idempotent, and an issue already here is left as it is: replayed into the
+    /// owner's own admin, that keeps the `Cause::Under` lineage a re-record would flatten to
+    /// `Cause::Node`.
+    pub fn replay(&self, signed: &Signed) -> Result<(), NodeError> {
+        match ledger::verify(signed, &self.root()?)? {
+            Entry::Issued(token) => {
+                if self.issue(&token.id())?.is_none() {
+                    // Lineage is the owner's business: its cascade ran before any `Revoked`
+                    // was signed, so this copy never needs to walk one.
+                    self.record(&token, Cause::Node, token.claims()?.iat)?;
+                }
+            }
+            Entry::Revoked { id, at } => self.mark_revoked(&id, at)?,
+        }
+        Ok(())
+    }
+
+    /// Appoint `did` a host of `ws_id`: a `host` token at exactly that space, the root's own
+    /// decision, living [`HOST_TTL`]. Not delegable — a host serves, it does not appoint. The
+    /// member learns of it by finding this token in the replayed ledger.
+    pub fn appoint_host(&self, ws_id: &str, did: &str, now: u64) -> Result<Token, NodeError> {
+        public_key_from_did(did).ok_or(CourierError::Decode)?;
+        let space = Scope::Workspace(ws_id.to_string());
+        let token = self.with_root_signer(|me| {
+            issue_root(me, did, HOST, space, false, now, now + HOST_TTL)
+        })??;
+        self.record(&token, Cause::Node, now)?;
+        Ok(token)
+    }
+
+    /// Whether `did` holds a live `host` grant at exactly `Scope::Workspace(ws_id)`.
+    pub fn is_host(&self, did: &str, ws_id: &str, now: u64) -> Result<bool, NodeError> {
+        Ok(self
+            .grants(did, now)?
+            .iter()
+            .any(|g| appoints(&g.role, &g.scope, ws_id)))
+    }
+
+    /// Every DID holding a live `host` grant at exactly `Scope::Workspace(ws_id)`, sorted.
+    /// Appointed hosts only — the owner is the root, not a holder. One pass over `token/`,
+    /// the scan [`revoke`] already makes, rather than a per-space index nothing else reads:
+    /// a space has a handful of hosts and this is asked once per session or change.
+    pub fn hosts_of(&self, ws_id: &str, now: u64) -> Result<Vec<String>, NodeError> {
+        let revoked = self.revoked()?;
+        let mut hosts = BTreeSet::new();
+        for issue in self.issues()? {
+            let claims = issue.token.claims()?;
+            if appoints(&claims.role, &claims.scope, ws_id)
+                && !revoked.contains(&issue.token.id())
+                && claims.exp > now
+            {
+                hosts.insert(claims.aud);
+            }
+        }
+        Ok(hosts.into_iter().collect())
     }
 
     /// Whether a token this node recorded is neither revoked nor expired. An unrecorded id is
@@ -487,12 +760,9 @@ impl Admin {
         let manifest = self.manifest(&req.scope)?;
         let grants = self.grants(&req.desktop_did, now)?;
         let revoked = self.revoked()?;
-        let (token, cause) = self
-            .vault
-            .with_signer(|node| {
-                courier::role::node_accept_assign(&req, node, &grants, &manifest, now, &revoked)
-            })
-            .ok_or(NodeError::Locked)??;
+        let (token, cause) = self.with_root_signer(|node| {
+            courier::role::node_accept_assign(&req, node, &grants, &manifest, now, &revoked)
+        })??;
         self.record(&token, Cause::Under(cause), now)?;
         Ok(token)
     }
@@ -502,7 +772,7 @@ impl Admin {
     pub fn revoke_role(&self, req: RoleRequest, now: u64) -> Result<usize, NodeError> {
         let manifest = self.manifest(&req.scope)?;
         let grants = self.grants(&req.desktop_did, now)?;
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         let revoked = self.revoked()?;
         courier::role::node_accept_revoke(&req, &node_did, &grants, &manifest, now, &revoked)?;
         let mut n = 0;
@@ -522,7 +792,7 @@ impl Admin {
     pub fn revoke(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
         let mut children: std::collections::HashMap<[u8; 32], Vec<[u8; 32]>> =
             std::collections::HashMap::new();
-        for name in self.vault.list_entries(RECORD)? {
+        for name in self.list_entries(RECORD)? {
             let child = id_in(&name)?;
             let issue = self.issue(&child)?.ok_or(NodeError::Damaged(name))?;
             if let Cause::Under(parent) = issue.cause {
@@ -571,18 +841,18 @@ impl Admin {
     /// same shape as every other accept method here — nothing is written until the request is
     /// proven.
     pub fn subscribe(&self, hello: &SubscribeHello, now: u64) -> Result<(), NodeError> {
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         courier::subscribe::node_accept_subscription(hello, &node_did, now, &self.revoked()?)?;
-        self.vault.put_entry(&subscription_key(hello), &[])?;
+        self.put_entry(&subscription_key(hello), &[])?;
         Ok(())
     }
 
     /// Drop a subscription. Same authorization as `subscribe` — a holder unsubscribes with the
     /// same grant that would let them subscribe, nothing further to prove to remove themselves.
     pub fn unsubscribe(&self, hello: &SubscribeHello, now: u64) -> Result<(), NodeError> {
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         courier::subscribe::node_accept_subscription(hello, &node_did, now, &self.revoked()?)?;
-        self.vault.delete_entry(&subscription_key(hello))?;
+        self.delete_entry(&subscription_key(hello))?;
         Ok(())
     }
 
@@ -594,7 +864,7 @@ impl Admin {
         token: &Token,
         now: u64,
     ) -> Result<(), NodeError> {
-        let node_did = node::did(&self.vault)?;
+        let node_did = self.root()?;
         courier::subscribe::node_accept_listen(
             token,
             &node_did,
@@ -613,7 +883,6 @@ impl Admin {
         layer: &SyncLayer,
     ) -> Result<Vec<String>, NodeError> {
         Ok(self
-            .vault
             .list_entries(&subscription_prefix(ws_id, item_id, layer))?
             .iter()
             .filter_map(|name| name.rsplit('/').next())
@@ -639,15 +908,12 @@ impl Admin {
             return Err(CourierError::NotPermitted.into());
         }
         let revoked = self.revoked()?;
-        let ticket = self
-            .vault
-            .with_signer(|node| {
-                courier::invite::issue_invite_ticket(node, request, name, now, &revoked)
-            })
-            .ok_or(NodeError::Locked)??;
+        let ticket = self.with_root_signer(|node| {
+            courier::invite::issue_invite_ticket(node, request, name, now, &revoked)
+        })??;
         let nonce = courier::invite::ticket_nonce(&ticket)?;
         let cause = request.token.root()?.id();
-        self.vault.put_entry(&invite_cause_key(&nonce), &cause)?;
+        self.put_entry(&invite_cause_key(&nonce), &cause)?;
         Ok(ticket)
     }
 
@@ -674,8 +940,7 @@ impl Admin {
             ws_id: ws_id.clone(),
             exp: now + CODE_TTL,
         };
-        self.vault
-            .put_entry(&code_key(&code), &serde_json::to_vec(&kept)?)?;
+        self.put_entry(&code_key(&code), &serde_json::to_vec(&kept)?)?;
         Ok(code)
     }
 
@@ -687,12 +952,12 @@ impl Admin {
         now: u64,
     ) -> Result<Option<(InviteTicket, String)>, NodeError> {
         let key = code_key(code);
-        let Some(bytes) = self.vault.get_entry(&key)? else {
+        let Some(bytes) = self.get_entry(&key)? else {
             return Ok(None);
         };
         let kept: Code = serde_json::from_slice(&bytes)?;
         if now >= kept.exp {
-            self.vault.delete_entry(&key)?;
+            self.delete_entry(&key)?;
             return Ok(None);
         }
         Ok(Some((kept.ticket, kept.ws_id)))
@@ -702,7 +967,6 @@ impl Admin {
     /// `revoked()`: a per-nonce check would be a decrypt per nonce on every redemption attempt.
     pub fn redeemed_invites(&self) -> Result<HashSet<String>, NodeError> {
         Ok(self
-            .vault
             .list_entries(INVITES)?
             .iter()
             .map(|name| name.rsplit('/').next().unwrap_or_default().to_string())
@@ -726,12 +990,11 @@ impl Admin {
                 return Err(CourierError::Revoked.into());
             }
         }
-        let welcome = self
-            .vault
-            .with_signer(|node| courier::invite::node_accept_invite(hello, node, now, &redeemed))
-            .ok_or(NodeError::Locked)??;
+        let welcome = self.with_root_signer(|node| {
+            courier::invite::node_accept_invite(hello, node, now, &redeemed)
+        })??;
         if let Some(spent) = &welcome.redeemed_nonce {
-            self.vault.put_entry(&invite_key(spent), &[])?;
+            self.put_entry(&invite_key(spent), &[])?;
         }
         self.record(&welcome.token, cause, now)?;
         Ok(welcome)
@@ -743,10 +1006,7 @@ impl Admin {
     fn invite_cause(&self, hello: &InviteClaimHello) -> Result<Cause, NodeError> {
         let nonce = courier::invite::ticket_nonce(&hello.ticket)?;
         let key = invite_cause_key(&nonce);
-        let bytes = self
-            .vault
-            .get_entry(&key)?
-            .ok_or(NodeError::UntrackedInvite)?;
+        let bytes = self.get_entry(&key)?.ok_or(NodeError::UntrackedInvite)?;
         Ok(Cause::Under(
             bytes.try_into().map_err(|_| NodeError::Damaged(key))?,
         ))
@@ -765,12 +1025,9 @@ impl Admin {
         let admins = self.admins()?;
         let revoked = self.revoked()?;
         let presented = hello.token.root()?.id();
-        let token = self
-            .vault
-            .with_signer(|node| {
-                courier::node_accept_reconnect(hello, node, &admins, challenges, now, &revoked)
-            })
-            .ok_or(NodeError::Locked)??;
+        let token = self.with_root_signer(|node| {
+            courier::node_accept_reconnect(hello, node, &admins, challenges, now, &revoked)
+        })??;
         // A reissue is an issuance, so it joins the log. That makes the log grow by one per
         // reconnect and leaves the superseded token listed as well; superseding is in the
         // backlog, and under-reporting what is live would be the worse of the two. It is
@@ -779,11 +1036,11 @@ impl Admin {
         Ok(token)
     }
 
-    /// One id into the revoked set, no cascade — [`Admin::revoke`] is the only caller, so no
-    /// revocation can skip the lineage walk.
+    /// One id into the revoked set, no cascade. Two callers: [`Admin::revoke`], which walks the
+    /// lineage first, and [`Admin::replay`], for which the owner's walk already ran and shipped
+    /// each id — so no revocation of this root's own making skips the walk.
     fn mark_revoked(&self, id: &[u8; 32], at: u64) -> Result<(), NodeError> {
-        self.vault
-            .put_entry(&revoked_key(id), &serde_json::to_vec(&Revocation { at })?)?;
+        self.put_entry(&revoked_key(id), &serde_json::to_vec(&Revocation { at })?)?;
         Ok(())
     }
 
@@ -793,8 +1050,7 @@ impl Admin {
     /// request. An unreadable name fails the whole read rather than returning a set that is
     /// quietly missing a revocation.
     pub fn revoked(&self) -> Result<HashSet<[u8; 32]>, NodeError> {
-        self.vault
-            .list_entries(REVOKED)?
+        self.list_entries(REVOKED)?
             .iter()
             .map(|name| id_in(name.as_str()))
             .collect()
@@ -865,6 +1121,17 @@ fn layer_tag(layer: &SyncLayer) -> String {
     }
 }
 
+/// A `host` grant at exactly `Scope::Workspace(ws_id)` — not a node-wide one, which no path
+/// mints, and not one on another space.
+fn appoints(role: &str, scope: &Scope, ws_id: &str) -> bool {
+    role == HOST && matches!(scope, Scope::Workspace(ws) if ws == ws_id)
+}
+
+/// Bytes Loro would not take, whatever it said about them.
+fn undecodable<E>(_: E) -> NodeError {
+    NodeError::Courier(CourierError::Decode)
+}
+
 /// The id is always the last segment, whichever index the name came from.
 fn id_in(name: &str) -> Result<[u8; 32], NodeError> {
     let last = name.rsplit('/').next().unwrap_or_default();
@@ -879,6 +1146,8 @@ fn id_in(name: &str) -> Result<[u8; 32], NodeError> {
 mod tests;
 
 #[cfg(test)]
-mod roles_tests;
-#[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod host_tests;
+#[cfg(test)]
+mod roles_tests;

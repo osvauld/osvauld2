@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use courier::invite::InviteClaimHello;
 use courier::link::HostAddr;
 use courier::publish::{PublishedItem, PublishedWorkspace};
-use courier::session::{DocState, Frame};
+use courier::session::{DocState, Frame, HostEntry};
 use courier::subscribe::SubscribeHello;
 use courier::sync::{SyncHello, SyncLayer, SyncReply};
 use courier::token::Token;
@@ -281,9 +281,13 @@ async fn fetch(
             created: i.created,
         })
         .collect();
+    let owner = kunki::node::did(&ctx.vault).map_err(|e| e.to_string())?;
     let fetched = Frame::Fetched {
         invite,
-        hosts: vec![host_addr_of(&ctx.ep.addr())],
+        hosts: vec![HostEntry {
+            did: owner,
+            addr: host_addr_of(&ctx.ep.addr()),
+        }],
         ws: PublishedWorkspace {
             id: ws.id,
             name: ws.name,

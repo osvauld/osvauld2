@@ -8,23 +8,39 @@
 //!
 //! member → host   Hello { attestation, ws_id, token | claim, docs }   first frame
 //! host   → member Welcome { token?, docs } | Refused { reason }
+//! host   → member Hosts { hosts }                          after Welcome, again when the list changes
 //! both            Update { item_id, layer, vv, update }   what the other lacks; empty = a pull
 //! host   → member Ack { item_id, layer, vv, missing }
 //! host   → member Rejected { .. }                          a refused write; the member rolls back
+//!
+//! host   → owner  HostHere { addr }                        an appointed host, after its Welcome
+//! owner  → host   Ledger { entries }                       the whole ledger, then on every change
 //! ```
 //!
 //! `Update` reuses [`SyncHello`](crate::sync::SyncHello)'s meaning for `vv` and `update`, and
 //! `Ack` is [`SyncAck`](crate::sync::SyncAck) without the request id — a session is ordered, so
 //! a reply is answered by the frame that carried it. A host relays an accepted update to its
 //! other sessions on the same space as an `Update` with the host's own `vv`.
+//!
+//! An appointed host (`laptop-host.md` §2 "Appointed hosts") is a member whose session to the
+//! owner is also its uplink: the last two frames ride on that ordinary session, and `Hosts` is
+//! how every member learns where else the space can be dialled.
 
 use serde::{Deserialize, Serialize};
 
 use crate::invite::{InviteClaimHello, InviteTicket};
+use crate::ledger;
 use crate::link::HostAddr;
 use crate::publish::{PublishedItem, PublishedWorkspace};
 use crate::sync::{Rejected, SyncLayer};
 use crate::token::Token;
+
+/// A host of a space: who it is and where it is dialled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEntry {
+    pub did: String,
+    pub addr: HostAddr,
+}
 
 /// One doc's position, as a side states it in `Hello`/`Welcome`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +57,7 @@ pub enum Frame {
     },
     Fetched {
         invite: InviteTicket,
-        hosts: Vec<HostAddr>,
+        hosts: Vec<HostEntry>,
         ws: PublishedWorkspace,
         items: Vec<PublishedItem>,
     },
@@ -90,5 +106,19 @@ pub enum Frame {
     RoleDone {
         ok: bool,
         reason: String,
+    },
+    /// The owner's whole ledger for this space, every send: replay is idempotent, so a resend
+    /// needs no cursor.
+    Ledger {
+        entries: Vec<ledger::Signed>,
+    },
+    /// Every host of the space, owner first — the order a member fails over in.
+    Hosts {
+        hosts: Vec<HostEntry>,
+    },
+    /// Where this appointed host can be dialled; the owner lists it while the DID holds
+    /// [`role::HOST`](crate::role::HOST).
+    HostHere {
+        addr: HostAddr,
     },
 }

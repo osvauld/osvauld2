@@ -24,6 +24,9 @@ pub enum NodeError {
     Manifest(#[from] manifest::Error),
     #[error("this invite has no recorded inviter; ask for a new one")]
     UntrackedInvite,
+    // A hosted admin holds the owner's records without the owner's key: it replays, never mints.
+    #[error("these are {0}'s records; only that account signs for them")]
+    NotOwner(String),
     #[error(transparent)]
     Vault(#[from] vault::VaultError),
     #[error(transparent)]

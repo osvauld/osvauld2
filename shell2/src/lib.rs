@@ -1541,7 +1541,7 @@ impl Shell {
                 host: fetched
                     .hosts
                     .first()
-                    .cloned()
+                    .map(|h| h.addr.clone())
                     .unwrap_or_else(|| fetched.link.host.clone()),
                 token: None,
             };

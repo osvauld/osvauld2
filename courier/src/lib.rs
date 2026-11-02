@@ -23,6 +23,7 @@ use thiserror::Error;
 pub mod access;
 pub mod attest;
 pub mod invite;
+pub mod ledger;
 pub mod link;
 pub mod policy;
 pub mod proof;

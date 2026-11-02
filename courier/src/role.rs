@@ -20,6 +20,10 @@ use crate::policy::{self, Capability};
 use crate::token::{Scope, Token, issue_root};
 use crate::{CLAIM_TTL, CourierError, Result};
 
+/// The appointed-host role (`laptop-host.md` §2 "Appointed hosts"): a platform role at
+/// `Scope::Workspace`, minted by the owner alone and never declared by a manifest.
+pub const HOST: &str = "host";
+
 /// One live token the node issued, as authority: what it is and where it reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {

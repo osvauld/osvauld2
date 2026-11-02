@@ -194,6 +194,71 @@ needs a joined member and a join needs a session):*
   the 20 s `SyncTick` (still the backstop for the socket route; for a hosted space it fans
   out the live doc again, harmless and removable).
 
+### Appointed hosts (step 7, designed 2026-11-02 with the user)
+
+A second host must judge members exactly as the owner does, and the owner's judgement reads
+three things: every token it minted for that DID, its revoked set, and the app's manifest. The
+manifest already travels with the space; the other two become **the ledger**.
+
+**The ledger** (`courier::ledger`). One entry per fact the owner's admin records —
+`Issued(token)` and `Revoked { id, at }` — each **signed by the owner's DID key**
+(`Signed { body, sig }`, verified with `verify_strict` against the owner DID, the shape of
+`courier::attest`). Per space: every issue whose scope is `Node` or inside `Workspace(ws)`,
+and every revocation. It is carried by a `Frame::Ledger { entries }` that always holds the
+**whole** ledger: replay is idempotent (`record` and `mark_revoked` put by id), so a resend
+costs a few KiB and needs no cursor — a `since` is the obvious later economy. An appointed
+host replays it into its own `kunki::admin`, kept under `hosted/<owner-did>/…` so that two
+owners' `Scope::Node` tokens never meet; that admin's **root is the owner's DID**, not the
+host's own (`Admin::hosted`). Nothing the host decides is its own authority: it holds the
+owner's ledger and the owner's docs, both verified at the door.
+
+**Appointment** = a `host` role token at `Scope::Workspace(ws)` (`courier::role::HOST`),
+minted by the owner to a member's DID (`AppointHost { ws_id, did }` over the bridge,
+`Admin::appoint_host`). It is one more ledger entry; the member learns it is a host by
+replaying the ledger and finding that token issued to itself. A holder of `host` on a space
+is judged with `Access::OPEN` on every doc of it (`Admin::judge`): what it relays was judged
+once already, by whichever host accepted it.
+
+**Hosts dial the owner, members dial any host.** An appointed host keeps one ordinary member
+session to the owner — its *uplink* — opened by `kunki --data DIR host --join LINK --accept
+WS` (join by link, claim, then wait to be appointed). Once the owner sees a session whose DID
+holds `host` on that space it becomes a **host session**: the owner sends `Hosts`, the
+`Ledger`, then a full copy of the space (`Update` per source and per doc, from the vault —
+one flush behind a live doc at most), and from then on **every** accepted update on the space
+is relayed to it, subscribed or not (`Pusher::broadcast`, once per fan-out, to the host
+sessions except the one it came in on). The uplink is registered in the headless host's own
+session table as a host session, so what it accepts from members goes up the same way, and
+what comes down is merged as the owner's (the link named that device; nothing to judge). The
+owner dials nobody; two appointed hosts do not talk to each other yet (they converge through
+the owner) — §6.
+
+**Relay only what was new.** A relayed update is a full snapshot; a host that merged nothing
+(its version vector did not move) acks and stops. That is what makes owner → host → owner
+loops end, with any number of hosts.
+
+**Members learn the hosts** from `Frame::Hosts { hosts: [(did, addr)] }` — owner first — sent
+after every `Welcome` and again when the list changes; `Fetched.hosts` carries the same
+entries at join. `Joined.hosts` keeps them (`joined/<ws>`). A host announces where it can be
+dialled with `Frame::HostHere { addr }` after its `Welcome`; the owner keeps that under
+`hostaddr/<ws>/<did>` and lists it only while the DID holds `host`.
+
+**Failover.** When a session drops, the member dials the **next** host in the list at once
+(no pause); a pause from the retry ladder and the `host offline:` console line come only
+after a whole round failed. With one host this is exactly today's behaviour. `Hosts` over
+the bridge lists every known host of a joined space, `online` for the one the live session
+is on.
+
+**The acceptor moves to `kunki::host`** (from `shell2::host`), generic over a `Sink` the
+process supplies: how an update is merged (`shell2`: `Msg::HostSync` to the UI thread, into
+the live doc; headless: `Admin::accept_sync` inline), the clock (`shell2::clock` vs the
+system's), the admin for a space (own vs `hosted`), the hosts to advertise, and the
+in-process listener to poke. `admit`, the guard, `Sessions`, `fetch` and the session loop
+are shared code with tests in one place.
+
+**Not in step 7:** issuing invites or role changes while the owner is offline (needs a
+delegated `host` with `delegable` and a code store on the host; §6), host↔host sessions,
+dismissing a host (revoking the `host` token already cuts it off at the next judgement).
+
 ## 3. What stays, what Tinline lends
 
 Stays ours: `manifest.osv` and `courier::{token, policy, role, access, invite, sync}`; the agent
@@ -247,6 +312,18 @@ Each step leaves `cargo test --workspace` and the smokes green and is reviewed b
    headers; copy/paste; `e2e_artifact.py`. H2, H5's link half, H9.
 7. **Headless host** (`expert-secure-core`): `kunki --data DIR host --join LINK --accept WS`;
    `host` role token; host↔host sessions; the binary's own bookkeeping stays at `Scope::Node`. H7.
+   *Detailed 2026-11-02 (§2 "Appointed hosts"), in four parts:*
+   - 7a `courier`: `ledger` (signed entries), `role::HOST`, `Frame::{Ledger, Hosts, HostHere}`,
+     `HostEntry` in `Fetched`, `node_accept_sync`/`accept_into` report whether the merge moved
+     the version vector.
+   - 7b `kunki::admin`: `Admin::hosted(vault, owner)` with the `hosted/<owner>/` prefix and
+     root = owner; `replay`, `signed_ledger(ws)`, `appoint_host`, `is_host`/`hosts_of`;
+     `judge` is `OPEN` for a host; `accept_trusted` for the uplink; `Pusher::broadcast`; no
+     fan-out when nothing was new.
+   - 7c `kunki::host` (the acceptor lifted from `shell2::host` behind `Sink`), host sessions,
+     the owner's side in shell2 (`AppointHost`, `Hosts`, ledger pushes), the member's failover.
+   - 7d the binary: `kunki::headless` (join, claim, uplink, replay, serve) and the `host`
+     subcommand. H7.
 8. **Mobile** (`expert-shell`): Android drops the ADB socket; iOS dials the same `net`; typed
    link/name join. H8 on the Pixel, manual acceptance.
 9. **Docs and smoke**: `architecture.md` kunki/courier rows, `status.md`, `group-chat-sync.md`
@@ -262,6 +339,11 @@ Each step leaves `cargo test --workspace` and the smokes green and is reviewed b
 - **Open:** when the owner is offline and only an appointed host is up, who issues invites and
   role changes? Tinline answers "any admin's device, as signed records the host stores" — we
   will need the same once H7 exists; until then issuance needs the owner online.
+  *2026-11-02:* step 7 settles the first half — hosts hold the owner's signed ledger (§2
+  "Appointed hosts") — and leaves issuance with the owner. A delegated `host` token with
+  `delegable` plus the ledger replicated *up* from the host is the shape for the rest.
+- **Open (new):** appointed hosts dial only the owner; two of them converge through it. A
+  host↔host session (lower DID dials) is the obvious next piece when a space has two.
 - **Open:** whether a member device may also be dialled by other members for the ephemeral
   channel (presence) without being a host.
 

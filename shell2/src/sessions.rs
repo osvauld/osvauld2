@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use courier::invite::InviteClaimHello;
 use courier::link::{HostAddr, Link};
 use courier::publish::{PublishedItem, PublishedWorkspace};
-use courier::session::{DocState, Frame};
+use courier::session::{DocState, Frame, HostEntry};
 use courier::token::Token;
 use iroh::{Endpoint, EndpointAddr, TransportAddr};
 use net::frames::{FIRST_FRAME, FrameBuf, MAX_FRAME, send_frame};
@@ -205,7 +205,7 @@ async fn run(
 pub struct Fetched {
     pub link: Link,
     pub invite: courier::invite::InviteTicket,
-    pub hosts: Vec<HostAddr>,
+    pub hosts: Vec<HostEntry>,
     pub ws: PublishedWorkspace,
     pub items: Vec<PublishedItem>,
 }
