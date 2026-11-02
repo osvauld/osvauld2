@@ -183,9 +183,30 @@ pub enum Request {
     /// (`OSVAULD_WATCHDOG_MS`, default 3000).
     ListTabs,
 
-    // ── node (kunki) ────────────────────────────────────────────────────────────
-    /// The unlocked account: `{did, name}`.
+    // ── laptop host (docs/design/laptop-host.md) ───────────────────────────────
+    /// The unlocked account: `{did, name, device, hosting}` — `device` is this install's
+    /// endpoint id, `hosting` the ids of the spaces this shell serves from it.
     Whoami,
+    /// Who serves a space: `[{did, device, online}]`.
+    Hosts {
+        ws_id: String,
+    },
+    /// Mint a share link for a space this account hosts: `osvauld://s/…`. Step 6.
+    ShareSpace {
+        ws_id: String,
+    },
+    /// Dial a link's host, redeem its code, adopt the space and what it lists:
+    /// `{ws, items: [{id, name, kind}]}`. Step 6.
+    JoinSpace {
+        link: String,
+    },
+    /// Give `did` the `host` role on a space this account owns. Step 7.
+    AppointHost {
+        ws_id: String,
+        did: String,
+    },
+
+    // ── node (kunki) ────────────────────────────────────────────────────────────
     /// Run the reconciliation pass `SyncTick` runs, now — so a test never waits on its timer.
     SyncNow,
     /// Give `did` an app role (declared in the item's manifest) on that item, as the unlocked

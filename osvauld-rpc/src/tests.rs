@@ -72,6 +72,19 @@ fn every_request_roundtrips() {
         Request::ReloadItem {
             item_id: "i-9".into(),
         },
+        Request::Hosts {
+            ws_id: "ws-1".into(),
+        },
+        Request::ShareSpace {
+            ws_id: "ws-1".into(),
+        },
+        Request::JoinSpace {
+            link: "osvauld://s/abc".into(),
+        },
+        Request::AppointHost {
+            ws_id: "ws-1".into(),
+            did: "did:key:z6Mk".into(),
+        },
         Request::RunTests {
             item_id: "i-9".into(),
             filter: Some("smoke".into()),

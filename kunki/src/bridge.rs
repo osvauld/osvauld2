@@ -307,7 +307,9 @@ fn handle_listen(
     result
 }
 
-fn dispatch(req: Request, vault: &Vault, pusher: &impl Pusher) -> Response {
+/// Public for the in-process host (`shell2::node::Link::Here`): the same dispatch the socket
+/// reaches, called directly — the caller is this process, so there is no envelope to gate.
+pub fn dispatch(req: Request, vault: &Vault, pusher: &impl Pusher) -> Response {
     match req {
         Request::Ping => Response::ok("pong"),
         Request::Claim(hello) => match Admin::new(vault.clone()).accept_claim(hello, now_secs()) {

@@ -682,6 +682,13 @@ the gate; all red after step 1.
   trip, an over-cap header refused before its body, a dial to nowhere times out). Nothing
   dials it yet. Local mode has no mDNS (iroh 1.3 core has none): a local link will carry
   the host's direct addresses, as iroh's own tickets do.
+- **Step 4 (2026-11-02), H1 green:** an unlocked account hosts for itself — `courier::self_claim`
+  mints its owner grant, `shell2::node::Link::Here` dispatches into its own `kunki::admin` with
+  no socket, the device endpoint is bound (`net`) on unlock and closed on lock; `Whoami` reports
+  `device` and `hosting`, `Hosts{ws}` the owner. `ClaimNode` still reaches a kunki over its socket,
+  so the chat suite's node mode is unchanged (t1, t4, t8, t13 re-run). `ShareSpace`/`JoinSpace`/
+  `AppointHost` exist as verbs and answer "not wired yet" (H2 fails there). Verified: `cargo test
+  -p shell2 --lib node::` (10, one new), `e2e_host.py h1`.
 
 ### Android support — shell and physical-device validation remain
 

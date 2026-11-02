@@ -49,6 +49,7 @@ use app_host::{
     run_lua_tests_with, write_source_file as write_source_doc_file,
 };
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::DesktopNodeRecord;
 use courier::sync::{Rejected, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync};
 use courier::token::{Scope, Token};
@@ -290,9 +291,9 @@ fn resolver_with_node(
         let DocKey::Own(name) = key else {
             return Ok(None); // pulling an asset from the node is slice 2c
         };
-        let socket = kunki::bridge::socket_path();
+        let link = node::Link::current(&v);
         Ok(node::pull_doc(
-            &socket,
+            &link,
             &v,
             &desktop_did,
             token.clone(),
@@ -349,8 +350,8 @@ fn spawn_push_listener(
     let gen_ = current.load(Ordering::SeqCst);
     std::thread::spawn(move || {
         while current.load(Ordering::SeqCst) == gen_ {
-            let socket = kunki::bridge::socket_path();
-            match node::listen(&socket, &vault, &desktop_did, token.clone()) {
+            let link = node::Link::current(&vault);
+            match node::listen(&link, &vault, &desktop_did, token.clone()) {
                 Ok(mut conn) => {
                     // Registered on the node by now, so nothing synced after this is missed.
                     let _ = proxy.send_event(Msg::ListenUp(gen_));
@@ -406,8 +407,8 @@ fn sync_doc<M: Clone + 'static>(
             let doc_name = name.to_string();
             let vault = vault.clone();
             std::thread::spawn(move || {
-                let socket = kunki::bridge::socket_path();
-                let result = node::sync(&socket, &vault, hello);
+                let link = node::Link::current(&vault);
+                let result = node::sync(&link, &vault, hello);
                 let _ = proxy.send_event(Msg::SyncDone(gen_, id, doc_name, result));
             });
         }
@@ -449,7 +450,7 @@ fn subscribe_if_new(
         return false;
     }
     let proxy = proxy.clone();
-    let socket = kunki::bridge::socket_path();
+    let link = node::Link::current(&vault);
     let did = desktop_did.to_string();
     let ws_id = ws_id.to_string();
     let id = item_id.clone();
@@ -457,7 +458,7 @@ fn subscribe_if_new(
     let log_name = name.to_string();
     let vault = vault.clone();
     std::thread::spawn(move || {
-        if let Err(e) = node::subscribe(&socket, &vault, &did, token, &ws_id, &id, layer) {
+        if let Err(e) = node::subscribe(&link, &vault, &did, token, &ws_id, &id, layer) {
             eprintln!("subscribe: {id}/{log_name}: {e}");
             let _ = proxy.send_event(Msg::SubscribeFailed(gen_, id, log_name));
         }
@@ -1057,8 +1058,21 @@ fn answer(vault: &Vault, req: Request) -> Response {
             Err(e) => Response::err(e.to_string()),
         },
         Request::Whoami => match vault.current() {
-            Some(a) => Response::ok(serde_json::json!({ "did": a.did, "name": a.label })),
+            Some(a) => {
+                let device = vault
+                    .device_public_key()
+                    .map(|k| URL_SAFE_NO_PAD.encode(k))
+                    .unwrap_or_default();
+                let hosting = node::hosting(vault).unwrap_or_default();
+                Response::ok(serde_json::json!({
+                    "did": a.did, "name": a.label, "device": device, "hosting": hosting,
+                }))
+            }
             None => Response::err("locked"),
+        },
+        Request::Hosts { ws_id } => match node::hosts(vault, &ws_id) {
+            Ok(hosts) => Response::ok(hosts),
+            Err(e) => Response::err(e),
         },
         req => Response::err(format!("not wired yet: {req:?}")),
     }
@@ -1105,6 +1119,9 @@ pub struct Shell {
     /// read it regardless of which screen is currently showing, and `SpaceScreen` itself is
     /// dropped the moment the user navigates away from Spaces.
     node: Option<DesktopNodeRecord>,
+    /// This device's iroh endpoint, bound on its device key while an account is unlocked
+    /// (laptop-host step 4). Nothing is served on it yet; step 5 brings the sessions.
+    net: Option<net::Net>,
     /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
@@ -1236,14 +1253,14 @@ impl Shell {
             closed.as_ref(),
         ) {
             if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
-                let socket = kunki::bridge::socket_path();
+                let link = node::Link::current(&self.vault);
                 let (did, ws_id, item_id) = (desktop_did, o.ws_id.clone(), id.to_string());
                 let vault = self.vault.clone();
                 std::thread::spawn(move || {
                     for name in names {
                         let layer = SyncLayer::Doc(name.clone());
                         if let Err(e) = node::unsubscribe(
-                            &socket,
+            &link,
                             &vault,
                             &did,
                             record.token.clone(),
@@ -1264,6 +1281,26 @@ impl Shell {
             self.focused -= 1;
         }
         true
+    }
+
+    /// Binds this device's endpoint on the unlocked account's device key — once per unlock,
+    /// replacing any earlier one. A failure is logged, not fatal: the shell still runs, it
+    /// just cannot be dialled.
+    fn bind_net(&mut self) {
+        if let Some(net) = self.net.take() {
+            net.close();
+        }
+        let secret = match self.vault.device_secret() {
+            Ok(secret) => secret,
+            Err(e) => {
+                eprintln!("net: no device key: {e}");
+                return;
+            }
+        };
+        match net::Net::bind(&secret, net::Mode::from_env(), vec![net::SPACE_ALPN.to_vec()]) {
+            Ok(bound) => self.net = Some(bound),
+            Err(e) => eprintln!("net: bind failed: {e}"),
+        }
     }
 
     /// A new sync generation: drop every piece of per-node bookkeeping and, if a node is
@@ -1310,9 +1347,9 @@ impl Shell {
         let vault = self.vault.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let socket = kunki::bridge::socket_path();
+            let link = node::Link::current(&vault);
             let result = node::change_role(
-                &socket,
+            &link,
                 &vault,
                 record.token,
                 &wi.ws_id,
@@ -1835,6 +1872,7 @@ impl Shell {
             driver: None,
             native_rects_pending: false,
             node: node.clone(),
+            net: None,
             subscribed: HashMap::new(),
             failed_subs: Vec::new(),
             node_vv: HashMap::new(),
@@ -2380,6 +2418,9 @@ impl App for Shell {
                 self.reset_tabs();
                 self.vault.lock();
                 self.node = None;
+                if let Some(net) = self.net.take() {
+                    net.close();
+                }
                 self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
@@ -2396,8 +2437,8 @@ impl App for Shell {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     eprintln!("DBG timing: ClaimNode thread start {}", debug_now_ms());
-                    let socket = kunki::bridge::socket_path();
-                    let result = node::join(&socket, &vault, &ticket, node::now_secs());
+                    let link = node::Link::socket();
+                    let result = node::join(&link, &vault, &ticket, node::now_secs());
                     eprintln!("DBG timing: ClaimNode send_event {}", debug_now_ms());
                     let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Claimed(result)));
                 });
@@ -2410,9 +2451,9 @@ impl App for Shell {
                         let proxy = self.proxy.clone();
                         std::thread::spawn(move || {
                             eprintln!("DBG timing: Invite thread start {}", debug_now_ms());
-                            let socket = kunki::bridge::socket_path();
+                            let link = node::Link::current(&vault);
                             let result =
-                                node::invite(&socket, &vault, record.token, "member", Scope::Node)
+                                node::invite(&link, &vault, record.token, "member", Scope::Node)
                                     .and_then(|t| t.to_text().map_err(|e| e.to_string()));
                             eprintln!("DBG timing: Invite send_event {}", debug_now_ms());
                             let _ = proxy
@@ -2440,9 +2481,9 @@ impl App for Shell {
                         let proxy = self.proxy.clone();
                         std::thread::spawn(move || {
                             eprintln!("DBG timing: PushSrc thread start {}", debug_now_ms());
-                            let socket = kunki::bridge::socket_path();
+                            let link = node::Link::current(&vault);
                             let result =
-                                node::push_src(&socket, &vault, record.token, &wi.ws_id, &wi.id);
+                                node::push_src(&link, &vault, record.token, &wi.ws_id, &wi.id);
                             eprintln!("DBG timing: PushSrc send_event {}", debug_now_ms());
                             let _ = proxy
                                 .send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
@@ -2464,12 +2505,12 @@ impl App for Shell {
                         let proxy = self.proxy.clone();
                         std::thread::spawn(move || {
                             eprintln!("DBG timing: PublishAll thread start {}", debug_now_ms());
-                            let socket = kunki::bridge::socket_path();
+                            let link = node::Link::current(&vault);
                             let mut published = 0usize;
                             let mut failed = None;
                             for meta in &spaces {
                                 let r =
-                                    space::publish_one(&socket, &vault, record.token.clone(), meta);
+                                    space::publish_one(&link, &vault, record.token.clone(), meta);
                                 if let Err(e) = r {
                                     failed = Some(e);
                                     break;
@@ -2512,7 +2553,7 @@ impl App for Shell {
                         let proxy = self.proxy.clone();
                         std::thread::spawn(move || {
                             eprintln!("DBG timing: JoinItem thread start {}", debug_now_ms());
-                            let socket = kunki::bridge::socket_path();
+                            let link = node::Link::current(&vault);
                             let now = node::now_secs();
                             let ws = WorkspaceMeta {
                                 id: ws_id.clone(),
@@ -2526,7 +2567,7 @@ impl App for Shell {
                                 kind,
                                 created: now,
                             };
-                            let result = node::join_item(&socket, &vault, record.token, ws, item);
+                            let result = node::join_item(&link, &vault, record.token, ws, item);
                             eprintln!("DBG timing: JoinItem send_event {}", debug_now_ms());
                             let _ = proxy
                                 .send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Joined(result)));
@@ -2948,7 +2989,15 @@ impl App for Shell {
                     // `Shell::new`'s own load ran while it was still locked and found nothing.
                     // Refresh from the now-unlocked vault so a persisted relationship actually
                     // starts its listener, instead of sitting unused until the next claim.
-                    self.node = node::load_relationship(&self.vault).ok().flatten();
+                    // An account with no node, or one that is its own, hosts for itself:
+                    // its owner grant is reissued every unlock, like a reconnect would.
+                    self.node = match node::load_relationship(&self.vault).ok().flatten() {
+                        Some(record) if !node::is_me(&self.vault, &record) => Some(record),
+                        _ => node::self_claim(&self.vault, node::now_secs())
+                            .map_err(|e| eprintln!("host: could not self-claim: {e}"))
+                            .ok(),
+                    };
+                    self.bind_net();
                     self.start_listener();
                 }
                 next

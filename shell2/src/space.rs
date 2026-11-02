@@ -400,8 +400,8 @@ impl SpaceScreen {
                 let vault = vault.clone();
                 let proxy = proxy.clone();
                 std::thread::spawn(move || {
-                    let socket = kunki::bridge::socket_path();
-                    let result = node::join(&socket, &vault, &text, node::now_secs());
+                    let link = node::Link::socket();
+                    let result = node::join(&link, &vault, &text, node::now_secs());
                     let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::ClaimResult(result)));
                 });
                 None
@@ -426,10 +426,10 @@ impl SpaceScreen {
                 let vault = vault.clone();
                 let proxy = proxy.clone();
                 std::thread::spawn(move || {
-                    let socket = kunki::bridge::socket_path();
+                    let link = node::Link::current(&vault);
                     let mut published = 0usize;
                     for meta in &spaces {
-                        let result = publish_one(&socket, &vault, record.token.clone(), meta);
+                        let result = publish_one(&link, &vault, record.token.clone(), meta);
                         if let Err(e) = result {
                             let _ =
                                 proxy.send_event(Msg::Space(SpaceScreenMsg::PublishResult(Err(e))));
@@ -453,8 +453,8 @@ impl SpaceScreen {
                 let vault = vault.clone();
                 let proxy = proxy.clone();
                 std::thread::spawn(move || {
-                    let socket = kunki::bridge::socket_path();
-                    let result = node::invite(&socket, &vault, record.token, "member", Scope::Node)
+                    let link = node::Link::current(&vault);
+                    let result = node::invite(&link, &vault, record.token, "member", Scope::Node)
                         .and_then(|ticket| ticket.to_text().map_err(|e| e.to_string()));
                     // No clipboard support in this codebase — printed for the same reason
                     // kunki's own boot ticket is: a terminal is the thing to copy it from.
@@ -480,7 +480,7 @@ impl SpaceScreen {
 /// One workspace's headers and item headers, over the wire to the claimed node. `courier`
 /// never touches storage, so the item list is read here rather than inside `node::publish`.
 pub(crate) fn publish_one(
-    socket: &std::path::Path,
+    link: &node::Link,
     vault: &Vault,
     token: courier::token::Token,
     meta: &WorkspaceMeta,
@@ -500,7 +500,7 @@ pub(crate) fn publish_one(
             created: i.created,
         })
         .collect();
-    node::publish(socket, vault, token, workspace, published_items).map(|_ack| ())
+    node::publish(link, vault, token, workspace, published_items).map(|_ack| ())
 }
 
 #[cfg(test)]

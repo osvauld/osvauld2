@@ -329,6 +329,15 @@ pub fn node_accept_claim(
     })
 }
 
+/// An account that hosts for itself (laptop-host step 4): the same root grant a claimant gets,
+/// issued by the owner to the owner. There is nothing to claim — the host *is* this account —
+/// so every later check (`verify_chain` with the owner as root, the policy table at
+/// `Scope::Node`) passes with no second identity in the picture. Reissued on every unlock,
+/// like a reconnect would.
+pub fn self_claim(me: &(impl Signer + ?Sized), now: u64) -> Result<Token> {
+    issue_claim_token(me, me.did(), now)
+}
+
 /// The node's grant to a claimant: its own root authority over itself, delegable so the
 /// holder can hand a narrowed slice to their own node when publishing.
 fn issue_claim_token(node: &(impl Signer + ?Sized), holder: &str, now: u64) -> Result<Token> {

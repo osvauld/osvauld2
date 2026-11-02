@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,9 +11,11 @@ use loro::LoroDoc;
 use tempfile::TempDir;
 use vault::Vault;
 
+use kunki::push::Pusher as _;
+
 use super::{
-    claim, claim_invite, invite, join_item, listen, next_push, ping, publish, pull_doc, subscribe,
-    sync,
+    Link, Pushes, claim, claim_invite, hosting, hosts, invite, is_me, join_item, listen,
+    next_push, ping, publish, pull_doc, registry, self_claim, subscribe, sync,
 };
 
 fn now() -> u64 {
@@ -26,7 +28,7 @@ fn now() -> u64 {
 /// A node with a fresh identity, served on its own socket in a background thread — same
 /// process as the test, so a shared env var (what `serve_forever` reads) would race against
 /// every other test doing the same thing; `serve` takes the path directly instead.
-fn spawn_node() -> (TempDir, PathBuf, ConnectionTicket, Vault) {
+fn spawn_node() -> (TempDir, Link, ConnectionTicket, Vault) {
     let dir = TempDir::new().unwrap();
     let socket = dir.path().join("bridge.sock");
     let (vault, _) = kunki::node::open(dir.path().to_path_buf(), "pw").unwrap();
@@ -38,19 +40,72 @@ fn spawn_node() -> (TempDir, PathBuf, ConnectionTicket, Vault) {
     let served = vault.clone();
     thread::spawn(move || kunki::bridge::serve(&bound, served, LiveRegistry::new()).unwrap());
     wait_for(&socket);
-    (dir, socket, ticket, vault)
+    (dir, Link::Socket(socket), ticket, vault)
 }
 
 /// The listener binds on its own thread, asynchronously to this one — bounded polling instead
 /// of a fixed sleep, so this is as fast as the thread actually is and never flaky under load.
 fn wait_for(socket: &Path) {
+    let link = Link::Socket(socket.to_path_buf());
     for _ in 0..200 {
-        if ping(socket) {
+        if ping(&link) {
             return;
         }
         thread::sleep(Duration::from_millis(10));
     }
     panic!("kunki bridge never came up at {socket:?}");
+}
+
+/// Hosting for itself (laptop-host step 4): no socket anywhere, the account's own admin
+/// answers, and the published workspace is what `hosting` reports.
+#[test]
+fn an_account_hosts_for_itself_without_a_socket() {
+    let (alice, _dir) = desktop_vault();
+    let record = self_claim(&alice, now()).unwrap();
+    assert!(is_me(&alice, &record));
+    let link = Link::current(&alice);
+    assert!(matches!(link, Link::Here(_)));
+    assert!(ping(&link));
+
+    let ws = alice.create_workspace("team").unwrap();
+    let item = alice.create_item(&ws.id, "chat", vault::ItemKind::App).unwrap();
+    publish(
+        &link,
+        &alice,
+        record.token.clone(),
+        PublishedWorkspace {
+            id: ws.id.clone(),
+            name: ws.name.clone(),
+            created: ws.created,
+        },
+        vec![PublishedItem {
+            id: item.id.clone(),
+            name: item.name.clone(),
+            kind: "app".into(),
+            created: item.created,
+        }],
+    )
+    .unwrap();
+
+    let doc = LoroDoc::new();
+    doc.get_text("t").insert(0, "hi").unwrap();
+    let did = record.node_did.clone();
+    let hello = desktop_start_sync(&did, record.token.clone(), &ws.id, &item.id, SyncLayer::Doc("notes".into()), &doc, None).unwrap();
+    sync(&link, &alice, hello).unwrap();
+    assert!(alice.get_doc(&ws.id, &item.id, "notes").unwrap().is_some(), "the host's copy is this vault");
+
+    assert_eq!(hosting(&alice).unwrap(), vec![ws.id.clone()]);
+    let who = hosts(&alice, &ws.id).unwrap();
+    assert_eq!(who.len(), 1);
+    assert_eq!(who[0]["did"], did);
+    assert_eq!(who[0]["online"], true);
+    assert!(hosts(&alice, "nope").unwrap().is_empty());
+
+    // A listen registers with the in-process registry and never touches a socket.
+    let mut pushes = listen(&link, &alice, &did, record.token.clone()).unwrap();
+    assert!(matches!(pushes, Pushes::Here(_)));
+    registry().push(&did, &kunki::push::Push { ws_id: ws.id.clone(), item_id: item.id.clone(), layer: SyncLayer::Doc("notes".into()), snapshot: vec![1] });
+    assert_eq!(next_push(&mut pushes).unwrap().snapshot, vec![1]);
 }
 
 fn desktop_vault() -> (Vault, TempDir) {

@@ -13,6 +13,10 @@ pub mod wire;
 pub use endpoint::{Mode, Net};
 pub use iroh::{EndpointAddr, EndpointId};
 
+/// The wire a space's sessions run on (laptop-host step 5). Versioned in the name: a peer on
+/// another version fails at connect, not mid-session.
+pub const SPACE_ALPN: &[u8] = b"osvauld/space/1";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The transport refused or dropped: a bind, dial, stream or read/write failure, as iroh

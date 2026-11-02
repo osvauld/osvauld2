@@ -67,6 +67,19 @@ path, already proven). Wake push is out of scope (§6).
 
 `Scope::Node` stays only for the headless binary's own bookkeeping; nothing in a space's chain uses it.
 
+*Revised 2026-11-02 (step 4, as built):* the owner's own grant is the same root token a
+claimant used to get — `owner` at **`Scope::Node`**, issued by the owner to the owner
+(`courier::self_claim`) on every unlock, recorded in `kunki::admin` over the owner's own vault.
+`Scope::Node` therefore means "this account's host as a whole"; members' tokens are the
+narrower scopes. `kunki::admin`'s records keep their keys (`token/`, `users/`, `revoked/`,
+`subscriptions/`): one host per account, so a `host/<ws>/` prefix bought nothing. A space this
+account *joined* from another host is marked `joined/<ws>` (written at step 6), and `hosting`
+is every workspace without that mark. `shell2::node::Link` routes a request in-process
+(`Here`) when the remembered relationship names this account, over the kunki socket when it
+claimed another node — so `e2e_chat_sync.py`'s node mode still runs until step 5 retires the
+socket. A claim always goes out over the socket: it names a new node, never the one this
+account already is.
+
 ### Device key = endpoint id
 
 Each install gets a **random per-install device key**, sealed in the vault beside the identity

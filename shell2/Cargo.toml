@@ -25,6 +25,7 @@ loro = "1.13.9"
 osvauld-rpc = { path = "../osvauld-rpc" }
 kunki = { path = "../kunki" }
 courier = { path = "../courier" }
+net = { path = "../net" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"

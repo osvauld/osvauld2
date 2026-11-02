@@ -673,7 +673,8 @@ def main() -> int:
     for name in names:
         started = time.monotonic()
         try:
-            with Net() as net:
+            # Node mode (one kunki process) unless OSVAULD_E2E_HOST=1 makes it host mode (H6).
+            with Net(node=True) as net:
                 TESTS[name](net)
             print(f"ok      {name}  {TESTS[name].__doc__.splitlines()[0]}  "
                   f"({time.monotonic() - started:.1f}s)", flush=True)
