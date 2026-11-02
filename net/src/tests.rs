@@ -36,8 +36,8 @@ fn local_addr(ep: &iroh::Endpoint) -> EndpointAddr {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frames_round_trip_over_loopback() {
-    let a = bind(&secret(1), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
-    let b = bind(&secret(2), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let a = bind(&secret(1), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
+    let b = bind(&secret(2), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
     let b_addr = local_addr(&b);
     let server = tokio::spawn(async move {
         let conn = b.accept().await.unwrap().accept().unwrap().await.unwrap();
@@ -69,8 +69,8 @@ async fn frames_round_trip_over_loopback() {
 /// buffered, so a stranger cannot make a host hold the cap's worth of bytes it never sends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_header_over_the_cap_is_refused_before_the_body() {
-    let a = bind(&secret(3), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
-    let b = bind(&secret(4), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let a = bind(&secret(3), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
+    let b = bind(&secret(4), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
     let b_addr = local_addr(&b);
     let server = tokio::spawn(async move {
         let conn = b.accept().await.unwrap().accept().unwrap().await.unwrap();
@@ -92,8 +92,8 @@ async fn a_header_over_the_cap_is_refused_before_the_body() {
 /// even when the peer sent the body in the same write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_over_cap_body_sent_with_its_header_is_not_buffered() {
-    let a = bind(&secret(8), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
-    let b = bind(&secret(9), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let a = bind(&secret(8), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
+    let b = bind(&secret(9), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
     let b_addr = local_addr(&b);
     let server = tokio::spawn(async move {
         let conn = b.accept().await.unwrap().accept().unwrap().await.unwrap();
@@ -114,7 +114,7 @@ async fn an_over_cap_body_sent_with_its_header_is_not_buffered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dial_to_nowhere_times_out() {
-    let a = bind(&secret(5), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let a = bind(&secret(5), Mode::Local, vec![ALPN.to_vec()], None).await.unwrap();
     // TEST-NET-1 (RFC 5737): routable nowhere, so the dial hangs until our timeout.
     let nowhere = EndpointAddr::from_parts(
         iroh::SecretKey::from_bytes(&secret(6)).public(),
@@ -126,7 +126,7 @@ async fn a_dial_to_nowhere_times_out() {
 
 #[test]
 fn block_on_runs_from_a_plain_thread_and_addr_is_direct_in_local_mode() {
-    let net = Net::bind(&secret(7), Mode::Local, vec![ALPN.to_vec()]).unwrap();
+    let net = Net::bind(&secret(7), Mode::Local, vec![ALPN.to_vec()], None).unwrap();
     assert_eq!(net.id(), iroh::SecretKey::from_bytes(&secret(7)).public());
     let addr = net.addr(Duration::from_secs(2));
     assert!(addr.ip_addrs().next().is_some(), "{addr:?}");

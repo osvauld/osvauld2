@@ -985,7 +985,8 @@ fn a_share_code_stands_for_a_public_invite_until_it_expires() {
         public: false,
     };
     let code = admin.issue_code(&request, "alice's laptop", NOW).unwrap();
-    let ticket = admin.fetch_code(&code, NOW + 1).unwrap().expect("a live code");
+    let (ticket, ws) = admin.fetch_code(&code, NOW + 1).unwrap().expect("a live code");
+    assert_eq!(ws, minted('a'));
 
     // Public: two joiners redeem the same code.
     for _ in 0..2 {

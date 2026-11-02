@@ -16,7 +16,10 @@ mod launcher;
 mod login;
 mod mnemonic;
 mod names;
+mod clock;
+mod host;
 mod node;
+mod sessions;
 mod shell_api;
 mod signup;
 mod space;
@@ -51,10 +54,15 @@ use app_host::{
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::DesktopNodeRecord;
-use courier::sync::{Rejected, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync};
+use courier::invite::{InviteClaimHello, InviteRequest, desktop_start_invite_claim};
+use courier::session::{DocState, Frame};
+use courier::sync::{
+    Rejected, SyncHello, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync,
+};
 use courier::token::{Scope, Token};
+use kunki::admin::Admin;
 use kunki::push::Push;
-use loro::{Container, LoroDoc, ValueOrContainer, VersionVector};
+use loro::{Container, ExportMode, LoroDoc, ValueOrContainer, VersionVector};
 use osvauld_rpc::{
     AccountSummary, EditFileResult, ItemSummary, LuaTestResult, Request, Response,
     SourceActivation, VersionedFile, WorkspaceSummary,
@@ -130,7 +138,27 @@ pub enum Msg {
     AuthDone(std::sync::mpsc::Sender<osvauld_rpc::Response>, AuthOutcome),
     /// The device endpoint bound off-thread after an unlock (laptop-host step 4), tagged with
     /// the sync generation it was asked for: a bind that lands after a lock is closed again.
-    NetBound(u64, Result<Bound, String>),
+    NetBound(u64, Result<Slot<net::Net>, String>),
+    /// A member's update reached this host (`host.rs`); the UI thread merges it — into the
+    /// live doc when the app is open, into the vault when not — and answers through the slot.
+    HostSync(u64, SyncHello, Slot<tokio::sync::oneshot::Sender<Result<SyncReply, String>>>),
+    /// A session to a joined space's host came up, dropped (with why), carried a frame, or
+    /// brought the token the host minted for this account's claim.
+    SessionUp(u64, String),
+    /// `(generation, space, the session's sequence number, why)` — the sequence number tells
+    /// an old session's ending from the one now dialling.
+    SessionDown(u64, String, u64, String),
+    SessionFrame(u64, String, Frame),
+    SessionToken(u64, String, Token),
+    /// The retry ladder says it is time to dial again.
+    SessionRedial(u64, String),
+    /// `JoinSpace` fetched the space from the link's host; the UI thread adopts it and opens
+    /// the claiming session. Answered when the sources have arrived (`PendingJoin`).
+    JoinFetched(
+        u64,
+        std::sync::mpsc::Sender<osvauld_rpc::Response>,
+        Result<Slot<sessions::Fetched>, String>,
+    ),
     /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
     DriverDone(DriverReply, Result<runtime::DriverReport, String>),
     NativeRects(
@@ -1111,6 +1139,15 @@ pub struct Shell {
     /// The DID the current push listener registered under, so the next generation can
     /// unregister it and let that thread end.
     listener_did: Option<String>,
+    /// Spaces joined from another host, by workspace id (`sessions::load_joined`).
+    joined: HashMap<String, sessions::Joined>,
+    /// Open sessions to those hosts, by workspace id.
+    sessions: HashMap<String, sessions::Handle>,
+    /// Redial attempts since the last session came up, by workspace id.
+    redial: HashMap<String, usize>,
+    pending_join: HashMap<String, PendingJoin>,
+    /// `JoinSpace` requests that arrived before the endpoint was bound.
+    join_waiting: Vec<(String, std::sync::mpsc::Sender<Response>)>,
     /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
@@ -1127,18 +1164,47 @@ pub struct Shell {
     /// listener whose generation has passed stops reconnecting.
     sync_gen: Arc<AtomicU64>,
 }
-/// A just-bound endpoint on its way to the UI thread. `Msg` is `Clone` and a `Net` is not
-/// (it owns a runtime), so the message carries a slot the handler takes it out of.
-#[derive(Clone)]
-pub struct Bound(Arc<Mutex<Option<net::Net>>>);
+/// A value on its way to the UI thread that `Msg`'s `Clone` cannot carry — a bound endpoint
+/// (it owns a runtime), a one-shot reply sender. The handler takes it out of the slot once.
+pub struct Slot<T>(Arc<Mutex<Option<T>>>);
 
-impl Bound {
-    fn new(net: net::Net) -> Self {
-        Self(Arc::new(Mutex::new(Some(net))))
+// By hand: a derive would ask `T: Clone`, and not being `Clone` is the point of the slot.
+impl<T> Clone for Slot<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
-    fn take(&self) -> Option<net::Net> {
+}
+
+impl<T> Slot<T> {
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(Mutex::new(Some(value))))
+    }
+    pub fn take(&self) -> Option<T> {
         self.0.lock().unwrap().take()
     }
+}
+
+/// A `JoinSpace` in flight: answered once every item's source has arrived over the first
+/// session, so the caller can open an item the moment the reply lands.
+struct PendingJoin {
+    reply: std::sync::mpsc::Sender<Response>,
+    remaining: std::collections::HashSet<String>,
+    ws: courier::publish::PublishedWorkspace,
+    items: Vec<courier::publish::PublishedItem>,
+}
+
+/// The UDP port this install's endpoint binds, remembered per account (a sealed entry).
+const PORT_KEY: &str = "net/port";
+
+/// Where a space's sync goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// This account hosts it: straight into its own admin.
+    Here,
+    /// A kunki node over its unix socket (pre-pivot; the chat tests' node mode).
+    Socket,
+    /// Joined from another host: a session over iroh.
+    Session,
 }
 
 /// `--offscreen WxH` — run with no window, for a bridge client driving the shell. The size is in
@@ -1185,7 +1251,15 @@ impl Shell {
     /// lock, unlock, signup — passes through here: open apps belong to the account that
     /// was active, and the post-update flush must never write their docs into another
     /// account's store. Nothing is lost: every prior update already flushed.
-    fn sync_one(&self, item_id: &Arc<str>, name: &str) {
+    fn sync_one(&mut self, item_id: &Arc<str>, name: &str) {
+        let Some(ws) = self.apps.get(item_id).map(|a| a.ws_id.clone()) else {
+            return;
+        };
+        match self.route(&ws) {
+            Route::Session => return self.session_sync_one(&ws, item_id, name),
+            Route::Here => return self.here_fan_out(item_id, name),
+            Route::Socket => {}
+        }
         let (Some(record), Some(a)) = (&self.node, self.apps.get(item_id)) else {
             return;
         };
@@ -1255,7 +1329,13 @@ impl Shell {
             self.subscribed.remove(&id),
             closed.as_ref(),
         ) {
-            if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
+            if self.joined.contains_key(&o.ws_id) {
+                // A session carries no subscriptions to undo; it closes with the last open item.
+                let ws = o.ws_id.clone();
+                if !self.apps.values().any(|a| a.ws_id == ws) {
+                    self.sessions.remove(&ws);
+                }
+            } else if let Some(desktop_did) = self.vault.with_signer(|d| d.did().to_string()) {
                 let link = node::Link::current(&self.vault);
                 let (did, ws_id, item_id) = (desktop_did, o.ws_id.clone(), id.to_string());
                 let vault = self.vault.clone();
@@ -1286,6 +1366,427 @@ impl Shell {
         true
     }
 
+    /// A member's update, judged by this host's records and merged into the live doc when
+    /// the app is open, into the vault when not. Answered through `reply`.
+    fn host_sync(
+        &mut self,
+        gen_: u64,
+        hello: SyncHello,
+        reply: tokio::sync::oneshot::Sender<Result<SyncReply, String>>,
+    ) {
+        if gen_ != self.gen_() {
+            let _ = reply.send(Err("account changed".into()));
+            return;
+        }
+        let admin = Admin::new(self.vault.clone());
+        let now = clock::now_secs();
+        let id: Arc<str> = hello.item_id.as_str().into();
+        // One copy per doc: an open app's live doc is the host's copy of it.
+        let live = match (&hello.layer, self.apps.get(&id)) {
+            (SyncLayer::Doc(name), Some(a))
+                if a.ws_id == hello.ws_id && a.doc_names.contains(name) =>
+            {
+                Some((a, name.clone()))
+            }
+            _ => None,
+        };
+        match live {
+            Some((a, name)) => a.call(move |h| {
+                let judged = match admin.judge(&hello, now) {
+                    Ok(judged) => judged,
+                    Err(e) => {
+                        let _ = reply.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let result = h.app.with_doc(&name, |doc| {
+                    admin.accept_live(doc, &hello, &judged, now, host::pusher())
+                });
+                let _ = reply.send(match result {
+                    Some(Ok(outcome)) => Ok(outcome),
+                    Some(Err(e)) => Err(e.to_string()),
+                    None => Err("doc closed".into()),
+                });
+            }),
+            None => {
+                std::thread::spawn(move || {
+                    let outcome = admin
+                        .accept_sync(hello, now, host::pusher())
+                        .map_err(|e| e.to_string());
+                    let _ = reply.send(outcome);
+                });
+            }
+        }
+    }
+
+    /// A session ended: its apps hear why, and if any is still open the retry ladder
+    /// schedules the next dial.
+    fn session_down(&mut self, ws: String, seq: u64, reason: String) {
+        if self.sessions.get(&ws).is_some_and(|h| h.seq != seq) {
+            return; // an earlier session's ending; a newer one is up or dialling
+        }
+        self.sessions.remove(&ws);
+        if let Some(p) = self.pending_join.remove(&ws) {
+            let _ = p
+                .reply
+                .send(Response::err(format!("could not reach the host: {reason}")));
+        }
+        self.note_offline(&ws, &reason);
+        if self.apps.values().any(|a| a.ws_id == ws) {
+            let attempt = self.redial.entry(ws.clone()).or_insert(0);
+            let pause = net::wire::retry_after(*attempt);
+            *attempt += 1;
+            let (proxy, gen_) = (self.proxy.clone(), self.gen_());
+            std::thread::spawn(move || {
+                std::thread::sleep(pause);
+                let _ = proxy.send_event(Msg::SessionRedial(gen_, ws));
+            });
+        }
+    }
+
+    /// `JoinSpace`'s second half: adopt what the host listed, remember the host, and open
+    /// the first session with the invite claim and a pull of every item's source.
+    fn join_fetched(
+        &mut self,
+        gen_: u64,
+        tx: std::sync::mpsc::Sender<Response>,
+        result: Result<Slot<sessions::Fetched>, String>,
+    ) {
+        if gen_ != self.gen_() {
+            let _ = tx.send(Response::err("account changed"));
+            return;
+        }
+        let fetched = match result.map(|slot| slot.take()) {
+            Ok(Some(fetched)) => fetched,
+            Ok(None) => return,
+            Err(e) => {
+                let _ = tx.send(Response::err(e));
+                return;
+            }
+        };
+        let now = clock::now_secs();
+        let ws = fetched.ws.id.clone();
+        let adopted = (|| -> Result<(), String> {
+            self.vault
+                .adopt_workspace(&WorkspaceMeta {
+                    id: ws.clone(),
+                    name: fetched.ws.name.clone(),
+                    created: fetched.ws.created,
+                })
+                .map_err(|e| e.to_string())?;
+            for item in &fetched.items {
+                self.vault
+                    .adopt_item(&WorkspaceItem {
+                        id: item.id.clone(),
+                        ws_id: ws.clone(),
+                        name: item.name.clone(),
+                        kind: kind_from_str(&item.kind)?,
+                        created: item.created,
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            let joined = sessions::Joined {
+                host_did: fetched.invite.node_did.clone(),
+                host: fetched
+                    .hosts
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| fetched.link.host.clone()),
+                token: None,
+            };
+            sessions::save_joined(&self.vault, &ws, &joined)?;
+            self.joined.insert(ws.clone(), joined);
+            Ok(())
+        })();
+        if let Err(e) = adopted {
+            let _ = tx.send(Response::err(e));
+            return;
+        }
+        let claim = self
+            .vault
+            .with_signer(|me| desktop_start_invite_claim(fetched.invite.clone(), me, now));
+        let claim = match claim {
+            Some(Ok(claim)) => claim,
+            Some(Err(e)) => {
+                let _ = tx.send(Response::err(e.to_string()));
+                return;
+            }
+            None => {
+                let _ = tx.send(Response::err("locked"));
+                return;
+            }
+        };
+        let docs = fetched
+            .items
+            .iter()
+            .map(|i| DocState {
+                item_id: i.id.clone(),
+                layer: SyncLayer::Src,
+                vv: VersionVector::new().encode(),
+            })
+            .collect();
+        self.pending_join.insert(
+            ws.clone(),
+            PendingJoin {
+                reply: tx,
+                remaining: fetched.items.iter().map(|i| i.id.clone()).collect(),
+                ws: fetched.ws.clone(),
+                items: fetched.items.clone(),
+            },
+        );
+        self.sessions.remove(&ws);
+        self.open_session(&ws, Some(claim), docs);
+    }
+
+    /// `JoinSpace`'s first half: fetch the space from the link's host, off-thread. Asked
+    /// before the endpoint is up (right after a signup), it waits for `NetBound`.
+    fn join_space(&mut self, link: String, tx: std::sync::mpsc::Sender<Response>) {
+        let Some(net) = &self.net else {
+            self.join_waiting.push((link, tx));
+            return;
+        };
+        let link = match courier::link::Link::from_text(&link) {
+            Ok(link) => link,
+            Err(_) => {
+                let _ = tx.send(Response::err("not a share link"));
+                return;
+            }
+        };
+        let (rt, ep, proxy, gen_) = (
+            net.handle().clone(),
+            net.endpoint().clone(),
+            self.proxy.clone(),
+            self.gen_(),
+        );
+        std::thread::spawn(move || {
+            let fetched = sessions::fetch(&rt, ep, link).map(Slot::new);
+            let _ = proxy.send_event(Msg::JoinFetched(gen_, tx, fetched));
+        });
+    }
+
+    fn route(&self, ws: &str) -> Route {
+        if self.joined.contains_key(ws) {
+            return Route::Session;
+        }
+        match node::Link::current(&self.vault) {
+            node::Link::Here(_) => Route::Here,
+            node::Link::Socket(_) => Route::Socket,
+        }
+    }
+
+    fn ensure_session(&mut self, ws: &str) {
+        if !self.sessions.contains_key(ws) {
+            self.open_session(ws, None, Vec::new());
+        }
+    }
+
+    /// Dials the space's host; `claim` only on the first session after a join. Silently
+    /// nothing until the endpoint is up — `NetBound` dials what is wanted then.
+    fn open_session(&mut self, ws: &str, claim: Option<InviteClaimHello>, docs: Vec<DocState>) {
+        let (Some(net), Some(joined)) = (&self.net, self.joined.get(ws)) else {
+            return;
+        };
+        let handle = sessions::dial(
+            net.handle(),
+            net.endpoint().clone(),
+            self.vault.clone(),
+            self.proxy.clone(),
+            self.gen_(),
+            sessions::Dial {
+                ws_id: ws.to_string(),
+                joined: joined.clone(),
+                docs,
+                claim,
+            },
+        );
+        self.sessions.insert(ws.to_string(), handle);
+    }
+
+    /// `sync_one` for a joined space: the update goes down the session instead of to a node.
+    fn session_sync_one(&mut self, ws: &str, item_id: &Arc<str>, name: &str) {
+        self.ensure_session(ws);
+        let Some(token) = self.joined.get(ws).and_then(|j| j.token.clone()) else {
+            return; // no token until the first Welcome; `SessionUp` re-syncs
+        };
+        let Some(tx) = self.sessions.get(ws).map(|h| h.tx.clone()) else {
+            return;
+        };
+        let Some(a) = self.apps.get(item_id) else { return };
+        let Some(did) = self.vault.with_signer(|d| d.did().to_string()) else {
+            return;
+        };
+        let since = self
+            .node_vv
+            .get(&(item_id.clone(), name.to_string()))
+            .cloned();
+        let (ws, id, name) = (ws.to_string(), item_id.clone(), name.to_string());
+        a.call(move |h| {
+            let hello = h.app.with_doc(&name, |doc| {
+                desktop_start_sync(
+                    &did,
+                    token,
+                    &ws,
+                    &id,
+                    SyncLayer::Doc(name.clone()),
+                    doc,
+                    since.as_deref(),
+                )
+            });
+            match hello {
+                Some(Ok(hello)) => {
+                    let _ = tx.send(Frame::Update {
+                        item_id: hello.item_id,
+                        layer: hello.layer,
+                        vv: hello.vv,
+                        update: hello.update,
+                    });
+                }
+                Some(Err(e)) => eprintln!("session: no update for {id}/{name}: {e}"),
+                None => {}
+            }
+        });
+    }
+
+    /// `sync_one` for a space this account hosts: the open doc *is* the host's copy, so there
+    /// is nothing to sync it with — only members to tell. Fans the live doc out to every
+    /// session subscribed to it, from the app's thread; the app's own flush persists it.
+    fn here_fan_out(&mut self, item_id: &Arc<str>, name: &str) {
+        let (Some(record), Some(a)) = (&self.node, self.apps.get(item_id)) else {
+            return;
+        };
+        let Some(did) = self.vault.with_signer(|d| d.did().to_string()) else {
+            return;
+        };
+        let admin = Admin::new(self.vault.clone());
+        let now = clock::now_secs();
+        let (ws, id, name, token) = (
+            a.ws_id.clone(),
+            item_id.clone(),
+            name.to_string(),
+            record.token.clone(),
+        );
+        a.call(move |h| {
+            let result = h.app.with_doc(&name, |doc| -> Result<(), String> {
+                let hello = SyncHello {
+                    request_id: String::new(),
+                    desktop_did: did,
+                    token,
+                    ws_id: ws,
+                    item_id: id.to_string(),
+                    layer: SyncLayer::Doc(name.clone()),
+                    vv: doc.oplog_vv().encode(),
+                    update: Vec::new(),
+                };
+                let judged = admin.judge(&hello, now).map_err(|e| e.to_string())?;
+                let snapshot = doc
+                    .export(ExportMode::Snapshot)
+                    .map_err(|e| e.to_string())?;
+                admin
+                    .fan_out(&hello, &snapshot, judged.rules.as_ref(), now, host::pusher())
+                    .map_err(|e| e.to_string())
+            });
+            if let Some(Err(e)) = result {
+                eprintln!("host: fan-out of {id}/{name}: {e}");
+            }
+        });
+    }
+
+    /// An item's source arrived over a session: stored, and if a join was waiting on it, one
+    /// fewer to wait for.
+    fn src_arrived(&mut self, ws: &str, item_id: &str, update: Vec<u8>) {
+        let doc = LoroDoc::new();
+        let stored = doc
+            .import(&update)
+            .map_err(|e| e.to_string())
+            .and_then(|_| doc.export(ExportMode::Snapshot).map_err(|e| e.to_string()))
+            .and_then(|bytes| {
+                self.vault
+                    .put_src(ws, item_id, &bytes)
+                    .map_err(|e| e.to_string())
+            });
+        if let Err(e) = stored {
+            eprintln!("session {ws}: source for {item_id}: {e}");
+            return;
+        }
+        let done = match self.pending_join.get_mut(ws) {
+            Some(p) => {
+                p.remaining.remove(item_id);
+                p.remaining.is_empty()
+            }
+            None => false,
+        };
+        if done {
+            self.finish_join(ws);
+        }
+    }
+
+    fn finish_join(&mut self, ws: &str) {
+        let Some(p) = self.pending_join.remove(ws) else { return };
+        refresh_after_workspace(&mut self.screen, &self.vault);
+        let _ = p
+            .reply
+            .send(Response::ok(serde_json::json!({ "ws": p.ws, "items": p.items })));
+    }
+
+    /// Tells every open app of a joined space that its host is unreachable, in its console.
+    fn note_offline(&self, ws: &str, reason: &str) {
+        for a in self.apps.values().filter(|a| a.ws_id == ws) {
+            let line = format!("host offline: {reason}");
+            a.call(move |h| h.app.note(line));
+        }
+    }
+
+    fn share_space(&self, ws_id: &str) -> Response {
+        let Some(net) = &self.net else {
+            return Response::err("this device's endpoint is not up yet");
+        };
+        let (Some(record), Some(did)) = (
+            &self.node,
+            self.vault.with_signer(|d| d.did().to_string()),
+        ) else {
+            return Response::err("locked");
+        };
+        if !node::hosting(&self.vault)
+            .unwrap_or_default()
+            .iter()
+            .any(|w| w == ws_id)
+        {
+            return Response::err("not a space this account hosts");
+        }
+        let request = InviteRequest {
+            desktop_did: did,
+            token: record.token.clone(),
+            role: "member".into(),
+            scope: Scope::Workspace(ws_id.to_string()),
+            public: true,
+        };
+        let label = self.vault.current().map(|a| a.label).unwrap_or_default();
+        let code = match Admin::new(self.vault.clone()).issue_code(&request, &label, clock::now_secs()) {
+            Ok(code) => code,
+            Err(e) => return Response::err(e.to_string()),
+        };
+        let host = host::host_addr_of(&net.addr(Duration::from_millis(500)));
+        match (courier::link::Link { host, code }).to_text() {
+            Ok(text) => Response::ok(text),
+            Err(e) => Response::err(e.to_string()),
+        }
+    }
+
+    fn hosts(&self, ws_id: &str) -> Response {
+        if let Some(joined) = self.joined.get(ws_id) {
+            let up = self.sessions.get(ws_id).is_some_and(|h| h.up);
+            return Response::ok(vec![serde_json::json!({
+                "did": joined.host_did,
+                "device": URL_SAFE_NO_PAD.encode(joined.host.device),
+                "online": up,
+            })]);
+        }
+        match node::hosts(&self.vault, ws_id, self.net.is_some()) {
+            Ok(hosts) => Response::ok(hosts),
+            Err(e) => Response::err(e),
+        }
+    }
+
     /// Binds this device's endpoint on the unlocked account's device key — off the UI thread,
     /// once per unlock, replacing any earlier one (`Msg::NetBound` lands it). A failure is
     /// logged, not fatal: the shell still runs, it just cannot be dialled.
@@ -1300,11 +1801,31 @@ impl Shell {
         };
         let proxy = self.proxy.clone();
         let gen_ = self.gen_();
+        let vault = self.vault.clone();
         std::thread::spawn(move || {
-            let bound = net::Net::bind(&secret, net::Mode::from_env(), vec![net::SPACE_ALPN.to_vec()])
-                .map(Bound::new)
+            // The port this install bound last time, so a local link survives a restart; a
+            // busy port falls back to any, and whatever was bound is what gets remembered.
+            let wanted = vault
+                .get_entry(PORT_KEY)
+                .ok()
+                .flatten()
+                .and_then(|b| b.try_into().ok().map(u16::from_be_bytes));
+            let alpns = vec![net::SPACE_ALPN.to_vec()];
+            let mode = net::Mode::from_env();
+            let bound = net::Net::bind(&secret, mode, alpns.clone(), wanted)
+                .or_else(|e| {
+                    eprintln!("net: port {wanted:?} unavailable ({e}); binding any");
+                    net::Net::bind(&secret, mode, alpns, None)
+                })
                 .map_err(|e| e.to_string());
-            let _ = proxy.send_event(Msg::NetBound(gen_, bound));
+            if let Ok(bound) = &bound {
+                if let Some(port) = net::endpoint::bound_port(bound.endpoint()) {
+                    if wanted != Some(port) {
+                        let _ = vault.put_entry(PORT_KEY, &port.to_be_bytes());
+                    }
+                }
+            }
+            let _ = proxy.send_event(Msg::NetBound(gen_, bound.map(Slot::new)));
         });
     }
 
@@ -1432,10 +1953,8 @@ impl Shell {
                 }
                 None => Response::err("locked"),
             },
-            Request::Hosts { ws_id } => match node::hosts(&self.vault, &ws_id, self.net.is_some()) {
-                Ok(hosts) => Response::ok(hosts),
-                Err(e) => Response::err(e),
-            },
+            Request::Hosts { ws_id } => self.hosts(&ws_id),
+            Request::ShareSpace { ws_id } => self.share_space(&ws_id),
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -1777,19 +2296,28 @@ impl Shell {
         };
         let Some(a) = self.apps.get(id) else { return };
         let ws = a.ws_id.clone();
+        let session = self.joined.contains_key(&ws);
         let mut send = names.to_vec();
         for name in &a.doc_names {
-            let first = subscribe_if_new(
-                &self.proxy,
-                &self.vault,
-                self.gen_(),
-                &mut self.subscribed,
-                &did,
-                record.token.clone(),
-                &ws,
-                id,
-                name,
-            );
+            // A session needs no subscribe: the host subscribes each doc an update names.
+            let first = if session {
+                self.subscribed
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(name.clone())
+            } else {
+                subscribe_if_new(
+                    &self.proxy,
+                    &self.vault,
+                    self.gen_(),
+                    &mut self.subscribed,
+                    &did,
+                    record.token.clone(),
+                    &ws,
+                    id,
+                    name,
+                )
+            };
             if first && !send.contains(name) {
                 send.push(name.clone());
             }
@@ -1912,6 +2440,11 @@ impl Shell {
             node: node.clone(),
             net: None,
             listener_did: None,
+            joined: HashMap::new(),
+            sessions: HashMap::new(),
+            redial: HashMap::new(),
+            pending_join: HashMap::new(),
+            join_waiting: Vec::new(),
             subscribed: HashMap::new(),
             failed_subs: Vec::new(),
             node_vv: HashMap::new(),
@@ -2458,6 +2991,15 @@ impl App for Shell {
                 self.vault.lock();
                 self.node = None;
                 self.close_net();
+                self.sessions.clear();
+                self.joined.clear();
+                self.redial.clear();
+                for (_, pending) in self.pending_join.drain() {
+                    let _ = pending.reply.send(Response::err("locked"));
+                }
+                for (_, tx) in self.join_waiting.drain(..) {
+                    let _ = tx.send(Response::err("locked"));
+                }
                 self.start_listener();
                 self.screen = match self.vault.accounts() {
                     Ok(list) if !list.is_empty() => Screen::Login(LoginScreen::new(&self.vault)),
@@ -2572,6 +3114,10 @@ impl App for Shell {
                         let _ = tx.send(Response::err(e.to_string()));
                     }
                 }
+                None
+            }
+            Msg::Rpc(Request::JoinSpace { link }, tx) => {
+                self.join_space(link, tx);
                 None
             }
             Msg::Rpc(
@@ -2856,7 +3402,11 @@ impl App for Shell {
             ) => {
                 let op = match req {
                     Request::Frame { count } => DriverOp::Frame(count),
-                    Request::Advance { secs } => DriverOp::Advance(secs),
+                    Request::Advance { secs } => {
+                        // The shell's own clock too, so a share code ages with the frames.
+                        clock::advance(secs);
+                        DriverOp::Advance(secs)
+                    }
                     Request::Rects {} => DriverOp::Rects,
                     Request::Touch { id, phase, x, y } => DriverOp::Touch { id, phase, at: (x, y) },
                     Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
@@ -3034,6 +3584,9 @@ impl App for Shell {
                             .map_err(|e| eprintln!("host: could not self-claim: {e}"))
                             .ok(),
                     };
+                    self.joined = sessions::load_joined(&self.vault);
+                    self.sessions.clear();
+                    self.redial.clear();
                     // The listener first: it bumps the generation the bind is tagged with.
                     self.start_listener();
                     self.bind_net();
@@ -3044,7 +3597,29 @@ impl App for Shell {
                 match bound.map(|b| b.take()) {
                     Ok(Some(bound)) if gen_ == self.gen_() => {
                         self.close_net();
+                        host::serve(
+                            &bound,
+                            host::HostCtx {
+                                vault: self.vault.clone(),
+                                proxy: self.proxy.clone(),
+                                gen_: gen_,
+                                ep: bound.endpoint().clone(),
+                            },
+                        );
                         self.net = Some(bound);
+                        // Sessions wanted before the endpoint was up can dial now.
+                        let wanted: Vec<String> = self
+                            .apps
+                            .values()
+                            .map(|a| a.ws_id.clone())
+                            .filter(|ws| self.joined.contains_key(ws))
+                            .collect();
+                        for ws in wanted {
+                            self.ensure_session(&ws);
+                        }
+                        for (link, tx) in std::mem::take(&mut self.join_waiting) {
+                            self.join_space(link, tx);
+                        }
                     }
                     Ok(Some(stale)) => {
                         std::thread::spawn(move || stale.close());
@@ -3113,6 +3688,116 @@ impl App for Shell {
                 None
             }
 
+            Msg::HostSync(gen_, hello, reply) => {
+                if let Some(reply) = reply.take() {
+                    self.host_sync(gen_, hello, reply);
+                }
+                None
+            }
+            Msg::SessionDown(_, ws, seq, reason) => {
+                self.session_down(ws, seq, reason);
+                None
+            }
+            Msg::JoinFetched(gen_, tx, result) => {
+                self.join_fetched(gen_, tx, result);
+                None
+            }
+            Msg::SessionUp(_, ws) => {
+                if let Some(h) = self.sessions.get_mut(&ws) {
+                    h.up = true;
+                }
+                self.redial.remove(&ws);
+                // A pull of every source a join waits on; then whatever is open re-syncs.
+                if let (Some(p), Some(h)) = (self.pending_join.get(&ws), self.sessions.get(&ws)) {
+                    for item_id in &p.remaining {
+                        let _ = h.tx.send(Frame::Update {
+                            item_id: item_id.clone(),
+                            layer: SyncLayer::Src,
+                            vv: VersionVector::new().encode(),
+                            update: Vec::new(),
+                        });
+                    }
+                    if p.remaining.is_empty() {
+                        self.finish_join(&ws);
+                    }
+                }
+                let open: Vec<(Arc<str>, Vec<String>)> = self
+                    .apps
+                    .iter()
+                    .filter(|(_, a)| a.ws_id == ws)
+                    .map(|(id, a)| (id.clone(), a.doc_names.clone()))
+                    .collect();
+                for (id, names) in open {
+                    // A fresh session knows nothing of what the host acked before.
+                    self.node_vv.retain(|(i, _), _| *i != id);
+                    self.subscribed.remove(&id);
+                    self.sync_open(&id, &names);
+                }
+                None
+            }
+            Msg::SessionRedial(_, ws) => {
+                if self.apps.values().any(|a| a.ws_id == ws) {
+                    self.ensure_session(&ws);
+                }
+                None
+            }
+            Msg::SessionToken(_, ws, token) => {
+                if let Some(joined) = self.joined.get_mut(&ws) {
+                    joined.token = Some(token);
+                    let joined = joined.clone();
+                    if let Err(e) = sessions::save_joined(&self.vault, &ws, &joined) {
+                        eprintln!("session {ws}: could not keep the token: {e}");
+                    }
+                }
+                None
+            }
+            Msg::SessionFrame(_, ws, frame) => {
+                match frame {
+                    Frame::Ack {
+                        item_id,
+                        layer: SyncLayer::Doc(name),
+                        vv,
+                        missing,
+                    } => {
+                        let id: Arc<str> = item_id.as_str().into();
+                        let key = (id.clone(), name.clone());
+                        if self.apps.contains_key(&id) {
+                            if missing {
+                                self.node_vv.remove(&key);
+                                self.sync_one(&id, &name);
+                            } else if newer_vv(self.node_vv.get(&key), &vv) {
+                                self.node_vv.insert(key, vv);
+                            }
+                        }
+                    }
+                    Frame::Update {
+                        item_id,
+                        layer: SyncLayer::Doc(name),
+                        update,
+                        ..
+                    } => {
+                        let id: Arc<str> = item_id.as_str().into();
+                        self.import(&id, Some(&ws), name, update);
+                    }
+                    Frame::Update {
+                        item_id,
+                        layer: SyncLayer::Src,
+                        update,
+                        ..
+                    } => self.src_arrived(&ws, &item_id, update),
+                    Frame::Rejected {
+                        item_id,
+                        layer: SyncLayer::Doc(name),
+                        rejected,
+                    } => {
+                        let id: Arc<str> = item_id.as_str().into();
+                        self.roll_back(&id, name, rejected);
+                    }
+                    Frame::Refused { reason } => eprintln!("session {ws}: {reason}"),
+                    _ => {}
+                }
+                None
+            }
             msg => match (&mut self.screen, msg) {
                 (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
                 (Screen::Mnemonic(f), Msg::Mnemonic(m)) => f.update(m, &self.vault),
@@ -3140,6 +3825,13 @@ impl App for Shell {
             Msg::SyncTick
                 | Msg::SyncDone(..)
                 | Msg::NetBound(..)
+                | Msg::HostSync(..)
+                | Msg::SessionUp(..)
+                | Msg::SessionDown(..)
+                | Msg::SessionFrame(..)
+                | Msg::SessionToken(..)
+                | Msg::SessionRedial(..)
+                | Msg::JoinFetched(..)
                 | Msg::PushReceived(..)
                 | Msg::ListenUp(_)
                 | Msg::SubscribeFailed(..)

@@ -45,15 +45,16 @@ pub struct Net {
 
 impl Net {
     /// Binds on `secret` — the device key, so the endpoint id *is* the device — serving
-    /// `alpns`. Blocks for the bind; makes the runtime.
-    pub fn bind(secret: &[u8; 32], mode: Mode, alpns: Vec<Vec<u8>>) -> Result<Net> {
+    /// `alpns`, on `port` when one is given (a stable port per install keeps a local link
+    /// valid across restarts). Blocks for the bind; makes the runtime.
+    pub fn bind(secret: &[u8; 32], mode: Mode, alpns: Vec<Vec<u8>>, port: Option<u16>) -> Result<Net> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("osvauld-net")
             .enable_all()
             .build()
             .map_err(Error::net)?;
-        let ep = rt.block_on(bind(secret, mode, alpns))?;
+        let ep = rt.block_on(bind(secret, mode, alpns, port))?;
         Ok(Net { rt, ep, mode })
     }
 
@@ -118,15 +119,27 @@ impl Net {
     }
 }
 
+/// The port the endpoint's sockets ended up on, for a caller that wants the same one next time.
+pub fn bound_port(ep: &Endpoint) -> Option<u16> {
+    ep.bound_sockets().first().map(|a| a.port())
+}
+
 /// The bind itself, for a caller that already has a runtime (tests, a future async host).
-pub async fn bind(secret: &[u8; 32], mode: Mode, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
+pub async fn bind(
+    secret: &[u8; 32],
+    mode: Mode,
+    alpns: Vec<Vec<u8>>,
+    port: Option<u16>,
+) -> Result<Endpoint> {
     let transport = QuicTransportConfig::builder()
-        // Keeps NAT bindings alive between frames; the relay link has its own pings.
+        // Keeps NAT bindings alive between frames; the relay link has its own pings. Two
+        // missed keep-alives and a vanished peer is noticed — a member's console says "host
+        // offline" within ten seconds, not twenty.
         .keep_alive_interval(Duration::from_secs(5))
-        .max_idle_timeout(Some(Duration::from_secs(20).try_into().expect("small timeout")))
+        .max_idle_timeout(Some(Duration::from_secs(10).try_into().expect("small timeout")))
         .build();
     let key = SecretKey::from_bytes(secret);
-    let ep = match mode {
+    let mut builder = match mode {
         Mode::Local => Endpoint::builder(presets::Minimal),
         Mode::Auto => Endpoint::builder(presets::N0),
         // No UDP of our own: every packet goes through the relay.
@@ -134,11 +147,16 @@ pub async fn bind(secret: &[u8; 32], mode: Mode, alpns: Vec<Vec<u8>>) -> Result<
     }
     .secret_key(key)
     .alpns(alpns)
-    .transport_config(transport)
-    .bind()
-    .await
-    .map_err(Error::net)?;
-    Ok(ep)
+    .transport_config(transport);
+    if let (Some(port), Mode::Local | Mode::Auto) = (port, mode) {
+        builder = builder
+            .clear_ip_transports()
+            .bind_addr(format!("0.0.0.0:{port}"))
+            .map_err(Error::net)?
+            .bind_addr(format!("[::]:{port}"))
+            .map_err(Error::net)?;
+    }
+    builder.bind().await.map_err(Error::net)
 }
 
 pub async fn dial(

@@ -87,7 +87,18 @@ pub struct Revocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Code {
     ticket: InviteTicket,
+    ws_id: String,
     exp: u64,
+}
+
+/// What a sync was judged on — see [`Admin::judge`].
+#[derive(Debug, Clone)]
+pub struct Judged {
+    pub node_did: String,
+    pub revoked: HashSet<[u8; 32]>,
+    pub access: Access,
+    pub undeclared: bool,
+    pub rules: Option<Manifest>,
 }
 
 /// The node's own records, over an unlocked account. Cloning is cheap and shares the account.
@@ -239,6 +250,39 @@ impl Admin {
         now: u64,
         pusher: &impl Pusher,
     ) -> Result<SyncReply, NodeError> {
+        let judged = self.judge(&hello, now)?;
+        let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
+        let why = match courier::sync::node_accept_sync(
+            &hello,
+            &judged.node_did,
+            current.as_deref(),
+            judged.access,
+            now,
+            &judged.revoked,
+        ) {
+            Ok(_) if judged.undeclared => CourierError::Undeclared,
+            Ok((ack, snapshot)) => {
+                self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
+                self.fan_out(&hello, &snapshot, judged.rules.as_ref(), now, pusher)?;
+                return Ok(SyncReply::Ack(ack));
+            }
+            Err(CourierError::NoRead | CourierError::NoWrite) if judged.undeclared => {
+                CourierError::Undeclared
+            }
+            Err(why) => why,
+        };
+        // A refused write is answered, not failed: the writer rolls back to the node's copy.
+        match courier::sync::node_reject(&hello, &why, current.as_deref(), judged.access)? {
+            Some(rejected) => Ok(SyncReply::Rejected(rejected)),
+            None => Err(why.into()),
+        }
+    }
+
+    /// What a sync is judged on, read from this host's records before any doc is touched:
+    /// the caller's grants against the manifest's rules. Split from [`accept_sync`] so a host
+    /// with the doc *open* can judge here and merge on the app's own thread
+    /// ([`accept_live`]) — the vault is read, never written, on this path.
+    pub fn judge(&self, hello: &SyncHello, now: u64) -> Result<Judged, NodeError> {
         let node_did = node::did(&self.vault)?;
         let revoked = self.revoked()?;
         let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
@@ -246,35 +290,59 @@ impl Admin {
         // An undeclared doc is judged as one nobody may read or write, so membership still
         // runs first and a stranger is refused as a stranger.
         let (access, undeclared) =
-            match self.access(rules.as_ref(), &hello, &hello.desktop_did, &grants) {
+            match self.access(rules.as_ref(), hello, &hello.desktop_did, &grants) {
                 Ok(access) => (access, false),
                 Err(NodeError::Courier(CourierError::Undeclared)) => {
                     (Access { read: false, write: false }, true)
                 }
                 Err(e) => return Err(e),
             };
-        let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
-        let why = match courier::sync::node_accept_sync(
-            &hello,
-            &node_did,
-            current.as_deref(),
+        Ok(Judged {
+            node_did,
+            revoked,
             access,
+            undeclared,
+            rules,
+        })
+    }
+
+    /// [`accept_sync`] over the live doc of an app this host has open (laptop-host §2, "One
+    /// copy per doc"): the merge lands in `doc` and nothing is stored here — the app's own
+    /// flush persists it, so the vault keeps one writer per doc. Fan-out still runs from
+    /// here, off the merged doc's snapshot.
+    pub fn accept_live(
+        &self,
+        doc: &loro::LoroDoc,
+        hello: &SyncHello,
+        judged: &Judged,
+        now: u64,
+        pusher: &impl Pusher,
+    ) -> Result<SyncReply, NodeError> {
+        let snapshot = |doc: &loro::LoroDoc| {
+            doc.export(loro::ExportMode::Snapshot)
+                .map_err(|_| NodeError::Courier(CourierError::Decode))
+        };
+        let why = match courier::sync::accept_into(
+            doc,
+            hello,
+            &judged.node_did,
+            judged.access,
             now,
-            &revoked,
+            &judged.revoked,
         ) {
-            Ok(_) if undeclared => CourierError::Undeclared,
-            Ok((ack, snapshot)) => {
-                self.store_layer(&hello.ws_id, &hello.item_id, &hello.layer, &snapshot)?;
-                self.fan_out(&hello, &snapshot, rules.as_ref(), now, pusher)?;
+            Ok(_) if judged.undeclared => CourierError::Undeclared,
+            Ok(ack) => {
+                let merged = snapshot(doc)?;
+                self.fan_out(hello, &merged, judged.rules.as_ref(), now, pusher)?;
                 return Ok(SyncReply::Ack(ack));
             }
-            Err(CourierError::NoRead | CourierError::NoWrite) if undeclared => {
+            Err(CourierError::NoRead | CourierError::NoWrite) if judged.undeclared => {
                 CourierError::Undeclared
             }
             Err(why) => why,
         };
-        // A refused write is answered, not failed: the writer rolls back to the node's copy.
-        match courier::sync::node_reject(&hello, &why, current.as_deref(), access)? {
+        let current = snapshot(doc)?;
+        match courier::sync::node_reject(hello, &why, Some(&current), judged.access)? {
             Some(rejected) => Ok(SyncReply::Rejected(rejected)),
             None => Err(why.into()),
         }
@@ -324,7 +392,7 @@ impl Admin {
     /// Each subscriber is re-checked against its live grants: a subscription outlives the
     /// grant that allowed it, and a revoked member must stop receiving. So is the manifest's read rule, whose inputs (a
     /// group's member list) change after the subscription was made.
-    fn fan_out(
+    pub fn fan_out(
         &self,
         hello: &SyncHello,
         snapshot: &[u8],
@@ -589,6 +657,9 @@ impl Admin {
         name: &str,
         now: u64,
     ) -> Result<[u8; courier::link::CODE_LEN], NodeError> {
+        let Scope::Workspace(ws_id) = &request.scope else {
+            return Err(CourierError::NotPermitted.into());
+        };
         let request = InviteRequest {
             public: true,
             ..request.clone()
@@ -597,6 +668,7 @@ impl Admin {
         let code = courier::link::new_code();
         let kept = Code {
             ticket,
+            ws_id: ws_id.clone(),
             exp: now + CODE_TTL,
         };
         self.vault
@@ -604,13 +676,13 @@ impl Admin {
         Ok(code)
     }
 
-    /// The invite a code stands for; `None` for a code never issued or past its time. An
-    /// expired code is forgotten on sight.
+    /// The invite a code stands for and the space it opens; `None` for a code never issued
+    /// or past its time. An expired code is forgotten on sight.
     pub fn fetch_code(
         &self,
         code: &[u8; courier::link::CODE_LEN],
         now: u64,
-    ) -> Result<Option<InviteTicket>, NodeError> {
+    ) -> Result<Option<(InviteTicket, String)>, NodeError> {
         let key = code_key(code);
         let Some(bytes) = self.vault.get_entry(&key)? else {
             return Ok(None);
@@ -620,7 +692,7 @@ impl Admin {
             self.vault.delete_entry(&key)?;
             return Ok(None);
         }
-        Ok(Some(kept.ticket))
+        Ok(Some((kept.ticket, kept.ws_id)))
     }
 
     /// Every nonce this node has already redeemed an invite for. Read whole, same reasoning as

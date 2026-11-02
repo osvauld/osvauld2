@@ -49,10 +49,32 @@ def refused(call, *words):
     raise AssertionError(f"accepted, should have been refused: {got}")
 
 
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def b58decode(text: str) -> bytes:
+    n = 0
+    for ch in text:
+        n = n * 58 + B58.index(ch)
+    out = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\0" * (len(text) - len(text.lstrip("1"))) + out
+
+
+def b58encode(data: bytes) -> str:
+    n = int.from_bytes(data, "big")
+    out = ""
+    while n:
+        n, r = divmod(n, 58)
+        out = B58[r] + out
+    return "1" * (len(data) - len(data.lstrip(b"\0"))) + out
+
+
 def wrong_code(link: str) -> str:
-    """The same link with its last character changed: a code the host never issued."""
-    last = link[-1]
-    return link[:-1] + ("A" if last != "A" else "B")
+    """The same link — same host, same addresses — with one byte of its 12-byte code
+    changed: a code the host never issued. Layout: version(1) device(32) code(12) …"""
+    raw = bytearray(b58decode(link[len("osvauld://s/"):]))
+    raw[33] ^= 0x01
+    return "osvauld://s/" + b58encode(bytes(raw))
 
 
 # ── tests ────────────────────────────────────────────────────────────────────
@@ -119,9 +141,10 @@ def h4(net):
     sees(b, i, "before alice slept")
     a.stop()
     send(b, i, "while alice slept")
+    # The transport notices a vanished host by its idle timeout (10 s), not at once.
     wait_until(
         lambda: any("host offline" in line for line in b.rpc.read_console(i)),
-        PUSH, "bob's console to say the host is offline",
+        PUSH * 4, "bob's console to say the host is offline",
     )
     assert "while alice slept" in texts(b, i), "bob's own post must stay local while offline"
     a.restart()
