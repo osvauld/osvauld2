@@ -300,6 +300,46 @@ fn resolver(vault: &Vault, ws_id: &str, item_id: &str) -> Resolve {
     })
 }
 
+/// [`resolver`] for a joined space: a doc the vault lacks is asked of the host over the
+/// session before the app may seed it — the same reason as [`resolver_with_node`], over the
+/// session's frames. Blocks the app thread for the round trip (a few ms on a LAN, ten seconds
+/// at most); the frames queue until the session is up, so an item opened while the dial is
+/// still in flight waits rather than seeds.
+fn resolver_with_session(vault: &Vault, ws_id: &str, item_id: &str, pull: sessions::Pull) -> Resolve {
+    let local = resolver(vault, ws_id, item_id);
+    let (v, ws, it) = (vault.clone(), ws_id.to_string(), item_id.to_string());
+    Rc::new(move |key| {
+        if let Some(bytes) = local(key)? {
+            return Ok(Some(bytes));
+        }
+        let DocKey::Own(name) = key else {
+            return Ok(None);
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let slot = (ws.clone(), it.clone(), name.to_string());
+        pull.waiters.lock().unwrap().insert(slot.clone(), tx);
+        let asked = pull.tx.send(Frame::Update {
+            item_id: it.clone(),
+            layer: SyncLayer::Doc(name.to_string()),
+            vv: VersionVector::new().encode(),
+            update: Vec::new(),
+        });
+        let bytes = match asked {
+            Ok(()) => rx.recv_timeout(net::wire::REPLY_TIMEOUT).ok(),
+            Err(_) => None,
+        };
+        pull.waiters.lock().unwrap().remove(&slot);
+        let Some(bytes) = bytes else { return Ok(None) };
+        let doc = LoroDoc::new();
+        if doc.import(&bytes).is_err() || doc.oplog_vv().is_empty() {
+            return Ok(None);
+        }
+        let snapshot = doc.export(ExportMode::Snapshot).map_err(|e| e.to_string())?;
+        let _ = v.put_doc(&ws, &it, &snapshot, name);
+        Ok(Some(snapshot))
+    })
+}
+
 /// [`resolver`], plus one more thing to check first: if the local vault has nothing yet *and*
 /// a node is claimed, pull whatever the node already has before answering `None` — otherwise
 /// a doc that looks empty only because nobody has synced it to *this* desktop yet gets treated
@@ -1148,6 +1188,10 @@ pub struct Shell {
     pending_join: HashMap<String, PendingJoin>,
     /// `JoinSpace` requests that arrived before the endpoint was bound.
     join_waiting: Vec<(String, std::sync::mpsc::Sender<Response>)>,
+    /// Docs app threads are waiting on from a host (`resolver_with_session`).
+    pulls: sessions::Pulls,
+    /// `AssignRole`/`RevokeRole` sent down a session, awaiting the host's `RoleDone`.
+    pending_role: HashMap<String, std::sync::mpsc::Sender<Response>>,
     /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
@@ -1431,6 +1475,9 @@ impl Shell {
                 .reply
                 .send(Response::err(format!("could not reach the host: {reason}")));
         }
+        if let Some(tx) = self.pending_role.remove(&ws) {
+            let _ = tx.send(Response::err(format!("could not reach the host: {reason}")));
+        }
         self.note_offline(&ws, &reason);
         if self.apps.values().any(|a| a.ws_id == ws) {
             let attempt = self.redial.entry(ws.clone()).or_insert(0);
@@ -1597,6 +1644,7 @@ impl Shell {
                 joined: joined.clone(),
                 docs,
                 claim,
+                pulls: self.pulls.clone(),
             },
         );
         self.sessions.insert(ws.to_string(), handle);
@@ -1863,9 +1911,10 @@ impl Shell {
         }
     }
 
-    /// `AssignRole`/`RevokeRole`: off-thread, answered through `NodeRpcDone`.
+    /// `AssignRole`/`RevokeRole`: off-thread, answered through `NodeRpcDone` — or, for a
+    /// joined space, down the session and answered by the host's `RoleDone`.
     fn change_role(
-        &self,
+        &mut self,
         item_id: &str,
         did: String,
         role: String,
@@ -1883,6 +1932,25 @@ impl Shell {
                 return;
             }
         };
+        if self.joined.contains_key(&wi.ws_id) {
+            self.ensure_session(&wi.ws_id);
+            let Some(handle) = self.sessions.get(&wi.ws_id) else {
+                let _ = tx.send(Response::err("not connected to the host"));
+                return;
+            };
+            if self.pending_role.contains_key(&wi.ws_id) {
+                let _ = tx.send(Response::err("a role change is already in flight"));
+                return;
+            }
+            let _ = handle.tx.send(Frame::Role {
+                item_id: wi.id.clone(),
+                to: did,
+                role,
+                revoke,
+            });
+            self.pending_role.insert(wi.ws_id.clone(), tx);
+            return;
+        }
         let vault = self.vault.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -2445,6 +2513,8 @@ impl Shell {
             redial: HashMap::new(),
             pending_join: HashMap::new(),
             join_waiting: Vec::new(),
+            pulls: Default::default(),
+            pending_role: HashMap::new(),
             subscribed: HashMap::new(),
             failed_subs: Vec::new(),
             node_vv: HashMap::new(),
@@ -2479,6 +2549,16 @@ impl Shell {
                 .with_signer(|d| d.did().to_string())
                 .map(|did| (did, record.token.clone()))
         });
+        // A joined space's docs come from its host, over the session, before the app seeds.
+        let pull = if self.joined.contains_key(&wi.ws_id) {
+            self.ensure_session(&wi.ws_id);
+            self.sessions.get(&wi.ws_id).map(|h| sessions::Pull {
+                tx: h.tx.clone(),
+                waiters: self.pulls.clone(),
+            })
+        } else {
+            None
+        };
         let app = AppThread::spawn(
             Open {
                 item_id: id.clone(),
@@ -2487,6 +2567,7 @@ impl Shell {
                 vault: self.vault.clone(),
                 persist: true,
                 node,
+                pull,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -2513,6 +2594,7 @@ impl Shell {
                 vault: self.vault.clone(),
                 persist: false,
                 node: None,
+                pull: None,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -3776,8 +3858,32 @@ impl App for Shell {
                         update,
                         ..
                     } => {
-                        let id: Arc<str> = item_id.as_str().into();
-                        self.import(&id, Some(&ws), name, update);
+                        // An app thread waiting on this doc before it opens gets it first.
+                        let waiter = self
+                            .pulls
+                            .lock()
+                            .unwrap()
+                            .remove(&(ws.clone(), item_id.clone(), name.clone()));
+                        match waiter {
+                            Some(tx) => {
+                                let _ = tx.send(update);
+                            }
+                            // Empty: the host's answer to a pull of a doc it holds nothing of.
+                            None if update.is_empty() => {}
+                            None => {
+                                let id: Arc<str> = item_id.as_str().into();
+                                self.import(&id, Some(&ws), name, update);
+                            }
+                        }
+                    }
+                    Frame::RoleDone { ok, reason } => {
+                        if let Some(tx) = self.pending_role.remove(&ws) {
+                            let _ = tx.send(if ok {
+                                Response::ok("done")
+                            } else {
+                                Response::err(reason)
+                            });
+                        }
                     }
                     Frame::Update {
                         item_id,

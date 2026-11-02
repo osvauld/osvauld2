@@ -159,6 +159,8 @@ pub struct Open {
     /// test tab: no vault reads or writes, an in-memory index.
     pub persist: bool,
     pub node: Option<(String, Token)>,
+    /// For a joined space: the session to pull a doc the vault lacks from, before seeding.
+    pub pull: Option<crate::sessions::Pull>,
 }
 
 enum In {
@@ -381,6 +383,12 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
     doc.import(&open.src).map_err(|e| e.to_string())?;
     let resolve = match (&open.node, open.persist) {
         (_, false) => std::rc::Rc::new(|_: &DocKey| Ok(None)) as app_host::Resolve,
+        (_, true) if open.pull.is_some() => crate::resolver_with_session(
+            &open.vault,
+            &open.ws_id,
+            &open.item_id,
+            open.pull.clone().expect("checked"),
+        ),
         (Some((did, token)), true) => resolver_with_node(
             &open.vault,
             &open.ws_id,

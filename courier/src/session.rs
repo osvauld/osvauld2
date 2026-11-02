@@ -79,4 +79,16 @@ pub enum Frame {
         layer: SyncLayer,
         rejected: Rejected,
     },
+    /// Give (or with `revoke`, take back) an app role on one of the space's items; the host
+    /// decides from the member's grants on record (`courier::role`).
+    Role {
+        item_id: String,
+        to: String,
+        role: String,
+        revoke: bool,
+    },
+    RoleDone {
+        ok: bool,
+        reason: String,
+    },
 }

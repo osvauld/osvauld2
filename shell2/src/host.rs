@@ -368,20 +368,45 @@ async fn session(
                             .send_event(Msg::HostSync(ctx.gen_, hello, Slot::new(reply_tx)))
                             .map_err(|_| "shell gone".to_string())?;
                         let reply = match reply_rx.await {
-                            Ok(Ok(SyncReply::Ack(ack))) => {
-                                let mut out = vec![Frame::Ack { item_id: item_id.clone(), layer: layer.clone(), vv: ack.vv.clone(), missing: ack.missing }];
-                                if !ack.update.is_empty() {
-                                    out.push(Frame::Update { item_id, layer, vv: ack.vv, update: ack.update });
-                                }
-                                out
-                            }
+                            // The update first, always — a member pulling a doc before it
+                            // seeds waits for exactly one `Update`, empty when there is
+                            // nothing — then the ack that moves its `since`.
+                            Ok(Ok(SyncReply::Ack(ack))) => vec![
+                                Frame::Update { item_id: item_id.clone(), layer: layer.clone(), vv: ack.vv.clone(), update: ack.update },
+                                Frame::Ack { item_id, layer, vv: ack.vv, missing: ack.missing },
+                            ],
                             Ok(Ok(SyncReply::Rejected(rejected))) => vec![Frame::Rejected { item_id, layer, rejected }],
-                            Ok(Err(reason)) => vec![Frame::Refused { reason }],
+                            // Refused outright (a doc the member may not read, a stale
+                            // generation): still one empty `Update`, so a pull waiting on
+                            // this doc is answered rather than timed out.
+                            Ok(Err(reason)) => vec![
+                                Frame::Update { item_id, layer, vv: Vec::new(), update: Vec::new() },
+                                Frame::Refused { reason },
+                            ],
                             Err(_) => return Err("reply dropped".to_string()),
                         };
                         for frame in out_frames(reply) {
                             send_frame(&mut send, &frame, MAX_FRAME).await.map_err(|e| e.to_string())?;
                         }
+                    }
+                    Ok(Some(Frame::Role { item_id, to, role, revoke })) => {
+                        let request = courier::role::RoleRequest {
+                            desktop_did: did.clone(),
+                            token: token.clone(),
+                            to,
+                            role,
+                            scope: courier::sync::item_scope(&ws_id, &item_id),
+                        };
+                        let outcome = if revoke {
+                            admin.revoke_role(request, clock::now_secs()).map(|_| ())
+                        } else {
+                            admin.assign_role(request, clock::now_secs()).map(|_| ())
+                        };
+                        let done = match outcome {
+                            Ok(()) => Frame::RoleDone { ok: true, reason: String::new() },
+                            Err(e) => Frame::RoleDone { ok: false, reason: e.to_string() },
+                        };
+                        send_frame(&mut send, &done, MAX_FRAME).await.map_err(|e| e.to_string())?;
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => return Ok(()),

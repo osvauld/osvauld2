@@ -142,8 +142,10 @@ def t4(net):
         send(a, i, "alice offline")
     for p in (a, b):
         p.rpc.request("SyncNow")
-    sees(a, i, "bob offline")
-    sees(b, i, "alice offline")
+    # Host mode: a vanished host is noticed by the idle timeout (10 s), then redialled.
+    back = PUSH * (5 if net.host_mode else 1)
+    sees(a, i, "bob offline", timeout=back)
+    sees(b, i, "alice offline", timeout=back)
     assert texts(a, i) == texts(b, i), f"order differs:\n{texts(a, i)}\n{texts(b, i)}"
     shots("T4", i, a, b)
 
@@ -304,8 +306,9 @@ def t13(net):
     net.stop_host(a)
     net.start_host(a, i)
     time.sleep(3)  # one Listen retry interval (node mode) / one dial retry (host mode)
+    back = PUSH * (5 if net.host_mode else 1)
     send(a, i, "after restart")
-    sees(b, i, "after restart")
+    sees(b, i, "after restart", timeout=back)
     # A blip while a fresh peer's subscriptions are still in flight must not lose them.
     c = net.peer("carol")
     net.join(a, c, *_ws_item(a, i))
@@ -313,7 +316,7 @@ def t13(net):
     net.start_host(a, i)
     time.sleep(3)
     send(a, i, "carol hears this")
-    sees(c, i, "carol hears this")
+    sees(c, i, "carol hears this", timeout=back)
     shots("T13", i, a, b, c)
 
 

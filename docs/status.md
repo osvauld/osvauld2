@@ -693,6 +693,14 @@ the gate; all red after step 1.
   endpoint is bound. Known, deferred to step 5 by design: with the host in the owner's process an
   open doc has two writers (app flush, host store) — step 5 makes the live doc the host's copy
   (plan §2, "One copy per doc").
+- **Step 5 (2026-11-02), H2–H6 and H9 green:** sessions over iroh (`shell2/host.rs` the acceptor,
+  `shell2/sessions.rs` the member), share links (`courier::link`, `kunki::admin::issue_code`),
+  join by link with the space's headers in the answer, one copy per doc (`Admin::judge` +
+  `accept_live` on the live doc; the owner's edits fan out from it), `Role` frames, offline
+  notice and redial, a remembered UDP port, a shell clock `Advance` moves. The chat suite
+  passes in host mode (`OSVAULD_E2E_HOST=1`: t1–t5, t8, t13, t15, t23a, t8a, t10a, t15a,
+  t20a) and still in node mode. Plan §2 carries the as-built revision. Not yet: copy/paste
+  UI, idle close, the headless host (H7), mobile (H8).
 
 ### Android support — shell and physical-device validation remain
 

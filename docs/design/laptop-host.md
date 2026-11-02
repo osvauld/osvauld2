@@ -164,6 +164,35 @@ Desktop: the link in a text box with a copy button (`arboard`); the join box acc
 (runtime editor gains `Ctrl/⌘+V`). Phone: typed link, or an xnet name that resolves to one
 (`xnet-names.md`). QR is later.
 
+*Revised 2026-11-02 (step 5, as built — steps 5 and 6 landed together, since a session test
+needs a joined member and a join needs a session):*
+- **`Browse` is `Fetched`'s payload.** The answer to a code carries the invite, the hosts and
+  the space's headers (`ws`, `items`); there is no separate verb. `JoinSpace` adopts them,
+  saves `joined/<ws>` (host, address, and later the minted token), opens the first session
+  with the invite claim and a pull of every item's source, and answers once the sources are
+  stored — so an item can be opened the moment the reply lands. Asked before the endpoint is
+  up, it waits for the bind.
+- **A pull is answered with one `Update`, always, before the `Ack`** — empty when the host
+  holds nothing, and also when the host refuses — so a member's app thread, which asks the
+  host for a doc before seeding it (`resolver_with_session`), waits for exactly one frame.
+  The session loop hands that frame to the waiting thread itself: the UI thread may be
+  waiting on that very app thread to finish opening.
+- **The owner's own edits never take the vault round trip.** A doc the owner has open *is*
+  the host's copy; its edits only fan out to the subscribed sessions from the live doc
+  (`here_fan_out`). Member updates merge into it through the UI thread (`Admin::judge` +
+  `accept_live`), into the vault only for a doc nobody has open.
+- **`Role` frames** carry a member's `AssignRole`/`RevokeRole` to the host, answered by
+  `RoleDone`; the owner's go to its own admin as before.
+- **A vanished host is noticed by QUIC's idle timeout** — 10 s (keep-alive 5 s), not Tinline's
+  20 s — then the retry ladder redials; the app's console says `host offline: <why>`.
+- **The endpoint's UDP port is remembered per account** (`net/port`, sealed), so a local
+  link's direct addresses survive the host's restart; a busy port falls back to any.
+- **`Advance` moves the shell's clock** (`shell2::clock`) as well as the runtime's, so share
+  codes expire in tests.
+- Not done here: the copy button, paste in the editor, idle close of a quiet session, and
+  the 20 s `SyncTick` (still the backstop for the socket route; for a hosted space it fans
+  out the live doc again, harmless and removable).
+
 ## 3. What stays, what Tinline lends
 
 Stays ours: `manifest.osv` and `courier::{token, policy, role, access, invite, sync}`; the agent

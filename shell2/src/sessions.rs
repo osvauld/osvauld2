@@ -4,6 +4,7 @@
 //! the UI thread as `Msg::SessionFrame`; the shell decides what each means for its open apps.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use courier::invite::InviteClaimHello;
 use courier::link::{HostAddr, Link};
@@ -70,6 +71,20 @@ pub fn endpoint_addr_of(host: &HostAddr) -> Result<EndpointAddr, String> {
     Ok(EndpointAddr::from_parts(id, addrs))
 }
 
+/// Docs an app thread is waiting on from the host, by (space, item, doc): the UI thread
+/// hands the bytes over when the session's `Update` arrives. Shared between the shell and
+/// every app thread's resolver.
+pub type Pulls =
+    Arc<Mutex<HashMap<(String, String, String), std::sync::mpsc::SyncSender<Vec<u8>>>>>;
+
+/// What an app thread needs to pull a doc the host holds before seeding its own: the
+/// session to ask on and the table the answer lands in.
+#[derive(Clone)]
+pub struct Pull {
+    pub tx: UnboundedSender<Frame>,
+    pub waiters: Pulls,
+}
+
 /// The shell's end of a session: frames to send go in here. Dropping it ends the session.
 pub struct Handle {
     pub tx: UnboundedSender<Frame>,
@@ -86,6 +101,9 @@ pub struct Dial {
     pub joined: Joined,
     pub docs: Vec<DocState>,
     pub claim: Option<InviteClaimHello>,
+    /// App threads waiting on a doc: answered from the loop itself, since the UI thread may
+    /// be waiting on that very app thread to finish opening.
+    pub pulls: Pulls,
 }
 
 /// Opens a session to the space's host on the net runtime and returns the shell's handle at
@@ -156,6 +174,22 @@ async fn run(
                 None => return Ok(()),
             },
             incoming = frames.recv::<Frame>(MAX_FRAME) => match incoming {
+                Ok(Some(Frame::Update { item_id, layer: courier::sync::SyncLayer::Doc(name), vv, update })) => {
+                    let waiter = dial
+                        .pulls
+                        .lock()
+                        .unwrap()
+                        .remove(&(dial.ws_id.clone(), item_id.clone(), name.clone()));
+                    match waiter {
+                        Some(tx) => {
+                            let _ = tx.send(update);
+                        }
+                        None => {
+                            let frame = Frame::Update { item_id, layer: courier::sync::SyncLayer::Doc(name), vv, update };
+                            let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), frame));
+                        }
+                    }
+                }
                 Ok(Some(frame)) => {
                     let _ = proxy.send_event(Msg::SessionFrame(gen_, dial.ws_id.clone(), frame));
                 }
