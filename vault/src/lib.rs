@@ -144,7 +144,7 @@ impl Vault {
             identity,
             store,
         });
-        self.ensure_device_key()?;
+        self.open_with_device_key()?;
         Ok((did, mnemonic))
     }
 
@@ -192,17 +192,28 @@ impl Vault {
             store,
         });
         // An account from before device keys gets one on its first unlock here.
-        self.ensure_device_key()?;
-        Ok(())
+        self.open_with_device_key()
     }
 
+    /// One lock hold for the check and the write, so a clone switching accounts in between
+    /// cannot make this overwrite another account's key. Presence is read from the sealed
+    /// bytes: the existing key is never decrypted just to learn it is there.
     fn ensure_device_key(&self) -> Result<(), VaultError> {
-        if self.get_sealed(DEVICE_KEY)?.is_some() {
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        if active.store.get(DEVICE_KEY)?.is_some() {
             return Ok(());
         }
         let mut secret = Zeroizing::new([0u8; 32]);
         rand::rngs::OsRng.fill_bytes(&mut *secret);
-        self.put_sealed(DEVICE_KEY, &*secret)
+        let sealed = active.seal(&*secret)?;
+        Ok(active.store.put(DEVICE_KEY, &sealed)?)
+    }
+
+    /// An account without a device key is not open: a failure here locks again rather than
+    /// returning an error from an unlocked vault.
+    fn open_with_device_key(&mut self) -> Result<(), VaultError> {
+        self.ensure_device_key().inspect_err(|_| self.lock())
     }
 
     /// This install's device key, the one iroh binds with — so unlike the identity it is
