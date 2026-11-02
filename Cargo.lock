@@ -4269,6 +4269,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "net"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "iroh",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "netdev"
 version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7784,6 +7795,7 @@ dependencies = [
 name = "vault"
 version = "0.1.0"
 dependencies = [
+ "cryptography",
  "dirs",
  "identity",
  "loro",
@@ -7794,6 +7806,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "workspace",
+ "zeroize",
 ]
 
 [[package]]

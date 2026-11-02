@@ -671,7 +671,17 @@ cross-app refresh (the game reads assets when it opens), desktop-to-phone delive
 The pivot: the maker's laptop hosts the space over iroh from its own device key; a headless kunki
 is an optional appointed host, same code. Trust root moves from a node DID to the space owner's
 DID; sessions replace Sync/Subscribe/Listen/tick; kunki's unix socket and the ADB socket go.
-Prior art: Tinline (`~/p2p_chat`). Nothing built; tests H1–H9 are the gate.
+Prior art: Tinline (`~/p2p_chat`). Tests H1–H9 (`scripts/e2e_host.py`, `e2e_artifact.py`) are
+the gate; all red after step 1.
+- **Step 2 (2026-11-02):** `Vault::device_secret`/`device_public_key` — a random per-install key
+  sealed at `identity/device`, the future iroh endpoint id; `courier::attest`; `storage::apply`
+  (ordered ops, one commit), `delete_prefix`, `scan`; `verify_strict`. Verified: `cargo test -p
+  storage -p cryptography -p courier -p vault -p kunki -p identity`. Nothing uses the key yet.
+- **Step 3 (2026-11-02):** the `net` crate — endpoint on the device key, `OSVAULD_NET`
+  modes, capped frames, timeouts, the code-guess guard; 8 tests over loopback (frames round
+  trip, an over-cap header refused before its body, a dial to nowhere times out). Nothing
+  dials it yet. Local mode has no mDNS (iroh 1.3 core has none): a local link will carry
+  the host's direct addresses, as iroh's own tickets do.
 
 ### Android support — shell and physical-device validation remain
 
