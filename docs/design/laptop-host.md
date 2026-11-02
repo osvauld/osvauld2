@@ -96,6 +96,16 @@ Kunki's unix socket, `OSVAULD_KUNKI_SOCKET` and the ADB socket path are deleted.
 is called directly. `osvauld-rpc`'s socket stays — it is the agent bridge, not node traffic — and
 gains the same frame cap.
 
+*Revised 2026-11-02 (step 3, as built):* frames are **bincode**, not postcard — courier's
+payloads already are, and nothing here is hashed or signed by its frame bytes, which was
+postcard's reason in Tinline. The mode knob is **`OSVAULD_NET`** (`auto` | `local` |
+`relay-only`), one name for the three cases, rather than Tinline's `P2P_RELAY_ONLY` plus a
+preset; `local` is direct addresses only, with no mDNS (iroh 1.3 core has none), so a local
+link carries the host's addresses as iroh's own tickets do. The GUI's way in is
+**`Net::block_on`** — a spawn and a channel, usable from any thread — not `Handle::block_on`,
+which panics on a runtime thread. The receiver reads the four header bytes and nothing more
+until the claimed length is under the cap, then exactly that many.
+
 ### Sessions replace Sync/Subscribe/Listen/tick
 
 One long-lived bi-stream per (member device, host, space):

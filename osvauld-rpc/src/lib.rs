@@ -454,10 +454,20 @@ pub fn write_msg<W: Write>(w: &mut W, payload: &[u8]) -> io::Result<()> {
     w.flush()
 }
 
+/// The most one message may claim: a whole app's source fits many times over, and a stranger's
+/// 4 GiB header is refused before a byte of it is allocated (laptop-host step 3).
+pub const MAX_MSG: usize = 16 * 1024 * 1024;
+
 pub fn read_msg<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MSG {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("message of {len} bytes over the {MAX_MSG} cap"),
+        ));
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     Ok(buf)

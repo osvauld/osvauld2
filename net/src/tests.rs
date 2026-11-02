@@ -88,6 +88,30 @@ async fn a_header_over_the_cap_is_refused_before_the_body() {
     assert!(matches!(err, Error::Protocol(ref m) if m.contains("over the cap")), "{err}");
 }
 
+/// The body that follows an over-cap header is never read: the buffer holds the header alone
+/// even when the peer sent the body in the same write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_cap_body_sent_with_its_header_is_not_buffered() {
+    let a = bind(&secret(8), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let b = bind(&secret(9), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();
+    let b_addr = local_addr(&b);
+    let server = tokio::spawn(async move {
+        let conn = b.accept().await.unwrap().accept().unwrap().await.unwrap();
+        let (_send, recv) = conn.accept_bi().await.unwrap();
+        let mut frames = FrameBuf::new(recv);
+        let r = tokio::time::timeout(Duration::from_secs(5), frames.recv::<Msg>(FIRST_FRAME)).await;
+        (r, frames.buffered(), conn)
+    });
+    let conn = dial(&a, b_addr, ALPN, Duration::from_secs(5)).await.unwrap();
+    let (mut send, _recv) = conn.open_bi().await.unwrap();
+    let mut bytes = (FIRST_FRAME as u32 * 4).to_be_bytes().to_vec();
+    bytes.extend(std::iter::repeat_n(0xAB, 32 * 1024));
+    send.write_all(&bytes).await.unwrap();
+    let (r, buffered, _conn) = server.await.unwrap();
+    assert!(r.unwrap().is_err(), "over the cap");
+    assert_eq!(buffered, 4, "only the header was read");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dial_to_nowhere_times_out() {
     let a = bind(&secret(5), Mode::Local, vec![ALPN.to_vec()]).await.unwrap();

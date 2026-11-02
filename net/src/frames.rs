@@ -28,28 +28,39 @@ impl FrameBuf {
     }
 
     /// `None` when the peer finished its side cleanly. Cancel-safe: bytes already read stay
-    /// in the buffer for the next call.
+    /// in the buffer for the next call. Reads the four header bytes and nothing more until
+    /// the length they claim is under the cap, then only that many: an over-cap body is
+    /// never read, let alone held.
     pub async fn recv<T: DeserializeOwned>(&mut self, limit: usize) -> Result<Option<T>> {
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
-            if let Some(head) = self.buf.first_chunk::<4>() {
-                let len = u32::from_be_bytes(*head) as usize;
-                if len > limit {
-                    return Err(Error::Protocol(format!("frame of {len} bytes over the cap")));
+            let want = match self.buf.first_chunk::<4>() {
+                None => 4 - self.buf.len(),
+                Some(head) => {
+                    let len = u32::from_be_bytes(*head) as usize;
+                    if len > limit {
+                        return Err(Error::Protocol(format!("frame of {len} bytes over the cap")));
+                    }
+                    if self.buf.len() >= 4 + len {
+                        let msg = bincode::deserialize(&self.buf[4..4 + len])
+                            .map_err(|_| Error::Protocol("frame does not decode".into()))?;
+                        self.buf.drain(..4 + len);
+                        return Ok(Some(msg));
+                    }
+                    (4 + len - self.buf.len()).min(chunk.len())
                 }
-                if self.buf.len() >= 4 + len {
-                    let msg = bincode::deserialize(&self.buf[4..4 + len])
-                        .map_err(|_| Error::Protocol("frame does not decode".into()))?;
-                    self.buf.drain(..4 + len);
-                    return Ok(Some(msg));
-                }
-            }
-            match self.recv.read(&mut chunk).await.map_err(Error::net)? {
+            };
+            match self.recv.read(&mut chunk[..want]).await.map_err(Error::net)? {
                 Some(n) => self.buf.extend_from_slice(&chunk[..n]),
                 None if self.buf.is_empty() => return Ok(None),
                 None => return Err(Error::Protocol("stream ended mid-frame".into())),
             }
         }
+    }
+
+    /// Bytes read off the stream and not yet returned as a frame.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
     }
 }
 
