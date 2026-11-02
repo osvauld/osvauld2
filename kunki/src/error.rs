@@ -27,6 +27,16 @@ pub enum NodeError {
     // A hosted admin holds the owner's records without the owner's key: it replays, never mints.
     #[error("these are {0}'s records; only that account signs for them")]
     NotOwner(String),
+    // The headless host's wire failed under it: the bind, or what `kunki::session` reports.
+    #[error("net: {0}")]
+    Net(String),
+    // A no with nothing to retry: the link names another space, or the owner refused the
+    // first claim. Carries the whole message — the owner's reasons already say `refused:`.
+    #[error("{0}")]
+    Refused(String),
+    // What the next boot's session needs could not be written.
+    #[error("could not keep {0}")]
+    Keep(String),
     #[error(transparent)]
     Vault(#[from] vault::VaultError),
     #[error(transparent)]

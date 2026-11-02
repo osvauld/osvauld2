@@ -95,12 +95,13 @@ fn an_account_hosts_for_itself_without_a_socket() {
     assert!(alice.get_doc(&ws.id, &item.id, "notes").unwrap().is_some(), "the host's copy is this vault");
 
     assert_eq!(hosting(&alice).unwrap(), vec![ws.id.clone()]);
-    let who = hosts(&alice, &ws.id, true).unwrap();
+    let nobody = |_: &str| false;
+    let who = hosts(&alice, &ws.id, true, now(), &nobody).unwrap();
     assert_eq!(who.len(), 1);
     assert_eq!(who[0]["did"], did);
     assert_eq!(who[0]["online"], true);
-    assert!(hosts(&alice, "nope", true).unwrap().is_empty());
-    assert_eq!(hosts(&alice, &ws.id, false).unwrap()[0]["online"], false);
+    assert!(hosts(&alice, "nope", true, now(), &nobody).unwrap().is_empty());
+    assert_eq!(hosts(&alice, &ws.id, false, now(), &nobody).unwrap()[0]["online"], false);
 
     // A listen registers with the in-process registry and never touches a socket.
     let mut pushes = listen(&link, &alice, &did, record.token.clone()).unwrap();
@@ -114,6 +115,36 @@ fn desktop_vault() -> (Vault, TempDir) {
     let mut vault = Vault::open(tmp.path().to_path_buf()).unwrap();
     vault.signup("alice", "pw").unwrap();
     (vault, tmp)
+}
+
+/// Laptop-host step 7: an appointed host joins the listing after the owner, but only once it
+/// has said where it can be dialled; `online` is whatever the session table says of it.
+#[test]
+fn an_appointed_host_is_listed_once_it_has_an_address() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use courier::link::HostAddr;
+    use kunki::admin::Admin;
+
+    let (alice, _dir) = desktop_vault();
+    self_claim(&alice, now()).unwrap();
+    let ws = alice.create_workspace("team").unwrap();
+    let (kunki, _kunki_dir) = desktop_vault();
+    let kunki_did = kunki.with_signer(|d| d.did().to_string()).unwrap();
+    let admin = Admin::new(alice.clone());
+    admin.appoint_host(&ws.id, &kunki_did, now()).unwrap();
+    let everyone = |_: &str| true;
+    assert_eq!(hosts(&alice, &ws.id, true, now(), &everyone).unwrap().len(), 1, "no address yet");
+
+    let addr = HostAddr { device: [7; 32], relay: None, addrs: Vec::new() };
+    admin.set_host_addr(&ws.id, &kunki_did, &addr).unwrap();
+    let listed = hosts(&alice, &ws.id, true, now(), &|did| did == kunki_did).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[1]["did"], kunki_did);
+    assert_eq!(listed[1]["device"], URL_SAFE_NO_PAD.encode([7u8; 32]));
+    assert_eq!(listed[1]["online"], true);
+    let listed = hosts(&alice, &ws.id, true, now(), &|_| false).unwrap();
+    assert_eq!(listed[1]["online"], false);
 }
 
 #[test]

@@ -108,10 +108,17 @@ pub fn hosting(vault: &Vault) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Who serves `ws_id`: this account alone while it hosts (appointed hosts are step 7).
-/// `online` is whether this device's endpoint is actually bound — a host nobody can dial is
-/// not one to advertise.
-pub fn hosts(vault: &Vault, ws_id: &str, online: bool) -> Result<Vec<serde_json::Value>, String> {
+/// Who serves `ws_id`, for a space this account hosts: this account first — `online` is
+/// whether this device's endpoint is actually bound, a host nobody can dial is not one to
+/// advertise — then every appointed host that has said where it is, `online` by `live`
+/// (whether it holds a host session right now).
+pub fn hosts(
+    vault: &Vault,
+    ws_id: &str,
+    online: bool,
+    now: u64,
+    live: &dyn Fn(&str) -> bool,
+) -> Result<Vec<serde_json::Value>, String> {
     if !hosting(vault)?.iter().any(|w| w == ws_id) {
         return Ok(Vec::new());
     }
@@ -119,7 +126,17 @@ pub fn hosts(vault: &Vault, ws_id: &str, online: bool) -> Result<Vec<serde_json:
         .with_signer(|d| d.did().to_string())
         .ok_or("account is locked")?;
     let device = URL_SAFE_NO_PAD.encode(vault.device_public_key().map_err(|e| e.to_string())?);
-    Ok(vec![serde_json::json!({ "did": did, "device": device, "online": online })])
+    let mut out = vec![serde_json::json!({ "did": did, "device": device, "online": online })];
+    let appointed = kunki::host::appointed_hosts(&Admin::new(vault.clone()), ws_id, now)
+        .map_err(|e| e.to_string())?;
+    out.extend(appointed.iter().map(|h| {
+        serde_json::json!({
+            "did": h.did,
+            "device": URL_SAFE_NO_PAD.encode(h.addr.device),
+            "online": live(&h.did),
+        })
+    }));
+    Ok(out)
 }
 
 fn connect(socket: &Path) -> Result<UnixStream, String> {

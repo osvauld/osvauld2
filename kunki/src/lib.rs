@@ -7,11 +7,13 @@
 //!
 //! Since laptop-host step 7 the host acceptor every serving process runs is here too
 //! (`host`, behind a `Sink` the process supplies), with the member-side pieces that need no
-//! shell (`session`).
+//! shell (`session`) and the headless appointed host the binary becomes under `host
+//! --join` (`headless`).
 
 pub mod admin;
 pub mod bridge;
 mod error;
+pub mod headless;
 pub mod host;
 pub mod node;
 pub mod peer;

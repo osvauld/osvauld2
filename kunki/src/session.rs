@@ -30,6 +30,20 @@ pub struct Joined {
     pub hosts: Vec<HostEntry>,
 }
 
+impl Joined {
+    /// Every host to dial, in failover order. A record from before `Hosts` existed names the
+    /// owner alone.
+    pub fn host_list(&self) -> Vec<HostEntry> {
+        if self.hosts.is_empty() {
+            return vec![HostEntry {
+                did: self.host_did.clone(),
+                addr: self.host.clone(),
+            }];
+        }
+        self.hosts.clone()
+    }
+}
+
 fn joined_key(ws_id: &str) -> String {
     format!("joined/{ws_id}")
 }
@@ -119,3 +133,6 @@ pub fn fetch(rt: &Rt, ep: Endpoint, link: Link) -> Result<Fetched, String> {
         items,
     })
 }
+
+#[cfg(test)]
+mod tests;

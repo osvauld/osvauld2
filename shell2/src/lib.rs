@@ -55,7 +55,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use courier::DesktopNodeRecord;
 use courier::invite::{InviteClaimHello, InviteRequest, desktop_start_invite_claim};
-use courier::session::{DocState, Frame};
+use courier::session::{DocState, Frame, HostEntry};
 use courier::sync::{
     Rejected, SyncHello, SyncLayer, SyncReply, desktop_roll_back, desktop_start_sync,
 };
@@ -1187,15 +1187,15 @@ pub struct Shell {
     joined: HashMap<String, sessions::Joined>,
     /// Open sessions to those hosts, by workspace id.
     sessions: HashMap<String, sessions::Handle>,
-    /// Redial attempts since the last session came up, by workspace id.
-    redial: HashMap<String, usize>,
+    /// Where a joined space's next dial goes, from a drop until a session comes up.
+    redial: HashMap<String, sessions::Redial>,
     pending_join: HashMap<String, PendingJoin>,
     /// `JoinSpace` requests that arrived before the endpoint was bound.
     join_waiting: Vec<(String, std::sync::mpsc::Sender<Response>)>,
     /// Docs app threads are waiting on from a host (`resolver_with_session`).
     pulls: sessions::Pulls,
     /// `AssignRole`/`RevokeRole` sent down a session, awaiting the host's `RoleDone`.
-    pending_role: HashMap<String, std::sync::mpsc::Sender<Response>>,
+    pending_role: HashMap<String, PendingRole>,
     /// Doc names already subscribed, per open item — `SyncTick` inserts into this the first
     /// time it sees a name from `open_doc_names()`, so a doc is subscribed once, not every
     /// tick; `Msg::Close` drains an item's entry to know what to unsubscribe.
@@ -1239,6 +1239,16 @@ struct PendingJoin {
     remaining: std::collections::HashSet<String>,
     ws: courier::publish::PublishedWorkspace,
     items: Vec<courier::publish::PublishedItem>,
+    /// Carried by every dial until the join is done: a failover to another host claims again.
+    claim: InviteClaimHello,
+}
+
+/// A role change down a session, awaiting `RoleDone`. `sent_on` is the dial it went down:
+/// a failover resends it on the next session, and no session hears it twice.
+struct PendingRole {
+    reply: std::sync::mpsc::Sender<Response>,
+    frame: Frame,
+    sent_on: u64,
 }
 
 /// The UDP port this install's endpoint binds, remembered per account (a sealed entry).
@@ -1468,32 +1478,56 @@ impl Shell {
         }
     }
 
-    /// A session ended: its apps hear why, and if any is still open the retry ladder
-    /// schedules the next dial.
+    /// A session ended: the next host is dialled at once; once the whole list has failed,
+    /// its apps hear why, what waited on it is answered, and the retry ladder paces the next
+    /// round. With one host that is every drop, as it always was.
     fn session_down(&mut self, ws: String, seq: u64, reason: String) {
-        if self.sessions.get(&ws).is_some_and(|h| h.seq != seq) {
-            return; // an earlier session's ending; a newer one is up or dialling
-        }
+        let from = match self.sessions.get(&ws) {
+            Some(h) if h.seq != seq => return, // an earlier session's ending; a newer one is up or dialling
+            Some(h) => h.host_index,
+            None => 0,
+        };
         self.sessions.remove(&ws);
-        if let Some(p) = self.pending_join.remove(&ws) {
-            let _ = p
-                .reply
-                .send(Response::err(format!("could not reach the host: {reason}")));
+        let hosts = self.joined.get(&ws).map_or(1, |j| j.host_list().len());
+        let next = self
+            .redial
+            .entry(ws.clone())
+            .or_default()
+            .after_drop(from, hosts);
+        if next.pause.is_some() {
+            if let Some(p) = self.pending_join.remove(&ws) {
+                let _ = p
+                    .reply
+                    .send(Response::err(format!("could not reach the host: {reason}")));
+            }
+            if let Some(p) = self.pending_role.remove(&ws) {
+                let _ = p
+                    .reply
+                    .send(Response::err(format!("could not reach the host: {reason}")));
+            }
+            self.note_offline(&ws, &reason);
         }
-        if let Some(tx) = self.pending_role.remove(&ws) {
-            let _ = tx.send(Response::err(format!("could not reach the host: {reason}")));
+        if !self.session_wanted(&ws) {
+            return;
         }
-        self.note_offline(&ws, &reason);
-        if self.apps.values().any(|a| a.ws_id == ws) {
-            let attempt = self.redial.entry(ws.clone()).or_insert(0);
-            let pause = net::wire::retry_after(*attempt);
-            *attempt += 1;
-            let (proxy, gen_) = (self.proxy.clone(), self.gen_());
-            std::thread::spawn(move || {
-                std::thread::sleep(pause);
-                let _ = proxy.send_event(Msg::SessionRedial(gen_, ws));
-            });
+        match next.pause {
+            None => self.open_session(&ws),
+            Some(pause) => {
+                let (proxy, gen_) = (self.proxy.clone(), self.gen_());
+                std::thread::spawn(move || {
+                    std::thread::sleep(pause);
+                    let _ = proxy.send_event(Msg::SessionRedial(gen_, ws));
+                });
+            }
         }
+    }
+
+    /// Whether anything is waiting on a session to `ws`: an open app, or a join or role
+    /// change still failing over.
+    fn session_wanted(&self, ws: &str) -> bool {
+        self.apps.values().any(|a| a.ws_id == ws)
+            || self.pending_join.contains_key(ws)
+            || self.pending_role.contains_key(ws)
     }
 
     /// `JoinSpace`'s second half: adopt what the host listed, remember the host, and open
@@ -1569,15 +1603,6 @@ impl Shell {
                 return;
             }
         };
-        let docs = fetched
-            .items
-            .iter()
-            .map(|i| DocState {
-                item_id: i.id.clone(),
-                layer: SyncLayer::Src,
-                vv: VersionVector::new().encode(),
-            })
-            .collect();
         self.pending_join.insert(
             ws.clone(),
             PendingJoin {
@@ -1585,10 +1610,12 @@ impl Shell {
                 remaining: fetched.items.iter().map(|i| i.id.clone()).collect(),
                 ws: fetched.ws.clone(),
                 items: fetched.items.clone(),
+                claim,
             },
         );
         self.sessions.remove(&ws);
-        self.open_session(&ws, Some(claim), docs);
+        self.redial.remove(&ws);
+        self.open_session(&ws);
     }
 
     /// `JoinSpace`'s first half: fetch the space from the link's host, off-thread. Asked
@@ -1625,6 +1652,14 @@ impl Shell {
             h.up = true;
         }
         self.redial.remove(&ws);
+        // A role change that failed over goes down this session; one queued on it already
+        // (the channel buffers before the hello) is not repeated.
+        if let (Some(p), Some(h)) = (self.pending_role.get_mut(&ws), self.sessions.get(&ws)) {
+            if p.sent_on != seq {
+                let _ = h.tx.send(p.frame.clone());
+                p.sent_on = seq;
+            }
+        }
         // A pull of every source a join waits on; then whatever is open re-syncs.
         if let (Some(p), Some(h)) = (self.pending_join.get(&ws), self.sessions.get(&ws)) {
             for item_id in &p.remaining {
@@ -1713,14 +1748,15 @@ impl Shell {
                 }
             }
             Frame::RoleDone { ok, reason } => {
-                if let Some(tx) = self.pending_role.remove(&ws) {
-                    let _ = tx.send(if ok {
+                if let Some(p) = self.pending_role.remove(&ws) {
+                    let _ = p.reply.send(if ok {
                         Response::ok("done")
                     } else {
                         Response::err(reason)
                     });
                 }
             }
+            Frame::Hosts { hosts } => self.hosts_learned(&ws, hosts),
             Frame::Update {
                 item_id,
                 layer: SyncLayer::Src,
@@ -1752,15 +1788,36 @@ impl Shell {
 
     fn ensure_session(&mut self, ws: &str) {
         if !self.sessions.contains_key(ws) {
-            self.open_session(ws, None, Vec::new());
+            self.open_session(ws);
         }
     }
 
-    /// Dials the space's host; `claim` only on the first session after a join. Silently
+    /// The host the space's last drop pointed at (owner first), and whatever a join still
+    /// pending needs said again — the claim and a pull of each source it waits on. Silently
     /// nothing until the endpoint is up — `NetBound` dials what is wanted then.
-    fn open_session(&mut self, ws: &str, claim: Option<InviteClaimHello>, docs: Vec<DocState>) {
+    fn open_session(&mut self, ws: &str) {
         let (Some(net), Some(joined)) = (&self.net, self.joined.get(ws)) else {
             return;
+        };
+        let list = joined.host_list();
+        let host_index = self
+            .redial
+            .get(ws)
+            .map_or(0, |r| r.next)
+            .min(list.len() - 1);
+        let (claim, docs) = match self.pending_join.get(ws) {
+            Some(p) => (
+                Some(p.claim.clone()),
+                p.remaining
+                    .iter()
+                    .map(|id| DocState {
+                        item_id: id.clone(),
+                        layer: SyncLayer::Src,
+                        vv: VersionVector::new().encode(),
+                    })
+                    .collect(),
+            ),
+            None => (None, Vec::new()),
         };
         let handle = sessions::dial(
             net.handle(),
@@ -1771,12 +1828,31 @@ impl Shell {
             sessions::Dial {
                 ws_id: ws.to_string(),
                 joined: joined.clone(),
+                host: list[host_index].clone(),
+                host_index,
                 docs,
                 claim,
                 pulls: self.pulls.clone(),
             },
         );
         self.sessions.insert(ws.to_string(), handle);
+    }
+
+    /// The host told this member who serves the space (`Frame::Hosts`, owner first): kept,
+    /// and the live session re-finds its place in the new order.
+    fn hosts_learned(&mut self, ws: &str, hosts: Vec<HostEntry>) {
+        let Some(joined) = self.joined.get_mut(ws) else {
+            return;
+        };
+        joined.hosts = hosts;
+        if let Some(h) = self.sessions.get_mut(ws) {
+            if let Some(i) = joined.host_list().iter().position(|e| e.did == h.host_did) {
+                h.host_index = i;
+            }
+        }
+        if let Err(e) = sessions::save_joined(&self.vault, ws, joined) {
+            eprintln!("session {ws}: could not keep the hosts: {e}");
+        }
     }
 
     /// `sync_one` for a joined space: the update goes down the session instead of to a node.
@@ -1950,17 +2026,60 @@ impl Shell {
         }
     }
 
+    /// `[{did, device, online}]`, owner first. For a joined space, `online` is the host the
+    /// live session is on; for one this account hosts, whether each appointed host holds a
+    /// host session right now.
     fn hosts(&self, ws_id: &str) -> Response {
         if let Some(joined) = self.joined.get(ws_id) {
-            let up = self.sessions.get(ws_id).is_some_and(|h| h.up);
-            return Response::ok(vec![serde_json::json!({
-                "did": joined.host_did,
-                "device": URL_SAFE_NO_PAD.encode(joined.host.device),
-                "online": up,
-            })]);
+            let on = self
+                .sessions
+                .get(ws_id)
+                .filter(|h| h.up)
+                .map(|h| h.host_did.clone());
+            let list: Vec<serde_json::Value> = joined
+                .host_list()
+                .iter()
+                .map(|h| {
+                    serde_json::json!({
+                        "did": h.did,
+                        "device": URL_SAFE_NO_PAD.encode(h.addr.device),
+                        "online": on.as_deref() == Some(h.did.as_str()),
+                    })
+                })
+                .collect();
+            return Response::ok(list);
         }
-        match node::hosts(&self.vault, ws_id, self.net.is_some()) {
+        let live = |did: &str| kunki::host::sessions().has_host(did, ws_id);
+        match node::hosts(&self.vault, ws_id, self.net.is_some(), clock::now_secs(), &live) {
             Ok(hosts) => Response::ok(hosts),
+            Err(e) => Response::err(e),
+        }
+    }
+
+    /// `AppointHost`: a `host` token for `did` on a space this account hosts, then whatever
+    /// `did` has live becomes a host session and everyone on the space hears the new list.
+    fn appoint_host(&self, ws_id: &str, did: &str) -> Response {
+        let Some(net) = &self.net else {
+            return Response::err("this device's endpoint is not up yet");
+        };
+        if !node::hosting(&self.vault)
+            .unwrap_or_default()
+            .iter()
+            .any(|w| w == ws_id)
+        {
+            return Response::err("not a space this account hosts");
+        }
+        let admin = Admin::new(self.vault.clone());
+        if let Err(e) = admin.appoint_host(ws_id, did, clock::now_secs()) {
+            return Response::err(e.to_string());
+        }
+        let ctx = kunki::host::HostCtx {
+            vault: self.vault.clone(),
+            ep: net.endpoint().clone(),
+            sink: self.sink(),
+        };
+        match kunki::host::appointed(&ctx, ws_id, did) {
+            Ok(()) => Response::ok("appointed"),
             Err(e) => Response::err(e),
         }
     }
@@ -2072,13 +2191,21 @@ impl Shell {
                 let _ = tx.send(Response::err("a role change is already in flight"));
                 return;
             }
-            let _ = handle.tx.send(Frame::Role {
+            let frame = Frame::Role {
                 item_id: wi.id.clone(),
                 to: did,
                 role,
                 revoke,
-            });
-            self.pending_role.insert(wi.ws_id.clone(), tx);
+            };
+            let _ = handle.tx.send(frame.clone());
+            self.pending_role.insert(
+                wi.ws_id.clone(),
+                PendingRole {
+                    reply: tx,
+                    frame,
+                    sent_on: handle.seq,
+                },
+            );
             return;
         }
         let vault = self.vault.clone();
@@ -2095,6 +2222,12 @@ impl Shell {
                 &role,
                 revoke,
             );
+            // A role moved in this account's own ledger: the hosts it appointed hear it.
+            if result.is_ok() && matches!(link, node::Link::Here(_)) {
+                if let Err(e) = kunki::host::ledger_changed(&Admin::new(vault.clone()), &wi.ws_id) {
+                    eprintln!("host: ledger of {}: {e}", wi.ws_id);
+                }
+            }
             let _ = proxy.send_event(Msg::NodeRpcDone(tx, NodeRpcOutcome::Pushed(result)));
         });
     }
@@ -2167,6 +2300,7 @@ impl Shell {
             },
             Request::Hosts { ws_id } => self.hosts(&ws_id),
             Request::ShareSpace { ws_id } => self.share_space(&ws_id),
+            Request::AppointHost { ws_id, did } => self.appoint_host(&ws_id, &did),
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -3945,7 +4079,7 @@ impl App for Shell {
                 None
             }
             Msg::SessionRedial(_, ws) => {
-                if self.apps.values().any(|a| a.ws_id == ws) {
+                if self.session_wanted(&ws) {
                     self.ensure_session(&ws);
                 }
                 None

@@ -206,7 +206,8 @@ def h7(net):
     )
     a.stop()
     send(b, i, "through kunki")
-    sees(c, i, "through kunki")
+    # A's death is noticed by QUIC's idle timeout (10 s); then each member dials kunki at once.
+    sees(c, i, "through kunki", timeout=PUSH * 4)
     assert not any("host offline" in line for line in b.rpc.read_console(i)), \
         "bob thought the space was offline with kunki hosting it"
     a.restart()

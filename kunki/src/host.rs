@@ -480,22 +480,44 @@ fn copy_frames(vault: &Vault, ws: &str) -> Result<Vec<Frame>, String> {
                 update: src,
             });
         }
-        for name in vault.doc_names(ws, &item.id).map_err(err)? {
-            let Some(bytes) = vault.get_doc(ws, &item.id, &name).map_err(err)? else {
-                continue;
-            };
-            let doc = loro::LoroDoc::new();
-            doc.import(&bytes)
-                .map_err(|e| format!("doc {}/{name}: {e}", item.id))?;
-            out.push(Frame::Update {
-                item_id: item.id.clone(),
-                layer: SyncLayer::Doc(name),
-                vv: doc.oplog_vv().encode(),
-                update: bytes,
-            });
-        }
+        doc_frames_of(vault, ws, &item.id, &mut out)?;
     }
     Ok(out)
+}
+
+/// The docs of `ws` alone, each with the version vector of its stored snapshot — what an
+/// appointed host sends up its uplink: only the owner installs a source, so a host's copy of
+/// one is never ahead and the owner would refuse it anyway.
+pub fn doc_frames(vault: &Vault, ws: &str) -> Result<Vec<Frame>, String> {
+    let mut out = Vec::new();
+    for item in vault.items(ws).map_err(|e| e.to_string())? {
+        doc_frames_of(vault, ws, &item.id, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn doc_frames_of(
+    vault: &Vault,
+    ws: &str,
+    item_id: &str,
+    out: &mut Vec<Frame>,
+) -> Result<(), String> {
+    let err = |e: vault::VaultError| e.to_string();
+    for name in vault.doc_names(ws, item_id).map_err(err)? {
+        let Some(bytes) = vault.get_doc(ws, item_id, &name).map_err(err)? else {
+            continue;
+        };
+        let doc = loro::LoroDoc::new();
+        doc.import(&bytes)
+            .map_err(|e| format!("doc {item_id}/{name}: {e}"))?;
+        out.push(Frame::Update {
+            item_id: item_id.to_string(),
+            layer: SyncLayer::Doc(name),
+            vv: doc.oplog_vv().encode(),
+            update: bytes,
+        });
+    }
+    Ok(())
 }
 
 /// The ledger of `ws` changed — a member joined, a role moved, a host was appointed: every
