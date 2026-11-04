@@ -2143,6 +2143,28 @@ fn a_world_without_a_camera_draws_only_what_meets_its_box() {
     assert_eq!(world.frame(200.0, 100.0).unwrap().stats().hittable, 1);
 }
 
+/// W-L2: one physics step of a driven cart on a 2000-point, 200 000-unit hilly line.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_cart_on_long_line() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    // Gentle hills, every point within 30 of the flat ground's y 40 the cart starts on.
+    let hills: Vec<_> = (0..2000)
+        .map(|i| {
+            let x = i as f64 * 100.0;
+            (x, 30.0 * (x / 700.0).sin() * (x / 3100.0).cos())
+        })
+        .collect();
+    let mut world = cart.world_on((-1000.0, 40.0), &hills);
+    let go = Motor { speed: 1440.0, torque: 2e5 };
+    cart.drive(&mut world, Some(go), Some(go));
+    let mut clock = 0.0;
+    bench("cart_on_long_line_step", 1200, || {
+        clock += STEP;
+        world.tick(clock, STEP);
+    });
+}
+
 /// B7: the frame of the 20000-entity crowd through a 1280 × 720 camera — about 6% of the map.
 #[test]
 #[ignore = "benchmark: scripts/bench.py"]
@@ -2491,7 +2513,7 @@ fn a_grab_is_refused_for_what_cannot_be_held_and_dropped_with_the_entity() {
 const GRIPPY: Material = Material { bounce: 0.0, friction: 0.0, grip: Some(0.5), density: 1.0, mass: None, center: None };
 
 fn joint(id: &str, kind: JointKind, a: &str, a_at: (f64, f64), b: Option<&str>, b_at: (f64, f64)) -> JointSpec {
-    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false }
+    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false, motor: None }
 }
 
 /// A plank (100 × 8, loose, with grip so it can turn) whose box top-left is `pos`.
@@ -2974,6 +2996,8 @@ struct Cart {
     damping: f64,
     travel: (f64, f64),
     drop: f64,
+    /// The tyres' grip (the ground has none, so theirs decides).
+    grip: f64,
 }
 
 const CHASSIS_KG: f64 = 100.0;
@@ -2981,29 +3005,39 @@ const MOUNTS: [(f64, f64); 2] = [(10.0, 30.0), (90.0, 30.0)];
 
 impl Cart {
     fn world(&self) -> World2d {
+        self.world_on((-1000.0, 40.0), &[(0.0, 0.0), (8000.0, 0.0)])
+    }
+
+    /// The cart over line ground through `points`, placed at `at`.
+    fn world_on(&self, at: (f64, f64), points: &[(f64, f64)]) -> World2d {
         let d = drawing();
         let chassis = EntitySpec {
             loose: Some(Material { mass: Some(CHASSIS_KG), ..GRIPPY }),
             ..solid("chassis", (0.0, -self.drop), Shape::Rect(100.0, 20.0), (0.0, 0.0), &d)
         };
         let wheel = |id: &str, (x, y): (f64, f64)| EntitySpec {
-            loose: Some(Material { mass: Some(10.0), grip: Some(1.0), ..GRIPPY }),
+            loose: Some(Material { mass: Some(10.0), grip: Some(self.grip), ..GRIPPY }),
             ..solid(id, (x - 10.0, y - 10.0 - self.drop), Shape::Circle(10.0), (10.0, 10.0), &d)
         };
-        let ground = solid("ground", (-1000.0, 40.0), line(&[(0.0, 0.0), (4000.0, 0.0)]), (0.0, 0.0), &d);
+        let ground = solid("ground", at, line(points), (0.0, 0.0), &d);
         let mut world = World2d::default();
         world.set_gravity((0.0, 981.0)).unwrap();
         world.reconcile(vec![chassis, wheel("rear", MOUNTS[0]), wheel("front", MOUNTS[1]), ground]).unwrap();
+        self.drive(&mut world, None, None);
+        world
+    }
+
+    /// Describes the two wheel joints again, with these motors.
+    fn drive(&self, world: &mut World2d, rear: Option<Motor>, front: Option<Motor>) {
         let kind = JointKind::Wheel {
             axis: (0.0, 1.0),
             stiffness: self.stiffness,
             damping: self.damping,
             travel: self.travel,
         };
-        let joints = [("rear", MOUNTS[0]), ("front", MOUNTS[1])]
-            .map(|(id, at)| joint(id, kind, "chassis", at, Some(id), (10.0, 10.0)));
+        let joints = [("rear", MOUNTS[0], rear), ("front", MOUNTS[1], front)]
+            .map(|(id, at, motor)| JointSpec { motor, ..joint(id, kind, "chassis", at, Some(id), (10.0, 10.0)) });
         world.set_joints(joints.to_vec()).unwrap();
-        world
     }
 }
 
@@ -3024,7 +3058,7 @@ const CORNER_KG: f64 = CHASSIS_KG / 2.0;
 #[test]
 fn a_wheel_joint_sags_by_weight_over_stiffness_at_rest() {
     let k = 5000.0;
-    let cart = Cart { stiffness: k, damping: 0.5 * 2.0 * (k * CORNER_KG).sqrt(), travel: (30.0, 30.0), drop: 0.0 };
+    let cart = Cart { stiffness: k, damping: 0.5 * 2.0 * (k * CORNER_KG).sqrt(), travel: (30.0, 30.0), drop: 0.0, grip: 1.0 };
     let mut world = cart.world();
     let mut clock = 0.0;
     run(&mut world, &mut clock, 4.0);
@@ -3043,7 +3077,7 @@ fn overshoot(zeta: f64) -> f64 {
     let k = 5000.0;
     // A 10-unit drop lands at 140 u/s: a swing of ~14 past a 9.8 sag, short of the 40-unit stop,
     // so the spring and damper alone decide it.
-    let cart = Cart { stiffness: k, damping: zeta * 2.0 * (k * CORNER_KG).sqrt(), travel: (40.0, 40.0), drop: 10.0 };
+    let cart = Cart { stiffness: k, damping: zeta * 2.0 * (k * CORNER_KG).sqrt(), travel: (40.0, 40.0), drop: 10.0, grip: 1.0 };
     let mut world = cart.world();
     let mut clock = 0.0;
     let mut lowest = f64::MIN;
@@ -3066,7 +3100,7 @@ fn damping_decides_how_far_a_landing_overshoots() {
 #[test]
 fn a_wheel_stays_on_its_axis_and_inside_its_travel() {
     let k = 5000.0;
-    let cart = Cart { stiffness: k, damping: 0.3 * 2.0 * (k * CORNER_KG).sqrt(), travel: (15.0, 20.0), drop: 500.0 };
+    let cart = Cart { stiffness: k, damping: 0.3 * 2.0 * (k * CORNER_KG).sqrt(), travel: (15.0, 20.0), drop: 500.0, grip: 1.0 };
     let mut world = cart.world();
     // Land moving fast sideways: a hard load across the axis.
     world.set("chassis", Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
@@ -3092,7 +3126,7 @@ fn a_wheel_stays_on_its_axis_and_inside_its_travel() {
 #[test]
 fn the_same_cart_and_drop_run_the_same_twice() {
     let run_once = || {
-        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 80.0 };
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 80.0, grip: 1.0 };
         let mut world = cart.world();
         world.set("chassis", Set { velocity: Some((300.0, 0.0)), ..Set::default() }).unwrap();
         let mut clock = 0.0;
@@ -3104,7 +3138,7 @@ fn the_same_cart_and_drop_run_the_same_twice() {
 
 #[test]
 fn a_bad_wheel_joint_is_refused() {
-    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0 };
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
     let mut world = cart.world();
     let wheel = |axis, stiffness, travel| {
         let kind = JointKind::Wheel { axis, stiffness, damping: 1.0, travel };
@@ -3121,4 +3155,124 @@ fn a_bad_wheel_joint_is_refused() {
         let err = world.set_joints(joints).unwrap_err().to_string();
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
+}
+
+// ── motors ─────────────────────────────────────────────────────────────────────────────────────
+
+/// A 10 kg wheel of radius 10 pinned at its centre to the world, driven by `motor`; its spin
+/// (degrees a second) after `secs`.
+fn pinned_spin(motor: Motor, secs: f64) -> f64 {
+    let d = drawing();
+    let wheel = EntitySpec {
+        loose: Some(Material { mass: Some(10.0), grip: Some(1.0), ..GRIPPY }),
+        ..solid("wheel", (0.0, 0.0), Shape::Circle(10.0), (10.0, 10.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![wheel]).unwrap();
+    let pin = JointSpec { motor: Some(motor), ..joint("axle", JointKind::Pin { limits: None }, "wheel", (10.0, 10.0), None, (10.0, 10.0)) };
+    world.set_joints(vec![pin]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, secs);
+    entity(&world, "wheel").spin
+}
+
+#[test]
+fn a_motor_spins_up_at_torque_over_inertia_and_holds_its_speed() {
+    // A disc: I = ½·m·r² = 500 kg·u². 1000 of torque gives α = 2 rad/s² ≈ 114.6 °/s², so
+    // after half a second 57.3 °/s, far short of the 3600 asked.
+    let limited = pinned_spin(Motor { speed: 3600.0, torque: 1000.0 }, 0.5);
+    assert!((limited - 57.3).abs() < 57.3 * 0.05, "torque-limited spin-up: {limited}");
+    // Ample torque reaches the speed and holds it, never past.
+    let held = pinned_spin(Motor { speed: 360.0, torque: 1e7 }, 0.5);
+    assert!((held - 360.0).abs() < 2.0, "held at 360: {held}");
+    let backward = pinned_spin(Motor { speed: -360.0, torque: 1e7 }, 0.5);
+    assert!((backward + 360.0).abs() < 2.0, "a negative speed turns it the other way: {backward}");
+}
+
+#[test]
+fn grip_turns_wheel_torque_into_drive_and_none_is_wheelspin() {
+    let go = Motor { speed: 720.0, torque: 2e5 };
+    let drove = |grip: f64| {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip };
+        let mut world = cart.world();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.0);
+        let before = world.joints["rear"].handle;
+        cart.drive(&mut world, Some(go), Some(go));
+        assert_eq!(world.joints["rear"].handle, before, "a new motor keeps the joint");
+        run(&mut world, &mut clock, 2.0);
+        (entity(&world, "chassis").pos.0, entity(&world, "rear").spin)
+    };
+    let (x, spin) = drove(1.0);
+    // 720 °/s on radius 10 rolls at 2π·10·2 ≈ 126 u/s.
+    assert!(x > 150.0, "with grip the cart drives off: x {x}");
+    assert!((spin - 720.0).abs() < 20.0, "rolling at the motor's speed: {spin}");
+    let (x, spin) = drove(0.0);
+    assert!(x.abs() < 5.0, "with none it stays put: x {x}");
+    assert!((spin - 720.0).abs() < 20.0, "while the wheels spin: {spin}");
+}
+
+/// A cart at 1000 u/s on flat ground, all wheels braked at `torque`; how far it goes.
+fn stopping_distance(torque: f64) -> f64 {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let rolling = 1000.0 / 10.0 * 180.0 / std::f64::consts::PI;
+    for id in ["chassis", "rear", "front"] {
+        let spin = (id != "chassis").then_some(rolling);
+        world.set(id, Set { velocity: Some((1000.0, 0.0)), spin, ..Set::default() }).unwrap();
+    }
+    let start = entity(&world, "chassis").pos.0;
+    let brake = Motor { speed: 0.0, torque };
+    cart.drive(&mut world, Some(brake), Some(brake));
+    for _ in 0..600 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        if entity(&world, "chassis").velocity.0.abs() < 2.0 {
+            break;
+        }
+    }
+    entity(&world, "chassis").pos.0 - start
+}
+
+#[test]
+fn braking_shortens_the_stop_until_the_wheels_lock_and_slide() {
+    // Locked, 120 kg slides on grip 1: decel μ·g, so v²/(2·μ·g) = 1000² / 1962 ≈ 510.
+    let (soft, hard, locked) = (stopping_distance(2e5), stopping_distance(2e6), stopping_distance(1e9));
+    assert!(soft > 2.0 * hard, "harder braking stops sooner: {soft} vs {hard}");
+    assert!((hard - 510.0).abs() < 510.0 * 0.15, "past locking it slides v²/2μg: {hard}");
+    assert!((locked - hard).abs() < hard * 0.05, "and more brake no longer helps: {locked} vs {hard}");
+}
+
+#[test]
+fn spinning_a_wheel_up_in_the_air_turns_the_body_the_other_way() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 2000.0, grip: 1.0 };
+    let mut world = cart.world();
+    cart.drive(&mut world, Some(Motor { speed: 3600.0, torque: 1e5 }), None);
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.3);
+    let (wheel, body) = (entity(&world, "rear").spin, entity(&world, "chassis").spin);
+    assert!(wheel > 100.0 && body < -1.0, "wheel {wheel} forward, body {body} back");
+}
+
+#[test]
+fn a_bad_motor_is_refused() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let rope = JointSpec {
+        motor: Some(Motor { speed: 1.0, torque: 1.0 }),
+        ..joint("r", JointKind::Rope { length: 5.0 }, "chassis", (0.0, 0.0), None, (0.0, 0.0))
+    };
+    let cases = [
+        (Motor { speed: f64::NAN, torque: 1.0 }, "motor speed must be a finite number"),
+        (Motor { speed: 1.0, torque: -1.0 }, "motor torque must be 0 or more"),
+    ];
+    let kind = JointKind::Wheel { axis: (0.0, 1.0), stiffness: 1.0, damping: 1.0, travel: (1.0, 1.0) };
+    for (motor, wanted) in cases {
+        let j = JointSpec { motor: Some(motor), ..joint("rear", kind, "chassis", MOUNTS[0], Some("rear"), (10.0, 10.0)) };
+        let err = world.set_joints(vec![j]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    let err = world.set_joints(vec![rope]).unwrap_err().to_string();
+    assert!(err.contains("a motor drives a pin or a wheel, not a rope"), "{err}");
 }

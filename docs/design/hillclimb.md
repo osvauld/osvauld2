@@ -192,6 +192,14 @@ Lessons so far:
   wheel stays within 0.05 u of its axis landing at 8 m/s sideways (so linear constraints follow
   the chassis frame, not the spinning wheel's). The bump stop gives 2.1 u at a 10 m/s landing
   (soft limit). Same run twice: bit-identical.
+- **Step 5, motors:** a force-based velocity motor on `AngX`, gain `torque × 10` per rad/s,
+  capped at `torque`. Spin-up matched τ/I within 5% (2D disc I = ½mr²). Braking past wheel-lock
+  matched v²/(2μg) within 15% and stopped improving. With grip 0 the wheels spin at speed and
+  the cart stays put. A motor change is updated in place (`impulse_joints.get_mut(_, wake)`):
+  the joint keeps its handle. Reaction torque turns the chassis against a wheel spun up in the
+  air, so step 6 (standing torque) waits for tuning in step 9.
+- **Step 5, cost:** one 120 Hz step of a driven cart on a 2000-point, 200 000-unit line is 7 µs
+  (release, nixos worker). Polyline cost does not show at this size.
 - **Step 4, testing damping:** a landing starts the spring with speed, so even critical damping
   overshoots once. Compare ζ levels instead (0.1 → 9.7, 0.4 → 5.6, 1.0 → 0.1 u). Keep the swing
   inside the travel, or the bump stop decides, not the damper.

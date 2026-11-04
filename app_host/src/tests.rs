@@ -6197,6 +6197,35 @@ fn bench_app_walk_camera() {
     });
 }
 
+/// W-L2 from Lua: a frame — tick and view — of a 2000-point stage line described every view,
+/// with a ball rolling on it. The line is built once at module scope, as an app would.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_long_line() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local hills = {{}} \
+         for i = 0, 1999 do local x = i * 100 \
+           table.insert(hills, x) table.insert(hills, 300 + 30 * math.sin(x / 700)) end \
+         return function() return ui.world({{ id = 'stage', width = 1280, height = 720, gravity = {{ 0, 981 }}, \
+           camera = {{ follow = 'ball' }}, \
+           {{ id = 'ground', pos = {{ 0, 0 }}, drawing = hero, collider = {{ line = hills }} }}, \
+           {{ id = 'ball', pos = {{ 50, 200 }}, drawing = hero, collider = {{ circle = 10, at = {{ 10, 10 }} }}, \
+             loose = {{ friction = 0, grip = 1, mass = 10 }} }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let mut i = 0;
+    bench("app_long_line_2000pt", 120, || {
+        i += 1;
+        app.update(LuaMsg::TickWorld("stage".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    });
+}
+
 /// A coin picked up: the signal's update and the view after it.
 #[test]
 #[ignore = "benchmark: scripts/bench.py"]
@@ -6441,7 +6470,8 @@ fn joints_are_described_and_checked_strictly() {
                   { id = 'bob', kind = 'spring', a = 'ball', a_at = { 4, 4 }, b_at = { 300, 50 }, \
                     length = 40, stiffness = 100, damping = 2, contacts = true }, \
                   { id = 'axle', kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, \
-                    axis = { 0, 1 }, stiffness = 5000, damping = 300, travel = { 15, 20 } } }";
+                    axis = { 0, 1 }, stiffness = 5000, damping = 300, travel = { 15, 20 }, \
+                    motor = { speed = 720, torque = 2e5 } } }";
     walk_world(&lua, &worlds, &room(fine)).unwrap();
     assert_eq!(worlds.borrow()["room"].joint_count(), 4);
     // The same description each frame keeps them.
@@ -6466,6 +6496,7 @@ fn joints_are_described_and_checked_strictly() {
         ("{ { id = 'j', kind = 'rope', a = 'ghost', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "there is no such entity \"ghost\""),
         ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, limits = { 5 } } }", "limits needs low and high"),
         ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, axis = { 0, 1 } } }", "axis is for wheel, not pin"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5, motor = { speed = 1, torque = 1 } } }", "a motor drives a pin or a wheel, not a rope"),
     ];
     let wheel = "kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, stiffness = 1, damping = 1";
     let wheels = [
@@ -6475,6 +6506,10 @@ fn joints_are_described_and_checked_strictly() {
         ("axis = { 0 }, travel = { 1, 1 }", "axis needs x and y"),
         ("axis = { 0, 1 }, travel = { 1, 1 }, length = 3", "length is for rope and spring, not wheel"),
         ("axis = { 0, 1 }, travel = { 1, 1 }, limits = { 0, 1 }", "limits is for pin, not wheel"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1 }", "joint \"j\".motor needs torque"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1, torque = 1, gear = 2 }", "motor: unknown field gear"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1, torque = -1 }", "motor torque must be 0 or more, got -1"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = 5", "motor must be a table, got integer"),
     ];
     let wheels = wheels.map(|(more, wanted)| (format!("{{ {{ id = 'j', {wheel}, {more} }} }}"), wanted));
     let cases = cases.into_iter().map(|(j, w)| (j.to_string(), w)).chain(wheels);

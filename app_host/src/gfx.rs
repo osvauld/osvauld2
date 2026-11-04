@@ -856,7 +856,7 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         let here = format!("{owner}: joint {id:?}");
         named_fields(&j, &here, &[
             "id", "kind", "a", "a_at", "b", "b_at", "limits", "length", "stiffness", "damping", "contacts",
-            "axis", "travel",
+            "axis", "travel", "motor",
         ])?;
         let kind: String = need(&j, &here, "kind")?;
         let has = |field: &str| j.get::<Value>(field).map(|v| !v.is_nil());
@@ -921,6 +921,15 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         }
         let a_at = point(need(&j, &here, "a_at")?, &format!("{here}.a_at"))?;
         let b_at = point(need(&j, &here, "b_at")?, &format!("{here}.b_at"))?;
+        // `motor = { speed = degrees_a_second, torque = n }`: the world checks the ranges.
+        let motor = match maybe_table(&j, &here, "motor")? {
+            Some(m) => {
+                let owner = format!("{here}.motor");
+                named_fields(&m, &owner, &["speed", "torque"])?;
+                Some(world::Motor { speed: need(&m, &owner, "speed")?, torque: need(&m, &owner, "torque")? })
+            }
+            None => None,
+        };
         joints.push(world::JointSpec {
             kind,
             a: need(&j, &here, "a")?,
@@ -928,6 +937,7 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
             b: entity_id(&j, &here, "b")?,
             b_at: (b_at.x, b_at.y),
             contacts: j.get::<Option<bool>>("contacts")?.unwrap_or(false),
+            motor,
             id,
         });
     }

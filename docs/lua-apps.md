@@ -547,6 +547,15 @@ ui.world({
     wobbles sideways. `a_at` is where the wheel's centre sits unloaded; at rest the body sags
     `weight on the wheel · gravity / stiffness` toward it. Hit hard, a stop gives a unit or two
     before it holds.
+  - `motor = { speed = degrees_a_second, torque = n }` on a `"pin"` or `"wheel"` drives its
+    turning: `b` relative to `a` (with no `b`, `a` itself) toward `speed`, pushing with at most
+    `torque`. Positive turns the way `spin` counts, so a wheel on the ground rolls right. With
+    masses in kg, `torque` is N·m × 10 000 (units are centimetres). `speed = 0` with a large
+    torque is a brake. A pedal is just state: describe the motor from it each view — a changed
+    motor is updated in place, never rebuilt, and wakes what it drives. Whether the torque
+    turns into drive is the tyre's `grip` against the ground's; without grip the wheel spins
+    in place. A motor pushes back on `a` just as hard, so spinning a wheel up in the air turns
+    the body the other way.
   - `contacts = true` lets the two bodies collide with each other (off by default); one end at
     least must be loose. A joint naming something not in the description is an error, and the
     previous joints stay.

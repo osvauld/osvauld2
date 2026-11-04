@@ -95,6 +95,43 @@ pub enum JointKind {
     Wheel { axis: (f64, f64), stiffness: f64, damping: f64, travel: (f64, f64) },
 }
 
+/// Drives a pin's or a wheel's turning: toward `speed` (degrees a second, `b` relative to `a`;
+/// with no `b`, `a` relative to the world), pushing with at most `torque` (mass × units² / s²:
+/// with kg, N·m × 10⁴). `speed` 0 with a large torque is a brake.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Motor {
+    pub speed: f64,
+    pub torque: f64,
+}
+
+impl Motor {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if !self.speed.is_finite() {
+            return Err(format!("motor speed must be a finite number, got {}", self.speed));
+        }
+        if !(self.torque.is_finite() && self.torque >= 0.0) {
+            return Err(format!("motor torque must be 0 or more, got {}", self.torque));
+        }
+        Ok(())
+    }
+}
+
+/// How hard a motor works per unit of speed it lacks (per rad/s), as a multiple of its torque:
+/// full torque by a tenth of a radian a second short.
+const MOTOR_GAIN: f32 = 10.0;
+
+/// Sets (or, with `None`, clears) the turning motor on `joint`. `to_world`: Rapier's body 2 is
+/// the world, so its relative turning is the negative of `a`'s.
+pub(crate) fn set_motor(joint: &mut GenericJoint, motor: Option<Motor>, to_world: bool) {
+    let axis = JointAxis::AngX;
+    let (speed, torque) = motor.map_or((0.0, 0.0), |m| (m.speed.to_radians() as f32, m.torque as f32));
+    let speed = if to_world { -speed } else { speed };
+    joint
+        .set_motor_model(axis, MotorModel::ForceBased)
+        .set_motor_velocity(axis, speed, torque * MOTOR_GAIN)
+        .set_motor_max_force(axis, torque);
+}
+
 /// What a body Rapier moves is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
@@ -287,7 +324,9 @@ impl Physics {
         b_at: (f64, f64),
         kind: JointKind,
         contacts: bool,
+        motor: Option<Motor>,
     ) -> ImpulseJointHandle {
+        let to_world = b.is_none();
         let b = match b {
             Some(b) => b,
             None => match self.ground {
@@ -342,7 +381,18 @@ impl Physics {
                     .build()
             }
         };
+        let mut joint = joint;
+        if motor.is_some() {
+            set_motor(&mut joint, motor, to_world);
+        }
         self.world.insert_impulse_joint(a, b, joint)
+    }
+
+    /// Changes a joint's motor in place — a pedal each view — and wakes what it joins.
+    pub(crate) fn drive(&mut self, joint: ImpulseJointHandle, motor: Option<Motor>, to_world: bool) {
+        if let Some(j) = self.world.impulse_joints.get_mut(joint, true) {
+            set_motor(&mut j.data, motor, to_world);
+        }
     }
 
     pub(crate) fn unjoin(&mut self, joint: ImpulseJointHandle) {

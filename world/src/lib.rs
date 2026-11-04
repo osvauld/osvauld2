@@ -25,7 +25,7 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, JointKind, Material, Shape};
+pub use crate::physics::{Collider, JointKind, Material, Motor, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -73,6 +73,8 @@ pub struct JointSpec {
     pub b_at: (f64, f64),
     /// Whether the two bodies collide with each other: not, unless asked.
     pub contacts: bool,
+    /// Drives a pin or a wheel. Changing only this keeps the joint and updates it in place.
+    pub motor: Option<Motor>,
 }
 
 /// A joint as the world holds it, and the bodies it was made for: a rebuilt body ends it.
@@ -1235,6 +1237,13 @@ impl World2d {
                 }
                 _ => {}
             }
+            if let Some(m) = &spec.motor {
+                match spec.kind {
+                    JointKind::Pin { .. } | JointKind::Wheel { .. } => m.check().map_err(bad)?,
+                    JointKind::Rope { .. } => return Err(bad("a motor drives a pin or a wheel, not a rope".into())),
+                    JointKind::Spring { .. } => return Err(bad("a motor drives a pin or a wheel, not a spring".into())),
+                }
+            }
             // What an end is: its body, where the anchor sits in the body's frame, whether it moves.
             let end = |name: &str, at: (f64, f64)| -> Result<_, WorldError> {
                 let entity = self.by_id.get(name).copied();
@@ -1276,14 +1285,19 @@ impl World2d {
         for m in made {
             let bodies = (m.a.0, m.b.0);
             let id = m.spec.id.clone();
-            if let Some(old) = self.joints.get(&id) {
-                if old.spec == m.spec && old.bodies == bodies && self.physics.joined(old.handle) {
+            if let Some(old) = self.joints.get_mut(&id) {
+                let same = |s: &JointSpec| JointSpec { motor: None, ..s.clone() };
+                if same(&old.spec) == same(&m.spec) && old.bodies == bodies && self.physics.joined(old.handle) {
+                    if old.spec.motor != m.spec.motor {
+                        self.physics.drive(old.handle, m.spec.motor, m.spec.b.is_none());
+                        old.spec.motor = m.spec.motor;
+                    }
                     continue;
                 }
                 let old = self.joints.remove(&id).expect("just seen");
                 self.physics.unjoin(old.handle);
             }
-            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts);
+            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts, m.spec.motor);
             self.joints.insert(id, Joined { spec: m.spec, handle, bodies });
         }
         Ok(())

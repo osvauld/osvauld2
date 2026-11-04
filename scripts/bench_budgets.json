@@ -1,4 +1,14 @@
 {
+  "app_long_line_2000pt": {
+    "baseline_us": 454.2,
+    "budget_us": 1000,
+    "note": "hillclimb.md W-L2: a frame (tick + view) of a 2000-point stage line described every view, a ball rolling on it. Mostly reading the 4000-number line back from Lua each view; cache it by table if it grows. nixos worker, release."
+  },
+  "cart_on_long_line_step": {
+    "baseline_us": 7.0,
+    "budget_us": 200,
+    "note": "hillclimb.md W-L2: one 120 Hz step of a two-wheeled sprung, motor-driven cart on a 2000-point, 200 000-unit line. nixos worker, release."
+  },
   "app_chat_300_edit_grouped": {
     "baseline_us": 1547.2,
     "budget_us": 3000,
