@@ -1,6 +1,6 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
-Status: **planned 2026-11-04, nothing built.** Worktree `.claude/worktrees/jetpack-mp`, branch
+Status: **in progress — steps 1–4 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)
 (uncommitted on `laptop-host` at writing). Absorbs the ephemeral half of
@@ -23,7 +23,7 @@ the virtual clock makes every frame number exact. Each test screenshots every pe
 
 | # | scenario | proves | step |
 |---|---|---|---|
-| M1 | A, B, C open one app in A's space. A sends on a declared channel; B and C receive it with `from` = A within 3 frames. No vault entry or doc changes on any peer or the host. An undeclared channel is an error in A's console | `net` channel, ephemeral | 4 |
+| M1 | A, B, C open one app in A's space. A sends on a declared channel; B and C receive it with `from` = A (within 5 s wall-clock; *was* "3 frames", see step 4). No vault entry or doc changes on any peer or the host. An undeclared channel is an error in A's console | `net` channel, ephemeral | 4 |
 | M2 | A sends faster than the manifest's rate; B receives at most the cap; A's console says `net: over rate` | host-side rate cap | 4 |
 | M3 | B and C show A in `net.peers()`; C's shell is killed; A and B drop C within 2 s | presence | 4 |
 | M4 | `demo_apps/mp_dots` (a `net.match` with no world): 10 s of scripted inputs on A and B; state hash equal on A, B, C at every 1 s checkpoint | `net.match` convergence | 5 |
@@ -177,6 +177,21 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
 4. **Lua `net`**: `net.send`, `net.on`, `net.peers` in app_host, shell2 plumbing (member dials
    the second stream after `Welcome`; the host shell's own app joins `Nets` as a peer). M1,
    M2, M3.
+   *As built 2026-11-04:* `app_host/src/net.rs`. `net.send(channel, value)` (handlers only;
+   returns `false` when over rate), `net.on(channel, fn(body, from))`, `net.peers()` →
+   `{ id, account, me }` sorted by id, `id` the device key in hex. The channel is checked
+   against the app's own `manifest.osv` (an undeclared one is an error), `size` too, and the
+   same token bucket the host runs (`manifest::DEFAULT_CHANNEL_RATE`, now shared with
+   `courier`) drops locally with `net: over rate on "x"` in the console. Values travel in a
+   tagged binary form with sorted map keys, so equal values are equal bytes. Who is here and
+   the outbox outlive a reload; `net.on` handlers are per VM. In the shell (`channels.rs`) the
+   app thread hands its outbox over after each batch; the UI thread signs (`seq` = wall-clock
+   µs, rising) and routes — the session's channel stream for a joined space, the process's own
+   `Nets` for a hosted one (`Admin::own_net_rules`). **Found while building M3:** a killed
+   shell sends no FIN and QUIC's idle timeout is 10 s, so the member sends `NetFrame::Beat`
+   every 500 ms and the host closes a channel stream silent for 2 s. M1's "within 3 frames"
+   became "within 5 s of wall-clock": the network does not wait for the virtual clock.
+   `scripts/e2e_mp.py` M1–M3 green with `scripts/e2e_apps/net_probe`.
 5. **`net.match`** without worlds, proved by `demo_apps/mp_dots`. M4, M5.
    **Player-cap sim** (added 2026-11-04 with the user): a Rust harness runs N matches in one
    process over a fake network (per-player delay, jitter, loss; no iroh) and records rollback

@@ -812,13 +812,16 @@ async fn net_session<S: Sink>(
     let NetStream { admin, admitted, ws_id, device, attestation } = stream;
     let welcome = Frame::Welcome { token: None, docs: Vec::new() };
     send_frame(&mut send, &welcome, MAX_FRAME).await.map_err(|e| e.to_string())?;
-    let sid = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    let sid = relay::next_sid();
     let (tx, mut rx) = unbounded_channel::<NetFrame>();
+    let silent = std::time::Duration::from_millis(courier::session::NET_SILENT_MS);
     let nets = relay::nets();
     let result = async {
         loop {
             tokio::select! {
-                incoming = frames.recv::<NetFrame>(MAX_FRAME) => match incoming {
+                incoming = tokio::time::timeout(silent, frames.recv::<NetFrame>(MAX_FRAME)) => match incoming {
+                    Err(_) => return Err("net: the member went silent".to_string()),
+                    Ok(incoming) => match incoming {
                     Ok(Some(NetFrame::Open { item_id })) => {
                         let now = ctx.sink.now_secs();
                         match admin.net_rules(&admitted.did, &admitted.token, &ws_id, &item_id, now) {
@@ -839,10 +842,11 @@ async fn net_session<S: Sink>(
                             Err(e) => eprintln!("host: {e}"),
                         }
                     }
-                    // `Here`/`Gone` are the host's to send.
+                    // `Beat` only resets the silence; `Here`/`Gone` are the host's to send.
                     Ok(Some(_)) => {}
                     Ok(None) => return Ok(()),
                     Err(e) => return Err(e.to_string()),
+                    },
                 },
                 relay = rx.recv() => match relay {
                     Some(frame) => send_frame(&mut send, &frame, MAX_FRAME).await.map_err(|e| e.to_string())?,

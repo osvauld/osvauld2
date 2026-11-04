@@ -7,6 +7,8 @@ mod camera;
 mod host;
 mod entry;
 mod limits;
+mod net;
+mod net_match;
 mod determinism;
 mod index;
 mod reload;

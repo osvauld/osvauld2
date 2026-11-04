@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use courier::invite::InviteClaimHello;
-use courier::session::{DocState, Frame, HostEntry};
+use courier::session::{DocState, Frame, HostEntry, NetFrame};
 use iroh::Endpoint;
 pub use kunki::session::{Fetched, Joined, endpoint_addr_of, fetch, load_joined, save_joined};
 use net::frames::{FIRST_FRAME, FrameBuf, MAX_FRAME, send_frame};
@@ -37,6 +37,8 @@ pub struct Pull {
 /// The shell's end of a session: frames to send go in here. Dropping it ends the session.
 pub struct Handle {
     pub tx: UnboundedSender<Frame>,
+    /// The session's channel stream (`channels::stream`): queued until it is up.
+    pub net: UnboundedSender<NetFrame>,
     pub up: bool,
     /// Which dial this is, so its `SessionDown` is told from a newer session's.
     pub seq: u64,
@@ -73,16 +75,18 @@ pub fn dial(
     dial: Dial,
 ) -> self::Handle {
     let (tx, rx) = unbounded_channel();
+    let (net_tx, net_rx) = unbounded_channel();
     let ws_id = dial.ws_id.clone();
     let (host_index, host_did) = (dial.host_index, dial.host.did.clone());
     let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     rt.spawn(async move {
-        let outcome = run(ep, vault, proxy.clone(), gen_, seq, dial, rx).await;
+        let outcome = run(ep, vault, proxy.clone(), gen_, seq, dial, rx, net_rx).await;
         let reason = outcome.err().unwrap_or_else(|| "closed".to_string());
         let _ = proxy.send_event(Msg::SessionDown(gen_, ws_id, seq, reason));
     });
     self::Handle {
         tx,
+        net: net_tx,
         up: false,
         seq,
         host_index,
@@ -140,6 +144,7 @@ async fn run(
     seq: u64,
     dial: Dial,
     mut rx: UnboundedReceiver<Frame>,
+    net_rx: UnboundedReceiver<NetFrame>,
 ) -> Result<(), String> {
     let addr = endpoint_addr_of(&dial.host.addr)?;
     let conn = net::endpoint::dial(&ep, addr, net::SPACE_ALPN, net::wire::DIAL_TIMEOUT)
@@ -153,7 +158,7 @@ async fn run(
         .ok_or("account is locked")?
         .map_err(|e| e.to_string())?;
     let hello = Frame::Hello {
-        attestation,
+        attestation: attestation.clone(),
         ws_id: dial.ws_id.clone(),
         token: dial.joined.token.clone(),
         claim: dial.claim,
@@ -162,16 +167,31 @@ async fn run(
     send_frame(&mut send, &hello, FIRST_FRAME)
         .await
         .map_err(|e| e.to_string())?;
-    match frames.recv::<Frame>(MAX_FRAME).await.map_err(|e| e.to_string())? {
+    let token = match frames.recv::<Frame>(MAX_FRAME).await.map_err(|e| e.to_string())? {
         Some(Frame::Welcome { token, .. }) => {
-            if let Some(token) = token {
-                let _ = proxy.send_event(Msg::SessionToken(gen_, dial.ws_id.clone(), seq, token));
+            if let Some(token) = &token {
+                let _ = proxy.send_event(Msg::SessionToken(gen_, dial.ws_id.clone(), seq, token.clone()));
             }
+            token.or_else(|| dial.joined.token.clone())
         }
         Some(Frame::Refused { reason }) => return Err(reason),
         Some(_) => return Err("the host did not answer the hello".into()),
         None => return Err("the host closed before answering".into()),
-    }
+    };
+    // The channel stream rides this connection and ends with this session.
+    let _net = token.map(|token| {
+        let task = tokio::spawn(crate::channels::stream(
+            conn.clone(),
+            attestation,
+            dial.ws_id.clone(),
+            token,
+            net_rx,
+            proxy.clone(),
+            gen_,
+            seq,
+        ));
+        AbortOnDrop(task)
+    });
     let _ = proxy.send_event(Msg::SessionUp(gen_, dial.ws_id.clone(), seq));
     loop {
         tokio::select! {
@@ -203,6 +223,14 @@ async fn run(
                 Err(e) => return Err(e.to_string()),
             },
         }
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

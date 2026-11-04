@@ -28,6 +28,10 @@ pub const OWNER: &str = "owner";
 /// per session, so this bounds what a sender can make a host buffer.
 pub const CHANNEL_SIZE_MAX: u32 = 16 * 1024;
 
+/// Messages per second a channel without `rate` gets: a cap still, so one app cannot flood a
+/// host. Twice the 30 Hz input rate a lockstep match sends at.
+pub const DEFAULT_CHANNEL_RATE: u32 = 60;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("manifest.osv line {line}: {message}")]
 pub struct Error {

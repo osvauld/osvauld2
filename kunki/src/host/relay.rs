@@ -142,6 +142,12 @@ fn here(item: &str, p: &Peer) -> NetFrame {
     }
 }
 
+/// A fresh stream id, for a channel stream or the process's own app.
+pub fn next_sid() -> u64 {
+    static SID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The process's relay: one per endpoint, like [`super::sessions`].
 pub fn nets() -> &'static Nets {
     static NETS: OnceLock<Nets> = OnceLock::new();

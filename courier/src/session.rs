@@ -149,4 +149,10 @@ pub enum NetFrame {
     /// device's DID itself. Sent for each one already here on `Open`, then as each arrives.
     Here { item_id: String, attestation: String },
     Gone { item_id: String, device: [u8; 32] },
+    /// member → host, every [`NET_BEAT_MS`]: a killed shell sends no FIN, and QUIC's idle
+    /// timeout (10 s) is too slow for presence. A stream silent for [`NET_SILENT_MS`] is closed.
+    Beat,
 }
+
+pub const NET_BEAT_MS: u64 = 500;
+pub const NET_SILENT_MS: u64 = 2000;

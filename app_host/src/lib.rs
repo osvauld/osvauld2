@@ -11,6 +11,9 @@ mod budget;
 mod dmath;
 pub mod index;
 mod modules;
+pub mod net;
+pub mod net_match;
+pub mod net_sim;
 mod props;
 pub(crate) mod signal;
 mod ui_group;
@@ -456,6 +459,11 @@ pub struct LuaApp<M> {
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
+    /// Who is here and what waits to go out; outlives the VM. Its `net.on` handlers do not.
+    net: net::Net,
+    net_handlers: net::Handlers,
+    /// This VM's matches: their functions and state are its own.
+    matches: net_match::Matches,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -598,7 +606,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
             src, cores, resolve, wake, to_msg, search, Worlds::default(),
-            gfx::world3d::Host::default(), setup, false, Rc::from(entry),
+            gfx::world3d::Host::default(), net::Net::default(), setup, false, Rc::from(entry),
         )?;
         if app.error.is_none() {
             if let Err(e) = app.worlds3d.commit() {
@@ -626,6 +634,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         search: index::SearchHook,
         worlds: Worlds,
         worlds3d: gfx::world3d::Host,
+        net: net::Net,
         setup: Option<host::VmSetup>,
         strict_trial: bool,
         entry: Rc<str>,
@@ -657,6 +666,9 @@ impl<M: Clone + 'static> LuaApp<M> {
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
         let host_context = host::HostContext::new(budget.clone());
+        let net_handlers = net::Handlers::default();
+        let matches = net_match::Matches::default();
+        net::install(&vm, net.clone(), net::rules(&src.doc), net_handlers.clone(), matches.clone(), host_context.clone())?;
         if let Some(install) = &setup {
             install(&vm, host_context.clone())?;
         }
@@ -694,6 +706,9 @@ impl<M: Clone + 'static> LuaApp<M> {
             groups: Groups::default(),
             kept: Default::default(),
             tracker,
+            net,
+            net_handlers,
+            matches,
         })
     }
 
@@ -732,6 +747,8 @@ impl<M: Clone + 'static> LuaApp<M> {
             self.search.clone(),
             self.worlds.clone(),
             if validate_tree { gfx::world3d::Host::default() } else { self.worlds3d.staged() },
+            // A candidate's load sends nothing (`net.send` needs a handler), so it shares the core.
+            self.net.clone(),
             self.setup.clone(),
             validate_tree,
             self.entry.clone(),
@@ -824,6 +841,42 @@ impl<M: Clone + 'static> LuaApp<M> {
     /// belongs beside what the app did itself.
     pub fn note(&self, line: String) {
         self.log(line);
+    }
+
+    /// Who is here on this app, as the host tells it (`net.peers()`).
+    pub fn net(&self) -> &net::Net {
+        &self.net
+    }
+
+    /// What the app sent since the last take, for the host to sign and route; the local
+    /// refusals (`net: over rate`) go to the console on the way.
+    pub fn net_take(&self) -> Vec<net::Outgoing> {
+        let (out, notes) = self.net.take();
+        for line in notes {
+            self.log(line);
+        }
+        out
+    }
+
+    /// One message from `from` (a peer's id) to its channel's `net.on` handler; none, dropped.
+    pub fn net_deliver(&mut self, channel: &str, from: &str, body: &[u8]) {
+        let m = self.matches.borrow().get(channel).cloned();
+        if let Some(m) = m {
+            if m.feed(&self.net, from, body) {
+                (self.wake)();
+                return;
+            }
+        }
+        let Some(h) = self.net_handlers.borrow().get(channel).cloned() else {
+            return;
+        };
+        let _armed = self.budget.arm();
+        let _scope = self.host_context.enter();
+        let result = net::decode_body(&self.vm, body).and_then(|v| h.call::<()>((v, from)));
+        if let Err(e) = result {
+            self.log(format!("handler error: {e}"));
+        }
+        (self.wake)();
     }
 
     /// Reload if the source has moved since this VM was built; `None` if it had not.
@@ -994,7 +1047,38 @@ impl<M: Clone + 'static> LuaApp<M> {
         true
     }
 
+    /// What each match did so far, by id — for the player-cap sim and the tests.
+    pub fn match_stats(&self) -> HashMap<String, net_match::Stats> {
+        self.matches.borrow().iter().map(|(id, m)| (id.clone(), m.stats())).collect()
+    }
+
+    /// A match's checkpoint hashes so far, `(frame, hash)`, oldest first.
+    pub fn match_checks(&self, id: &str) -> Vec<(u64, String)> {
+        self.matches.borrow().get(id).map(|m| m.checks()).unwrap_or_default()
+    }
+
     pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
+        let playing = self.advance_matches(elapsed, active);
+        self.advance_worlds3d(elapsed, active) | playing
+    }
+
+    fn advance_matches(&mut self, now: f64, active: bool) -> bool {
+        let all: Vec<net_match::Match> = self.matches.borrow().values().cloned().collect();
+        if all.is_empty() {
+            return false;
+        }
+        let _armed = self.budget.arm();
+        let mut playing = false;
+        for m in all {
+            playing |= m.advance(&self.vm, &self.net, now, active);
+            if let Some(e) = m.take_error() {
+                self.log(format!("net.match: {e}"));
+            }
+        }
+        playing
+    }
+
+    fn advance_worlds3d(&mut self, elapsed: f64, active: bool) -> bool {
         match self.worlds3d.advance(elapsed, active) {
             Ok(ticking) => {
                 let _armed = self.budget.arm();

@@ -113,9 +113,7 @@ pub fn may_send<'m>(
     Ok(ch)
 }
 
-/// Messages per second a channel without `rate` gets: a cap still, so one app cannot flood a
-/// host. Twice the 30 Hz input rate a lockstep match sends at.
-pub const DEFAULT_RATE: u32 = 60;
+pub use manifest::DEFAULT_CHANNEL_RATE as DEFAULT_RATE;
 
 /// A token bucket per sender, item and channel: up to a second's worth in a burst, refilled
 /// continuously at the channel's rate.

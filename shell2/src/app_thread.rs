@@ -537,6 +537,10 @@ fn settle(tile: &mut Tile<Hosted>, ctx: &Ctx, names: &mut Vec<String>) -> bool {
         return false;
     }
     let h = tile.app_mut();
+    let sent = h.app.net_take();
+    if !sent.is_empty() {
+        let _ = ctx.proxy.send_event(Msg::NetOut(ctx.id.clone(), sent));
+    }
     if let Some(Err(e)) = h.app.reload_if_stale() {
         eprintln!("reload failed: {e}");
         tile.invalidate();

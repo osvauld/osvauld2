@@ -791,6 +791,13 @@ impl Admin {
         Ok((manifest, roles))
     }
 
+    /// [`Self::net_rules`] for the root itself — the host's own open app, which no token admits.
+    pub fn own_net_rules(&self, ws: &str, item: &str, now: u64) -> Result<(Manifest, BTreeSet<String>), NodeError> {
+        let manifest = self.manifest(&item_scope(ws, item))?;
+        let roles = roles_at(&self.grants(&self.root()?, now)?, ws, item, "");
+        Ok((manifest, roles))
+    }
+
     /// The app's manifest, read from the source the node holds for `scope`'s item. A source
     /// without `manifest.osv` is bare: it declares no roles.
     pub fn manifest(&self, scope: &Scope) -> Result<Manifest, NodeError> {
