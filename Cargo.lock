@@ -224,6 +224,7 @@ dependencies = [
  "libm",
  "loro",
  "lua_tree",
+ "manifest",
  "mlua",
  "runtime",
  "serde",
