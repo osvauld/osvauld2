@@ -178,6 +178,11 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
    the second stream after `Welcome`; the host shell's own app joins `Nets` as a peer). M1,
    M2, M3.
 5. **`net.match`** without worlds, proved by `demo_apps/mp_dots`. M4, M5.
+   **Player-cap sim** (added 2026-11-04 with the user): a Rust harness runs N matches in one
+   process over a fake network (per-player delay, jitter, loss; no iroh) and records rollback
+   rate and depth, stalled frames and ms per frame, for 2, 4, 6, 8 players on LAN, good wifi,
+   and 4G with one bad link. Run on `mp_dots` here, on Jetpack at step 8, on the Pixel at
+   step 11. The cap is picked from those numbers, not guessed.
 6. **World under a match**: Rapier `enhanced-determinism`, `driven`, save/restore/hash, moments
    as events; hockey as a two-player match. M6.
 7. **World gaps for Jetpack**: flyer body, `:get`. Rust tests, a world demo.
@@ -199,7 +204,7 @@ traffic goes through the host); voice; matchmaking outside a space.
 
 ## Open questions
 
-- Player cap (proposal: 4 players, bots up to 6 soldiers).
+- Player cap: set from the step 5 sim (4 was a guess; bots up to 6 soldiers).
 - Drop-out ends the match (M10). Continuing without C needs the others to agree on the frame C
   left — later?
 - Rollback cost on the Pixel: Lua `step` × up to 32 ticks plus deterministic Rapier in one frame.
