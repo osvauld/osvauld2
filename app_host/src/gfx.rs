@@ -793,14 +793,24 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction", "grip", "density"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip", "density", "mass", "center"])?;
     let d = world::Material::default();
     let number = |field: &str| maybe_number(&m, &owner, field);
+    let (density, mass) = (number("density")?, number("mass")?);
+    if density.is_some() && mass.is_some() {
+        return Err(Error::runtime(format!("{owner}: mass or density, not both")));
+    }
+    let center = match maybe_table(&m, &owner, "center")? {
+        Some(c) => point(c, &format!("{owner}.center")).map(|p| Some((p.x, p.y)))?,
+        None => None,
+    };
     Ok(Some(world::Material {
         bounce: number("bounce")?.unwrap_or(d.bounce),
         friction: number("friction")?.unwrap_or(d.friction),
         grip: number("grip")?,
-        density: number("density")?.unwrap_or(d.density),
+        density: density.unwrap_or(d.density),
+        mass,
+        center,
     }))
 }
 

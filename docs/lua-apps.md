@@ -519,6 +519,16 @@ ui.world({
   let `grip` (surface friction) stop the sliding. `grip` is also what lets a thing tumble.
 - **`loose = { density = n }`** (default 1, above 0): mass is density × area, so a stone block
   outweighs a wooden one the same size and flings what it hits.
+- **`loose = { mass = kg }`** states the whole thing's mass instead, whatever its size: a game
+  states a 300 kg chassis, not a density. `mass` or `density`, not both. Springs (and motors)
+  are force-based, so with masses in kg their `stiffness` is in N/m and `damping` in N·s/m:
+  a 5 kg box sags `5 · 981 / stiffness` units on a spring under `gravity = { 0, 981 }`.
+- **`loose = { center = { x, y } }`** moves the centre of mass to that point of the drawing
+  (default: the collider's middle). A car with its weight low and forward is hard to flip; a
+  plank with its weight at one end tips that way off a peg. How hard it is to turn stays the
+  shape's own.
+- Things fall asleep once nearly still. A heavily overdamped spring creeps toward its rest so
+  slowly that it can doze off short of it; damp near critical (`2·√(stiffness·mass)`) or less.
 - **`wells = { { at, radius, pull }, … }`** are standing fields, described like `gravity`: a loose
   thing whose centre is within `radius` of `at` accelerates toward it at `pull`, fading to nothing
   at the edge; a negative `pull` pushes away. They wake what they reach.

@@ -105,17 +105,29 @@ pub struct Material {
     /// Mass per area: a stone ball outweighs a wooden one the same size, so it flings what it
     /// strikes and is hardly slowed by it.
     pub density: f64,
+    /// The whole body's mass, in place of density × area: a game states kilograms. Springs and
+    /// motors are force-based, so with mass in kg their stiffness is in N/m.
+    pub mass: Option<f64>,
+    /// The centre of mass in drawing units, where the shape's centroid is otherwise. How hard
+    /// it is to turn stays the shape's own (its inertia about its centroid, scaled to the mass).
+    pub center: Option<(f64, f64)>,
 }
 
 impl Default for Material {
     /// A let-go chest's: a modest bounce, at rest in about half a second.
     fn default() -> Self {
-        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }
+        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0, mass: None, center: None }
     }
 }
 
 impl Material {
     pub(crate) fn check(&self) -> Result<(), String> {
+        if let Some(m) = self.mass.filter(|m| !(m.is_finite() && *m > 0.0)) {
+            return Err(format!("mass must be above 0, got {m}"));
+        }
+        if self.center.is_some_and(|(x, y)| !(x.is_finite() && y.is_finite())) {
+            return Err("center must be finite".into());
+        }
         if !(0.0..=1.0).contains(&self.bounce) {
             return Err(format!("bounce must be from 0 to 1, got {}", self.bounce));
         }
@@ -211,11 +223,29 @@ impl Physics {
             Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32, m.density as f32),
             _ => (0.0, 0.0, 1.0),
         };
+        let stated = match kind {
+            Body::Dynamic(_, m) if m.mass.is_some() || m.center.is_some() => Some(m),
+            _ => None,
+        };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
         if let Some(c) = solid {
-            let solid = shape(c, anchor)
-                .density(density)
+            let solid = shape(c, anchor);
+            let solid = match stated {
+                // The shape's own props at its density, then mass and centre as stated. Body
+                // frame = the shape's centre (`anchor`), so the centre is taken from there.
+                Some(m) => {
+                    let own = solid.shape.mass_properties(density);
+                    let mass = m.mass.map_or(own.mass(), |v| v as f32);
+                    let com = m.center.map_or(own.local_com, |(x, y)| {
+                        Vector::new((x - anchor.0) as f32, (y - anchor.1) as f32)
+                    });
+                    let inertia = own.principal_inertia() * mass / own.mass();
+                    solid.mass_properties(MassProperties::new(com, mass, inertia))
+                }
+                None => solid.density(density),
+            };
+            let solid = solid
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(grip)
@@ -234,7 +264,10 @@ impl Physics {
             let kinds = ActiveCollisionTypes::default()
                 | ActiveCollisionTypes::KINEMATIC_FIXED
                 | ActiveCollisionTypes::KINEMATIC_KINEMATIC;
-            let zone = shape(c, anchor).sensor(true).active_collision_types(kinds);
+            let mut zone = shape(c, anchor).sensor(true).active_collision_types(kinds);
+            if stated.is_some() {
+                zone = zone.density(0.0); // a stated mass is the whole body's
+            }
             colliders.insert_with_parent(zone.user_data(owner as u128), body, bodies);
         }
         body

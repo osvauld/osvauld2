@@ -179,6 +179,13 @@ Lessons so far:
   against a line without CCD.
 - **Step 1, check the physics against a formula:** a 2D circle is a disc (I = ½mr²), so it rolls
   down a slope at (2/3)·g·sin θ. Rapier matched that within 1%.
+- **Step 3, mass in kg:** Rapier's springs are `MotorModel::ForceBased`, so once mass is in kg
+  their stiffness is in N/m with no conversion. Sag = m·g/k matched within 3%. The centre of
+  mass is set through `MassProperties` (the shape's inertia scaled to the stated mass); the tip
+  of a plank off a peg matched ½·α·t² within 1°.
+- **Step 3, sleep vs suspension:** an overdamped spring (ζ ≈ 1.4) fell asleep ±10% short of its
+  rest, on whichever side it came from. Suspension sag tests and tuning must stay near ζ ≤ 1,
+  or the car's sleep thresholds must change. Watch for this in W-S1.
 
 - Where the vehicle setup lives, and which fields mapped cleanly to Rapier versus needed
   conversion.
