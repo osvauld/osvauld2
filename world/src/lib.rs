@@ -1624,50 +1624,55 @@ impl World2d {
 impl World2d {
     /// Every entity, in description order.
     pub fn inspect(&self) -> Vec<EntityInspection> {
+        self.order.iter().map(|&entity| self.inspection(entity)).collect()
+    }
+
+    /// Lua's question: one entity as the dump has it, or `None` for an id the world lacks.
+    pub fn get(&self, id: &str) -> Option<EntityInspection> {
+        self.by_id.get(id).map(|&entity| self.inspection(entity))
+    }
+
+    fn inspection(&self, entity: Entity) -> EntityInspection {
         let name = |entity| self.ecs.get::<Name>(entity).expect("every entity has one").0.clone();
-        (self.order.iter())
-            .map(|&entity| {
-                let e = self.ecs.entity(entity);
-                let t = e.get::<Transform>().expect("every entity has a Transform");
-                let solid = e.get::<Solid>();
-                let body = match solid {
-                    None => "none",
-                    Some(s) if s.loose.is_some() => "loose",
-                    Some(s) if s.sliding => "thrown",
-                    Some(s) if s.moves => "moved",
-                    Some(_) => "fixed",
-                };
-                let velocity = match (solid, e.get::<Velocity>()) {
-                    (Some(s), _) if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
-                    (_, Some(v)) => (v.0, v.1),
-                    _ => (0.0, 0.0),
-                };
-                let spin = match solid {
-                    Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
-                    _ => 0.0,
-                };
-                let mut zones: Vec<String> = (self.inside.iter())
-                    .filter(|(_, who)| *who == entity)
-                    .map(|&(zone, _)| name(zone))
-                    .collect();
-                zones.sort();
-                EntityInspection {
-                    id: name(entity),
-                    pos: (t.x, t.y),
-                    body,
-                    velocity,
-                    rot: t.rot,
-                    spin,
-                    attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
-                    zones,
-                    clip: e.get::<Animator>().map(|a| ClipInspection {
-                        time: self.clock - a.started,
-                        length: a.clip.length(),
-                        looped: a.clip.looped(),
-                    }),
-                }
-            })
-            .collect()
+        let e = self.ecs.entity(entity);
+        let t = e.get::<Transform>().expect("every entity has a Transform");
+        let solid = e.get::<Solid>();
+        let body = match solid {
+            None => "none",
+            Some(s) if s.loose.is_some() => "loose",
+            Some(s) if s.sliding => "thrown",
+            Some(s) if s.moves => "moved",
+            Some(_) => "fixed",
+        };
+        let velocity = match (solid, e.get::<Velocity>()) {
+            (Some(s), _) if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
+            (_, Some(v)) => (v.0, v.1),
+            _ => (0.0, 0.0),
+        };
+        let spin = match solid {
+            Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
+            _ => 0.0,
+        };
+        let mut zones: Vec<String> = (self.inside.iter())
+            .filter(|(_, who)| *who == entity)
+            .map(|&(zone, _)| name(zone))
+            .collect();
+        zones.sort();
+        EntityInspection {
+            id: name(entity),
+            pos: (t.x, t.y),
+            body,
+            velocity,
+            rot: t.rot,
+            spin,
+            attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
+            zones,
+            clip: e.get::<Animator>().map(|a| ClipInspection {
+                time: self.clock - a.started,
+                length: a.clip.length(),
+                looped: a.clip.looped(),
+            }),
+        }
     }
 }
 

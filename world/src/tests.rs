@@ -2828,6 +2828,22 @@ fn a_carried_thing_let_go_as_a_line_is_fixed_ground() {
 }
 
 #[test]
+fn get_answers_one_entity_as_the_dump_does() {
+    let (specs, _) = ball_over_floor(500.0, Material { grip: Some(1.0), ..DEAD });
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    world.set("ball", Set { velocity: Some((80.0, 0.0)), spin: Some(45.0), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    for id in ["ball", "floor"] {
+        let dumped = world.inspect().into_iter().find(|e| e.id == id);
+        assert_eq!(world.get(id), dumped, "{id}");
+    }
+    assert_eq!(world.get("ghost"), None);
+}
+
+#[test]
 fn a_line_is_kept_while_the_same_and_replaced_when_changed() {
     let d = drawing();
     let mut world = World2d::default();

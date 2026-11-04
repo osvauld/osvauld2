@@ -551,10 +551,10 @@ world("lab"):release("block")                             -- … let go: it keep
   not pull a held thing. Drags that end after the thing has gone are no error.
 - `e.shape` of an `on_drag` on a world is the entity's id — it says which body was taken.
 
-### Questions — `world(id):ray` and `:at`
+### Questions — `world(id):ray`, `:at` and `:get`
 
 Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
-is in front of the player when they press E, what did the click land on:
+is in front of the player when they press E, what did the click land on, how fast is the car:
 
 ```lua
 local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
@@ -562,7 +562,14 @@ local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
 if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
 
 local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+
+local car = world("track"):get("car")
+-- nil, or { pos = { x, y }, rot = 12, velocity = { vx, vy }, spin = -40, tick = 1042 }
 ```
+
+- `get` reads one entity back, in the dump's names and units: `pos` its box's top-left, `rot`
+  degrees turned, `velocity` per second, `spin` degrees a second. An id the world lacks is `nil`.
+  It reads the entity itself, so a `set` shows in it at once.
 
 - `ray` answers the first solid thing on the line from one point to the other: `at` where the line
   met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop

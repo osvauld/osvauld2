@@ -5712,6 +5712,63 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
     }
 }
 
+#[test]
+fn view_and_handlers_read_an_entity_back_with_get() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function show(b) \
+           if not b then return 'nil' end \
+           return string.format('pos %.1f,%.1f rot %.0f v %.1f,%.1f spin %.0f t%d', \
+             b.pos[1], b.pos[2], b.rot, b.velocity[1], b.velocity[2], b.spin, b.tick) end \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() \
+           local room = world('room') \
+           local ok, ball = pcall(room.get, room, 'ball') \
+           local seen = ok and show(ball) .. ' ghost=' .. show(room:get('ghost')) or 'not yet' \
+           return ui.col({{ ui.text({{ seen }}), ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               world('room'):set('ball', {{ velocity = {{ 30, 0 }}, spin = 90 }}) \
+               table.insert(heard, show(world('room'):get('ball'))) \
+               try(function() world('room'):get(4) end) \
+               try(function() world('room'):get() end) end, \
+             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+               loose = {{ friction = 0, grip = 0.5 }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    let info = app.view().info();
+    let said = |i: usize| info.children[i].text.clone().unwrap();
+    let b = &app.inspect_worlds()["room"].entities[0];
+    let tick = app.inspect_worlds()["room"].tick;
+    let dump = format!(
+        "pos {:.1},{:.1} rot {:.0} v {:.1},{:.1} spin {:.0} t{tick}",
+        b.pos.0, b.pos.1, b.rot, b.velocity.0, b.velocity.1, b.spin
+    );
+    assert!(b.pos.0 > 20.0 && (b.spin - 90.0).abs() < 1.0, "it moved and turns: {b:?}");
+    assert_eq!(said(0), format!("{dump} ghost=nil"), "get in view says what the dump says");
+    let heard = said(1);
+    assert!(heard.starts_with("pos 0.0,0.0 rot 0 v 30.0,0.0 spin 90"), "a set shows at once to get: {heard}");
+    for wanted in [
+        "world \"room\":get needs an entity id (a string), got integer",
+        "world \"room\":get needs an entity id (a string), got nil",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}
+
 /// An app whose `main.lua` is `src`, viewed once.
 fn app_of(src_lua: &str) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();

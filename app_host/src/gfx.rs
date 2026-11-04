@@ -605,6 +605,25 @@ impl UserData for WorldHandle {
                 lua.create_sequence_from([x, y])
             });
         }
+        // `track:get("car")`: nil, or `{ pos, rot, velocity, spin, tick }` — the dump's names.
+        methods.add_method("get", |lua, this, id: Value| {
+            let owner = format!("world {:?}:get", this.id);
+            let Value::String(id) = id else {
+                let what = id.type_name();
+                return Err(Error::runtime(format!("{owner} needs an entity id (a string), got {what}")));
+            };
+            let id = id.to_str()?.to_string();
+            let (got, tick) = this.ask(&owner, |w| Ok(w.get(&id)))?;
+            let Some(e) = got else { return Ok(Value::Nil) };
+            let pair = |(x, y): (f64, f64)| lua.create_sequence_from([x, y]);
+            let answer = lua.create_table()?;
+            answer.set("pos", pair(e.pos)?)?;
+            answer.set("rot", e.rot)?;
+            answer.set("velocity", pair(e.velocity)?)?;
+            answer.set("spin", e.spin)?;
+            answer.set("tick", tick)?;
+            Ok(Value::Table(answer))
+        });
         // `rink:at({ x, y })`: the ids there, sorted, as a list that also has `tick`.
         methods.add_method("at", |lua, this, at: Table| {
             let owner = format!("world {:?}:at", this.id);
