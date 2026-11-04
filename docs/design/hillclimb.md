@@ -118,7 +118,7 @@ bare world with no stage, art or controls (W/P tests). The rover would need thes
 | `chassis.mass` | kg | chassis body mass (driver included unless `driver.mass` given) |
 | `chassis.size` | m `{w, h}` | collider box |
 | `chassis.center` | m `{x, y}` | centre of mass from the box's top-left; low and forward = harder to flip |
-| `driver.mass`, `driver.head_radius` | kg, m | head is its own body on a `pin` with limits; its contact ends the run |
+| `driver.mass`, `driver.head_radius`, `driver.neck` | kg, m, m | head is its own body on a `pin` with limits at `neck`; its contact ends the run |
 | `wheels[i].at` | m `{x, y}` | suspension mount on the chassis |
 | `wheels[i].radius` | m | |
 | `wheels[i].mass` | kg | |
@@ -130,7 +130,8 @@ bare world with no stage, art or controls (W/P tests). The rover would need thes
 | `drive.torque` | N·m | max motor torque per driven wheel |
 | `drive.top_speed` | km/h | converted to wheel deg/s through the radius |
 | `brake.torque` | N·m | max brake torque per wheel |
-| `air.torque` | N·m | standing tilt torque while airborne and a pedal is held (0 = off) |
+| `brake.reverse_speed` | km/h | the brake drives backwards to this: braking when rolling forward, reversing at rest *(added at step 7: one pedal rule for both)* |
+| ~~`air.torque`~~ | N·m | *(step 7: left out until step 6 is built; the motor's reaction already tilts the car)* |
 | `fuel.capacity`, `fuel.burn`, `fuel.idle` | L, L/s, L/s | |
 
 The guide and `vehicle.lua` comments give these units. The validator rejects a missing field

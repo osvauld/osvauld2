@@ -5773,6 +5773,89 @@ fn view_and_handlers_read_an_entity_back_with_get() {
     }
 }
 
+/// Hillclimb step 7: the real `vehicle`/`units`/`setup`/`drive` modules in a sandboxed VM drive
+/// the car on flat line ground — it settles, the gas takes it to its top speed, the brake stops
+/// it — read back with `get`.
+#[test]
+fn the_hillclimb_car_drives_on_a_bare_world() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for (name, text) in [
+        ("units.lua", include_str!("../../demo_apps/hillclimb/units.lua")),
+        ("vehicle.lua", include_str!("../../demo_apps/hillclimb/vehicle.lua")),
+        ("setup.lua", include_str!("../../demo_apps/hillclimb/setup.lua")),
+        ("drive.lua", include_str!("../../demo_apps/hillclimb/drive.lua")),
+    ] {
+        files.insert_container(name, LoroText::new()).unwrap().insert(0, text).unwrap();
+    }
+    let main = format!(
+        "{HERO} local V = require('vehicle') local U = require('units') \
+         local Setup = require('setup') local Drive = require('drive') \
+         local car = V.check(V.car) \
+         local made = Setup.build(car, {{ 0, 300 }}) \
+         local pedals = {{ gas = 0, brake = 0 }} \
+         for _, e in ipairs(made.entities) do e.drawing = hero end \
+         local ground = {{ id = 'ground', pos = {{ -2000, 400 }}, drawing = hero, group = 'ground', \
+           collider = {{ line = {{ 0, 0, 200000, 0 }} }} }} \
+         return function() \
+           local car_now = world('road'):get('chassis') \
+           local kmh = car_now and U.kmh(car_now.velocity[1]) or 0 \
+           local road = {{ id = 'road', width = 800, height = 500, gravity = {{ 0, U.gravity }}, \
+             actions = {{ gas = 'KeyD', brake = 'KeyA', coast = 'KeyS' }}, \
+             on_action = function(e) \
+               pedals = {{ gas = e.action == 'gas' and 1 or 0, brake = e.action == 'brake' and 1 or 0 }} end, \
+             joints = Setup.joints(car, Drive.motors(car, pedals, {{ fuel = 5 }})), \
+             ground }} \
+           for _, e in ipairs(made.entities) do table.insert(road, e) end \
+           return ui.col({{ ui.text({{ string.format('%.1f', kmh) }}), ui.world(road) }}) end"
+    );
+    files.insert_container("main.lua", LoroText::new()).unwrap().insert(0, &main).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let mut t = 0.0;
+    let mut run = |app: &mut LuaApp<LuaMsg>, secs: f64| {
+        for _ in 0..(secs * 60.0) as usize {
+            t += 1.0 / 60.0;
+            app.update(LuaMsg::TickWorld("road".into(), 1.0 / 60.0, t));
+            app.view();
+        }
+    };
+    let press = |app: &mut LuaApp<LuaMsg>, code: &str| {
+        app.update(LuaMsg::KeyWorld("road".into(), runtime::KeyInput {
+            code: Some(code.into()), key: String::new(), down: true, repeat: false, cancelled: false,
+            mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+        }));
+        app.view();
+    };
+    let chassis = |app: &LuaApp<LuaMsg>| {
+        app.inspect_worlds()["road"].entities.iter().find(|e| e.id == "chassis").cloned().unwrap()
+    };
+    let shown = |app: &mut LuaApp<LuaMsg>| app.view().info().children[0].text.clone().unwrap();
+    run(&mut app, 2.0);
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let rest = chassis(&app);
+    assert!(rest.rot.abs() < 1.0 && rest.velocity.0.abs() < 2.0, "settled level on its wheels: {rest:?}");
+    // Wheels 0.62 m below the chassis top with radius 0.32: the top sits 94 above the ground,
+    // and down by the sag, (290 kg / 2) · 9.81 / 18000 ≈ 7.9 cm.
+    let sag = rest.pos.1 - (400.0 - 94.0);
+    assert!((sag - 7.9).abs() < 1.5, "sagged {sag} on its springs");
+
+    press(&mut app, "KeyD");
+    run(&mut app, 6.0);
+    let going = chassis(&app);
+    let kmh = going.velocity.0 / 100.0 * 3.6;
+    assert!(going.pos.0 > 2000.0, "the gas took it 20 m and more: {going:?}");
+    assert!((kmh - 60.0).abs() < 4.0, "at its top speed, 60 km/h: {kmh}");
+    assert_eq!(shown(&mut app), format!("{kmh:.1}"), "the view reads the speed back with get");
+
+    press(&mut app, "KeyA");
+    run(&mut app, 3.0);
+    let braked = chassis(&app);
+    assert!(braked.velocity.0 < 30.0, "the brake stopped it (and backs it up): {braked:?}");
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+}
+
 /// An app whose `main.lua` is `src`, viewed once.
 fn app_of(src_lua: &str) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();

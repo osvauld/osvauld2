@@ -613,6 +613,10 @@ impl UserData for WorldHandle {
                 return Err(Error::runtime(format!("{owner} needs an entity id (a string), got {what}")));
             };
             let id = id.to_str()?.to_string();
+            // The view that describes a world asks before its first frame made it: nothing yet.
+            if !this.worlds.borrow().contains_key(&this.id) {
+                return Ok(Value::Nil);
+            }
             let (got, tick) = this.ask(&owner, |w| Ok(w.get(&id)))?;
             let Some(e) = got else { return Ok(Value::Nil) };
             let pair = |(x, y): (f64, f64)| lua.create_sequence_from([x, y]);

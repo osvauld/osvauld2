@@ -291,7 +291,8 @@ ui.world({
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
   `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
   takes `camera` (see Camera, below).
-  `false` drops out, like a child element. List order is draw order,
+  `false` drops out, like a child element. Unlike child elements, a nested list of entities does
+  not splice in: build the world's table and `table.insert` each entity. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
@@ -594,8 +595,9 @@ local car = world("track"):get("car")
 ```
 
 - `get` reads one entity back, in the dump's names and units: `pos` its box's top-left, `rot`
-  degrees turned, `velocity` per second, `spin` degrees a second. An id the world lacks is `nil`.
-  It reads the entity itself, so a `set` shows in it at once.
+  degrees turned, `velocity` per second, `spin` degrees a second. An id the world lacks is `nil`,
+  and so is everything before the world's first frame — the view that describes the world can
+  ask it without a guard. It reads the entity itself, so a `set` shows in it at once.
 
 - `ray` answers the first solid thing on the line from one point to the other: `at` where the line
   met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop
