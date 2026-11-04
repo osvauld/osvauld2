@@ -1043,7 +1043,7 @@ fn fling(material: Material, wall_x: Option<f64>, after: usize) -> (Vec<(f64, f6
 #[test]
 fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
     let rebound = |bounce| {
-        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None, density: 1.0 }, Some(52.0), 20);
+        let (trace, _) = fling(Material { bounce, friction: 0.5, grip: None, density: 1.0, mass: None, center: None }, Some(52.0), 20);
         trace.iter().map(|&(_, vx)| vx).fold(f64::MAX, f64::min)
     };
     // Let go at 100/s, 4 short of the wall: it hits almost at once, then comes back.
@@ -1055,7 +1055,7 @@ fn a_springy_thing_keeps_more_speed_off_a_wall_than_a_dead_one() {
 #[test]
 fn friction_decides_how_far_a_loose_thing_slides() {
     let slid = |friction| {
-        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None, density: 1.0 }, None, 60);
+        let (trace, _) = fling(Material { bounce: 0.5, friction, grip: None, density: 1.0, mass: None, center: None }, None, 60);
         trace.last().unwrap().0
     };
     let (ball, crate_) = (slid(0.5), slid(8.0));
@@ -1157,7 +1157,7 @@ fn a_line_stops_only_the_group_it_blocks() {
             ..solid("line", (30.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d)
         };
         let thing = EntitySpec {
-            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
+            loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0, mass: None, center: None }),
             ..solid("box", (12.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
         };
         let mut world = World2d::default();
@@ -1195,7 +1195,7 @@ fn a_fast_loose_thing_does_not_pass_through_a_thin_wall() {
             pivot: (0.0, 0.0),
             turn: false,
         }),
-        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0, mass: None, center: None }),
         ..solid("puck", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
     };
     let wall = || solid("wall", (320.0, -50.0), Shape::Rect(2.0, 100.0), (0.0, 0.0), &d);
@@ -1245,7 +1245,7 @@ fn a_loose_thing_put_down_inside_a_walker_is_pushed_out_not_left_asleep_in_it() 
         ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }),
+        loose: Some(Material { bounce: 0.5, friction: 6.0, grip: None, density: 1.0, mass: None, center: None }),
         ..solid("puck", (5.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     world.reconcile(vec![hero, puck]).unwrap();
@@ -1262,7 +1262,7 @@ fn set_moves_an_entity_and_sets_a_loose_things_velocity() {
     let specs = || {
         let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
         let puck = EntitySpec {
-            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None, density: 1.0 }),
+            loose: Some(Material { bounce: 0.5, friction: 0.0, grip: None, density: 1.0, mass: None, center: None }),
             ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
         };
         vec![wall, puck]
@@ -1364,7 +1364,7 @@ fn a_loose_thing_reports_a_hit_once_at_the_speed_it_met_at() {
     let d = drawing();
     let wall = solid("wall", (100.0, -50.0), Shape::Rect(4.0, 100.0), (2.0, 50.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 }),
+        loose: Some(Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0, mass: None, center: None }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1443,7 +1443,7 @@ fn a_walker_strikes_a_loose_thing_it_runs_into_rather_than_shoving_it() {
         ..solid("paddle", (0.0, 0.0), Shape::Circle(8.0), (8.0, 8.0), &d)
     };
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density: 1.0 }),
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density: 1.0, mass: None, center: None }),
         ..solid("puck", (40.0, 4.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1470,7 +1470,7 @@ fn spun(
     let d = drawing();
     let floor = solid("floor", (-500.0, 40.0), Shape::Rect(1000.0, 4.0), (0.0, 0.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.5, friction, grip, density: 1.0 }),
+        loose: Some(Material { bounce: 0.5, friction, grip, density: 1.0, mass: None, center: None }),
         ..solid("puck", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -1622,7 +1622,7 @@ fn run_at(fps: f64) -> ((f64, f64), (f64, f64), u64) {
     let d = drawing();
     let wall = solid("wall", (300.0, -100.0), Shape::Rect(4.0, 200.0), (0.0, 0.0), &d);
     let puck = EntitySpec {
-        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.3), density: 1.0 }),
+        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.3), density: 1.0, mass: None, center: None }),
         ..solid("puck", (0.0, 40.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let hero = EntitySpec {
@@ -1700,7 +1700,7 @@ fn crowd(d: &Arc<Drawing>, grass: usize) -> Vec<EntitySpec> {
     for i in 0..200 {
         let at = ((i % 20) as f64 * 200.0 + 100.0, (i / 20) as f64 * 400.0 + 120.0);
         specs.push(EntitySpec {
-            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None, density: 1.0 }),
+            loose: Some(Material { bounce: 0.9, friction: 0.05, grip: None, density: 1.0, mass: None, center: None }),
             ..solid(&format!("ball{i}"), at, Shape::Circle(4.0), (4.0, 4.0), &d)
         });
     }
@@ -2143,6 +2143,28 @@ fn a_world_without_a_camera_draws_only_what_meets_its_box() {
     assert_eq!(world.frame(200.0, 100.0).unwrap().stats().hittable, 1);
 }
 
+/// W-L2: one physics step of a driven cart on a 2000-point, 200 000-unit hilly line.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_cart_on_long_line() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    // Gentle hills, every point within 30 of the flat ground's y 40 the cart starts on.
+    let hills: Vec<_> = (0..2000)
+        .map(|i| {
+            let x = i as f64 * 100.0;
+            (x, 30.0 * (x / 700.0).sin() * (x / 3100.0).cos())
+        })
+        .collect();
+    let mut world = cart.world_on((-1000.0, 40.0), &hills);
+    let go = Motor { speed: 1440.0, torque: 2e5 };
+    cart.drive(&mut world, Some(go), Some(go));
+    let mut clock = 0.0;
+    bench("cart_on_long_line_step", 1200, || {
+        clock += STEP;
+        world.tick(clock, STEP);
+    });
+}
+
 /// B7: the frame of the 20000-entity crowd through a 1280 × 720 camera — about 6% of the map.
 #[test]
 #[ignore = "benchmark: scripts/bench.py"]
@@ -2171,7 +2193,7 @@ fn ball_over_floor(floor_y: f64, ball: Material) -> (Vec<EntitySpec>, Arc<Drawin
     (vec![ball, floor], d)
 }
 
-const DEAD: Material = Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0 };
+const DEAD: Material = Material { bounce: 0.0, friction: 0.0, grip: None, density: 1.0, mass: None, center: None };
 
 /// Ticks `secs` of 1/60 s frames from `*clock`.
 fn run(world: &mut World2d, clock: &mut f64, secs: f64) {
@@ -2260,7 +2282,7 @@ fn a_bad_gravity_is_refused_and_the_last_good_one_kept() {
 fn a_denser_thing_flings_a_lighter_one_further_than_it_slows() {
     let d = drawing();
     let ball = |id: &str, x: f64, density: f64| EntitySpec {
-        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density }),
+        loose: Some(Material { bounce: 1.0, friction: 0.0, grip: None, density, mass: None, center: None }),
         ..solid(id, (x, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
     };
     let mut world = World2d::default();
@@ -2488,10 +2510,10 @@ fn a_grab_is_refused_for_what_cannot_be_held_and_dropped_with_the_entity() {
 
 // ── joints ─────────────────────────────────────────────────────────────────────────────────────
 
-const GRIPPY: Material = Material { bounce: 0.0, friction: 0.0, grip: Some(0.5), density: 1.0 };
+const GRIPPY: Material = Material { bounce: 0.0, friction: 0.0, grip: Some(0.5), density: 1.0, mass: None, center: None };
 
 fn joint(id: &str, kind: JointKind, a: &str, a_at: (f64, f64), b: Option<&str>, b_at: (f64, f64)) -> JointSpec {
-    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false }
+    JointSpec { id: id.into(), kind, a: a.into(), a_at, b: b.map(str::to_string), b_at, contacts: false, motor: None }
 }
 
 /// A plank (100 × 8, loose, with grip so it can turn) whose box top-left is `pos`.
@@ -2667,4 +2689,624 @@ fn a_world_with_a_well_or_a_hand_keeps_asking_for_ticks_even_when_all_is_asleep(
     let mut clock = 0.0;
     run(&mut world, &mut clock, 3.0);
     assert!(!world.needs_ticks(), "and at rest again, it needs none");
+}
+
+// ── line ground ────────────────────────────────────────────────────────────────────────────────
+
+fn line(points: &[(f64, f64)]) -> Shape {
+    Shape::Line(points.into())
+}
+
+/// The ball's centre and the ground's height under it, once a frame, for `secs`.
+fn roll(world: &mut World2d, secs: f64, ground: impl Fn(f64) -> f64) -> Vec<((f64, f64), f64)> {
+    let mut clock = 0.0;
+    (0..(secs * 60.0).round() as usize)
+        .map(|_| {
+            run(world, &mut clock, 1.0 / 60.0);
+            let b = ball_of(world);
+            let c = (b.pos.0 + 4.0, b.pos.1 + 4.0);
+            (c, ground(c.0))
+        })
+        .collect()
+}
+
+#[test]
+fn a_ball_rolls_down_a_line_slope_and_never_sinks_into_it() {
+    let d = drawing();
+    let slope = 30f64.to_radians().tan();
+    let ground = solid("ground", (0.0, 300.0), line(&[(0.0, 0.0), (2000.0, 2000.0 * slope)]), (0.0, 0.0), &d);
+    let ball = EntitySpec {
+        loose: Some(Material { grip: Some(1.0), ..DEAD }),
+        ..solid("ball", (100.0, 200.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let path = roll(&mut world, 3.0, |x| 300.0 + x * slope);
+    for ((x, y), g) in &path {
+        assert!(*y < g + 0.5, "the ball's centre went under the line at x {x}: {y} vs {g}");
+    }
+    let ((x, y), g) = *path.last().unwrap();
+    assert!(x > 400.0, "rolled downhill to the right: x {x}");
+    // Resting on a 30° slope, the centre is r / cos 30° above the line straight below it.
+    assert!((g - y - 4.0 / 30f64.to_radians().cos()).abs() < 1.5, "touching the slope: {y} over {g}");
+    assert!(ball_of(&world).rot.abs() > 90.0, "it rolled rather than slid: {:?}", ball_of(&world));
+}
+
+#[test]
+fn a_fast_ball_does_not_tunnel_through_a_line() {
+    let d = drawing();
+    let ground = solid("ground", (-1000.0, 500.0), line(&[(0.0, 0.0), (2000.0, 0.0)]), (0.0, 0.0), &d);
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    // 250 units a step at 120 Hz, far past a radius-4 ball's reach: Rapier's speculative
+    // contacts hold a line without CCD (checked at 3000 and 30000 with CCD off).
+    world.set("ball", Set { velocity: Some((0.0, 30000.0)), ..Set::default() }).unwrap();
+    for ((x, y), g) in roll(&mut world, 1.0, |_| 500.0) {
+        assert!(y < g + 0.5, "went through the line at x {x}: {y}");
+    }
+}
+
+/// Height of the polyline through `points` (world units) at `x`.
+fn height_on(points: &[(f64, f64)], x: f64) -> f64 {
+    let seg = points.windows(2).find(|w| x <= w[1].0).unwrap_or(&points[points.len() - 2..]);
+    let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
+    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+}
+
+/// Where a gripping ball has rolled after 2 s down a 15° slope made of `pieces` collinear
+/// segments, never sinking below it.
+fn rolled_down(pieces: usize, at_joints: &[(usize, f64)]) -> f64 {
+    let d = drawing();
+    let slope = 15f64.to_radians().tan();
+    let mut hills: Vec<_> = (0..=pieces).map(|i| {
+        let x = 4000.0 * i as f64 / pieces as f64;
+        (x, x * slope)
+    }).collect();
+    // Bumps at chosen joints: (index, how far the joint is lifted), to make a crest or a valley.
+    for &(i, lift) in at_joints {
+        hills[i].1 -= lift;
+    }
+    let ground = solid("ground", (0.0, 300.0), line(&hills), (0.0, 0.0), &d);
+    // Its box's top-left, so the ball starts on the slope at x 24, at rest.
+    let top = 300.0 + 24.0 * slope - 4.0 / 15f64.to_radians().cos() - 4.0 - 0.05;
+    let ball = EntitySpec {
+        loose: Some(Material { grip: Some(1.0), ..DEAD }),
+        ..solid("ball", (20.0, top), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let path = roll(&mut world, 2.0, |x| 300.0 + height_on(&hills, x));
+    for ((x, y), g) in &path {
+        assert!(*y < g + 0.5, "under the line at x {x}: {y} vs {g}");
+    }
+    path.last().unwrap().0.0
+}
+
+#[test]
+fn a_ball_rolls_across_joints_as_if_they_were_not_there() {
+    // Joints in a straight line must not catch: the classic internal-edge snag.
+    let whole = rolled_down(1, &[]);
+    let jointed = rolled_down(160, &[]);
+    // Rolling without slipping, and a 2D circle is a disc (I = ½·m·r²): a = (2/3)·g·sin θ along
+    // the slope, so x = ½·a·t²·cos θ ≈ 327 from where it started.
+    let theta = 15f64.to_radians();
+    let expected = 20.0 + 4.0 + 0.5 * (2.0 / 3.0) * 981.0 * theta.sin() * 4.0 * theta.cos();
+    assert!((whole - expected).abs() < expected * 0.03, "rolled to {whole}, expected {expected}");
+    assert!((jointed - whole).abs() < whole * 0.02, "160 joints {jointed} vs one segment {whole}");
+    // A shallow crest and valley (a 4-unit lift over 25-unit pieces, about 9° each way) are rolled
+    // over: the ball gets as far, give or take what the bumps cost.
+    let bumpy = rolled_down(160, &[(20, 4.0), (40, -4.0), (60, 4.0)]);
+    assert!(bumpy > whole * 0.9, "over the bumps {bumpy} vs smooth {whole}");
+}
+
+#[test]
+fn a_lines_points_are_from_its_at_and_its_entitys_pos() {
+    let d = drawing();
+    let ground = solid("ground", (100.0, 0.0), line(&[(0.0, 0.0), (500.0, 0.0)]), (0.0, 400.0), &d);
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (300.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let ((_, y), _) = *roll(&mut world, 2.0, |_| 400.0).last().unwrap();
+    assert!((y - 396.0).abs() < 1.0, "rests on y = 400 (pos 0 + at 400): centre {y}");
+    // And off its ends there is nothing: a ball at x 50 falls past where the line would be.
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (50.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let ground = solid("ground", (100.0, 0.0), line(&[(0.0, 0.0), (500.0, 0.0)]), (0.0, 400.0), &d);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let ((_, y), _) = *roll(&mut world, 2.0, |_| 400.0).last().unwrap();
+    assert!(y > 600.0, "nothing to land on left of x 100: centre {y}");
+}
+
+#[test]
+fn a_carried_thing_let_go_as_a_line_is_fixed_ground() {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let carried = EntitySpec {
+        attach: Some(Attach { to: "hero".into(), part: "body".into(), at: (10.0, 0.0), pivot: (0.0, 0.0), turn: false }),
+        ..solid("plank", (50.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![hero(), carried]).unwrap();
+    world.key("KeyD", true);
+    frames(&mut world, 0.3, 0.1);
+    world.key("KeyD", false);
+    let plank = solid("plank", (50.0, 0.0), line(&[(0.0, 0.0), (40.0, 0.0)]), (0.0, 0.0), &d);
+    world.reconcile(vec![hero(), plank]).unwrap();
+    let before = world.inspect().into_iter().find(|e| e.id == "plank").unwrap();
+    assert_eq!(before.body, "fixed", "let go as a line, it is ground: {before:?}");
+    frames(&mut world, 1.3, 0.1);
+    let after = world.inspect().into_iter().find(|e| e.id == "plank").unwrap();
+    assert_eq!(after.pos, before.pos, "and ground does not fall");
+}
+
+#[test]
+fn get_answers_one_entity_as_the_dump_does() {
+    let (specs, _) = ball_over_floor(500.0, Material { grip: Some(1.0), ..DEAD });
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(specs).unwrap();
+    world.set("ball", Set { velocity: Some((80.0, 0.0)), spin: Some(45.0), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    for id in ["ball", "floor"] {
+        let dumped = world.inspect().into_iter().find(|e| e.id == id);
+        assert_eq!(world.get(id), dumped, "{id}");
+    }
+    assert_eq!(world.get("ghost"), None);
+}
+
+#[test]
+fn get_after_a_zone_is_despawned_does_not_name_the_gone_zone() {
+    // The real-path smoke found it: a coin taken (despawned) while the car was in it, then
+    // `get` before the next step looked up the gone zone's name and panicked the app thread.
+    let d = drawing();
+    let ball = || EntitySpec { loose: Some(DEAD), ..solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let coin = || EntitySpec { sensor: Some(Collider { shape: Shape::Circle(20.0), at: (0.0, 0.0) }), ..spec("coin", (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.reconcile(vec![ball(), coin()]).unwrap();
+    world.set("ball", Set { velocity: Some((1.0, 0.0)), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    assert_eq!(world.get("ball").unwrap().zones, ["coin"], "in the coin");
+    world.reconcile(vec![ball()]).unwrap();
+    assert_eq!(world.get("ball").unwrap().zones, Vec::<String>::new(), "the coin is gone at once");
+    assert_eq!(world.inspect()[0].zones, Vec::<String>::new());
+}
+
+#[test]
+fn a_line_is_kept_while_the_same_and_replaced_when_changed() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let ground = |end| solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (end, 10.0)]), (0.0, 0.0), &d);
+    let body = |w: &World2d| w.ecs.get::<Solid>(w.by_id["ground"]).map(|s| s.body);
+    world.reconcile(vec![ground(100.0)]).unwrap();
+    let first = body(&world);
+    world.reconcile(vec![ground(100.0)]).unwrap();
+    assert_eq!(body(&world), first, "the same line keeps its body");
+    world.reconcile(vec![ground(200.0)]).unwrap();
+    assert_ne!(body(&world), first, "a changed line replaces it");
+}
+
+#[test]
+fn a_bad_line_is_refused_and_keeps_the_last_good_world() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let good = solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (10.0, 0.0)]), (0.0, 0.0), &d);
+    world.reconcile(vec![good]).unwrap();
+    let flat = || Some(Collider { shape: line(&[(0.0, 0.0), (10.0, 0.0)]), at: (0.0, 0.0) });
+    let ball = || solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d);
+    let cases = [
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0)]), (0.0, 0.0), &d), "a line needs at least 2 points"),
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (f64::NAN, 1.0)]), (0.0, 0.0), &d), "line points must be finite"),
+        (solid("ground", (0.0, 0.0), line(&[(1.0, 1.0), (1.0, 1.0)]), (0.0, 0.0), &d), "two points in the same place"),
+        // Finite as f64, infinite as the f32 Rapier gets.
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (1e39, 0.0)]), (0.0, 0.0), &d), "line points must be finite"),
+        // Distinct as f64, one point as f32.
+        (solid("ground", (0.0, 0.0), line(&[(1e8, 0.0), (1e8 + 1.0, 0.0)]), (0.0, 0.0), &d), "two points in the same place"),
+        (EntitySpec { collider: flat(), loose: Some(DEAD), ..ball() }, "a line is ground: it cannot be loose"),
+        (EntitySpec { collider: flat(), controller: Some(wasd(10.0)), ..ball() }, "a line is ground: it cannot have a controller"),
+        (EntitySpec { sensor: flat(), ..spec("zone", (0.0, 0.0), &d) }, "a sensor needs an area: a line has none"),
+    ];
+    for (bad, wanted) in cases {
+        let err = world.reconcile(vec![bad]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        assert_eq!(ids(&world), ["ground"], "the last good world stays");
+    }
+}
+
+// ── mass and centre of mass ────────────────────────────────────────────────────────────────────
+
+/// How far a box of `size` and mass `m` hangs below a spring's anchor once settled, minus the
+/// rest length. Damped at ζ 0.6: overdamped, the slow creep falls asleep short of where it would
+/// rest — 10% off either side.
+fn sag(size: f64, material: Material, m: f64) -> f64 {
+    let damping = 0.6 * 2.0 * (500.0 * m).sqrt();
+    let d = drawing();
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    let thing = EntitySpec { loose: Some(material), ..solid("box", (0.0, 0.0), Shape::Rect(size, size), (0.0, 0.0), &d) };
+    world.reconcile(vec![thing]).unwrap();
+    let mid = size / 2.0;
+    let spring = JointKind::Spring { length: 50.0, stiffness: 500.0, damping };
+    world.set_joints(vec![joint("spring", spring, "box", (mid, mid), None, (mid, -50.0))]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 6.0);
+    // The box's middle hangs at the anchor (y -50) plus rest length 50 plus the sag.
+    entity(&world, "box").pos.1 + mid
+}
+
+#[test]
+fn mass_sets_how_heavy_a_thing_is_whatever_its_size() {
+    // A force-based spring settles where k·x = m·g: x = 5 · 981 / 500 = 9.81.
+    let five = Material { mass: Some(5.0), ..DEAD };
+    let (small, big) = (sag(8.0, five, 5.0), sag(80.0, five, 5.0));
+    assert!((small - 9.81).abs() < 0.3, "an 8×8 box of mass 5 sags {small}");
+    assert!((big - 9.81).abs() < 0.3, "an 80×80 box of mass 5 sags {big}");
+    // Without `mass`, density × area decides: 8 × 8 × 1 = 64, so 64 · 981 / 500 ≈ 125.6.
+    let by_area = sag(8.0, DEAD, 64.0);
+    assert!((by_area - 125.6).abs() < 3.0, "density 1 over 64 square units sags {by_area}");
+}
+
+/// A 100 × 8 plank resting across a fixed peg under its middle, with its centre of mass at
+/// `center` (drawing units); how far it has turned after a quarter second — before it can turn
+/// past 180° and wrap.
+fn tipped(center: Option<(f64, f64)>) -> f64 {
+    let d = drawing();
+    let plank = EntitySpec {
+        loose: Some(Material { center, ..GRIPPY }),
+        ..solid("plank", (0.0, 0.0), Shape::Rect(100.0, 8.0), (0.0, 0.0), &d)
+    };
+    let peg = solid("peg", (46.0, 8.0), Shape::Circle(4.0), (4.0, 4.0), &d);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![plank, peg]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.25);
+    entity(&world, "plank").rot
+}
+
+#[test]
+fn center_moves_the_centre_of_mass_and_the_plank_tips_toward_it() {
+    let level = tipped(None);
+    assert!(level.abs() < 2.0, "balanced on its middle it stays level: {level}");
+    let right = tipped(Some((90.0, 4.0)));
+    let left = tipped(Some((10.0, 4.0)));
+    // +y is down, so a positive turn takes the right end down. About the peg: torque m·g·40,
+    // inertia m·(100² + 8²)/12 + m·40², so θ = ½·α·t² ≈ 29° at 0.25 s.
+    assert!(right > 15.0, "heavy right end goes down: {right}");
+    assert!(left < -15.0, "heavy left end goes down: {left}");
+}
+
+#[test]
+fn bad_mass_or_center_is_refused() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let with = |m: Material| EntitySpec { loose: Some(m), ..solid("box", (0.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d) };
+    let cases = [
+        (Material { mass: Some(0.0), ..DEAD }, "mass must be above 0, got 0"),
+        (Material { mass: Some(f64::NAN), ..DEAD }, "mass must be above 0"),
+        (Material { center: Some((f64::INFINITY, 0.0)), ..DEAD }, "center must be finite"),
+    ];
+    for (m, wanted) in cases {
+        let err = world.reconcile(vec![with(m)]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+// ── wheel joint ────────────────────────────────────────────────────────────────────────────────
+
+/// A test cart: a 100 × 20 chassis of 100 kg on two 10 kg wheels of radius 10, sprung at
+/// `stiffness`/`damping` per wheel, `drop` above flat line ground at y 40. Unloaded, each
+/// wheel's centre is 30 below the chassis top (chassis-drawing point (10, 30) and (90, 30)), so
+/// with no drop the wheels just touch.
+struct Cart {
+    stiffness: f64,
+    damping: f64,
+    travel: (f64, f64),
+    drop: f64,
+    /// The tyres' grip (the ground has none, so theirs decides).
+    grip: f64,
+}
+
+const CHASSIS_KG: f64 = 100.0;
+const MOUNTS: [(f64, f64); 2] = [(10.0, 30.0), (90.0, 30.0)];
+
+impl Cart {
+    fn world(&self) -> World2d {
+        self.world_on((-1000.0, 40.0), &[(0.0, 0.0), (8000.0, 0.0)])
+    }
+
+    /// The cart over line ground through `points`, placed at `at`.
+    fn world_on(&self, at: (f64, f64), points: &[(f64, f64)]) -> World2d {
+        let d = drawing();
+        let chassis = EntitySpec {
+            loose: Some(Material { mass: Some(CHASSIS_KG), ..GRIPPY }),
+            ..solid("chassis", (0.0, -self.drop), Shape::Rect(100.0, 20.0), (0.0, 0.0), &d)
+        };
+        let wheel = |id: &str, (x, y): (f64, f64)| EntitySpec {
+            loose: Some(Material { mass: Some(10.0), grip: Some(self.grip), ..GRIPPY }),
+            ..solid(id, (x - 10.0, y - 10.0 - self.drop), Shape::Circle(10.0), (10.0, 10.0), &d)
+        };
+        let ground = solid("ground", at, line(points), (0.0, 0.0), &d);
+        let mut world = World2d::default();
+        world.set_gravity((0.0, 981.0)).unwrap();
+        world.reconcile(vec![chassis, wheel("rear", MOUNTS[0]), wheel("front", MOUNTS[1]), ground]).unwrap();
+        self.drive(&mut world, None, None);
+        world
+    }
+
+    /// Describes the two wheel joints again, with these motors.
+    fn drive(&self, world: &mut World2d, rear: Option<Motor>, front: Option<Motor>) {
+        let kind = JointKind::Wheel {
+            axis: (0.0, 1.0),
+            stiffness: self.stiffness,
+            damping: self.damping,
+            travel: self.travel,
+        };
+        let joints = [("rear", MOUNTS[0], rear), ("front", MOUNTS[1], front)]
+            .map(|(id, at, motor)| JointSpec { motor, ..joint(id, kind, "chassis", at, Some(id), (10.0, 10.0)) });
+        world.set_joints(joints.to_vec()).unwrap();
+    }
+}
+
+/// Where `wheel`'s centre is in the chassis's own drawing frame, against its mount: (across the
+/// axis, along it — positive is extended, down).
+fn wheel_offset(world: &World2d, wheel: &str, mount: (f64, f64)) -> (f64, f64) {
+    let (c, w) = (entity(world, "chassis"), entity(world, wheel));
+    let centre = (c.pos.0 + 50.0, c.pos.1 + 10.0);
+    let (dx, dy) = (w.pos.0 + 10.0 - centre.0, w.pos.1 + 10.0 - centre.1);
+    let (s, co) = c.rot.to_radians().sin_cos();
+    // Into the chassis frame: rotate by −rot, then measure from the mount.
+    let (lx, ly) = (dx * co + dy * s, -dx * s + dy * co);
+    (lx - (mount.0 - 50.0), ly - (mount.1 - 10.0))
+}
+
+const CORNER_KG: f64 = CHASSIS_KG / 2.0;
+
+#[test]
+fn a_wheel_joint_sags_by_weight_over_stiffness_at_rest() {
+    let k = 5000.0;
+    let cart = Cart { stiffness: k, damping: 0.5 * 2.0 * (k * CORNER_KG).sqrt(), travel: (30.0, 30.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 4.0);
+    // Each spring carries half the chassis: m·g/k = 50 · 981 / 5000 = 9.81.
+    let want = CORNER_KG * 981.0 / k;
+    for (id, mount) in [("rear", MOUNTS[0]), ("front", MOUNTS[1])] {
+        let (_, along) = wheel_offset(&world, id, mount);
+        assert!((-along - want).abs() < want * 0.05, "{id} compressed {} for {want}", -along);
+    }
+    let c = entity(&world, "chassis");
+    assert!((c.pos.1 - want).abs() < want * 0.05 && c.rot.abs() < 0.5, "chassis down by the sag, level: {c:?}");
+}
+
+/// The chassis's lowest point after a drop, past where it finally rests: the overshoot.
+fn overshoot(zeta: f64) -> f64 {
+    let k = 5000.0;
+    // A 10-unit drop lands at 140 u/s: a swing of ~14 past a 9.8 sag, short of the 40-unit stop,
+    // so the spring and damper alone decide it.
+    let cart = Cart { stiffness: k, damping: zeta * 2.0 * (k * CORNER_KG).sqrt(), travel: (40.0, 40.0), drop: 10.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    let mut lowest = f64::MIN;
+    for _ in 0..240 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        lowest = lowest.max(entity(&world, "chassis").pos.1);
+    }
+    lowest - entity(&world, "chassis").pos.1
+}
+
+#[test]
+fn damping_decides_how_far_a_landing_overshoots() {
+    // A landing starts the spring with speed, so even critical damping dives past rest once;
+    // what damping decides is how far.
+    let (light, medium, critical) = (overshoot(0.1), overshoot(0.4), overshoot(1.0));
+    assert!(light > medium && medium > critical, "more damping, less dive: {light} > {medium} > {critical}");
+    assert!(light > 2.0 * critical, "lightly damped dives well past: {light} vs {critical}");
+}
+
+#[test]
+fn a_wheel_stays_on_its_axis_and_inside_its_travel() {
+    let k = 5000.0;
+    let cart = Cart { stiffness: k, damping: 0.3 * 2.0 * (k * CORNER_KG).sqrt(), travel: (15.0, 20.0), drop: 500.0, grip: 1.0 };
+    let mut world = cart.world();
+    // Land moving fast sideways: a hard load across the axis.
+    world.set("chassis", Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    for id in ["rear", "front"] {
+        world.set(id, Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    }
+    let mut clock = 0.0;
+    let mut deepest = 0.0f64;
+    for _ in 0..180 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        for (id, mount) in [("rear", MOUNTS[0]), ("front", MOUNTS[1])] {
+            let (across, along) = wheel_offset(&world, id, mount);
+            deepest = deepest.min(along);
+            assert!(across.abs() < 0.5, "{id} drifted {across} off its axis");
+            assert!(along <= 21.0, "{id} out past its travel: {along}");
+        }
+    }
+    // Rapier's limit is a constraint the solver meets over a few steps: a 10 m/s landing pushes
+    // ~2 units past a 15-unit stop before it holds.
+    assert!(deepest >= -18.0, "compressed past its stop by more than 3: {deepest}");
+}
+
+#[test]
+fn the_same_cart_and_drop_run_the_same_twice() {
+    let run_once = || {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 80.0, grip: 1.0 };
+        let mut world = cart.world();
+        world.set("chassis", Set { velocity: Some((300.0, 0.0)), ..Set::default() }).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 20.0);
+        world.inspect().into_iter().map(|e| (e.id, e.pos, e.rot)).collect::<Vec<_>>()
+    };
+    assert_eq!(run_once(), run_once());
+}
+
+#[test]
+fn a_bad_wheel_joint_is_refused() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let wheel = |axis, stiffness, travel| {
+        let kind = JointKind::Wheel { axis, stiffness, damping: 1.0, travel };
+        vec![joint("rear", kind, "chassis", MOUNTS[0], Some("rear"), (10.0, 10.0))]
+    };
+    let cases = [
+        (wheel((0.0, 0.0), 1.0, (1.0, 1.0)), "axis must be a direction, not 0, 0"),
+        (wheel((f64::NAN, 1.0), 1.0, (1.0, 1.0)), "axis must be a direction"),
+        (wheel((0.0, 1.0), -1.0, (1.0, 1.0)), "stiffness must be 0 or more"),
+        (wheel((0.0, 1.0), 1.0, (-1.0, 1.0)), "travel must be up and down, each 0 or more"),
+        (vec![joint("w", JointKind::Wheel { axis: (0.0, 1.0), stiffness: 1.0, damping: 1.0, travel: (1.0, 1.0) }, "chassis", (0.0, 0.0), None, (0.0, 0.0))], "a wheel joins two things"),
+    ];
+    for (joints, wanted) in cases {
+        let err = world.set_joints(joints).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+// ── motors ─────────────────────────────────────────────────────────────────────────────────────
+
+/// A 10 kg wheel of radius 10 pinned at its centre to the world, driven by `motor`; its spin
+/// (degrees a second) after `secs`.
+fn pinned_spin(motor: Motor, secs: f64) -> f64 {
+    let d = drawing();
+    let wheel = EntitySpec {
+        loose: Some(Material { mass: Some(10.0), grip: Some(1.0), ..GRIPPY }),
+        ..solid("wheel", (0.0, 0.0), Shape::Circle(10.0), (10.0, 10.0), &d)
+    };
+    let mut world = World2d::default();
+    world.reconcile(vec![wheel]).unwrap();
+    let pin = JointSpec { motor: Some(motor), ..joint("axle", JointKind::Pin { limits: None }, "wheel", (10.0, 10.0), None, (10.0, 10.0)) };
+    world.set_joints(vec![pin]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, secs);
+    entity(&world, "wheel").spin
+}
+
+#[test]
+fn a_motor_spins_up_at_torque_over_inertia_and_holds_its_speed() {
+    // A disc: I = ½·m·r² = 500 kg·u². 1000 of torque gives α = 2 rad/s² ≈ 114.6 °/s², so
+    // after half a second 57.3 °/s, far short of the 3600 asked.
+    let limited = pinned_spin(Motor { speed: 3600.0, torque: 1000.0 }, 0.5);
+    assert!((limited - 57.3).abs() < 57.3 * 0.05, "torque-limited spin-up: {limited}");
+    // Ample torque reaches the speed and holds it, never past.
+    let held = pinned_spin(Motor { speed: 360.0, torque: 1e7 }, 0.5);
+    assert!((held - 360.0).abs() < 2.0, "held at 360: {held}");
+    let backward = pinned_spin(Motor { speed: -360.0, torque: 1e7 }, 0.5);
+    assert!((backward + 360.0).abs() < 2.0, "a negative speed turns it the other way: {backward}");
+}
+
+#[test]
+fn grip_turns_wheel_torque_into_drive_and_none_is_wheelspin() {
+    let go = Motor { speed: 720.0, torque: 2e5 };
+    let drove = |grip: f64| {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip };
+        let mut world = cart.world();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.0);
+        let before = world.joints["rear"].handle;
+        cart.drive(&mut world, Some(go), Some(go));
+        assert_eq!(world.joints["rear"].handle, before, "a new motor keeps the joint");
+        run(&mut world, &mut clock, 2.0);
+        (entity(&world, "chassis").pos.0, entity(&world, "rear").spin)
+    };
+    let (x, spin) = drove(1.0);
+    // 720 °/s on radius 10 rolls at 2π·10·2 ≈ 126 u/s.
+    assert!(x > 150.0, "with grip the cart drives off: x {x}");
+    assert!((spin - 720.0).abs() < 20.0, "rolling at the motor's speed: {spin}");
+    let (x, spin) = drove(0.0);
+    assert!(x.abs() < 5.0, "with none it stays put: x {x}");
+    assert!((spin - 720.0).abs() < 20.0, "while the wheels spin: {spin}");
+}
+
+/// A cart at 1000 u/s on flat ground, all wheels braked at `torque`; how far it goes.
+fn stopping_distance(torque: f64) -> f64 {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let rolling = 1000.0 / 10.0 * 180.0 / std::f64::consts::PI;
+    for id in ["chassis", "rear", "front"] {
+        let spin = (id != "chassis").then_some(rolling);
+        world.set(id, Set { velocity: Some((1000.0, 0.0)), spin, ..Set::default() }).unwrap();
+    }
+    let start = entity(&world, "chassis").pos.0;
+    let brake = Motor { speed: 0.0, torque };
+    cart.drive(&mut world, Some(brake), Some(brake));
+    for _ in 0..600 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        if entity(&world, "chassis").velocity.0.abs() < 2.0 {
+            break;
+        }
+    }
+    entity(&world, "chassis").pos.0 - start
+}
+
+#[test]
+fn braking_shortens_the_stop_until_the_wheels_lock_and_slide() {
+    // Locked, 120 kg slides on grip 1: decel μ·g, so v²/(2·μ·g) = 1000² / 1962 ≈ 510.
+    let (soft, hard, locked) = (stopping_distance(2e5), stopping_distance(2e6), stopping_distance(1e9));
+    assert!(soft > 2.0 * hard, "harder braking stops sooner: {soft} vs {hard}");
+    assert!((hard - 510.0).abs() < 510.0 * 0.15, "past locking it slides v²/2μg: {hard}");
+    assert!((locked - hard).abs() < hard * 0.05, "and more brake no longer helps: {locked} vs {hard}");
+}
+
+#[test]
+fn a_motor_wakes_a_sleeping_cart_and_the_world_asks_for_the_clock() {
+    // The real-path smoke found it: asleep, nothing asks for ticks, so a pedal did nothing.
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 6.0);
+    assert!(!world.needs_ticks(), "settled, the cart sleeps and the world rests");
+    let go = Motor { speed: 720.0, torque: 2e5 };
+    cart.drive(&mut world, Some(go), Some(go));
+    assert!(world.needs_ticks(), "a new motor needs the clock");
+    let x = entity(&world, "chassis").pos.0;
+    run(&mut world, &mut clock, 1.0);
+    assert!(entity(&world, "chassis").pos.0 > x + 50.0, "and the cart drives off");
+}
+
+#[test]
+fn spinning_a_wheel_up_in_the_air_turns_the_body_the_other_way() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 2000.0, grip: 1.0 };
+    let mut world = cart.world();
+    cart.drive(&mut world, Some(Motor { speed: 3600.0, torque: 1e5 }), None);
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.3);
+    let (wheel, body) = (entity(&world, "rear").spin, entity(&world, "chassis").spin);
+    assert!(wheel > 100.0 && body < -1.0, "wheel {wheel} forward, body {body} back");
+}
+
+#[test]
+fn a_bad_motor_is_refused() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let rope = JointSpec {
+        motor: Some(Motor { speed: 1.0, torque: 1.0 }),
+        ..joint("r", JointKind::Rope { length: 5.0 }, "chassis", (0.0, 0.0), None, (0.0, 0.0))
+    };
+    let cases = [
+        (Motor { speed: f64::NAN, torque: 1.0 }, "motor speed must be a finite number"),
+        (Motor { speed: 1.0, torque: -1.0 }, "motor torque must be 0 or more"),
+    ];
+    let kind = JointKind::Wheel { axis: (0.0, 1.0), stiffness: 1.0, damping: 1.0, travel: (1.0, 1.0) };
+    for (motor, wanted) in cases {
+        let j = JointSpec { motor: Some(motor), ..joint("rear", kind, "chassis", MOUNTS[0], Some("rear"), (10.0, 10.0)) };
+        let err = world.set_joints(vec![j]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+    let err = world.set_joints(vec![rope]).unwrap_err().to_string();
+    assert!(err.contains("a motor drives a pin or a wheel, not a rope"), "{err}");
 }

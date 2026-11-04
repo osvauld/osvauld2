@@ -291,7 +291,8 @@ ui.world({
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
   `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
   takes `camera` (see Camera, below).
-  `false` drops out, like a child element. List order is draw order,
+  `false` drops out, like a child element. Unlike child elements, a nested list of entities does
+  not splice in: build the world's table and `table.insert` each entity. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
@@ -323,6 +324,13 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+  - `collider = { line = { x1, y1, x2, y2, … } }` is ground: segments joining the points, from
+    `at`, as long as you like — one entity can be a whole hilly stage. It has no inside, so it is
+    only ever a wall: never `loose`, controlled, carried or a sensor. Two points in a row must
+    differ. **It is one-sided: the solid is on your right as you walk the points**, so a line
+    listed left to right is ground with its solid below; list a ceiling right to left. Things
+    roll and rest on it under `gravity`, cross its joints without catching, and fast ones don't
+    pass through.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
   one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
@@ -512,6 +520,16 @@ ui.world({
   let `grip` (surface friction) stop the sliding. `grip` is also what lets a thing tumble.
 - **`loose = { density = n }`** (default 1, above 0): mass is density × area, so a stone block
   outweighs a wooden one the same size and flings what it hits.
+- **`loose = { mass = kg }`** states the whole thing's mass instead, whatever its size: a game
+  states a 300 kg chassis, not a density. `mass` or `density`, not both. Springs (and motors)
+  are force-based, so with masses in kg their `stiffness` is in N/m and `damping` in N·s/m:
+  a 5 kg box sags `5 · 981 / stiffness` units on a spring under `gravity = { 0, 981 }`.
+- **`loose = { center = { x, y } }`** moves the centre of mass to that point of the drawing
+  (default: the collider's middle). A car with its weight low and forward is hard to flip; a
+  plank with its weight at one end tips that way off a peg. How hard it is to turn stays the
+  shape's own.
+- Things fall asleep once nearly still. A heavily overdamped spring creeps toward its rest so
+  slowly that it can doze off short of it; damp near critical (`2·√(stiffness·mass)`) or less.
 - **`wells = { { at, radius, pull }, … }`** are standing fields, described like `gravity`: a loose
   thing whose centre is within `radius` of `at` accelerates toward it at `pull`, fading to nothing
   at the edge; a negative `pull` pushes away. They wake what they reach.
@@ -523,6 +541,22 @@ ui.world({
     it cannot turn.
   - `"rope"`: never farther apart than `length`, free to come closer — a chain is ropes between links.
   - `"spring"`: pulls toward `length` apart; needs `stiffness` and `damping`.
+  - `"wheel"`: suspension. `a` is the body, `b` the wheel (both loose with `grip`). The wheel
+    turns freely about `b_at` and slides along `axis` (a direction in `a`'s drawing, `{ 0, 1 }`
+    is straight down) from `a_at`, sprung back toward `a_at` at `stiffness` with `damping`,
+    at most `travel = { up, down }` either way. It is rigid across the axis, so the wheel never
+    wobbles sideways. `a_at` is where the wheel's centre sits unloaded; at rest the body sags
+    `weight on the wheel · gravity / stiffness` toward it. Hit hard, a stop gives a unit or two
+    before it holds.
+  - `motor = { speed = degrees_a_second, torque = n }` on a `"pin"` or `"wheel"` drives its
+    turning: `b` relative to `a` (with no `b`, `a` itself) toward `speed`, pushing with at most
+    `torque`. Positive turns the way `spin` counts, so a wheel on the ground rolls right. With
+    masses in kg, `torque` is N·m × 10 000 (units are centimetres). `speed = 0` with a large
+    torque is a brake. A pedal is just state: describe the motor from it each view — a changed
+    motor is updated in place, never rebuilt, and wakes what it drives. Whether the torque
+    turns into drive is the tyre's `grip` against the ground's; without grip the wheel spins
+    in place. A motor pushes back on `a` just as hard, so spinning a wheel up in the air turns
+    the body the other way.
   - `contacts = true` lets the two bodies collide with each other (off by default); one end at
     least must be loose. A joint naming something not in the description is an error, and the
     previous joints stay.
@@ -544,10 +578,10 @@ world("lab"):release("block")                             -- … let go: it keep
   not pull a held thing. Drags that end after the thing has gone are no error.
 - `e.shape` of an `on_drag` on a world is the entity's id — it says which body was taken.
 
-### Questions — `world(id):ray` and `:at`
+### Questions — `world(id):ray`, `:at` and `:get`
 
 Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
-is in front of the player when they press E, what did the click land on:
+is in front of the player when they press E, what did the click land on, how fast is the car:
 
 ```lua
 local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
@@ -555,7 +589,15 @@ local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
 if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
 
 local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+
+local car = world("track"):get("car")
+-- nil, or { pos = { x, y }, rot = 12, velocity = { vx, vy }, spin = -40, tick = 1042 }
 ```
+
+- `get` reads one entity back, in the dump's names and units: `pos` its box's top-left, `rot`
+  degrees turned, `velocity` per second, `spin` degrees a second. An id the world lacks is `nil`,
+  and so is everything before the world's first frame — the view that describes the world can
+  ask it without a guard. It reads the entity itself, so a `set` shows in it at once.
 
 - `ray` answers the first solid thing on the line from one point to the other: `at` where the line
   met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop

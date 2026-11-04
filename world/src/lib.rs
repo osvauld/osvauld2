@@ -25,7 +25,7 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, JointKind, Material, Shape};
+pub use crate::physics::{Collider, JointKind, Material, Motor, Shape};
 
 pub struct EntitySpec {
     pub id: String,
@@ -73,6 +73,8 @@ pub struct JointSpec {
     pub b_at: (f64, f64),
     /// Whether the two bodies collide with each other: not, unless asked.
     pub contacts: bool,
+    /// Drives a pin or a wheel. Changing only this keeps the joint and updates it in place.
+    pub motor: Option<Motor>,
 }
 
 /// A joint as the world holds it, and the bodies it was made for: a rebuilt body ends it.
@@ -505,6 +507,18 @@ impl World2d {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             }
+            let line = |c: &Option<Collider>| c.as_ref().is_some_and(|c| matches!(c.shape, Shape::Line(_)));
+            let ground = match () {
+                _ if line(&spec.sensor) => Some("a sensor needs an area: a line has none"),
+                _ if !line(&spec.collider) => None,
+                _ if spec.loose.is_some() => Some("a line is ground: it cannot be loose"),
+                _ if spec.controller.is_some() => Some("a line is ground: it cannot have a controller"),
+                _ if spec.attach.is_some() => Some("a line is ground: it cannot be carried"),
+                _ => None,
+            };
+            if let Some(why) = ground {
+                return Err(WorldError::Collider(spec.id.clone(), why.into()));
+            }
             self.groups_of(spec)
                 .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             let current = self
@@ -693,6 +707,8 @@ impl World2d {
                 let t = e.get::<Transform>().expect("every entity has a Transform");
                 let kind = match (moves, thrown, &collider, loose) {
                     (true, ..) => Body::Moved,
+                    // Let go as a line, a carried thing becomes ground, not a thrown body.
+                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed,
                     (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
                     (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
                     _ => Body::Fixed,
@@ -1202,7 +1218,31 @@ impl World2d {
                 JointKind::Pin { limits: Some((lo, hi)) } if !(lo.is_finite() && hi.is_finite() && lo < hi) => {
                     return Err(bad(format!("limits must be low then high, got {lo} and {hi}")));
                 }
+                JointKind::Wheel { axis: (ax, ay), stiffness, damping, travel: (up, down) } => {
+                    if !(ax.is_finite() && ay.is_finite() && ax.hypot(ay) > 1e-9) {
+                        return Err(bad(format!("axis must be a direction, not {ax}, {ay}")));
+                    }
+                    if !(stiffness.is_finite() && stiffness >= 0.0) {
+                        return Err(bad(format!("stiffness must be 0 or more, got {stiffness}")));
+                    }
+                    if !(damping.is_finite() && damping >= 0.0) {
+                        return Err(bad(format!("damping must be 0 or more, got {damping}")));
+                    }
+                    if !(up.is_finite() && up >= 0.0 && down.is_finite() && down >= 0.0) {
+                        return Err(bad(format!("travel must be up and down, each 0 or more, got {up} and {down}")));
+                    }
+                    if spec.b.is_none() {
+                        return Err(bad("a wheel joins two things: a = the body, b = the wheel".into()));
+                    }
+                }
                 _ => {}
+            }
+            if let Some(m) = &spec.motor {
+                match spec.kind {
+                    JointKind::Pin { .. } | JointKind::Wheel { .. } => m.check().map_err(bad)?,
+                    JointKind::Rope { .. } => return Err(bad("a motor drives a pin or a wheel, not a rope".into())),
+                    JointKind::Spring { .. } => return Err(bad("a motor drives a pin or a wheel, not a spring".into())),
+                }
             }
             // What an end is: its body, where the anchor sits in the body's frame, whether it moves.
             let end = |name: &str, at: (f64, f64)| -> Result<_, WorldError> {
@@ -1223,11 +1263,12 @@ impl World2d {
             if a.2.is_none() && b.is_none_or(|b| b.2.is_none()) {
                 return Err(bad("it joins nothing that moves: one end must be loose".into()));
             }
-            if matches!(spec.kind, JointKind::Pin { .. }) {
+            if matches!(spec.kind, JointKind::Pin { .. } | JointKind::Wheel { .. }) {
+                let what = if matches!(spec.kind, JointKind::Pin { .. }) { "pin" } else { "wheel" };
                 let ends = [(&spec.a, a.2)].into_iter().chain(spec.b.as_ref().zip(b.map(|b| b.2)));
                 for (name, loose) in ends {
                     if loose.is_some_and(|m| m.grip.is_none()) {
-                        return Err(bad(format!("a pin needs grip on {name:?}: nothing else turns")));
+                        return Err(bad(format!("a {what} needs grip on {name:?}: nothing else turns")));
                     }
                 }
             }
@@ -1244,17 +1285,41 @@ impl World2d {
         for m in made {
             let bodies = (m.a.0, m.b.0);
             let id = m.spec.id.clone();
-            if let Some(old) = self.joints.get(&id) {
-                if old.spec == m.spec && old.bodies == bodies && self.physics.joined(old.handle) {
+            if let Some(old) = self.joints.get_mut(&id) {
+                let same = |s: &JointSpec| JointSpec { motor: None, ..s.clone() };
+                if same(&old.spec) == same(&m.spec) && old.bodies == bodies && self.physics.joined(old.handle) {
+                    if old.spec.motor != m.spec.motor {
+                        self.physics.drive(old.handle, m.spec.motor, m.spec.b.is_none());
+                        old.spec.motor = m.spec.motor;
+                        let ends = [Some(m.spec.a.clone()), m.spec.b.clone()];
+                        self.stir(ends.iter().flatten());
+                    }
                     continue;
                 }
                 let old = self.joints.remove(&id).expect("just seen");
                 self.physics.unjoin(old.handle);
             }
-            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts);
+            let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts, m.spec.motor);
+            if m.spec.motor.is_some() {
+                let ends = [Some(m.spec.a.clone()), m.spec.b.clone()];
+                self.stir(ends.iter().flatten());
+            }
             self.joints.insert(id, Joined { spec: m.spec, handle, bodies });
         }
         Ok(())
+    }
+
+    /// Marks these loose entities as moving: Rapier has woken them, and a world all asleep asks
+    /// for no frames, so without this a motor on a resting car would never run.
+    fn stir<'a>(&mut self, ids: impl Iterator<Item = &'a String>) {
+        for id in ids {
+            if let Some(&entity) = self.by_id.get(id)
+                && let Some(mut s) = self.ecs.get_mut::<Solid>(entity)
+                && s.loose.is_some()
+            {
+                s.sliding = true;
+            }
+        }
     }
 
     /// Takes hold of a loose thing: each step it is driven toward `to`, so what it meets still
@@ -1610,50 +1675,56 @@ impl World2d {
 impl World2d {
     /// Every entity, in description order.
     pub fn inspect(&self) -> Vec<EntityInspection> {
+        self.order.iter().map(|&entity| self.inspection(entity)).collect()
+    }
+
+    /// Lua's question: one entity as the dump has it, or `None` for an id the world lacks.
+    pub fn get(&self, id: &str) -> Option<EntityInspection> {
+        self.by_id.get(id).map(|&entity| self.inspection(entity))
+    }
+
+    fn inspection(&self, entity: Entity) -> EntityInspection {
         let name = |entity| self.ecs.get::<Name>(entity).expect("every entity has one").0.clone();
-        (self.order.iter())
-            .map(|&entity| {
-                let e = self.ecs.entity(entity);
-                let t = e.get::<Transform>().expect("every entity has a Transform");
-                let solid = e.get::<Solid>();
-                let body = match solid {
-                    None => "none",
-                    Some(s) if s.loose.is_some() => "loose",
-                    Some(s) if s.sliding => "thrown",
-                    Some(s) if s.moves => "moved",
-                    Some(_) => "fixed",
-                };
-                let velocity = match (solid, e.get::<Velocity>()) {
-                    (Some(s), _) if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
-                    (_, Some(v)) => (v.0, v.1),
-                    _ => (0.0, 0.0),
-                };
-                let spin = match solid {
-                    Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
-                    _ => 0.0,
-                };
-                let mut zones: Vec<String> = (self.inside.iter())
-                    .filter(|(_, who)| *who == entity)
-                    .map(|&(zone, _)| name(zone))
-                    .collect();
-                zones.sort();
-                EntityInspection {
-                    id: name(entity),
-                    pos: (t.x, t.y),
-                    body,
-                    velocity,
-                    rot: t.rot,
-                    spin,
-                    attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
-                    zones,
-                    clip: e.get::<Animator>().map(|a| ClipInspection {
-                        time: self.clock - a.started,
-                        length: a.clip.length(),
-                        looped: a.clip.looped(),
-                    }),
-                }
-            })
-            .collect()
+        let e = self.ecs.entity(entity);
+        let t = e.get::<Transform>().expect("every entity has a Transform");
+        let solid = e.get::<Solid>();
+        let body = match solid {
+            None => "none",
+            Some(s) if s.loose.is_some() => "loose",
+            Some(s) if s.sliding => "thrown",
+            Some(s) if s.moves => "moved",
+            Some(_) => "fixed",
+        };
+        let velocity = match (solid, e.get::<Velocity>()) {
+            (Some(s), _) if s.sliding || s.loose.is_some() => self.physics.velocity(s.body),
+            (_, Some(v)) => (v.0, v.1),
+            _ => (0.0, 0.0),
+        };
+        let spin = match solid {
+            Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
+            _ => 0.0,
+        };
+        // `inside` keeps a despawned zone until the next step reports the leave; it is not one.
+        let mut zones: Vec<String> = (self.inside.iter())
+            .filter(|(_, who)| *who == entity)
+            .filter_map(|&(zone, _)| self.ecs.get::<Name>(zone).map(|n| n.0.clone()))
+            .collect();
+        zones.sort();
+        EntityInspection {
+            id: name(entity),
+            pos: (t.x, t.y),
+            body,
+            velocity,
+            rot: t.rot,
+            spin,
+            attached: e.get::<Attached>().map(|a| (name(a.to), a.part.clone())),
+            zones,
+            clip: e.get::<Animator>().map(|a| ClipInspection {
+                time: self.clock - a.started,
+                length: a.clip.length(),
+                looped: a.clip.looped(),
+            }),
+        }
     }
 }
 

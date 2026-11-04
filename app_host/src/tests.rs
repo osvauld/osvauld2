@@ -1101,7 +1101,7 @@ fn a_loose_thing_is_checked_strictly() {
         format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {loose} }} }})")
     };
-    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }", "{ density = 4 }"] {
+    for fine in ["true", "false", "{}", "{ bounce = 0.9, friction = 0.5 }", "{ friction = 0 }", "{ density = 4 }", "{ mass = 300, center = { 1, 1 } }"] {
         walk_world(&lua, &worlds, &room(fine)).unwrap();
     }
     let cases = [
@@ -1112,6 +1112,10 @@ fn a_loose_thing_is_checked_strictly() {
         ("{ friction = -1 }", "friction must be 0 or more, got -1"),
         ("{ density = 'x' }", "loose.density must be a number, got string"),
         ("{ density = 0 }", "density must be above 0, got 0"),
+        ("{ mass = 2, density = 1 }", "loose: mass or density, not both"),
+        ("{ mass = -1 }", "mass must be above 0, got -1"),
+        ("{ center = { 1 } }", "loose.center needs x and y"),
+        ("{ center = 3 }", "loose.center must be a table, got integer"),
     ];
     for (loose, wanted) in cases {
         let err = walk_world(&lua, &worlds, &room(loose)).unwrap_err().to_string();
@@ -1152,10 +1156,16 @@ fn a_collider_is_checked_strictly() {
     };
     walk_world(&lua, &worlds, &room("{ circle = 4, at = { 1, 2 } }")).unwrap();
     walk_world(&lua, &worlds, &room("{ rect = { 4, 2 } }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ line = { 0, 0, 100, 20, 200, 0 }, at = { 0, 50 } }")).unwrap();
     let cases = [
         ("4", "world entity 1.collider must be a table, got integer"),
-        ("{ at = { 1, 2 } }", "world entity 1.collider needs circle or rect"),
-        ("{ circle = 4, rect = { 4, 2 } }", "a circle or a rect, not both"),
+        ("{ at = { 1, 2 } }", "world entity 1.collider needs circle, rect or line"),
+        ("{ circle = 4, rect = { 4, 2 } }", "is one of circle, rect or line, not two"),
+        ("{ line = { 0, 0, 1, 1 }, circle = 4 }", "is one of circle, rect or line, not two"),
+        ("{ line = { 0, 0, 10 } }", "world entity 1.collider.line needs x, y pairs: got 3 numbers"),
+        ("{ line = { 0, 'a' } }", "world entity 1.collider.line[2] must be a number, got string"),
+        ("{ line = 'hills' }", "world entity 1.collider.line must be a table, got string"),
+        ("{ line = { 0, 0 } }", "a line needs at least 2 points"),
         ("{ circle = 'big' }", "world entity 1.collider.circle"),
         ("{ rect = { 4 } }", "world entity 1.collider.rect needs x and y"),
         ("{ circle = 4, layer = 'walls' }", "unknown field layer"),
@@ -1178,7 +1188,7 @@ fn a_sensor_is_checked_like_a_collider() {
     walk_world(&lua, &worlds, &room("{ circle = 40, at = { 4, 4 } }")).unwrap();
     let err = walk_world(&lua, &worlds, &room("{ circle = 40, rect = { 1, 1 } }"));
     let err = err.unwrap_err().to_string();
-    assert!(err.contains("world entity 1.sensor is a circle or a rect, not both"), "{err}");
+    assert!(err.contains("world entity 1.sensor is one of circle, rect or line, not two"), "{err}");
 }
 
 #[test]
@@ -5709,6 +5719,146 @@ fn view_and_handlers_ask_the_world_what_a_ray_meets_and_what_is_at_a_point() {
     }
 }
 
+#[test]
+fn view_and_handlers_read_an_entity_back_with_get() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local heard = {{}} \
+         local function show(b) \
+           if not b then return 'nil' end \
+           return string.format('pos %.1f,%.1f rot %.0f v %.1f,%.1f spin %.0f t%d', \
+             b.pos[1], b.pos[2], b.rot, b.velocity[1], b.velocity[2], b.spin, b.tick) end \
+         local function try(f) local ok, e = pcall(f) if not ok then table.insert(heard, tostring(e)) end end \
+         return function() \
+           local room = world('room') \
+           local ok, ball = pcall(room.get, room, 'ball') \
+           local seen = ok and show(ball) .. ' ghost=' .. show(room:get('ghost')) or 'not yet' \
+           return ui.col({{ ui.text({{ seen }}), ui.text({{ table.concat(heard, ' | ') }}), \
+           ui.world({{ id = 'room', width = 200, height = 100, actions = {{ go = 'Space' }}, \
+             on_action = function() \
+               world('room'):set('ball', {{ velocity = {{ 30, 0 }}, spin = 90 }}) \
+               table.insert(heard, show(world('room'):get('ball'))) \
+               try(function() world('room'):get(4) end) \
+               try(function() world('room'):get() end) end, \
+             {{ id = 'ball', pos = {{ 0, 0 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+               loose = {{ friction = 0, grip = 0.5 }} }} }}) }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    app.update(LuaMsg::TickWorld("room".into(), 0.0, 0.0));
+    app.update(LuaMsg::KeyWorld("room".into(), runtime::KeyInput {
+        code: Some("Space".into()), key: String::new(), down: true, repeat: false, cancelled: false,
+        mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+    }));
+    for i in 1..=60 {
+        app.update(LuaMsg::TickWorld("room".into(), 1.0 / 60.0, i as f64 / 60.0));
+    }
+    let info = app.view().info();
+    let said = |i: usize| info.children[i].text.clone().unwrap();
+    let b = &app.inspect_worlds()["room"].entities[0];
+    let tick = app.inspect_worlds()["room"].tick;
+    let dump = format!(
+        "pos {:.1},{:.1} rot {:.0} v {:.1},{:.1} spin {:.0} t{tick}",
+        b.pos.0, b.pos.1, b.rot, b.velocity.0, b.velocity.1, b.spin
+    );
+    assert!(b.pos.0 > 20.0 && (b.spin - 90.0).abs() < 1.0, "it moved and turns: {b:?}");
+    assert_eq!(said(0), format!("{dump} ghost=nil"), "get in view says what the dump says");
+    let heard = said(1);
+    assert!(heard.starts_with("pos 0.0,0.0 rot 0 v 30.0,0.0 spin 90"), "a set shows at once to get: {heard}");
+    for wanted in [
+        "world \"room\":get needs an entity id (a string), got integer",
+        "world \"room\":get needs an entity id (a string), got nil",
+    ] {
+        assert!(heard.contains(wanted), "wanted {wanted:?} in {heard}");
+    }
+}
+
+/// Hillclimb step 7: the real `vehicle`/`units`/`setup`/`drive` modules in a sandboxed VM drive
+/// the car on flat line ground — it settles, the gas takes it to its top speed, the brake stops
+/// it — read back with `get`.
+#[test]
+fn the_hillclimb_car_drives_on_a_bare_world() {
+    let src = LoroDoc::new();
+    let files = src.get_map("files");
+    for (name, text) in [
+        ("units.lua", include_str!("../../demo_apps/hillclimb/units.lua")),
+        ("vehicle.lua", include_str!("../../demo_apps/hillclimb/vehicle.lua")),
+        ("setup.lua", include_str!("../../demo_apps/hillclimb/setup.lua")),
+        ("drive.lua", include_str!("../../demo_apps/hillclimb/drive.lua")),
+    ] {
+        files.insert_container(name, LoroText::new()).unwrap().insert(0, text).unwrap();
+    }
+    let main = format!(
+        "{HERO} local V = require('vehicle') local U = require('units') \
+         local Setup = require('setup') local Drive = require('drive') \
+         local car = V.check(V.car) \
+         local made = Setup.build(car, {{ 0, 300 }}) \
+         local pedals = {{ gas = 0, brake = 0 }} \
+         for _, e in ipairs(made.entities) do e.drawing = hero end \
+         local ground = {{ id = 'ground', pos = {{ -2000, 400 }}, drawing = hero, group = 'ground', \
+           collider = {{ line = {{ 0, 0, 200000, 0 }} }} }} \
+         return function() \
+           local car_now = world('road'):get('chassis') \
+           local kmh = car_now and U.kmh(car_now.velocity[1]) or 0 \
+           local road = {{ id = 'road', width = 800, height = 500, gravity = {{ 0, U.gravity }}, \
+             actions = {{ gas = 'KeyD', brake = 'KeyA', coast = 'KeyS' }}, \
+             on_action = function(e) \
+               pedals = {{ gas = e.action == 'gas' and 1 or 0, brake = e.action == 'brake' and 1 or 0 }} end, \
+             joints = Setup.joints(car, Drive.motors(car, pedals, {{ fuel = 5 }})), \
+             ground }} \
+           for _, e in ipairs(made.entities) do table.insert(road, e) end \
+           return ui.col({{ ui.text({{ string.format('%.1f', kmh) }}), ui.world(road) }}) end"
+    );
+    files.insert_container("main.lua", LoroText::new()).unwrap().insert(0, &main).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let mut t = 0.0;
+    let mut run = |app: &mut LuaApp<LuaMsg>, secs: f64| {
+        for _ in 0..(secs * 60.0) as usize {
+            t += 1.0 / 60.0;
+            app.update(LuaMsg::TickWorld("road".into(), 1.0 / 60.0, t));
+            app.view();
+        }
+    };
+    let press = |app: &mut LuaApp<LuaMsg>, code: &str| {
+        app.update(LuaMsg::KeyWorld("road".into(), runtime::KeyInput {
+            code: Some(code.into()), key: String::new(), down: true, repeat: false, cancelled: false,
+            mods: runtime::Mods { shift: false, ctrl: false, alt: false, super_: false },
+        }));
+        app.view();
+    };
+    let chassis = |app: &LuaApp<LuaMsg>| {
+        app.inspect_worlds()["road"].entities.iter().find(|e| e.id == "chassis").cloned().unwrap()
+    };
+    let shown = |app: &mut LuaApp<LuaMsg>| app.view().info().children[0].text.clone().unwrap();
+    run(&mut app, 2.0);
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+    let rest = chassis(&app);
+    assert!(rest.rot.abs() < 1.0 && rest.velocity.0.abs() < 2.0, "settled level on its wheels: {rest:?}");
+    // Wheels 0.62 m below the chassis top with radius 0.32: the top sits 94 above the ground,
+    // and down by the sag, (290 kg / 2) · 9.81 / 18000 ≈ 7.9 cm.
+    let sag = rest.pos.1 - (400.0 - 94.0);
+    assert!((sag - 7.9).abs() < 1.5, "sagged {sag} on its springs");
+
+    press(&mut app, "KeyD");
+    run(&mut app, 6.0);
+    let going = chassis(&app);
+    let kmh = going.velocity.0 / 100.0 * 3.6;
+    assert!(going.pos.0 > 2000.0, "the gas took it 20 m and more: {going:?}");
+    assert!((kmh - 60.0).abs() < 4.0, "at its top speed, 60 km/h: {kmh}");
+    assert_eq!(shown(&mut app), format!("{kmh:.1}"), "the view reads the speed back with get");
+
+    press(&mut app, "KeyA");
+    run(&mut app, 3.0);
+    let braked = chassis(&app);
+    assert!(braked.velocity.0 < 30.0, "the brake stopped it (and backs it up): {braked:?}");
+    assert!(app.console.borrow().is_empty(), "{:?}", app.console.borrow());
+}
+
 /// An app whose `main.lua` is `src`, viewed once.
 fn app_of(src_lua: &str) -> LuaApp<LuaMsg> {
     let src = LoroDoc::new();
@@ -6133,6 +6283,35 @@ fn bench_app_walk_camera() {
     });
 }
 
+/// W-L2 from Lua: a frame — tick and view — of a 2000-point stage line described every view,
+/// with a ball rolling on it. The line is built once at module scope, as an app would.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_app_long_line() {
+    let src = LoroDoc::new();
+    let main = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    let view = format!(
+        "{HERO} local hills = {{}} \
+         for i = 0, 1999 do local x = i * 100 \
+           table.insert(hills, x) table.insert(hills, 300 + 30 * math.sin(x / 700)) end \
+         return function() return ui.world({{ id = 'stage', width = 1280, height = 720, gravity = {{ 0, 981 }}, \
+           camera = {{ follow = 'ball' }}, \
+           {{ id = 'ground', pos = {{ 0, 0 }}, drawing = hero, collider = {{ line = hills }} }}, \
+           {{ id = 'ball', pos = {{ 50, 200 }}, drawing = hero, collider = {{ circle = 10, at = {{ 10, 10 }} }}, \
+             loose = {{ friction = 0, grip = 1, mass = 10 }} }} }}) end"
+    );
+    main.insert(0, &view).unwrap();
+    src.commit();
+    let mut app = LuaApp::open(src, Rc::new(|_| Ok(None)), noop_wake(), identity()).unwrap();
+    app.view();
+    let mut i = 0;
+    bench("app_long_line_2000pt", 120, || {
+        i += 1;
+        app.update(LuaMsg::TickWorld("stage".into(), 1.0 / 60.0, i as f64 / 60.0));
+        let _ = app.view();
+    });
+}
+
 /// A coin picked up: the signal's update and the view after it.
 #[test]
 #[ignore = "benchmark: scripts/bench.py"]
@@ -6367,25 +6546,30 @@ fn joints_are_described_and_checked_strictly() {
             "{HERO} return ui.world({{ id = 'room', width = 400, height = 300, gravity = {{ 0, 900 }}, joints = {joints}, \
                {{ id = 'plank', pos = {{ 100, 100 }}, drawing = hero, collider = {{ rect = {{ 100, 8 }} }}, \
                   loose = {{ grip = 0.5 }} }}, \
-               {{ id = 'ball', pos = {{ 250, 100 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{}} }} }})"
+               {{ id = 'ball', pos = {{ 250, 100 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{}} }}, \
+               {{ id = 'tyre', pos = {{ 106, 116 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+                  loose = {{ mass = 10, grip = 1 }} }} }})"
         )
     };
     let fine = "{ { id = 'hinge', kind = 'pin', a = 'plank', a_at = { 0, 4 }, b_at = { 100, 104 }, limits = { -90, 90 } }, \
                   { id = 'string', kind = 'rope', a = 'ball', a_at = { 4, 4 }, b = 'plank', b_at = { 100, 4 }, length = 60 }, \
                   { id = 'bob', kind = 'spring', a = 'ball', a_at = { 4, 4 }, b_at = { 300, 50 }, \
-                    length = 40, stiffness = 100, damping = 2, contacts = true } }";
+                    length = 40, stiffness = 100, damping = 2, contacts = true }, \
+                  { id = 'axle', kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, \
+                    axis = { 0, 1 }, stiffness = 5000, damping = 300, travel = { 15, 20 }, \
+                    motor = { speed = 720, torque = 2e5 } } }";
     walk_world(&lua, &worlds, &room(fine)).unwrap();
-    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+    assert_eq!(worlds.borrow()["room"].joint_count(), 4);
     // The same description each frame keeps them.
     walk_world(&lua, &worlds, &room(fine)).unwrap();
-    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+    assert_eq!(worlds.borrow()["room"].joint_count(), 4);
 
     let cases = [
         ("7", "world joints must be a list"),
         ("{ 7 }", "joint 1 must be a table"),
         ("{ { kind = 'pin' } }", "joint 1 needs id"),
         ("{ { id = 'j' } }", "joint \"j\" needs kind"),
-        ("{ { id = 'j', kind = 'chain' } }", "kind must be \"pin\", \"rope\" or \"spring\", got \"chain\""),
+        ("{ { id = 'j', kind = 'chain' } }", "kind must be \"pin\", \"rope\", \"spring\" or \"wheel\", got \"chain\""),
         ("{ { id = 'j', kind = 'rope', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a"),
         ("{ { id = 'j', kind = 'rope', a = 'ball', b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a_at"),
         ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs b_at"),
@@ -6397,11 +6581,28 @@ fn joints_are_described_and_checked_strictly() {
         ("{ { id = 'j', kind = 'pin', a = 'ball', a_at = { 4, 4 }, b_at = { 0, 0 } } }", "a pin needs grip on \"ball\""),
         ("{ { id = 'j', kind = 'rope', a = 'ghost', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "there is no such entity \"ghost\""),
         ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, limits = { 5 } } }", "limits needs low and high"),
+        ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, axis = { 0, 1 } } }", "axis is for wheel, not pin"),
+        ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5, motor = { speed = 1, torque = 1 } } }", "a motor drives a pin or a wheel, not a rope"),
     ];
+    let wheel = "kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, stiffness = 1, damping = 1";
+    let wheels = [
+        ("axis = { 0, 1 }", "joint \"j\" needs travel"),
+        ("travel = { 1, 1 }", "joint \"j\" needs axis"),
+        ("axis = { 0, 1 }, travel = { 1 }", "travel needs up and down"),
+        ("axis = { 0 }, travel = { 1, 1 }", "axis needs x and y"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, length = 3", "length is for rope and spring, not wheel"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, limits = { 0, 1 }", "limits is for pin, not wheel"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1 }", "joint \"j\".motor needs torque"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1, torque = 1, gear = 2 }", "motor: unknown field gear"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = { speed = 1, torque = -1 }", "motor torque must be 0 or more, got -1"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, motor = 5", "motor must be a table, got integer"),
+    ];
+    let wheels = wheels.map(|(more, wanted)| (format!("{{ {{ id = 'j', {wheel}, {more} }} }}"), wanted));
+    let cases = cases.into_iter().map(|(j, w)| (j.to_string(), w)).chain(wheels);
     for (joints, wanted) in cases {
-        let err = walk_world(&lua, &worlds, &room(joints)).unwrap_err().to_string();
+        let err = walk_world(&lua, &worlds, &room(&joints)).unwrap_err().to_string();
         assert!(err.contains(wanted), "{joints}: wanted {wanted:?}, got {err}");
-        assert_eq!(worlds.borrow()["room"].joint_count(), 3, "{wanted}: the last good joints kept");
+        assert_eq!(worlds.borrow()["room"].joint_count(), 4, "{wanted}: the last good joints kept");
     }
     walk_world(&lua, &worlds, &room("{}")).unwrap();
     assert_eq!(worlds.borrow()["room"].joint_count(), 0, "empty or left out: none");

@@ -605,6 +605,29 @@ impl UserData for WorldHandle {
                 lua.create_sequence_from([x, y])
             });
         }
+        // `track:get("car")`: nil, or `{ pos, rot, velocity, spin, tick }` — the dump's names.
+        methods.add_method("get", |lua, this, id: Value| {
+            let owner = format!("world {:?}:get", this.id);
+            let Value::String(id) = id else {
+                let what = id.type_name();
+                return Err(Error::runtime(format!("{owner} needs an entity id (a string), got {what}")));
+            };
+            let id = id.to_str()?.to_string();
+            // The view that describes a world asks before its first frame made it: nothing yet.
+            if !this.worlds.borrow().contains_key(&this.id) {
+                return Ok(Value::Nil);
+            }
+            let (got, tick) = this.ask(&owner, |w| Ok(w.get(&id)))?;
+            let Some(e) = got else { return Ok(Value::Nil) };
+            let pair = |(x, y): (f64, f64)| lua.create_sequence_from([x, y]);
+            let answer = lua.create_table()?;
+            answer.set("pos", pair(e.pos)?)?;
+            answer.set("rot", e.rot)?;
+            answer.set("velocity", pair(e.velocity)?)?;
+            answer.set("spin", e.spin)?;
+            answer.set("tick", tick)?;
+            Ok(Value::Table(answer))
+        });
         // `rink:at({ x, y })`: the ids there, sorted, as a list that also has `tick`.
         methods.add_method("at", |lua, this, at: Table| {
             let owner = format!("world {:?}:at", this.id);
@@ -774,14 +797,24 @@ fn loose(spec: &Table, owner: &str) -> mlua::Result<Option<world::Material>> {
         }
     };
     let owner = format!("{owner}.loose");
-    named_fields(&m, &owner, &["bounce", "friction", "grip", "density"])?;
+    named_fields(&m, &owner, &["bounce", "friction", "grip", "density", "mass", "center"])?;
     let d = world::Material::default();
     let number = |field: &str| maybe_number(&m, &owner, field);
+    let (density, mass) = (number("density")?, number("mass")?);
+    if density.is_some() && mass.is_some() {
+        return Err(Error::runtime(format!("{owner}: mass or density, not both")));
+    }
+    let center = match maybe_table(&m, &owner, "center")? {
+        Some(c) => point(c, &format!("{owner}.center")).map(|p| Some((p.x, p.y)))?,
+        None => None,
+    };
     Ok(Some(world::Material {
         bounce: number("bounce")?.unwrap_or(d.bounce),
         friction: number("friction")?.unwrap_or(d.friction),
         grip: number("grip")?,
-        density: number("density")?.unwrap_or(d.density),
+        density: density.unwrap_or(d.density),
+        mass,
+        center,
     }))
 }
 
@@ -827,6 +860,7 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         let here = format!("{owner}: joint {id:?}");
         named_fields(&j, &here, &[
             "id", "kind", "a", "a_at", "b", "b_at", "limits", "length", "stiffness", "damping", "contacts",
+            "axis", "travel", "motor",
         ])?;
         let kind: String = need(&j, &here, "kind")?;
         let has = |field: &str| j.get::<Value>(field).map(|v| !v.is_nil());
@@ -837,8 +871,8 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         let kind = match kind.as_str() {
             "pin" => {
                 only("length", "rope and spring, not pin")?;
-                only("stiffness", "spring, not pin")?;
-                only("damping", "spring, not pin")?;
+                only("stiffness", "spring and wheel, not pin")?;
+                only("damping", "spring and wheel, not pin")?;
                 let limits = match maybe_table(&j, &here, "limits")? {
                     Some(t) => {
                         if positional_len(&t, &format!("{here}.limits"))? != 2 {
@@ -852,8 +886,8 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
             }
             "rope" => {
                 only("limits", "pin, not rope")?;
-                only("stiffness", "spring, not rope")?;
-                only("damping", "spring, not rope")?;
+                only("stiffness", "spring and wheel, not rope")?;
+                only("damping", "spring and wheel, not rope")?;
                 world::JointKind::Rope { length: need(&j, &here, "length")? }
             }
             "spring" => {
@@ -864,14 +898,42 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
                     damping: need(&j, &here, "damping")?,
                 }
             }
+            "wheel" => {
+                only("limits", "pin, not wheel")?;
+                only("length", "rope and spring, not wheel")?;
+                let axis = point(need(&j, &here, "axis")?, &format!("{here}.axis"))?;
+                let travel: Table = need(&j, &here, "travel")?;
+                if positional_len(&travel, &format!("{here}.travel"))? != 2 {
+                    return Err(Error::runtime(format!("{here}: travel needs up and down")));
+                }
+                world::JointKind::Wheel {
+                    axis: (axis.x, axis.y),
+                    stiffness: need(&j, &here, "stiffness")?,
+                    damping: need(&j, &here, "damping")?,
+                    travel: (travel.get(1)?, travel.get(2)?),
+                }
+            }
             other => {
                 return Err(Error::runtime(format!(
-                    "{here}: kind must be \"pin\", \"rope\" or \"spring\", got {other:?}"
+                    "{here}: kind must be \"pin\", \"rope\", \"spring\" or \"wheel\", got {other:?}"
                 )));
             }
         };
+        if !matches!(kind, world::JointKind::Wheel { .. }) {
+            only("axis", "wheel, not pin, rope or spring")?;
+            only("travel", "wheel, not pin, rope or spring")?;
+        }
         let a_at = point(need(&j, &here, "a_at")?, &format!("{here}.a_at"))?;
         let b_at = point(need(&j, &here, "b_at")?, &format!("{here}.b_at"))?;
+        // `motor = { speed = degrees_a_second, torque = n }`: the world checks the ranges.
+        let motor = match maybe_table(&j, &here, "motor")? {
+            Some(m) => {
+                let owner = format!("{here}.motor");
+                named_fields(&m, &owner, &["speed", "torque"])?;
+                Some(world::Motor { speed: need(&m, &owner, "speed")?, torque: need(&m, &owner, "torque")? })
+            }
+            None => None,
+        };
         joints.push(world::JointSpec {
             kind,
             a: need(&j, &here, "a")?,
@@ -879,27 +941,29 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
             b: entity_id(&j, &here, "b")?,
             b_at: (b_at.x, b_at.y),
             contacts: j.get::<Option<bool>>("contacts")?.unwrap_or(false),
+            motor,
             id,
         });
     }
     Ok(joints)
 }
 
-/// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
-/// units; `at` (default the origin) is a circle's centre, a rect's top-left corner. A sensor is
-/// the same shape.
+/// `{ circle = r }`, `{ rect = {w, h} }` or `{ line = {x1, y1, x2, y2, …} }`, plus `at`, in the
+/// entity's drawing units; `at` (default the origin) is a circle's centre, a rect's top-left
+/// corner, the point a line's points are from. A sensor is the same words.
 fn collider(spec: &Table, owner: &str) -> mlua::Result<world::Collider> {
-    named_fields(spec, owner, &["circle", "rect", "at"])?;
-    let shape = match (spec.get::<Value>("circle")?, maybe_table(spec, owner, "rect")?) {
-        (Value::Nil, Some(size)) => {
+    named_fields(spec, owner, &["circle", "rect", "line", "at"])?;
+    let circle = spec.get::<Value>("circle")?;
+    let (rect, line) = (maybe_table(spec, owner, "rect")?, maybe_table(spec, owner, "line")?);
+    let shape = match (circle.is_nil(), rect, line) {
+        (true, Some(size), None) => {
             let size = point(size, &format!("{owner}.rect"))?;
             world::Shape::Rect(size.x, size.y)
         }
-        (Value::Nil, None) => return Err(Error::runtime(format!("{owner} needs circle or rect"))),
-        (_, None) => world::Shape::Circle(need(spec, owner, "circle")?),
-        (_, Some(_)) => {
-            return Err(Error::runtime(format!("{owner} is a circle or a rect, not both")));
-        }
+        (true, None, Some(line)) => world::Shape::Line(line_points(line, &format!("{owner}.line"))?),
+        (false, None, None) => world::Shape::Circle(need(spec, owner, "circle")?),
+        (true, None, None) => return Err(Error::runtime(format!("{owner} needs circle, rect or line"))),
+        _ => return Err(Error::runtime(format!("{owner} is one of circle, rect or line, not two"))),
     };
     let at = match maybe_table(spec, owner, "at")? {
         Some(at) => point(at, &format!("{owner}.at"))?,
@@ -1423,6 +1487,20 @@ fn need_gfx<T: 'static, R>(
         .borrow::<T>()
         .map_err(|_| Error::runtime(format!("{owner}.{field} must be {what}")))?;
     Ok(take(&held))
+}
+
+/// `{ x1, y1, x2, y2, … }`, flat so a long stage stays one plain array.
+fn line_points(table: Table, owner: &str) -> mlua::Result<std::sync::Arc<[(f64, f64)]>> {
+    let n = positional_len(&table, owner)?;
+    if n % 2 != 0 {
+        return Err(Error::runtime(format!("{owner} needs x, y pairs: got {n} numbers")));
+    }
+    let number = |i: usize| match table.raw_get::<Value>(i)? {
+        Value::Integer(v) => Ok(v as f64),
+        Value::Number(v) => Ok(v),
+        other => Err(Error::runtime(format!("{owner}[{i}] must be a number, got {}", other.type_name()))),
+    };
+    (1..=n).step_by(2).map(|i| Ok((number(i)?, number(i + 1)?))).collect()
 }
 
 fn point(table: Table, owner: &str) -> mlua::Result<Point> {
