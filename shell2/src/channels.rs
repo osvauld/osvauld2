@@ -231,7 +231,7 @@ pub async fn stream(
     attestation: String,
     ws_id: String,
     token: Token,
-    mut rx: UnboundedReceiver<NetFrame>,
+    rx: UnboundedReceiver<NetFrame>,
     proxy: EventLoopProxy<Msg>,
     gen_: u64,
     seq: u64,
@@ -243,6 +243,40 @@ pub async fn stream(
         }
     }
     let _down = Down(proxy.clone(), gen_, ws_id.clone(), seq);
+    // `OSVAULD_NET_DELAY_MS`: this member's link made slow both ways, for the rollback tests (M5).
+    let delay = std::env::var("OSVAULD_NET_DELAY_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis);
+    let (late_tx, mut late_rx) = unbounded_channel::<(tokio::time::Instant, NetFrame)>();
+    let mut rx = match delay {
+        None => rx,
+        Some(d) => {
+            let (tx, slow_rx) = unbounded_channel();
+            tokio::spawn(async move {
+                let mut rx = rx;
+                let (hold_tx, mut hold_rx) = unbounded_channel::<(tokio::time::Instant, NetFrame)>();
+                tokio::spawn(async move {
+                    while let Some((at, f)) = hold_rx.recv().await {
+                        tokio::time::sleep_until(at).await;
+                        if tx.send(f).is_err() {
+                            return;
+                        }
+                    }
+                });
+                while let Some(f) = rx.recv().await {
+                    let _ = hold_tx.send((tokio::time::Instant::now() + d, f));
+                }
+            });
+            slow_rx
+        }
+    };
+    {
+        let (proxy, ws_id) = (proxy.clone(), ws_id.clone());
+        tokio::spawn(async move {
+            while let Some((at, frame)) = late_rx.recv().await {
+                tokio::time::sleep_until(at).await;
+                let _ = proxy.send_event(Msg::NetFrame(gen_, ws_id.clone(), seq, frame));
+            }
+        });
+    }
     let result: Result<(), String> = async {
         let (mut send, recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
         let mut frames = FrameBuf::new(recv);
@@ -263,7 +297,7 @@ pub async fn stream(
                 _ = beat.tick() => send_frame(&mut send, &NetFrame::Beat, MAX_FRAME).await.map_err(|e| e.to_string())?,
                 incoming = frames.recv::<NetFrame>(MAX_FRAME) => match incoming.map_err(|e| e.to_string())? {
                     Some(frame) => {
-                        let _ = proxy.send_event(Msg::NetFrame(gen_, ws_id.clone(), seq, frame));
+                        let _ = late_tx.send((tokio::time::Instant::now() + delay.unwrap_or_default(), frame));
                     }
                     None => return Ok(()),
                 },

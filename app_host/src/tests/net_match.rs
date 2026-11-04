@@ -73,3 +73,39 @@ fn a_step_that_keeps_state_outside_state_is_caught() {
     let caught: u64 = sim.apps.iter().map(|a| a.match_stats()["dots"].desyncs).sum();
     assert!(caught > 0, "{:?}", sim.apps.iter().map(|a| a.match_stats()).collect::<Vec<_>>());
 }
+
+fn text_of(info: &runtime::ElInfo, id: &str) -> Option<String> {
+    if info.id.as_deref() == Some(id) {
+        return info.text.clone();
+    }
+    info.children.iter().find_map(|c| text_of(c, id))
+}
+
+/// `(frame, what player 2's own dot reads)` for player 2, after each render frame.
+fn own_dot_by_frame(sim: &mut Sim, secs: f64) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for _ in 0..(secs * 60.0) as usize {
+        sim.run(1.0 / 60.0, 1.0 / 60.0);
+        let info = sim.apps[1].view().info();
+        if let (Some(status), Some(dot)) = (text_of(&info, "status"), text_of(&info, "dot:2")) {
+            out.insert(status, dot);
+        }
+    }
+    out
+}
+
+/// M5's Rust half: a slow link delays only the others' dots. Player 2's own dot reads the same at
+/// every frame as on a link with no latency at all — its input is never predicted.
+#[test]
+fn rollback_hides_latency_for_my_own_dot() {
+    let straight = own_dot_by_frame(&mut dots(vec![slow(0.0), slow(0.0)]), 5.0);
+    let late = own_dot_by_frame(&mut dots(vec![Link::LAN, slow(60.0)]), 5.0);
+    let mut compared = 0;
+    for (status, dot) in &late {
+        if let Some(want) = straight.get(status) {
+            assert_eq!(dot, want, "at {status}");
+            compared += 1;
+        }
+    }
+    assert!(compared > 100, "only {compared} frames in common");
+}

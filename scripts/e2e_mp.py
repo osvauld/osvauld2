@@ -12,6 +12,8 @@ in virtual frames: the offscreen clock only moves when asked, the network does n
 """
 
 import base64
+import os
+import re
 import sys
 import time
 import traceback
@@ -22,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from osvauld.net import Net, build, wait_until  # noqa: E402
 
 PROBE = Path(__file__).parent / "e2e_apps" / "net_probe"
+DOTS = Path(__file__).parent.parent / "demo_apps" / "mp_dots"
 SOON = 5.0
 
 
@@ -61,14 +64,23 @@ def shots(label, item, *peers):
         p.shot(label, item)
 
 
-def setup(net, names):
-    peers = [net.peer(n) for n in names]
-    _, item, _ = net.share_space(peers[0], peers[1:], PROBE)
+def setup(net, names, app=PROBE, env=None):
+    peers = []
+    for n in names:
+        if env and n in env:
+            os.environ.update(env[n])
+        try:
+            peers.append(net.peer(n))
+        finally:
+            for k in (env or {}).get(n, {}):
+                os.environ.pop(k, None)
+    _, item, _ = net.share_space(peers[0], peers[1:], app)
     i = item["id"]
     # Everyone hears everyone before a test starts.
-    for p in peers:
-        wait_until(lambda p=p: shown(p, i, "peers").count(",") == len(peers) - 1, SOON,
-                   f"{p.name} to see {len(peers)} peers")
+    if app == PROBE:
+        for p in peers:
+            wait_until(lambda p=p: shown(p, i, "peers").count(",") == len(peers) - 1, SOON,
+                       f"{p.name} to see {len(peers)} peers")
     return peers, i
 
 
@@ -121,7 +133,60 @@ def m3(net):
     shots("M3", i, a, b)
 
 
-TESTS = {"m1": m1, "m2": m2, "m3": m3}
+def checks(p, item) -> dict[int, str]:
+    text = shown(p, item, "checks")
+    return {int(f): h for f, h in re.findall(r"(\d+)=([0-9a-f]+)", text)}
+
+
+def play(peers, i, secs, label):
+    """Start mp_dots on every peer with scripted input, then run `secs` of virtual time in
+    step with real time (the network is real). Returns each peer's checkpoint hashes."""
+    for p in peers:
+        p.rpc.click(i, "script")
+    # Every peer must see every other before the roster is read.
+    time.sleep(1.0)
+    for p in peers:
+        p.rpc.click(i, "start")
+    seen = [dict() for _ in peers]
+    started = time.monotonic()
+    for n in range(int(secs * 60)):
+        for k, p in enumerate(peers):
+            p.rpc.frame(1)
+            if n % 30 == 0:
+                seen[k].update(checks(p, i))
+        lag = started + (n + 1) / 60 - time.monotonic()
+        if lag > 0:
+            time.sleep(lag)
+    for k, p in enumerate(peers):
+        seen[k].update(checks(p, i))
+        status = shown(p, i, "status")
+        assert status.startswith("status playing"), f"{p.name}: {status}"
+        assert shown(p, i, "desynced").strip() == "desynced", f"{p.name}: {shown(p, i, 'desynced')}"
+    shots(label, i, *peers)
+    return seen
+
+
+def agree(peers, seen, least):
+    common = set.intersection(*(set(s) for s in seen))
+    assert len(common) >= least, f"only {len(common)} checkpoints in common: {[sorted(s) for s in seen]}"
+    for f in sorted(common):
+        hashes = {p.name: s[f] for p, s in zip(peers, seen)}
+        assert len(set(hashes.values())) == 1, f"frame {f}: {hashes}"
+
+
+def m4(net):
+    """net.match converges: 10 s of scripted play, equal hashes on A, B, C every second."""
+    peers, i = setup(net, ["alice", "bob", "carol"], app=DOTS)
+    agree(peers, play(peers, i, 10, "M4"), 6)
+
+
+def m5(net):
+    """With B's link 120 ms slower each way, the hashes still agree."""
+    peers, i = setup(net, ["alice", "bob"], app=DOTS, env={"bob": {"OSVAULD_NET_DELAY_MS": "120"}})
+    agree(peers, play(peers, i, 10, "M5"), 6)
+
+
+TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
 
 
 def main() -> int:

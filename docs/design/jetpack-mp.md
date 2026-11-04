@@ -1,6 +1,6 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
-Status: **in progress — steps 1–4 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
+Status: **in progress — steps 1–5 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)
 (uncommitted on `laptop-host` at writing). Absorbs the ephemeral half of
@@ -198,6 +198,31 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
    rate and depth, stalled frames and ms per frame, for 2, 4, 6, 8 players on LAN, good wifi,
    and 4G with one bad link. Run on `mp_dots` here, on Jetpack at step 8, on the Pixel at
    step 11. The cap is picked from those numbers, not guessed.
+   *As built 2026-11-04:* `app_host/src/net_match.rs`. A match is per VM; its traffic rides
+   the channel named by its `id`, which must be declared with a `rate` covering the frame rate
+   (checked at creation). Snapshots are `state` in `net`'s wire form, taken before every input
+   frame; a late input that differs from what a frame ran on rewinds to that frame. Inputs
+   before `DELAY` are nil for everyone. The starter is the lowest player id; its `setup` wins.
+   A hello is answered once and resent every 0.5 s in the lobby, so match creation order does
+   not matter. Checkpoints every ~1 s of frames, hashed (sha256, 8 bytes); a differing peer is
+   listed in `match.desynced` (step 9 decides what follows). Rust: one-player, rolled-back ==
+   straight, impure step caught, own input never predicted. `e2e_mp.py` M4, M5 green
+   (`OSVAULD_NET_DELAY_MS` delays a member's channel stream both ways).
+   **Sim, `mp_dots`, 20 s per row** (`cargo run --release -p app_host --example mp_sim`, nixos):
+
+   | players | net | rollbacks/s | frames per rollback | stalls/s | frames run of 600 |
+   |---|---|---|---|---|---|
+   | 2 | 4G | 3.0 | 3.9 | 0 | 596 |
+   | 4 | 4G | 6.6 | 4.0 | 0.3 | 596 |
+   | 6 | 4G | 12.2 | 4.9 | 7.3 | 593 |
+   | 8 | 4G | 14.6 | 4.7 | 6.8 | 593 |
+   | 2 | 4G + 1 bad | 2.6 | 5.5 | 14.0 | 549 |
+   | 8 | 4G + 1 bad | 12.5 | 4.5 | 34.8 | 480 |
+
+   LAN and wifi: no stalls up to 8. Network-wise 4 is comfortable on 4G and 8 works on wifi; one
+   bad link costs everyone 8–20% of frames. `mp_dots` costs < 0.3 ms per frame even at 8, so
+   CPU says nothing yet — the cap waits on Jetpack (step 8) and the Pixel (step 11). Scripted
+   inputs change every 15–20 frames; real players change more often, so more rollbacks.
 6. **World under a match**: Rapier `enhanced-determinism`, `driven`, save/restore/hash, moments
    as events; hockey as a two-player match. M6.
 7. **World gaps for Jetpack**: flyer body, `:get`. Rust tests, a world demo.
