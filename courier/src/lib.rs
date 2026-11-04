@@ -25,6 +25,7 @@ pub mod attest;
 pub mod invite;
 pub mod ledger;
 pub mod link;
+pub mod net;
 pub mod policy;
 pub mod proof;
 pub mod publish;
@@ -58,6 +59,8 @@ pub enum CourierError {
     Decode,
     #[error("signature invalid")]
     BadSignature,
+    #[error("message larger than a channel allows")]
+    TooLarge,
     // Also raised when a chain roots somewhere other than the authority the caller expected,
     // which since attestations exist is no longer always the node.
     #[error("identity did not match the one expected")]

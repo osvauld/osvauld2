@@ -153,6 +153,11 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
 2. **Envelope and channels**: `courier::net` envelope `{ ws, item, channel, seq, from_device,
    body }` signed by the device key, so a host relays what it cannot forge; manifest
    `channel <name> { rate n/s size bytes }`. Rust tests.
+   *As built 2026-11-04:* the `channel` grammar already existed (`send`, `rate`, `slot sender`,
+   `app-permissions.md` §3); step 2 added `size N`, capped by `manifest::CHANNEL_SIZE_MAX`
+   (16 KiB), which `courier::net` also enforces on seal and open. `seal` takes the device
+   signature as a closure, so courier stays iroh-free. `net::Seen` refuses a replayed or older
+   `seq` per sender, item and channel, since a signature proves who, not when.
 3. **Transport**: a second QUIC stream per session (game traffic never queues behind a large doc
    update); the host — shell or kunki — relays to sessions on the same space with the item open
    and to its own app, checking membership and rate, never reading `body`; presence join/leave.

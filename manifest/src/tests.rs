@@ -359,3 +359,25 @@ fn an_unclosed_block_is_an_error() {
     let e = err("app \"c\" {\n  roles member\n");
     assert!(e.message.contains("}"), "{e}");
 }
+
+#[test]
+fn a_channel_takes_a_size() {
+    let m = Manifest::parse(
+        "app \"g\" {\n  roles player\n  channel inputs { send player  rate 40/s  size 512 }\n}\n",
+    )
+    .unwrap();
+    assert_eq!(m.channels[0].size_bytes, Some(512));
+    assert_eq!(m.channels[0].rate_per_sec, Some(40));
+    assert_eq!(chat().channels[0].size_bytes, None);
+}
+
+#[test]
+fn a_channel_size_must_be_bytes_under_the_ceiling() {
+    let e = err("app \"g\" {\n  channel inputs { size 512b }\n}\n");
+    assert_eq!(e.line, 2);
+    assert!(e.message.contains("512b"), "{e}");
+    let too_big = CHANNEL_SIZE_MAX + 1;
+    let e = err(&format!("app \"g\" {{\n  channel inputs {{ size {too_big} }}\n}}\n"));
+    assert!(e.message.contains(&CHANNEL_SIZE_MAX.to_string()), "{e}");
+    assert!(err("app \"g\" {\n  channel inputs { size 0 }\n}\n").message.contains("size"));
+}

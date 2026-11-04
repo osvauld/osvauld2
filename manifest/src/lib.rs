@@ -11,7 +11,7 @@
 //!                           read members(group/{gid}/meta)  write members(group/{gid}/meta)
 //!                           validate "rules.message" }
 //!   uses "people" read
-//!   channel typing { send member  rate 4/s  slot sender }
+//!   channel typing { send member  rate 4/s  size 64  slot sender }
 //! }
 //! ```
 //!
@@ -23,6 +23,10 @@ use std::fmt;
 
 /// The implicit root role: may grant any declared role and satisfies every one.
 pub const OWNER: &str = "owner";
+
+/// The most one channel message may carry, whatever `size` says: a relay holds a few in flight
+/// per session, so this bounds what a sender can make a host buffer.
+pub const CHANNEL_SIZE_MAX: u32 = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("manifest.osv line {line}: {message}")]
@@ -88,6 +92,8 @@ pub struct Channel {
     pub name: String,
     pub send: Vec<Who>,
     pub rate_per_sec: Option<u32>,
+    /// `size N`: the most bytes one message's body may hold, at most [`CHANNEL_SIZE_MAX`].
+    pub size_bytes: Option<u32>,
     pub slot_sender: bool,
     pub line: usize,
 }
@@ -762,6 +768,7 @@ impl Parser {
             name,
             send: Vec::new(),
             rate_per_sec: None,
+            size_bytes: None,
             slot_sender: false,
             line,
         };
@@ -779,6 +786,19 @@ impl Parser {
                             .and_then(|n| n.parse().ok())
                             .ok_or_else(|| at(line, format!("bad rate `{r}`, expected `N/s`")))?;
                         ch.rate_per_sec = Some(n);
+                    }
+                    "size" => {
+                        let s = self.word("a size in bytes")?;
+                        let n: u32 = s
+                            .parse()
+                            .map_err(|_| at(line, format!("bad size `{s}`, expected bytes")))?;
+                        if n == 0 || n > CHANNEL_SIZE_MAX {
+                            return Err(at(
+                                line,
+                                format!("size must be 1 to {CHANNEL_SIZE_MAX} bytes, not {n}"),
+                            ));
+                        }
+                        ch.size_bytes = Some(n);
                     }
                     "slot" => {
                         let s = self.word("`sender`")?;
