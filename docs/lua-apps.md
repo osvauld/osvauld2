@@ -323,6 +323,13 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+  - `collider = { line = { x1, y1, x2, y2, … } }` is ground: segments joining the points, from
+    `at`, as long as you like — one entity can be a whole hilly stage. It has no inside, so it is
+    only ever a wall: never `loose`, controlled, carried or a sensor. Two points in a row must
+    differ. **It is one-sided: the solid is on your right as you walk the points**, so a line
+    listed left to right is ground with its solid below; list a ceiling right to left. Things
+    roll and rest on it under `gravity`, cross its joints without catching, and fast ones don't
+    pass through.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
   one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,

@@ -885,21 +885,22 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
     Ok(joints)
 }
 
-/// `{ circle = r, at = {x, y} }` or `{ rect = {w, h}, at = {x, y} }`, in the entity's drawing
-/// units; `at` (default the origin) is a circle's centre, a rect's top-left corner. A sensor is
-/// the same shape.
+/// `{ circle = r }`, `{ rect = {w, h} }` or `{ line = {x1, y1, x2, y2, …} }`, plus `at`, in the
+/// entity's drawing units; `at` (default the origin) is a circle's centre, a rect's top-left
+/// corner, the point a line's points are from. A sensor is the same words.
 fn collider(spec: &Table, owner: &str) -> mlua::Result<world::Collider> {
-    named_fields(spec, owner, &["circle", "rect", "at"])?;
-    let shape = match (spec.get::<Value>("circle")?, maybe_table(spec, owner, "rect")?) {
-        (Value::Nil, Some(size)) => {
+    named_fields(spec, owner, &["circle", "rect", "line", "at"])?;
+    let circle = spec.get::<Value>("circle")?;
+    let (rect, line) = (maybe_table(spec, owner, "rect")?, maybe_table(spec, owner, "line")?);
+    let shape = match (circle.is_nil(), rect, line) {
+        (true, Some(size), None) => {
             let size = point(size, &format!("{owner}.rect"))?;
             world::Shape::Rect(size.x, size.y)
         }
-        (Value::Nil, None) => return Err(Error::runtime(format!("{owner} needs circle or rect"))),
-        (_, None) => world::Shape::Circle(need(spec, owner, "circle")?),
-        (_, Some(_)) => {
-            return Err(Error::runtime(format!("{owner} is a circle or a rect, not both")));
-        }
+        (true, None, Some(line)) => world::Shape::Line(line_points(line, &format!("{owner}.line"))?),
+        (false, None, None) => world::Shape::Circle(need(spec, owner, "circle")?),
+        (true, None, None) => return Err(Error::runtime(format!("{owner} needs circle, rect or line"))),
+        _ => return Err(Error::runtime(format!("{owner} is one of circle, rect or line, not two"))),
     };
     let at = match maybe_table(spec, owner, "at")? {
         Some(at) => point(at, &format!("{owner}.at"))?,
@@ -1423,6 +1424,20 @@ fn need_gfx<T: 'static, R>(
         .borrow::<T>()
         .map_err(|_| Error::runtime(format!("{owner}.{field} must be {what}")))?;
     Ok(take(&held))
+}
+
+/// `{ x1, y1, x2, y2, … }`, flat so a long stage stays one plain array.
+fn line_points(table: Table, owner: &str) -> mlua::Result<std::sync::Arc<[(f64, f64)]>> {
+    let n = positional_len(&table, owner)?;
+    if n % 2 != 0 {
+        return Err(Error::runtime(format!("{owner} needs x, y pairs: got {n} numbers")));
+    }
+    let number = |i: usize| match table.raw_get::<Value>(i)? {
+        Value::Integer(v) => Ok(v as f64),
+        Value::Number(v) => Ok(v),
+        other => Err(Error::runtime(format!("{owner}[{i}] must be a number, got {}", other.type_name()))),
+    };
+    (1..=n).step_by(2).map(|i| Ok((number(i)?, number(i + 1)?))).collect()
 }
 
 fn point(table: Table, owner: &str) -> mlua::Result<Point> {

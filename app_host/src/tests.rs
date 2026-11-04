@@ -1149,10 +1149,16 @@ fn a_collider_is_checked_strictly() {
     };
     walk_world(&lua, &worlds, &room("{ circle = 4, at = { 1, 2 } }")).unwrap();
     walk_world(&lua, &worlds, &room("{ rect = { 4, 2 } }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ line = { 0, 0, 100, 20, 200, 0 }, at = { 0, 50 } }")).unwrap();
     let cases = [
         ("4", "world entity 1.collider must be a table, got integer"),
-        ("{ at = { 1, 2 } }", "world entity 1.collider needs circle or rect"),
-        ("{ circle = 4, rect = { 4, 2 } }", "a circle or a rect, not both"),
+        ("{ at = { 1, 2 } }", "world entity 1.collider needs circle, rect or line"),
+        ("{ circle = 4, rect = { 4, 2 } }", "is one of circle, rect or line, not two"),
+        ("{ line = { 0, 0, 1, 1 }, circle = 4 }", "is one of circle, rect or line, not two"),
+        ("{ line = { 0, 0, 10 } }", "world entity 1.collider.line needs x, y pairs: got 3 numbers"),
+        ("{ line = { 0, 'a' } }", "world entity 1.collider.line[2] must be a number, got string"),
+        ("{ line = 'hills' }", "world entity 1.collider.line must be a table, got string"),
+        ("{ line = { 0, 0 } }", "a line needs at least 2 points"),
         ("{ circle = 'big' }", "world entity 1.collider.circle"),
         ("{ rect = { 4 } }", "world entity 1.collider.rect needs x and y"),
         ("{ circle = 4, layer = 'walls' }", "unknown field layer"),
@@ -1175,7 +1181,7 @@ fn a_sensor_is_checked_like_a_collider() {
     walk_world(&lua, &worlds, &room("{ circle = 40, at = { 4, 4 } }")).unwrap();
     let err = walk_world(&lua, &worlds, &room("{ circle = 40, rect = { 1, 1 } }"));
     let err = err.unwrap_err().to_string();
-    assert!(err.contains("world entity 1.sensor is a circle or a rect, not both"), "{err}");
+    assert!(err.contains("world entity 1.sensor is one of circle, rect or line, not two"), "{err}");
 }
 
 #[test]

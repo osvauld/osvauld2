@@ -505,6 +505,18 @@ impl World2d {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             }
+            let line = |c: &Option<Collider>| c.as_ref().is_some_and(|c| matches!(c.shape, Shape::Line(_)));
+            let ground = match () {
+                _ if line(&spec.sensor) => Some("a sensor needs an area: a line has none"),
+                _ if !line(&spec.collider) => None,
+                _ if spec.loose.is_some() => Some("a line is ground: it cannot be loose"),
+                _ if spec.controller.is_some() => Some("a line is ground: it cannot have a controller"),
+                _ if spec.attach.is_some() => Some("a line is ground: it cannot be carried"),
+                _ => None,
+            };
+            if let Some(why) = ground {
+                return Err(WorldError::Collider(spec.id.clone(), why.into()));
+            }
             self.groups_of(spec)
                 .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
             let current = self
@@ -693,6 +705,8 @@ impl World2d {
                 let t = e.get::<Transform>().expect("every entity has a Transform");
                 let kind = match (moves, thrown, &collider, loose) {
                     (true, ..) => Body::Moved,
+                    // Let go as a line, a carried thing becomes ground, not a thrown body.
+                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed,
                     (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
                     (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
                     _ => Body::Fixed,

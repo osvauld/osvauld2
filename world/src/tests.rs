@@ -2668,3 +2668,202 @@ fn a_world_with_a_well_or_a_hand_keeps_asking_for_ticks_even_when_all_is_asleep(
     run(&mut world, &mut clock, 3.0);
     assert!(!world.needs_ticks(), "and at rest again, it needs none");
 }
+
+// ── line ground ────────────────────────────────────────────────────────────────────────────────
+
+fn line(points: &[(f64, f64)]) -> Shape {
+    Shape::Line(points.into())
+}
+
+/// The ball's centre and the ground's height under it, once a frame, for `secs`.
+fn roll(world: &mut World2d, secs: f64, ground: impl Fn(f64) -> f64) -> Vec<((f64, f64), f64)> {
+    let mut clock = 0.0;
+    (0..(secs * 60.0).round() as usize)
+        .map(|_| {
+            run(world, &mut clock, 1.0 / 60.0);
+            let b = ball_of(world);
+            let c = (b.pos.0 + 4.0, b.pos.1 + 4.0);
+            (c, ground(c.0))
+        })
+        .collect()
+}
+
+#[test]
+fn a_ball_rolls_down_a_line_slope_and_never_sinks_into_it() {
+    let d = drawing();
+    let slope = 30f64.to_radians().tan();
+    let ground = solid("ground", (0.0, 300.0), line(&[(0.0, 0.0), (2000.0, 2000.0 * slope)]), (0.0, 0.0), &d);
+    let ball = EntitySpec {
+        loose: Some(Material { grip: Some(1.0), ..DEAD }),
+        ..solid("ball", (100.0, 200.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let path = roll(&mut world, 3.0, |x| 300.0 + x * slope);
+    for ((x, y), g) in &path {
+        assert!(*y < g + 0.5, "the ball's centre went under the line at x {x}: {y} vs {g}");
+    }
+    let ((x, y), g) = *path.last().unwrap();
+    assert!(x > 400.0, "rolled downhill to the right: x {x}");
+    // Resting on a 30° slope, the centre is r / cos 30° above the line straight below it.
+    assert!((g - y - 4.0 / 30f64.to_radians().cos()).abs() < 1.5, "touching the slope: {y} over {g}");
+    assert!(ball_of(&world).rot.abs() > 90.0, "it rolled rather than slid: {:?}", ball_of(&world));
+}
+
+#[test]
+fn a_fast_ball_does_not_tunnel_through_a_line() {
+    let d = drawing();
+    let ground = solid("ground", (-1000.0, 500.0), line(&[(0.0, 0.0), (2000.0, 0.0)]), (0.0, 0.0), &d);
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    // 250 units a step at 120 Hz, far past a radius-4 ball's reach: Rapier's speculative
+    // contacts hold a line without CCD (checked at 3000 and 30000 with CCD off).
+    world.set("ball", Set { velocity: Some((0.0, 30000.0)), ..Set::default() }).unwrap();
+    for ((x, y), g) in roll(&mut world, 1.0, |_| 500.0) {
+        assert!(y < g + 0.5, "went through the line at x {x}: {y}");
+    }
+}
+
+/// Height of the polyline through `points` (world units) at `x`.
+fn height_on(points: &[(f64, f64)], x: f64) -> f64 {
+    let seg = points.windows(2).find(|w| x <= w[1].0).unwrap_or(&points[points.len() - 2..]);
+    let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
+    y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+}
+
+/// Where a gripping ball has rolled after 2 s down a 15° slope made of `pieces` collinear
+/// segments, never sinking below it.
+fn rolled_down(pieces: usize, at_joints: &[(usize, f64)]) -> f64 {
+    let d = drawing();
+    let slope = 15f64.to_radians().tan();
+    let mut hills: Vec<_> = (0..=pieces).map(|i| {
+        let x = 4000.0 * i as f64 / pieces as f64;
+        (x, x * slope)
+    }).collect();
+    // Bumps at chosen joints: (index, how far the joint is lifted), to make a crest or a valley.
+    for &(i, lift) in at_joints {
+        hills[i].1 -= lift;
+    }
+    let ground = solid("ground", (0.0, 300.0), line(&hills), (0.0, 0.0), &d);
+    // Its box's top-left, so the ball starts on the slope at x 24, at rest.
+    let top = 300.0 + 24.0 * slope - 4.0 / 15f64.to_radians().cos() - 4.0 - 0.05;
+    let ball = EntitySpec {
+        loose: Some(Material { grip: Some(1.0), ..DEAD }),
+        ..solid("ball", (20.0, top), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let path = roll(&mut world, 2.0, |x| 300.0 + height_on(&hills, x));
+    for ((x, y), g) in &path {
+        assert!(*y < g + 0.5, "under the line at x {x}: {y} vs {g}");
+    }
+    path.last().unwrap().0.0
+}
+
+#[test]
+fn a_ball_rolls_across_joints_as_if_they_were_not_there() {
+    // Joints in a straight line must not catch: the classic internal-edge snag.
+    let whole = rolled_down(1, &[]);
+    let jointed = rolled_down(160, &[]);
+    // Rolling without slipping, and a 2D circle is a disc (I = ½·m·r²): a = (2/3)·g·sin θ along
+    // the slope, so x = ½·a·t²·cos θ ≈ 327 from where it started.
+    let theta = 15f64.to_radians();
+    let expected = 20.0 + 4.0 + 0.5 * (2.0 / 3.0) * 981.0 * theta.sin() * 4.0 * theta.cos();
+    assert!((whole - expected).abs() < expected * 0.03, "rolled to {whole}, expected {expected}");
+    assert!((jointed - whole).abs() < whole * 0.02, "160 joints {jointed} vs one segment {whole}");
+    // A shallow crest and valley (a 4-unit lift over 25-unit pieces, about 9° each way) are rolled
+    // over: the ball gets as far, give or take what the bumps cost.
+    let bumpy = rolled_down(160, &[(20, 4.0), (40, -4.0), (60, 4.0)]);
+    assert!(bumpy > whole * 0.9, "over the bumps {bumpy} vs smooth {whole}");
+}
+
+#[test]
+fn a_lines_points_are_from_its_at_and_its_entitys_pos() {
+    let d = drawing();
+    let ground = solid("ground", (100.0, 0.0), line(&[(0.0, 0.0), (500.0, 0.0)]), (0.0, 400.0), &d);
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (300.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let ((_, y), _) = *roll(&mut world, 2.0, |_| 400.0).last().unwrap();
+    assert!((y - 396.0).abs() < 1.0, "rests on y = 400 (pos 0 + at 400): centre {y}");
+    // And off its ends there is nothing: a ball at x 50 falls past where the line would be.
+    let ball = EntitySpec { loose: Some(DEAD), ..solid("ball", (50.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let ground = solid("ground", (100.0, 0.0), line(&[(0.0, 0.0), (500.0, 0.0)]), (0.0, 400.0), &d);
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![ball, ground]).unwrap();
+    let ((_, y), _) = *roll(&mut world, 2.0, |_| 400.0).last().unwrap();
+    assert!(y > 600.0, "nothing to land on left of x 100: centre {y}");
+}
+
+#[test]
+fn a_carried_thing_let_go_as_a_line_is_fixed_ground() {
+    let d = drawing();
+    let hero = || EntitySpec {
+        controller: Some(wasd(100.0)),
+        ..solid("hero", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d)
+    };
+    let carried = EntitySpec {
+        attach: Some(Attach { to: "hero".into(), part: "body".into(), at: (10.0, 0.0), pivot: (0.0, 0.0), turn: false }),
+        ..solid("plank", (50.0, 0.0), Shape::Rect(8.0, 8.0), (0.0, 0.0), &d)
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![hero(), carried]).unwrap();
+    world.key("KeyD", true);
+    frames(&mut world, 0.3, 0.1);
+    world.key("KeyD", false);
+    let plank = solid("plank", (50.0, 0.0), line(&[(0.0, 0.0), (40.0, 0.0)]), (0.0, 0.0), &d);
+    world.reconcile(vec![hero(), plank]).unwrap();
+    let before = world.inspect().into_iter().find(|e| e.id == "plank").unwrap();
+    assert_eq!(before.body, "fixed", "let go as a line, it is ground: {before:?}");
+    frames(&mut world, 1.3, 0.1);
+    let after = world.inspect().into_iter().find(|e| e.id == "plank").unwrap();
+    assert_eq!(after.pos, before.pos, "and ground does not fall");
+}
+
+#[test]
+fn a_line_is_kept_while_the_same_and_replaced_when_changed() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let ground = |end| solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (end, 10.0)]), (0.0, 0.0), &d);
+    let body = |w: &World2d| w.ecs.get::<Solid>(w.by_id["ground"]).map(|s| s.body);
+    world.reconcile(vec![ground(100.0)]).unwrap();
+    let first = body(&world);
+    world.reconcile(vec![ground(100.0)]).unwrap();
+    assert_eq!(body(&world), first, "the same line keeps its body");
+    world.reconcile(vec![ground(200.0)]).unwrap();
+    assert_ne!(body(&world), first, "a changed line replaces it");
+}
+
+#[test]
+fn a_bad_line_is_refused_and_keeps_the_last_good_world() {
+    let d = drawing();
+    let mut world = World2d::default();
+    let good = solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (10.0, 0.0)]), (0.0, 0.0), &d);
+    world.reconcile(vec![good]).unwrap();
+    let flat = || Some(Collider { shape: line(&[(0.0, 0.0), (10.0, 0.0)]), at: (0.0, 0.0) });
+    let ball = || solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d);
+    let cases = [
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0)]), (0.0, 0.0), &d), "a line needs at least 2 points"),
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (f64::NAN, 1.0)]), (0.0, 0.0), &d), "line points must be finite"),
+        (solid("ground", (0.0, 0.0), line(&[(1.0, 1.0), (1.0, 1.0)]), (0.0, 0.0), &d), "two points in the same place"),
+        // Finite as f64, infinite as the f32 Rapier gets.
+        (solid("ground", (0.0, 0.0), line(&[(0.0, 0.0), (1e39, 0.0)]), (0.0, 0.0), &d), "line points must be finite"),
+        // Distinct as f64, one point as f32.
+        (solid("ground", (0.0, 0.0), line(&[(1e8, 0.0), (1e8 + 1.0, 0.0)]), (0.0, 0.0), &d), "two points in the same place"),
+        (EntitySpec { collider: flat(), loose: Some(DEAD), ..ball() }, "a line is ground: it cannot be loose"),
+        (EntitySpec { collider: flat(), controller: Some(wasd(10.0)), ..ball() }, "a line is ground: it cannot have a controller"),
+        (EntitySpec { sensor: flat(), ..spec("zone", (0.0, 0.0), &d) }, "a sensor needs an area: a line has none"),
+    ];
+    for (bad, wanted) in cases {
+        let err = world.reconcile(vec![bad]).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+        assert_eq!(ids(&world), ["ground"], "the last good world stays");
+    }
+}

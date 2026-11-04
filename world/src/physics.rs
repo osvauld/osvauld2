@@ -2,7 +2,10 @@
 //! when a controller moves it. Only shapes live here; drawings never reach Rapier, and no Rapier
 //! type leaves this crate.
 
+use std::sync::Arc;
+
 use rapier2d::control::{CharacterLength, KinematicCharacterController};
+use rapier2d::parry::shape::{Polyline, PolylineFlags};
 use rapier2d::prelude::*;
 
 /// A collision shape in the entity's drawing units. Plain data, not tied to an entity, so an
@@ -10,22 +13,40 @@ use rapier2d::prelude::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Collider {
     pub shape: Shape,
-    /// From the entity's origin: a circle's centre, a rect's top-left corner.
+    /// From the entity's origin: a circle's centre, a rect's top-left corner, a line's origin.
     pub at: (f64, f64),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Circle(f64),
     Rect(f64, f64),
+    /// Ground: segments joining these points, placed from `at`. It has no area, so it is never
+    /// loose, moved or a sensor.
+    Line(Arc<[(f64, f64)]>),
 }
 
 impl Collider {
     pub(crate) fn check(&self) -> Result<(), String> {
         let size = |v: f64| v.is_finite() && v > 0.0;
-        let sized = match self.shape {
-            Shape::Circle(r) => size(r),
-            Shape::Rect(w, h) => size(w) && size(h),
+        let sized = match &self.shape {
+            Shape::Circle(r) => size(*r),
+            Shape::Rect(w, h) => size(*w) && size(*h),
+            Shape::Line(points) => {
+                if points.len() < 2 {
+                    return Err(format!("a line needs at least 2 points, got {}", points.len()));
+                }
+                // Checked as Rapier gets them: f32, where a huge finite f64 overflows and two
+                // close points can merge. A zero-length segment has no normal.
+                let f32s: Vec<_> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+                if !f32s.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+                    return Err("line points must be finite".into());
+                }
+                if let Some(i) = f32s.windows(2).position(|w| w[0] == w[1]) {
+                    return Err(format!("line has two points in the same place: {} and {}", i + 1, i + 2));
+                }
+                true
+            }
         };
         if !sized {
             return Err("collider size must be a finite number above zero".into());
@@ -39,7 +60,7 @@ impl Collider {
     /// Rapier places shapes by their centre.
     pub(crate) fn centre(&self) -> (f64, f64) {
         match self.shape {
-            Shape::Circle(_) => self.at,
+            Shape::Circle(_) | Shape::Line(_) => self.at,
             Shape::Rect(w, h) => (self.at.0 + w / 2.0, self.at.1 + h / 2.0),
         }
     }
@@ -143,9 +164,16 @@ impl Default for Physics {
 
 /// A shape placed relative to its body, which sits at `anchor`.
 fn shape(c: &Collider, anchor: (f64, f64)) -> ColliderBuilder {
-    let shape = match c.shape {
-        Shape::Circle(r) => ColliderBuilder::ball(r as f32),
+    let shape = match &c.shape {
+        Shape::Circle(r) => ColliderBuilder::ball(*r as f32),
         Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
+        Shape::Line(points) => {
+            // One-sided, solid on the right of the points' direction: a left-to-right line is
+            // ground with its solid below (+y is down). Unoriented, every joint is an edge a
+            // rolling body snags on — 20% of the speed lost over 160 straight joints.
+            let points = points.iter().map(|&(x, y)| Vector::new(x as f32, y as f32)).collect();
+            ColliderBuilder::new(SharedShape::new(Polyline::with_flags(points, None, PolylineFlags::ORIENTED)))
+        }
     };
     let (cx, cy) = c.centre();
     shape.translation(Vector::new((cx - anchor.0) as f32, (cy - anchor.1) as f32))
