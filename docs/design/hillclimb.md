@@ -51,7 +51,7 @@ only once green). World units are 100 to the metre. The game runs gravity `{ 0, 
 | P-V1 | `vehicle.lua` validates: every parameter in §3 present, in range, with its SI unit; an unknown field is an error | 7 |
 | P-V2 | `units.lua` round-trips: kg, m, N/m, N·s/m, N·m, rad/s to world units and back, within 1e-9 | 7 |
 | P-V3 | `setup.lua` builds the world entities and joints from a vehicle table alone: no controls, art or stage in its inputs. The joint `stiffness` equals the vehicle's N/m, and the anchors are at the wheel positions | 7 |
-| P-G1 | `model.lua` rules on a virtual clock: fuel burns at `burn` L/s while the gas is held, plus `idle` L/s at rest; at 0 the motor is cut; a fuel can refills it; distance = the furthest chassis x reached | 8 |
+| P-G1 | `run.lua` rules on a virtual clock: fuel burns at `burn` L/s while the gas is held, plus `idle` L/s at rest; at 0 the motor is cut; a fuel can refills it; distance = the furthest chassis x reached | 8 |
 | P-G2 | crash: a head `on_hit` with the ground ends the run; a body hitting the ground does not; a car resting upside down for 2 s ends the run | 8 |
 | P-S1 | the stage generator for seed `n` gives the same polyline every time, slopes stay within `max_slope`, and fuel cans are spaced so a full tank can reach the next can on flat driving | 8 |
 | S-1 | upload `demo_apps/hillclimb`, open it: the console is clean, the car is at rest on the start, and its sag matches the vehicle's `m·g/k` (from the dump) | 9 |
@@ -100,7 +100,7 @@ demo_apps/hillclimb/
   setup.lua     vehicle → world entities + joints (colliders, mass, centre, wheel joints)
   drive.lua     pedal state + vehicle → motor/torque fields (throttle, brake, air control)
   stage.lua     seeded terrain polyline, fuel cans, coins, finish
-  model.lua     run rules: fuel, distance, coins, crash, run over (pure, virtual clock)
+  run.lua       run rules: fuel, distance, coins, crash, run over (pure, virtual clock)
   controls.lua  on-screen pedals (pointer down/up) and keys → pedal state
   art.lua       chassis, wheel, driver and terrain drawings (our own)
   view.lua      ui.world description + HUD; reads get("car")
@@ -164,7 +164,7 @@ Then a fresh review (`expert-runtime` for `world/`, `expert-app-host` for `app_h
    the car usefully. Otherwise, record that and drop the step.
 7. `vehicle.lua`, `units.lua`, `setup.lua`, `drive.lua` (P-V1..3) and a bare-world L test that
    drives the vehicle over a flat line.
-8. `stage.lua`, `model.lua` (P-G1, P-G2, P-S1).
+8. `stage.lua`, `run.lua` (P-G1, P-G2, P-S1).
 9. View, art, controls, `smoke_hillclimb.py` (S-1..6); guide section in `lua-apps.md`;
    `status.md`.
 
