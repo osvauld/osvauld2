@@ -1,6 +1,8 @@
 # Hillclimb — a side-on driving game on Rapier
 
-Status: **planned 2026-11-04; nothing built.** Worktree `.claude/worktrees/hillclimb`, branch
+Status: **steps 1–5 and 7–9 built 2026-11-04; step 6 (standing torque) deferred to play
+testing — see docs/status.md.** Every §0 test exists under its own name (world/app_host tests,
+`scripts/test_hillclimb_*.lua`, `scripts/smoke_hillclimb.py`). Worktree `.claude/worktrees/hillclimb`, branch
 `hillclimb` (from `dev` `9b1e08d`). Scope (user, 2026-11-04): **Rapier, desktop first, one car,
 one stage.** A side-scrolling drive over hills: gas and brake, fuel to pick up, coins, and a
 crash when the driver's head touches the ground. Art, name and tuning are our own.
@@ -169,6 +171,34 @@ Then a fresh review (`expert-runtime` for `world/`, `expert-app-host` for `app_h
    `status.md`.
 
 ## 6. Hand-off for the 3D rover (filled in when step 9 lands)
+
+**Where the vehicle setup lives.** `demo_apps/hillclimb/vehicle.lua` is the car as SI data
+(kg, m, N/m, N·s/m, N·m, km/h, L), checked by `V.check`. `units.lua` is the only place the
+world scale (100 u/m) lives: lengths ×100, torques ×10⁴, masses and spring/damper constants
+pass through unchanged (force-based joints). `setup.lua` turns a car plus a spawn point into
+entities (no drawings) and joints: chassis (driver's mass included, centre of mass set), one
+`wheel` joint per wheel, a `pin` neck for the head. `drive.lua` turns `{gas, brake}` plus fuel
+into a motor per axle. Neither takes art, input or stage, so a car can be tested in a bare world
+(`app_host` test `the_hillclimb_car_drives_on_a_bare_world`). The rover can keep these four
+files' shapes and replace only what Rapier3D needs.
+
+**How suspension works.** Per wheel: one joint locked across the axis, free to spin, sliding
+along the axis within `travel`, with a force-based position motor as the spring
+(`stiffness` N/m, `damping` N·s/m) toward the unloaded mount. Sag is m·g/k. The car's corners run
+at ζ ≈ 0.5. The stops are soft: a few cm at a hard landing.
+
+**How traction works.** Nothing is scripted. A velocity motor on the wheel's angle pushes toward
+a target speed with at most `torque`. Whether that becomes thrust is Rapier's Coulomb contact,
+tyre `grip` × normal load (ground grip 0, combine Max). So wheelspin, lock-up, load transfer and
+wheelies come out of the solver. The brake is the same motor aimed backwards, which gives
+braking while rolling and reversing at rest from one rule.
+
+**Driving tests that carry to 3D as they are:** sag = m·g/k, overshoot falls with ζ, the wheel
+stays on its axis landing sideways, spin-up = τ/I, braking → v²/2μg once locked, grip 0 =
+wheelspin in place, reaction torque tilts the body in the air, same inputs → same run, a motor
+wakes a sleeping car. **2D-only:** the line ground (3D: a heightfield or trimesh with
+`FIX_INTERNAL_EDGES`), the disc's I = ½mr² (a 3D wheel is a cylinder about its axle: still
+½mr²), and rot/spin as one angle.
 
 Lessons so far:
 - **Step 1, joints in the ground:** an unoriented polyline snags at its joints. A rolling ball

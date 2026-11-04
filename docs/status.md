@@ -10,6 +10,27 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Hillclimb (2026-11-04, branch `hillclimb`, not landed) — [plan](design/hillclimb.md)
+- Engine (`world` + `app_host`, all generic): `collider = { line = {…} }` one-sided ground
+  (oriented polyline: no snag at joints); `world(id):get(id)` → `{pos, rot, velocity, spin, tick}`
+  (nil before the world's first frame); `loose.mass` (kg) and `loose.center`; joint
+  `kind = "wheel"` (sprung, damped, travel stops, rigid across its axis); `motor = { speed,
+  torque }` on pin and wheel joints, changed in place each view.
+- Two engine bugs the real-path smoke found, now pinned by world tests: a motor set on a sleeping
+  body never ran (an all-asleep world asks for no ticks — `stir` marks its ends moving), and
+  `get` panicked the app thread naming a zone despawned since the last step (a taken coin).
+- `demo_apps/hillclimb`: vehicle in SI (`vehicle.lua`), one unit scale (`units.lua`), car to
+  bodies/joints with no art (`setup.lua`), pedals to motors (`drive.lua`), seeded 1 km stage
+  (`stage.lua`), run rules (`run.lua`), art, controls (keys + held pedals), HUD, Retry.
+- Physics checked against formulas: disc rolling (2/3)·g·sin θ within 1%, sag m·g/k within 5%,
+  spin-up τ/I within 5%, braking v²/2μg within 15% and flat once locked, wheelspin at grip 0.
+- Benchmarks: a driven cart step on a 2000-point line 7 µs; a Lua frame with that line 454 µs.
+- verified: `cargo test -p world` 172, `-p app_host` 316 (lib), `cargo check --workspace
+  --tests`; pure Lua `test_hillclimb_{vehicle,run}.lua`; offscreen `smoke_hillclimb.py` (drives
+  288 m flat out to a head-first crash, same twice), `smoke_world.py`, `smoke_gravity_lab.py`.
+  Not run: the rest of `smoke.py`, windowed play, Android.
+- next: tuning by hand (the user plays it); step 6 (standing air torque) only if play wants it.
+
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable
   `mac` peer bundles, ad-hoc signs, installs, launches and screenshots. No Xcode project.

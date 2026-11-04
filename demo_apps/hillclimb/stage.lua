@@ -7,7 +7,7 @@ local S = {}
 local STEP = 50                   -- units between ground points (0.5 m)
 local LENGTH = U.length(1000)     -- 1 km of road
 local FLAT = U.length(15)         -- a flat start
-local MAX_SLOPE = 32              -- degrees, no steeper anywhere
+local MAX_SLOPE = 40              -- degrees, no steeper anywhere
 local CHASSIS_CLEAR = 98          -- chassis top above the ground at the start (wheel bottoms 94 below it)
 
 -- Park–Miller: exact in doubles (products stay under 2^53) and in Lua integers.
@@ -25,9 +25,11 @@ function S.build(seed)
 	local function target(x)
 		if x < FLAT then return 0 end
 		local d = x - FLAT
-		local hard = 0.35 + 0.65 * math.min(1, d / (LENGTH * 0.6))
-		local wave = 160 * math.sin(d / 1100 + phase[1]) + 70 * math.sin(d / 430 + phase[2])
-			+ 22 * math.sin(d / 170 + phase[3])
+		-- Gentle at first, then crests that throw a car flat out into the air and climbs
+		-- steep enough to stand it on its tail.
+		local hard = 0.4 + 1.1 * math.min(1, d / (LENGTH * 0.5))
+		local wave = 220 * math.sin(d / 1000 + phase[1]) + 110 * math.sin(d / 380 + phase[2])
+			+ 40 * math.sin(d / 150 + phase[3])
 		local ramp = math.min(1, d / U.length(20)) -- ease in from the flat
 		return ramp * (hard * wave - d * 0.03)   -- and climb overall (−y is up)
 	end

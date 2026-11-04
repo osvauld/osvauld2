@@ -2866,6 +2866,24 @@ fn get_answers_one_entity_as_the_dump_does() {
 }
 
 #[test]
+fn get_after_a_zone_is_despawned_does_not_name_the_gone_zone() {
+    // The real-path smoke found it: a coin taken (despawned) while the car was in it, then
+    // `get` before the next step looked up the gone zone's name and panicked the app thread.
+    let d = drawing();
+    let ball = || EntitySpec { loose: Some(DEAD), ..solid("ball", (0.0, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let coin = || EntitySpec { sensor: Some(Collider { shape: Shape::Circle(20.0), at: (0.0, 0.0) }), ..spec("coin", (4.0, 4.0), &d) };
+    let mut world = World2d::default();
+    world.reconcile(vec![ball(), coin()]).unwrap();
+    world.set("ball", Set { velocity: Some((1.0, 0.0)), ..Set::default() }).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.1);
+    assert_eq!(world.get("ball").unwrap().zones, ["coin"], "in the coin");
+    world.reconcile(vec![ball()]).unwrap();
+    assert_eq!(world.get("ball").unwrap().zones, Vec::<String>::new(), "the coin is gone at once");
+    assert_eq!(world.inspect()[0].zones, Vec::<String>::new());
+}
+
+#[test]
 fn a_line_is_kept_while_the_same_and_replaced_when_changed() {
     let d = drawing();
     let mut world = World2d::default();
@@ -3242,6 +3260,22 @@ fn braking_shortens_the_stop_until_the_wheels_lock_and_slide() {
     assert!(soft > 2.0 * hard, "harder braking stops sooner: {soft} vs {hard}");
     assert!((hard - 510.0).abs() < 510.0 * 0.15, "past locking it slides v²/2μg: {hard}");
     assert!((locked - hard).abs() < hard * 0.05, "and more brake no longer helps: {locked} vs {hard}");
+}
+
+#[test]
+fn a_motor_wakes_a_sleeping_cart_and_the_world_asks_for_the_clock() {
+    // The real-path smoke found it: asleep, nothing asks for ticks, so a pedal did nothing.
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 6.0);
+    assert!(!world.needs_ticks(), "settled, the cart sleeps and the world rests");
+    let go = Motor { speed: 720.0, torque: 2e5 };
+    cart.drive(&mut world, Some(go), Some(go));
+    assert!(world.needs_ticks(), "a new motor needs the clock");
+    let x = entity(&world, "chassis").pos.0;
+    run(&mut world, &mut clock, 1.0);
+    assert!(entity(&world, "chassis").pos.0 > x + 50.0, "and the cart drives off");
 }
 
 #[test]

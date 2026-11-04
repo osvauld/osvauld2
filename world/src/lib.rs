@@ -1291,6 +1291,8 @@ impl World2d {
                     if old.spec.motor != m.spec.motor {
                         self.physics.drive(old.handle, m.spec.motor, m.spec.b.is_none());
                         old.spec.motor = m.spec.motor;
+                        let ends = [Some(m.spec.a.clone()), m.spec.b.clone()];
+                        self.stir(ends.iter().flatten());
                     }
                     continue;
                 }
@@ -1298,9 +1300,26 @@ impl World2d {
                 self.physics.unjoin(old.handle);
             }
             let handle = self.physics.join(m.a.0, m.a.1, m.b.0, m.b.1, m.spec.kind, m.spec.contacts, m.spec.motor);
+            if m.spec.motor.is_some() {
+                let ends = [Some(m.spec.a.clone()), m.spec.b.clone()];
+                self.stir(ends.iter().flatten());
+            }
             self.joints.insert(id, Joined { spec: m.spec, handle, bodies });
         }
         Ok(())
+    }
+
+    /// Marks these loose entities as moving: Rapier has woken them, and a world all asleep asks
+    /// for no frames, so without this a motor on a resting car would never run.
+    fn stir<'a>(&mut self, ids: impl Iterator<Item = &'a String>) {
+        for id in ids {
+            if let Some(&entity) = self.by_id.get(id)
+                && let Some(mut s) = self.ecs.get_mut::<Solid>(entity)
+                && s.loose.is_some()
+            {
+                s.sliding = true;
+            }
+        }
     }
 
     /// Takes hold of a loose thing: each step it is driven toward `to`, so what it meets still
@@ -1685,9 +1704,10 @@ impl World2d {
             Some(s) if s.loose.is_some() => self.physics.turn(s.body).1,
             _ => 0.0,
         };
+        // `inside` keeps a despawned zone until the next step reports the leave; it is not one.
         let mut zones: Vec<String> = (self.inside.iter())
             .filter(|(_, who)| *who == entity)
-            .map(|&(zone, _)| name(zone))
+            .filter_map(|&(zone, _)| self.ecs.get::<Name>(zone).map(|n| n.0.clone()))
             .collect();
         zones.sort();
         EntityInspection {
