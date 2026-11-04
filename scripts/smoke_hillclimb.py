@@ -147,6 +147,14 @@ def drive(shots=False):
         assert world is not None and abs(ents["chassis"]["pos"][0] - start_x) < 5, ents["chassis"]
         assert g.number(tree, "distance") == 0 and by_id(tree, "over") is None
         g.quiet()
+
+        # The road's left end is a wall: reversing from the start stops there, it doesn't fall off.
+        start_y = ents["chassis"]["pos"][1]
+        g.hold("brake", 600)
+        ents, world, tree = g.look()
+        c = ents["chassis"]
+        assert c["pos"][0] > -150 and abs(c["pos"][1] - start_y) < 300, ("stopped by the wall", c)
+        g.quiet()
         return ended["why"], final
 
 

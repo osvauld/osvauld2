@@ -17,7 +17,15 @@ local SEED = 7
 
 local car = V.check(V.car)
 local stage = Stage.build(SEED)
-local looks = Art.build(Setup.sizes(car), stage)
+local function mounts()
+	local axles = {}
+	for _, w in ipairs(car.wheels) do
+		local at = U.point(w.at)
+		table.insert(axles, { at[1], at[2], r = U.length(w.radius) })
+	end
+	return { axles = axles, neck = U.point(car.driver.neck) }
+end
+local looks = Art.build(Setup.sizes(car), stage, mounts())
 local controls = Controls.new()
 
 local game = { n = 0 }
@@ -38,6 +46,11 @@ local function world_id() return "stage" .. game.n end
 local GROUND = {
 	id = "ground", pos = looks.ground_at, drawing = looks.ground,
 	collider = { line = looks.ground_line }, group = "ground",
+}
+local BACKDROP = { id = "backdrop", pos = looks.backdrop_at, drawing = looks.backdrop }
+local CLIFF = {
+	id = "cliff", pos = looks.cliff_at, drawing = looks.cliff,
+	collider = { rect = Art.CLIFF }, group = "ground",
 }
 
 -- The run's clock is the frame clock (virtual offscreen): fuel and the end rules advance on it.
@@ -113,7 +126,7 @@ return function()
 		joints = Setup.joints(car, Drive.motors(car, pedals, run)),
 		on_hit = function(e) run:hit(e) end,
 		on_zone = function(e) run:zone(e) end,
-		GROUND,
+		BACKDROP, GROUND, CLIFF,
 	}
 	for _, item in ipairs(run:items()) do
 		local r = Art.PICKUP_R[item.kind]
