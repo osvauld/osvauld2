@@ -61,6 +61,12 @@ pub enum CourierError {
     BadSignature,
     #[error("message larger than a channel allows")]
     TooLarge,
+    #[error("the app's manifest does not declare that channel")]
+    UndeclaredChannel,
+    #[error("may not send on that channel")]
+    NoSend,
+    #[error("message names another device or space than its session")]
+    WrongDevice,
     // Also raised when a chain roots somewhere other than the authority the caller expected,
     // which since attestations exist is no longer always the node.
     #[error("identity did not match the one expected")]

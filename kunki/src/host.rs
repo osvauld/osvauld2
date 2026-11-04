@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use courier::invite::InviteClaimHello;
 use courier::link::HostAddr;
 use courier::publish::{PublishedItem, PublishedWorkspace};
-use courier::session::{DocState, Frame, HostEntry};
+use courier::session::{DocState, Frame, HostEntry, NetFrame};
 use courier::subscribe::SubscribeHello;
 use courier::sync::{SyncHello, SyncLayer, SyncReply};
 use courier::token::{Scope, Token};
@@ -30,6 +30,8 @@ use vault::Vault;
 use crate::NodeError;
 use crate::admin::Admin;
 use crate::push::{Push, Pusher};
+
+pub mod relay;
 
 /// One merge, answered wherever the process keeps the doc.
 pub type SyncFuture = Pin<Box<dyn Future<Output = Result<SyncReply, String>> + Send>>;
@@ -371,7 +373,24 @@ async fn serve_conn<S: Sink>(conn: Connection, ctx: HostCtx<S>, codes: Arc<Mutex
                         }
                     }
                 },
-                _ => refuse(send, "a stream starts with Hello or Fetch").await,
+                Frame::NetHello {
+                    attestation,
+                    ws_id,
+                    token,
+                } => match ctx.sink.admin_for(&ws_id) {
+                    None => refuse(send, "refused: not hosting this space").await,
+                    Some(admin) => {
+                        let now = ctx.sink.now_secs();
+                        match admit(&admin, &ws_id, remote, &attestation, Some(token), None, now) {
+                            Ok(admitted) => {
+                                let stream = NetStream { admin, admitted, ws_id, device: remote, attestation };
+                                net_session(&ctx, stream, send, frames).await
+                            }
+                            Err(reason) => refuse(send, &reason).await,
+                        }
+                    }
+                },
+                _ => refuse(send, "a stream starts with Hello, NetHello or Fetch").await,
             };
             if let Err(e) = result {
                 eprintln!("host: stream ended: {e}");
@@ -770,6 +789,70 @@ async fn session<S: Sink>(
     }
     .await;
     sessions().remove(&ws_id, sid);
+    result
+}
+
+/// An admitted channel stream: who, on which space, from which device.
+struct NetStream {
+    admin: Admin,
+    admitted: Admitted,
+    ws_id: String,
+    device: [u8; 32],
+    attestation: String,
+}
+
+/// A channel stream (`courier::session` `NetHello`): items opened and closed, each message
+/// judged by the relay and passed on unread. Ends by leaving every item it was here on.
+async fn net_session<S: Sink>(
+    ctx: &HostCtx<S>,
+    stream: NetStream,
+    mut send: SendStream,
+    mut frames: FrameBuf,
+) -> Result<(), String> {
+    let NetStream { admin, admitted, ws_id, device, attestation } = stream;
+    let welcome = Frame::Welcome { token: None, docs: Vec::new() };
+    send_frame(&mut send, &welcome, MAX_FRAME).await.map_err(|e| e.to_string())?;
+    let sid = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    let (tx, mut rx) = unbounded_channel::<NetFrame>();
+    let nets = relay::nets();
+    let result = async {
+        loop {
+            tokio::select! {
+                incoming = frames.recv::<NetFrame>(MAX_FRAME) => match incoming {
+                    Ok(Some(NetFrame::Open { item_id })) => {
+                        let now = ctx.sink.now_secs();
+                        match admin.net_rules(&admitted.did, &admitted.token, &ws_id, &item_id, now) {
+                            Ok(rules) => nets.open(&ws_id, &item_id, relay::Peer {
+                                sid,
+                                device,
+                                attestation: attestation.clone(),
+                                tx: tx.clone(),
+                                rules: Arc::new(rules),
+                            }),
+                            Err(e) => eprintln!("host: net: open {item_id}: {e}"),
+                        }
+                    }
+                    Ok(Some(NetFrame::Close { item_id })) => nets.close(&ws_id, &item_id, sid),
+                    Ok(Some(NetFrame::Msg(sealed))) => {
+                        match nets.judge(&sealed, sid, device, &ws_id, ctx.sink.now_ms()) {
+                            Ok(env) => nets.relay(&ws_id, &env.item, sid, &sealed),
+                            Err(e) => eprintln!("host: {e}"),
+                        }
+                    }
+                    // `Here`/`Gone` are the host's to send.
+                    Ok(Some(_)) => {}
+                    Ok(None) => return Ok(()),
+                    Err(e) => return Err(e.to_string()),
+                },
+                relay = rx.recv() => match relay {
+                    Some(frame) => send_frame(&mut send, &frame, MAX_FRAME).await.map_err(|e| e.to_string())?,
+                    None => return Ok(()),
+                },
+            }
+        }
+    }
+    .await;
+    nets.close_all(sid);
     result
 }
 

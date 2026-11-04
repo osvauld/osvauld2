@@ -6,8 +6,9 @@
 //! a DID, and attestations are DID-signed, so a host cannot invent that either. Transport-free
 //! like the rest of the crate: [`seal`] takes the signing as a closure, which keeps iroh out.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
+use manifest::{Channel, Manifest, Who};
 use serde::{Deserialize, Serialize};
 
 use crate::{CourierError, Result};
@@ -74,6 +75,66 @@ impl Seen {
                 self.0.insert(key, env.seq);
                 true
             }
+        }
+    }
+}
+
+/// Whether the session that proved `device` on space `ws`, holding `roles` on the item, may send
+/// `env`: the envelope names that device and space, the channel is declared, `send` admits one
+/// of the roles, and the body fits the channel's `size`. A channel with no `send` admits every
+/// member — getting this far proved membership. `members(...)` and DID variables admit nobody
+/// here: a channel has no path to bind them, and the manifest parser refuses the variable form.
+pub fn may_send<'m>(
+    env: &Envelope,
+    device: [u8; 32],
+    ws: &str,
+    manifest: &'m Manifest,
+    roles: &BTreeSet<String>,
+) -> Result<&'m Channel> {
+    if env.from_device != device || env.ws != ws {
+        return Err(CourierError::WrongDevice);
+    }
+    let ch = manifest
+        .channels
+        .iter()
+        .find(|c| c.name == env.channel)
+        .ok_or(CourierError::UndeclaredChannel)?;
+    let admitted = ch.send.is_empty()
+        || ch.send.iter().any(|who| match who {
+            Who::Role(r) => roles.iter().any(|held| manifest.satisfies(held, r)),
+            Who::Var(_) | Who::Node | Who::Members(_) => false,
+        });
+    if !admitted {
+        return Err(CourierError::NoSend);
+    }
+    if ch.size_bytes.is_some_and(|max| env.body.len() > max as usize) {
+        return Err(CourierError::TooLarge);
+    }
+    Ok(ch)
+}
+
+/// Messages per second a channel without `rate` gets: a cap still, so one app cannot flood a
+/// host. Twice the 30 Hz input rate a lockstep match sends at.
+pub const DEFAULT_RATE: u32 = 60;
+
+/// A token bucket per sender, item and channel: up to a second's worth in a burst, refilled
+/// continuously at the channel's rate.
+#[derive(Debug, Default)]
+pub struct Rate(HashMap<([u8; 32], String, String), (f64, u64)>);
+
+impl Rate {
+    pub fn allow(&mut self, env: &Envelope, per_sec: Option<u32>, now_ms: u64) -> bool {
+        let cap = f64::from(per_sec.unwrap_or(DEFAULT_RATE));
+        let key = (env.from_device, env.item.clone(), env.channel.clone());
+        let (tokens, last) = self.0.entry(key).or_insert((cap, now_ms));
+        let refill = now_ms.saturating_sub(*last) as f64 * cap / 1000.0;
+        *tokens = (*tokens + refill).min(cap);
+        *last = now_ms;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
         }
     }
 }

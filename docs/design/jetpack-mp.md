@@ -24,8 +24,8 @@ the virtual clock makes every frame number exact. Each test screenshots every pe
 | # | scenario | proves | step |
 |---|---|---|---|
 | M1 | A, B, C open one app in A's space. A sends on a declared channel; B and C receive it with `from` = A within 3 frames. No vault entry or doc changes on any peer or the host. An undeclared channel is an error in A's console | `net` channel, ephemeral | 4 |
-| M2 | A sends faster than the manifest's rate; B receives at most the cap; A's console says `net: over rate` | host-side rate cap | 3 |
-| M3 | B and C show A in `net.peers()`; C's shell is killed; A and B drop C within 2 s | presence | 3 |
+| M2 | A sends faster than the manifest's rate; B receives at most the cap; A's console says `net: over rate` | host-side rate cap | 4 |
+| M3 | B and C show A in `net.peers()`; C's shell is killed; A and B drop C within 2 s | presence | 4 |
 | M4 | `demo_apps/mp_dots` (a `net.match` with no world): 10 s of scripted inputs on A and B; state hash equal on A, B, C at every 1 s checkpoint | `net.match` convergence | 5 |
 | M5 | M4 with B's link delayed 120 ms (`OSVAULD_NET_DELAY_MS`): B's own dot moves on the frame of B's input; hashes still equal | rollback hides latency | 5 |
 | M6 | Hockey as a two-player `net.match`: 20 s of play, the puck's path and the hashes equal on both peers, with and without the delay | world rollback | 6 |
@@ -162,7 +162,21 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
    update); the host — shell or kunki — relays to sessions on the same space with the item open
    and to its own app, checking membership and rate, never reading `body`; presence join/leave.
    M2, M3.
-4. **Lua `net`**: `net.send`, `net.on`, `net.peers` in app_host, shell2 plumbing. M1.
+   *As built 2026-11-04 (host half):* `Frame::NetHello { attestation, ws_id, token }` opens the
+   second stream, admitted like `Hello` with a held token; then `NetFrame`s — `Open`/`Close`
+   an item, `Msg(Sealed)` both ways, `Here { item, attestation }`/`Gone { item, device }` for
+   presence. `kunki::host::relay::Nets` keeps who is here on which item and relays only to them;
+   each message passes `Nets::judge` — signature, item open on that stream, `courier::net::
+   may_send` (device and space match the session, channel declared, `send` admits a role,
+   `size`), `Seen`, then `Rate` (token bucket, a second's burst; no `rate` means
+   `DEFAULT_RATE` = 60/s, not unlimited). Rules are read once per `Open` (`Admin::net_rules`).
+   A channel with no `send` admits every member. Refusals are logged on the host, not told to
+   the sender — the sender's own over-rate message comes from its local check (step 4).
+   **M2 and M3 move to step 4**: they need Lua `net` to observe, and the member dial and
+   the host's own app as a `Peer` are shell plumbing, also step 4.
+4. **Lua `net`**: `net.send`, `net.on`, `net.peers` in app_host, shell2 plumbing (member dials
+   the second stream after `Welcome`; the host shell's own app joins `Nets` as a peer). M1,
+   M2, M3.
 5. **`net.match`** without worlds, proved by `demo_apps/mp_dots`. M4, M5.
 6. **World under a match**: Rapier `enhanced-determinism`, `driven`, save/restore/hash, moments
    as events; hockey as a two-player match. M6.

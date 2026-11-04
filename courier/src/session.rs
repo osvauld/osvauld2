@@ -15,7 +15,14 @@
 //!
 //! host   → owner  HostHere { addr }                        an appointed host, after its Welcome
 //! owner  → host   Ledger { entries }                       the whole ledger, then on every change
+//!
+//! member → host   NetHello { attestation, ws_id, token }   first frame of a second stream
+//! host   → member Welcome { .. } | Refused { reason }      then the stream carries `NetFrame`s
 //! ```
+//!
+//! The second stream is app channel traffic (`jetpack-mp.md` §6 step 3): its own QUIC stream so
+//! game inputs never queue behind a large doc update. Admitted like `Hello`, with a token held
+//! (a claim is the first session's business), and judged message by message ([`NetFrame`]).
 //!
 //! `Update` reuses [`SyncHello`](crate::sync::SyncHello)'s meaning for `vv` and `update`, and
 //! `Ack` is [`SyncAck`](crate::sync::SyncAck) without the request id — a session is ordered, so
@@ -31,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::invite::{InviteClaimHello, InviteTicket};
 use crate::ledger;
 use crate::link::HostAddr;
+use crate::net::Sealed;
 use crate::publish::{PublishedItem, PublishedWorkspace};
 use crate::sync::{Rejected, SyncLayer};
 use crate::token::Token;
@@ -121,4 +129,24 @@ pub enum Frame {
     HostHere {
         addr: HostAddr,
     },
+    NetHello {
+        attestation: String,
+        ws_id: String,
+        token: Token,
+    },
+}
+
+/// The channel stream after its `Welcome`. Presence is per item: a device is "here" on an item
+/// while it has the app open, and only those devices hear its messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetFrame {
+    /// member → host: this device opened the item's app; the host checks it may.
+    Open { item_id: String },
+    Close { item_id: String },
+    /// Both ways: one message, relayed unread to every other device here on its item.
+    Msg(Sealed),
+    /// host → member: a device here on the item, its attestation so the member checks the
+    /// device's DID itself. Sent for each one already here on `Open`, then as each arrives.
+    Here { item_id: String, attestation: String },
+    Gone { item_id: String, device: [u8; 32] },
 }
