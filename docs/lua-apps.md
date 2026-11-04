@@ -1350,6 +1350,13 @@ measuring how long something took: it follows the system clock, so it can jump, 
 backwards. Anything timing a gesture or an animation wants the monotonic clock instead, which
 reaches Lua as `e.t` on `on_drag` and `e.elapsed` on `on_frame`.
 
+`math` gives the same bits on every device — a laptop and a phone running the same code with the
+same numbers get the same answer, which is what lets players' copies of a game agree. Outside
+that promise: the `^` operator (write `x * x` or `math.pow(x, y)` where it must agree), and
+`string.format` of floats (keep game state as numbers, not formatted strings). `math.noise` and
+the `vector` library are refused (build noise from `math.random` with a seed; use plain numbers).
+Iterate arrays, not `pairs`, where order changes the result.
+
 Errors are for reading, not for fearing:
 
 - An unknown prop or a value of the wrong type is an error at that element — a red box in

@@ -8,6 +8,7 @@ mod crdt;
 mod gfx;
 pub mod host;
 mod budget;
+mod dmath;
 pub mod index;
 mod modules;
 mod props;
@@ -1595,6 +1596,7 @@ fn shadow_os(vm: &Lua) -> mlua::Result<()> {
 
 fn test_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
+    dmath::install(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
     let budget = budget::install(&vm, budget::Policy::app())?;
@@ -1632,6 +1634,7 @@ fn install_test_bindings(vm: &Lua) -> mlua::Result<()> {
 
 pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
+    dmath::install(&vm)?;
     let now_fn = vm.create_function(|_, ()| wall_clock())?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;

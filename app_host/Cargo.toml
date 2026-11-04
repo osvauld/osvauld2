@@ -18,6 +18,9 @@ world = { path = "../world" }
 csscolorparser = "0.8.3"
 glam = "0.30"
 uuid = { version = "1.24.0", features = ["v4"] }
+# Software only: the same bits on every device is the point (`dmath.rs`). `force-soft-floats`, since
+# another crate's default features turn `arch` back on.
+libm = { version = "0.2", features = ["force-soft-floats"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

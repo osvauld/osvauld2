@@ -1,0 +1,6 @@
+[env]
+# Luau's VM does float `%` as `a - floor(a / b) * b`; clang and gcc fuse that into one rounding on
+# arm64 and not on x86_64, so a phone and a laptop disagree (app_host `float_mod_is_not_fused`,
+# docs/design/jetpack-mp.md §4). cc appends this to any target-specific CXXFLAGS. Not forced: an
+# exported CXXFLAGS replaces it, and that test then fails on arm64.
+CXXFLAGS = "-ffp-contract=off"

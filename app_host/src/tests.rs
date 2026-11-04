@@ -7,6 +7,7 @@ mod camera;
 mod host;
 mod entry;
 mod limits;
+mod determinism;
 mod index;
 mod reload;
 mod require;
