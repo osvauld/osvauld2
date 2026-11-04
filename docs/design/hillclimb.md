@@ -186,6 +186,15 @@ Lessons so far:
 - **Step 3, sleep vs suspension:** an overdamped spring (ζ ≈ 1.4) fell asleep ±10% short of its
   rest, on whichever side it came from. Suspension sag tests and tuning must stay near ζ ≤ 1,
   or the car's sleep thresholds must change. Watch for this in W-S1.
+- **Step 4, the wheel joint:** one `GenericJoint`: `LIN_Y` locked, `LinX` along the suspension
+  axis (`local_axis1` = `local_axis2` = the axis) with limits and a force-based position motor
+  as the spring, angle free. Body 1 is the chassis. Measured: sag m·g/k within 5% at ζ 0.5. The
+  wheel stays within 0.05 u of its axis landing at 8 m/s sideways (so linear constraints follow
+  the chassis frame, not the spinning wheel's). The bump stop gives 2.1 u at a 10 m/s landing
+  (soft limit). Same run twice: bit-identical.
+- **Step 4, testing damping:** a landing starts the spring with speed, so even critical damping
+  overshoots once. Compare ζ levels instead (0.1 → 9.7, 0.4 → 5.6, 1.0 → 0.1 u). Keep the swing
+  inside the travel, or the bump stop decides, not the damper.
 
 - Where the vehicle setup lives, and which fields mapped cleanly to Rapier versus needed
   conversion.

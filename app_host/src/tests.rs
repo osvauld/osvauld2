@@ -6431,25 +6431,29 @@ fn joints_are_described_and_checked_strictly() {
             "{HERO} return ui.world({{ id = 'room', width = 400, height = 300, gravity = {{ 0, 900 }}, joints = {joints}, \
                {{ id = 'plank', pos = {{ 100, 100 }}, drawing = hero, collider = {{ rect = {{ 100, 8 }} }}, \
                   loose = {{ grip = 0.5 }} }}, \
-               {{ id = 'ball', pos = {{ 250, 100 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{}} }} }})"
+               {{ id = 'ball', pos = {{ 250, 100 }}, drawing = hero, collider = {{ circle = 4 }}, loose = {{}} }}, \
+               {{ id = 'tyre', pos = {{ 106, 116 }}, drawing = hero, collider = {{ circle = 4, at = {{ 4, 4 }} }}, \
+                  loose = {{ mass = 10, grip = 1 }} }} }})"
         )
     };
     let fine = "{ { id = 'hinge', kind = 'pin', a = 'plank', a_at = { 0, 4 }, b_at = { 100, 104 }, limits = { -90, 90 } }, \
                   { id = 'string', kind = 'rope', a = 'ball', a_at = { 4, 4 }, b = 'plank', b_at = { 100, 4 }, length = 60 }, \
                   { id = 'bob', kind = 'spring', a = 'ball', a_at = { 4, 4 }, b_at = { 300, 50 }, \
-                    length = 40, stiffness = 100, damping = 2, contacts = true } }";
+                    length = 40, stiffness = 100, damping = 2, contacts = true }, \
+                  { id = 'axle', kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, \
+                    axis = { 0, 1 }, stiffness = 5000, damping = 300, travel = { 15, 20 } } }";
     walk_world(&lua, &worlds, &room(fine)).unwrap();
-    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+    assert_eq!(worlds.borrow()["room"].joint_count(), 4);
     // The same description each frame keeps them.
     walk_world(&lua, &worlds, &room(fine)).unwrap();
-    assert_eq!(worlds.borrow()["room"].joint_count(), 3);
+    assert_eq!(worlds.borrow()["room"].joint_count(), 4);
 
     let cases = [
         ("7", "world joints must be a list"),
         ("{ 7 }", "joint 1 must be a table"),
         ("{ { kind = 'pin' } }", "joint 1 needs id"),
         ("{ { id = 'j' } }", "joint \"j\" needs kind"),
-        ("{ { id = 'j', kind = 'chain' } }", "kind must be \"pin\", \"rope\" or \"spring\", got \"chain\""),
+        ("{ { id = 'j', kind = 'chain' } }", "kind must be \"pin\", \"rope\", \"spring\" or \"wheel\", got \"chain\""),
         ("{ { id = 'j', kind = 'rope', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a"),
         ("{ { id = 'j', kind = 'rope', a = 'ball', b_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs a_at"),
         ("{ { id = 'j', kind = 'rope', a = 'ball', a_at = { 0, 0 }, length = 5 } }", "joint \"j\" needs b_at"),
@@ -6461,11 +6465,23 @@ fn joints_are_described_and_checked_strictly() {
         ("{ { id = 'j', kind = 'pin', a = 'ball', a_at = { 4, 4 }, b_at = { 0, 0 } } }", "a pin needs grip on \"ball\""),
         ("{ { id = 'j', kind = 'rope', a = 'ghost', a_at = { 0, 0 }, b_at = { 0, 0 }, length = 5 } }", "there is no such entity \"ghost\""),
         ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, limits = { 5 } } }", "limits needs low and high"),
+        ("{ { id = 'j', kind = 'pin', a = 'plank', a_at = { 0, 0 }, b_at = { 0, 0 }, axis = { 0, 1 } } }", "axis is for wheel, not pin"),
     ];
+    let wheel = "kind = 'wheel', a = 'plank', a_at = { 10, 20 }, b = 'tyre', b_at = { 4, 4 }, stiffness = 1, damping = 1";
+    let wheels = [
+        ("axis = { 0, 1 }", "joint \"j\" needs travel"),
+        ("travel = { 1, 1 }", "joint \"j\" needs axis"),
+        ("axis = { 0, 1 }, travel = { 1 }", "travel needs up and down"),
+        ("axis = { 0 }, travel = { 1, 1 }", "axis needs x and y"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, length = 3", "length is for rope and spring, not wheel"),
+        ("axis = { 0, 1 }, travel = { 1, 1 }, limits = { 0, 1 }", "limits is for pin, not wheel"),
+    ];
+    let wheels = wheels.map(|(more, wanted)| (format!("{{ {{ id = 'j', {wheel}, {more} }} }}"), wanted));
+    let cases = cases.into_iter().map(|(j, w)| (j.to_string(), w)).chain(wheels);
     for (joints, wanted) in cases {
-        let err = walk_world(&lua, &worlds, &room(joints)).unwrap_err().to_string();
+        let err = walk_world(&lua, &worlds, &room(&joints)).unwrap_err().to_string();
         assert!(err.contains(wanted), "{joints}: wanted {wanted:?}, got {err}");
-        assert_eq!(worlds.borrow()["room"].joint_count(), 3, "{wanted}: the last good joints kept");
+        assert_eq!(worlds.borrow()["room"].joint_count(), 4, "{wanted}: the last good joints kept");
     }
     walk_world(&lua, &worlds, &room("{}")).unwrap();
     assert_eq!(worlds.borrow()["room"].joint_count(), 0, "empty or left out: none");

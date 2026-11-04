@@ -1216,6 +1216,23 @@ impl World2d {
                 JointKind::Pin { limits: Some((lo, hi)) } if !(lo.is_finite() && hi.is_finite() && lo < hi) => {
                     return Err(bad(format!("limits must be low then high, got {lo} and {hi}")));
                 }
+                JointKind::Wheel { axis: (ax, ay), stiffness, damping, travel: (up, down) } => {
+                    if !(ax.is_finite() && ay.is_finite() && ax.hypot(ay) > 1e-9) {
+                        return Err(bad(format!("axis must be a direction, not {ax}, {ay}")));
+                    }
+                    if !(stiffness.is_finite() && stiffness >= 0.0) {
+                        return Err(bad(format!("stiffness must be 0 or more, got {stiffness}")));
+                    }
+                    if !(damping.is_finite() && damping >= 0.0) {
+                        return Err(bad(format!("damping must be 0 or more, got {damping}")));
+                    }
+                    if !(up.is_finite() && up >= 0.0 && down.is_finite() && down >= 0.0) {
+                        return Err(bad(format!("travel must be up and down, each 0 or more, got {up} and {down}")));
+                    }
+                    if spec.b.is_none() {
+                        return Err(bad("a wheel joins two things: a = the body, b = the wheel".into()));
+                    }
+                }
                 _ => {}
             }
             // What an end is: its body, where the anchor sits in the body's frame, whether it moves.
@@ -1237,11 +1254,12 @@ impl World2d {
             if a.2.is_none() && b.is_none_or(|b| b.2.is_none()) {
                 return Err(bad("it joins nothing that moves: one end must be loose".into()));
             }
-            if matches!(spec.kind, JointKind::Pin { .. }) {
+            if matches!(spec.kind, JointKind::Pin { .. } | JointKind::Wheel { .. }) {
+                let what = if matches!(spec.kind, JointKind::Pin { .. }) { "pin" } else { "wheel" };
                 let ends = [(&spec.a, a.2)].into_iter().chain(spec.b.as_ref().zip(b.map(|b| b.2)));
                 for (name, loose) in ends {
                     if loose.is_some_and(|m| m.grip.is_none()) {
-                        return Err(bad(format!("a pin needs grip on {name:?}: nothing else turns")));
+                        return Err(bad(format!("a {what} needs grip on {name:?}: nothing else turns")));
                     }
                 }
             }

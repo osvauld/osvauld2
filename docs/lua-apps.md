@@ -540,6 +540,13 @@ ui.world({
     it cannot turn.
   - `"rope"`: never farther apart than `length`, free to come closer — a chain is ropes between links.
   - `"spring"`: pulls toward `length` apart; needs `stiffness` and `damping`.
+  - `"wheel"`: suspension. `a` is the body, `b` the wheel (both loose with `grip`). The wheel
+    turns freely about `b_at` and slides along `axis` (a direction in `a`'s drawing, `{ 0, 1 }`
+    is straight down) from `a_at`, sprung back toward `a_at` at `stiffness` with `damping`,
+    at most `travel = { up, down }` either way. It is rigid across the axis, so the wheel never
+    wobbles sideways. `a_at` is where the wheel's centre sits unloaded; at rest the body sags
+    `weight on the wheel · gravity / stiffness` toward it. Hit hard, a stop gives a unit or two
+    before it holds.
   - `contacts = true` lets the two bodies collide with each other (off by default); one end at
     least must be loose. A joint naming something not in the description is an error, and the
     previous joints stay.

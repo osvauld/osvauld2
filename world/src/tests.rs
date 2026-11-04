@@ -2962,3 +2962,163 @@ fn bad_mass_or_center_is_refused() {
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
 }
+
+// ── wheel joint ────────────────────────────────────────────────────────────────────────────────
+
+/// A test cart: a 100 × 20 chassis of 100 kg on two 10 kg wheels of radius 10, sprung at
+/// `stiffness`/`damping` per wheel, `drop` above flat line ground at y 40. Unloaded, each
+/// wheel's centre is 30 below the chassis top (chassis-drawing point (10, 30) and (90, 30)), so
+/// with no drop the wheels just touch.
+struct Cart {
+    stiffness: f64,
+    damping: f64,
+    travel: (f64, f64),
+    drop: f64,
+}
+
+const CHASSIS_KG: f64 = 100.0;
+const MOUNTS: [(f64, f64); 2] = [(10.0, 30.0), (90.0, 30.0)];
+
+impl Cart {
+    fn world(&self) -> World2d {
+        let d = drawing();
+        let chassis = EntitySpec {
+            loose: Some(Material { mass: Some(CHASSIS_KG), ..GRIPPY }),
+            ..solid("chassis", (0.0, -self.drop), Shape::Rect(100.0, 20.0), (0.0, 0.0), &d)
+        };
+        let wheel = |id: &str, (x, y): (f64, f64)| EntitySpec {
+            loose: Some(Material { mass: Some(10.0), grip: Some(1.0), ..GRIPPY }),
+            ..solid(id, (x - 10.0, y - 10.0 - self.drop), Shape::Circle(10.0), (10.0, 10.0), &d)
+        };
+        let ground = solid("ground", (-1000.0, 40.0), line(&[(0.0, 0.0), (4000.0, 0.0)]), (0.0, 0.0), &d);
+        let mut world = World2d::default();
+        world.set_gravity((0.0, 981.0)).unwrap();
+        world.reconcile(vec![chassis, wheel("rear", MOUNTS[0]), wheel("front", MOUNTS[1]), ground]).unwrap();
+        let kind = JointKind::Wheel {
+            axis: (0.0, 1.0),
+            stiffness: self.stiffness,
+            damping: self.damping,
+            travel: self.travel,
+        };
+        let joints = [("rear", MOUNTS[0]), ("front", MOUNTS[1])]
+            .map(|(id, at)| joint(id, kind, "chassis", at, Some(id), (10.0, 10.0)));
+        world.set_joints(joints.to_vec()).unwrap();
+        world
+    }
+}
+
+/// Where `wheel`'s centre is in the chassis's own drawing frame, against its mount: (across the
+/// axis, along it — positive is extended, down).
+fn wheel_offset(world: &World2d, wheel: &str, mount: (f64, f64)) -> (f64, f64) {
+    let (c, w) = (entity(world, "chassis"), entity(world, wheel));
+    let centre = (c.pos.0 + 50.0, c.pos.1 + 10.0);
+    let (dx, dy) = (w.pos.0 + 10.0 - centre.0, w.pos.1 + 10.0 - centre.1);
+    let (s, co) = c.rot.to_radians().sin_cos();
+    // Into the chassis frame: rotate by −rot, then measure from the mount.
+    let (lx, ly) = (dx * co + dy * s, -dx * s + dy * co);
+    (lx - (mount.0 - 50.0), ly - (mount.1 - 10.0))
+}
+
+const CORNER_KG: f64 = CHASSIS_KG / 2.0;
+
+#[test]
+fn a_wheel_joint_sags_by_weight_over_stiffness_at_rest() {
+    let k = 5000.0;
+    let cart = Cart { stiffness: k, damping: 0.5 * 2.0 * (k * CORNER_KG).sqrt(), travel: (30.0, 30.0), drop: 0.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 4.0);
+    // Each spring carries half the chassis: m·g/k = 50 · 981 / 5000 = 9.81.
+    let want = CORNER_KG * 981.0 / k;
+    for (id, mount) in [("rear", MOUNTS[0]), ("front", MOUNTS[1])] {
+        let (_, along) = wheel_offset(&world, id, mount);
+        assert!((-along - want).abs() < want * 0.05, "{id} compressed {} for {want}", -along);
+    }
+    let c = entity(&world, "chassis");
+    assert!((c.pos.1 - want).abs() < want * 0.05 && c.rot.abs() < 0.5, "chassis down by the sag, level: {c:?}");
+}
+
+/// The chassis's lowest point after a drop, past where it finally rests: the overshoot.
+fn overshoot(zeta: f64) -> f64 {
+    let k = 5000.0;
+    // A 10-unit drop lands at 140 u/s: a swing of ~14 past a 9.8 sag, short of the 40-unit stop,
+    // so the spring and damper alone decide it.
+    let cart = Cart { stiffness: k, damping: zeta * 2.0 * (k * CORNER_KG).sqrt(), travel: (40.0, 40.0), drop: 10.0 };
+    let mut world = cart.world();
+    let mut clock = 0.0;
+    let mut lowest = f64::MIN;
+    for _ in 0..240 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        lowest = lowest.max(entity(&world, "chassis").pos.1);
+    }
+    lowest - entity(&world, "chassis").pos.1
+}
+
+#[test]
+fn damping_decides_how_far_a_landing_overshoots() {
+    // A landing starts the spring with speed, so even critical damping dives past rest once;
+    // what damping decides is how far.
+    let (light, medium, critical) = (overshoot(0.1), overshoot(0.4), overshoot(1.0));
+    assert!(light > medium && medium > critical, "more damping, less dive: {light} > {medium} > {critical}");
+    assert!(light > 2.0 * critical, "lightly damped dives well past: {light} vs {critical}");
+}
+
+#[test]
+fn a_wheel_stays_on_its_axis_and_inside_its_travel() {
+    let k = 5000.0;
+    let cart = Cart { stiffness: k, damping: 0.3 * 2.0 * (k * CORNER_KG).sqrt(), travel: (15.0, 20.0), drop: 500.0 };
+    let mut world = cart.world();
+    // Land moving fast sideways: a hard load across the axis.
+    world.set("chassis", Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    for id in ["rear", "front"] {
+        world.set(id, Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    }
+    let mut clock = 0.0;
+    let mut deepest = 0.0f64;
+    for _ in 0..180 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        for (id, mount) in [("rear", MOUNTS[0]), ("front", MOUNTS[1])] {
+            let (across, along) = wheel_offset(&world, id, mount);
+            deepest = deepest.min(along);
+            assert!(across.abs() < 0.5, "{id} drifted {across} off its axis");
+            assert!(along <= 21.0, "{id} out past its travel: {along}");
+        }
+    }
+    // Rapier's limit is a constraint the solver meets over a few steps: a 10 m/s landing pushes
+    // ~2 units past a 15-unit stop before it holds.
+    assert!(deepest >= -18.0, "compressed past its stop by more than 3: {deepest}");
+}
+
+#[test]
+fn the_same_cart_and_drop_run_the_same_twice() {
+    let run_once = || {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 80.0 };
+        let mut world = cart.world();
+        world.set("chassis", Set { velocity: Some((300.0, 0.0)), ..Set::default() }).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 20.0);
+        world.inspect().into_iter().map(|e| (e.id, e.pos, e.rot)).collect::<Vec<_>>()
+    };
+    assert_eq!(run_once(), run_once());
+}
+
+#[test]
+fn a_bad_wheel_joint_is_refused() {
+    let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0 };
+    let mut world = cart.world();
+    let wheel = |axis, stiffness, travel| {
+        let kind = JointKind::Wheel { axis, stiffness, damping: 1.0, travel };
+        vec![joint("rear", kind, "chassis", MOUNTS[0], Some("rear"), (10.0, 10.0))]
+    };
+    let cases = [
+        (wheel((0.0, 0.0), 1.0, (1.0, 1.0)), "axis must be a direction, not 0, 0"),
+        (wheel((f64::NAN, 1.0), 1.0, (1.0, 1.0)), "axis must be a direction"),
+        (wheel((0.0, 1.0), -1.0, (1.0, 1.0)), "stiffness must be 0 or more"),
+        (wheel((0.0, 1.0), 1.0, (-1.0, 1.0)), "travel must be up and down, each 0 or more"),
+        (vec![joint("w", JointKind::Wheel { axis: (0.0, 1.0), stiffness: 1.0, damping: 1.0, travel: (1.0, 1.0) }, "chassis", (0.0, 0.0), None, (0.0, 0.0))], "a wheel joins two things"),
+    ];
+    for (joints, wanted) in cases {
+        let err = world.set_joints(joints).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}

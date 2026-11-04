@@ -856,6 +856,7 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         let here = format!("{owner}: joint {id:?}");
         named_fields(&j, &here, &[
             "id", "kind", "a", "a_at", "b", "b_at", "limits", "length", "stiffness", "damping", "contacts",
+            "axis", "travel",
         ])?;
         let kind: String = need(&j, &here, "kind")?;
         let has = |field: &str| j.get::<Value>(field).map(|v| !v.is_nil());
@@ -866,8 +867,8 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
         let kind = match kind.as_str() {
             "pin" => {
                 only("length", "rope and spring, not pin")?;
-                only("stiffness", "spring, not pin")?;
-                only("damping", "spring, not pin")?;
+                only("stiffness", "spring and wheel, not pin")?;
+                only("damping", "spring and wheel, not pin")?;
                 let limits = match maybe_table(&j, &here, "limits")? {
                     Some(t) => {
                         if positional_len(&t, &format!("{here}.limits"))? != 2 {
@@ -881,8 +882,8 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
             }
             "rope" => {
                 only("limits", "pin, not rope")?;
-                only("stiffness", "spring, not rope")?;
-                only("damping", "spring, not rope")?;
+                only("stiffness", "spring and wheel, not rope")?;
+                only("damping", "spring and wheel, not rope")?;
                 world::JointKind::Rope { length: need(&j, &here, "length")? }
             }
             "spring" => {
@@ -893,12 +894,31 @@ pub(crate) fn joints(node: &Table, owner: &str) -> mlua::Result<Vec<world::Joint
                     damping: need(&j, &here, "damping")?,
                 }
             }
+            "wheel" => {
+                only("limits", "pin, not wheel")?;
+                only("length", "rope and spring, not wheel")?;
+                let axis = point(need(&j, &here, "axis")?, &format!("{here}.axis"))?;
+                let travel: Table = need(&j, &here, "travel")?;
+                if positional_len(&travel, &format!("{here}.travel"))? != 2 {
+                    return Err(Error::runtime(format!("{here}: travel needs up and down")));
+                }
+                world::JointKind::Wheel {
+                    axis: (axis.x, axis.y),
+                    stiffness: need(&j, &here, "stiffness")?,
+                    damping: need(&j, &here, "damping")?,
+                    travel: (travel.get(1)?, travel.get(2)?),
+                }
+            }
             other => {
                 return Err(Error::runtime(format!(
-                    "{here}: kind must be \"pin\", \"rope\" or \"spring\", got {other:?}"
+                    "{here}: kind must be \"pin\", \"rope\", \"spring\" or \"wheel\", got {other:?}"
                 )));
             }
         };
+        if !matches!(kind, world::JointKind::Wheel { .. }) {
+            only("axis", "wheel, not pin, rope or spring")?;
+            only("travel", "wheel, not pin, rope or spring")?;
+        }
         let a_at = point(need(&j, &here, "a_at")?, &format!("{here}.a_at"))?;
         let b_at = point(need(&j, &here, "b_at")?, &format!("{here}.b_at"))?;
         joints.push(world::JointSpec {

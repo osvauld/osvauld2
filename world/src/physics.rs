@@ -89,6 +89,10 @@ pub enum JointKind {
     Rope { length: f64 },
     /// A spring pulling the anchors to `length` apart.
     Spring { length: f64, stiffness: f64, damping: f64 },
+    /// Suspension: `b` turns freely about its anchor, which slides along `axis` (in `a`'s frame)
+    /// from `a`'s anchor, at most `travel.0` back (compressed) and `travel.1` out, sprung toward
+    /// `a`'s anchor at `stiffness` with `damping`. Held rigid across the axis.
+    Wheel { axis: (f64, f64), stiffness: f64, damping: f64, travel: (f64, f64) },
 }
 
 /// What a body Rapier moves is made of.
@@ -321,6 +325,21 @@ impl Physics {
                     .contacts_enabled(contacts)
                     .build()
                     .into()
+            }
+            JointKind::Wheel { axis, stiffness, damping, travel } => {
+                // The joint's X is the suspension axis; Y, across it, is locked; the angle is free.
+                // Force-based, so with masses in kg the stiffness is N/m.
+                let axis = v(axis).normalize();
+                GenericJointBuilder::new(JointAxesMask::LIN_Y)
+                    .local_anchor1(v(a_at))
+                    .local_anchor2(v(b_at))
+                    .local_axis1(axis)
+                    .local_axis2(axis)
+                    .limits(JointAxis::LinX, [-travel.0 as f32, travel.1 as f32])
+                    .motor_model(JointAxis::LinX, MotorModel::ForceBased)
+                    .motor_position(JointAxis::LinX, 0.0, stiffness as f32, damping as f32)
+                    .contacts_enabled(contacts)
+                    .build()
             }
         };
         self.world.insert_impulse_joint(a, b, joint)
