@@ -707,7 +707,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
-        "loose", "group", "blocks", "surface", "parallax",
+        "loose", "group", "blocks", "surface", "parallax", "emit",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -779,6 +779,41 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
                 return Err(Error::runtime(format!("{owner}.parallax must be a number or {{ x, y }}, got {what}")));
             }
         },
+        emit: match maybe_table(&spec, &owner, "emit")? {
+            Some(t) => Some(emit(&t, &format!("{owner}.emit"))?),
+            None => None,
+        },
+    })
+}
+
+/// `emit = { rate, life, color, … }`: rate, life and color are needed, the rest default (still,
+/// all round, radius 3, from the box's top-left, no gravity). The world checks the ranges.
+fn emit(t: &Table, owner: &str) -> mlua::Result<world::Emit> {
+    let fields = ["rate", "life", "color", "speed", "angle", "spread", "size", "grow", "at", "gravity"];
+    named_fields(t, owner, &fields)?;
+    let needed = |field: &str| {
+        maybe_number(t, owner, field)?.ok_or_else(|| Error::runtime(format!("{owner} needs {field}")))
+    };
+    let or = |field: &str, default: f64| Ok::<_, Error>(maybe_number(t, owner, field)?.unwrap_or(default));
+    let color: String = need(t, owner, "color")?;
+    let at = match maybe_table(t, owner, "at")? {
+        Some(p) => {
+            let p = point(p, &format!("{owner}.at"))?;
+            (p.x, p.y)
+        }
+        None => (0.0, 0.0),
+    };
+    Ok(world::Emit {
+        rate: needed("rate")?,
+        life: needed("life")?,
+        color: crate::parse_color(&color).map_err(|e| Error::runtime(format!("{owner}.color: {e}")))?,
+        speed: or("speed", 0.0)?,
+        angle: or("angle", 0.0)?,
+        spread: or("spread", 360.0)?,
+        size: or("size", 3.0)?,
+        grow: or("grow", 0.0)?,
+        at,
+        gravity: or("gravity", 0.0)?,
     })
 }
 

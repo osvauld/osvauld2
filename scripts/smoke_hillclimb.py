@@ -96,6 +96,7 @@ def drive(shots=False):
         compression = 62 - (rear["pos"][1] + 32 - c["pos"][1])
         assert abs(compression - 7.9) < 2.5, ("sag on the springs", compression)
         assert g.number(tree, "distance") == 0 and g.number(tree, "coins") == 0
+        assert c["particles"] == 0, ("S-9: no dust at rest", c["particles"])
         start_x = c["pos"][0]
         # L-K1 on the real path: the world's sky gradient, read from pixels at its top.
         # The world takes no pointer, so `rects` lacks it: it is the 470-tall box one gap (10)
@@ -110,7 +111,10 @@ def drive(shots=False):
             rpc.save_screenshot(g.item, SHOTS / "hillclimb_start.png")
 
         # S-2: the gas pedal, held by a real pointer, drives it off; the HUD and camera keep up.
-        g.hold("gas", 300)
+        # S-9: and the rear tyre throws dust while it does.
+        dusty = []
+        g.hold("gas", 300, watch=lambda ents, world, tree: dusty.append(ents["chassis"]["particles"]))
+        assert max(dusty) > 5, ("S-9: dust off the tyre under gas", dusty)
         ents, world, tree = g.look()
         c = ents["chassis"]
         assert c["pos"][0] > start_x + 1500, ("the gas drove it on", start_x, c)

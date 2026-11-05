@@ -951,7 +951,7 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
             "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
-            "attached": attached, "zones": e.zones, "clip": clip,
+            "attached": attached, "zones": e.zones, "clip": clip, "particles": e.particles,
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));

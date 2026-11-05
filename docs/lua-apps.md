@@ -530,6 +530,18 @@ ui.world({
   road climbs. Scenery has no body: a `collider`, `sensor`, `controller` or `attach` with it is
   an error. Without a camera it changes nothing. Draw order is still list order, so list far
   layers first.
+- **`emit = { rate, life, color, … }`** on an entity streams particles: dust, spray, sparks,
+  smoke. `rate` a second (0 stops new ones), `life` seconds each (they fade over it), `color`;
+  then `speed` (0), `angle` (degrees in the entity's frame, 0 = +x, 90 = down), `spread` (360),
+  `size` (radius, 3), `grow` (radius a second, 0), `at` (in the drawing box, `{0, 0}`),
+  `gravity` (+y down, 0; negative rises). Rust moves them each fixed step; no Lua runs per
+  particle. They leave from where the entity is and don't follow it after, so a moving car
+  leaves a trail. They are paint: they touch no body and the pointer goes through them; they
+  draw just under their entity. Describe `emit` from game state each view (dust only while the
+  gas is down); the stream is kept across views, and without `emit` the live ones finish. The
+  dump shows `particles`, the live count. Seeded from the world's step and the entity's id, so
+  the same run paints the same particles. At most 1024 alive per entity. A spinning wheel
+  would spray in circles, so emit from the body beside it.
 - **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
   changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
   falls; it comes to rest asleep on what holds it, as before.

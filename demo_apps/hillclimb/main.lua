@@ -136,7 +136,17 @@ return function()
 			sensor = { circle = r, at = { r, r } },
 		})
 	end
-	for _, e in ipairs(game.car) do table.insert(stage_world, e) end
+	-- Dust thrown back off the rear tyre while it drives: from the chassis (the wheel spins, its
+	-- frame would spray in circles), where the tyre meets the ground.
+	local moving = body and math.abs(body.velocity[1]) > 60
+	local throwing = pedals.gas > 0 and moving
+	for _, e in ipairs(game.car) do
+		if e.id == "chassis" then
+			e.emit = { rate = throwing and 45 * pedals.gas or 0, life = 0.7, color = C.dust,
+				speed = 140, angle = 205, spread = 40, size = 4, grow = 14, gravity = 160, at = looks.dust_at }
+		end
+		table.insert(stage_world, e)
+	end
 
 	return ui.col({
 		id = "hillclimb", full = true, center = true, gap = 10, fill = "#dff1fb",

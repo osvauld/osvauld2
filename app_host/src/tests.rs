@@ -1173,6 +1173,34 @@ fn parallax_is_checked_strictly() {
 }
 
 #[test]
+fn emit_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |emit: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, \
+            {{ id = 'wheel', pos = {{ 0, 0 }}, drawing = hero, emit = {emit} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ rate = 30, life = 0.8, color = '#a08060' }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ rate = 0, life = 1, color = 'white', speed = 40, angle = -90, \
+        spread = 50, size = 4, grow = 6, at = { 2, 3 }, gravity = -50 }")).unwrap();
+    let cases = [
+        ("1", "world entity 1.emit must be a table, got integer"),
+        ("{ life = 1, color = 'red' }", "world entity 1.emit needs rate"),
+        ("{ rate = 1, color = 'red' }", "world entity 1.emit needs life"),
+        ("{ rate = 1, life = 1 }", "world entity 1.emit needs color"),
+        ("{ rate = 1, life = 1, color = 'red', colour = 'red' }", "emit: unknown field colour"),
+        ("{ rate = 1, life = 1, color = 'nocolour' }", "world entity 1.emit.color: "),
+        ("{ rate = 1, life = 1, color = 'red', at = { 1 } }", "emit.at"),
+        ("{ rate = -1, life = 1, color = 'red' }", "emit rate must be from 0 to 10000"),
+        ("{ rate = 1, life = 1, color = 'red', spread = 999 }", "emit spread must be from 0 to 360"),
+    ];
+    for (emit, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(emit)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_world_sky_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

@@ -21,7 +21,7 @@ A.colours = {
 	-- land
 	grass = "#4caf50", grass_light = "#7fd36b", grass_dark = "#2f7d32",
 	dirt_top = "#8a5f3a", dirt = "#6b4a2f", dirt_deep = "#3e2a1a", rock = "#8d8478", rock_dark = "#5c554c",
-	hills = "#b9dcc0", hills_far = "#cfe7e6", cloud = "#ffffff",
+	hills = "#b9dcc0", hills_far = "#cfe7e6", cloud = "#ffffff", dust = "#b08a62cc",
 }
 local C = A.colours
 
@@ -334,6 +334,8 @@ function A.build(sizes, stage, mounts)
 		fuel = fuel_can(2 * A.PICKUP_R.fuel, 2 * A.PICKUP_R.fuel),
 		coin = coin(2 * A.PICKUP_R.coin),
 		cliff = cliff(A.CLIFF[1], A.CLIFF[2]),
+		-- Under the rear tyre, in the chassis box: where its dust leaves from.
+		dust_at = { mounts.axles[1][1], mounts.axles[1][2] + mounts.axles[1].r - 6 },
 	}
 	for id, size in pairs(sizes) do
 		if id:sub(1, 5) == "wheel" then looks[id] = wheel(size[1]) end

@@ -48,6 +48,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         blocks: None,
         surface: None,
         parallax: None,
+        emit: None,
     }
 }
 
@@ -3542,6 +3543,147 @@ fn a_parallax_entity_is_scenery_and_a_body_is_refused() {
         let mut world = World2d::default();
         world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
         let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
+}
+
+// --- Particles (plan: docs/design/hillclimb-terrain.md, L-E1, W-E2) ---
+
+fn dust(rate: f64, life: f64) -> Emit {
+    Emit {
+        rate,
+        life,
+        speed: 100.0,
+        angle: 0.0,
+        spread: 0.0,
+        size: 2.0,
+        grow: 0.0,
+        color: Color::from_rgb8(150, 120, 90),
+        at: (4.0, 4.0),
+        gravity: 0.0,
+    }
+}
+
+fn emitting(emit: Option<Emit>) -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![EntitySpec { emit, ..spec("wheel", (100.0, 100.0), &d) }]).unwrap();
+    world
+}
+
+fn live(world: &World2d) -> usize {
+    entity(world, "wheel").particles
+}
+
+#[test]
+fn a_stream_keeps_rate_times_life_alive_and_the_world_asks_for_the_clock() {
+    let mut world = emitting(Some(dust(60.0, 0.5)));
+    assert!(world.needs_ticks(), "emitting, it needs the clock");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.25);
+    assert!((live(&world) as f64 - 60.0 * 0.25).abs() <= 1.0, "rate × t while young: {}", live(&world));
+    run(&mut world, &mut clock, 1.0);
+    assert!((live(&world) as f64 - 60.0 * 0.5).abs() <= 1.0, "then rate × life: {}", live(&world));
+}
+
+#[test]
+fn particles_leave_from_at_along_angle_in_the_entitys_frame() {
+    let mut world = emitting(Some(dust(120.0, 1.0)));
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    let ps = world.particles("wheel");
+    assert!(!ps.is_empty());
+    // From (104, 104), along +x at 60 to 100 u/s: x ahead of the start, y on the line.
+    for &(x, y) in &ps {
+        assert!((y - 104.0).abs() < 1e-6, "spread 0 keeps them on the line: {y}");
+        assert!((104.0..=104.0 + 100.0 * 0.5 + 1.0).contains(&x), "ahead of at, no faster than speed: {x}");
+    }
+    let flipped = |angle: f64| {
+        let mut world = emitting(Some(Emit { angle, ..dust(120.0, 1.0) }));
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 0.5);
+        world.particles("wheel")
+    };
+    assert!(flipped(90.0).iter().all(|&(x, y)| (x - 104.0).abs() < 1e-6 && y > 104.0 - 1e-6), "90° is down");
+}
+
+#[test]
+fn without_emit_the_live_ones_finish_and_no_more_come() {
+    let mut world = emitting(Some(dust(60.0, 0.5)));
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let d = drawing();
+    world.reconcile(vec![spec("wheel", (100.0, 100.0), &d)]).unwrap();
+    let left = live(&world);
+    assert!(left > 0, "the live ones are kept");
+    run(&mut world, &mut clock, 0.25);
+    assert!(live(&world) < left, "they die off, none come");
+    run(&mut world, &mut clock, 0.5);
+    assert_eq!(live(&world), 0);
+    assert!(!world.needs_ticks(), "done, the world rests");
+}
+
+#[test]
+fn particles_are_paint_under_their_entity_and_never_take_the_pointer() {
+    let mut world = emitting(Some(Emit { speed: 0.0, size: 6.0, ..dust(60.0, 1.0) }));
+    let bare = world.frame(200.0, 200.0).unwrap().items().len();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.2);
+    let frame = world.frame(200.0, 200.0).unwrap();
+    assert_eq!(frame.items().len(), bare + 1, "one group of particles, beside the entity");
+    assert_eq!(frame.items()[0].id(), None, "drawn first, under it, unnamed");
+    // The test drawing is hit on its row y = 4, x 4..8: there, the entity, not its dust.
+    assert_eq!(frame.hit(Point::new(106.0, 104.0)).map(|h| h.id.to_string()).as_deref(), Some("wheel"));
+    assert_eq!(frame.hit(Point::new(101.0, 106.0)), None, "dust beside it isn't something to hit");
+}
+
+#[test]
+fn the_same_run_streams_the_same_particles_and_bodies_never_feel_them() {
+    let scattered = || {
+        let mut world = emitting(Some(Emit { spread: 360.0, ..dust(200.0, 1.0) }));
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 0.75);
+        world.particles("wheel")
+    };
+    let (a, b) = (scattered(), scattered());
+    assert!(a.len() > 100);
+    assert_eq!(a, b, "seeded from the step and the id: the same twice");
+    // A ball rolling down a slope, with a stream pouring over it or not.
+    let rolled = |emit: Option<Emit>| {
+        let d = drawing();
+        let mut world = World2d::default();
+        world.set_gravity((0.0, 981.0)).unwrap();
+        let ball = EntitySpec {
+            loose: Some(Material { grip: Some(1.0), ..GRIPPY }),
+            ..solid("ball", (0.0, -30.0), Shape::Circle(10.0), (10.0, 10.0), &d)
+        };
+        let slope = solid("slope", (-100.0, 0.0), line(&[(0.0, 0.0), (2000.0, 600.0)]), (0.0, 0.0), &d);
+        let puffer = EntitySpec { emit, ..spec("puffer", (0.0, -40.0), &d) };
+        world.reconcile(vec![ball, slope, puffer]).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 2.0);
+        let e = entity(&world, "ball");
+        (e.pos, e.rot, e.velocity)
+    };
+    let bare = rolled(None);
+    assert!(bare.0.0 > 300.0, "it rolled: {bare:?}");
+    assert_eq!(bare, rolled(Some(Emit { spread: 360.0, ..dust(500.0, 2.0) })), "particles touch no body");
+}
+
+#[test]
+fn a_bad_stream_is_refused_whole() {
+    let d = drawing();
+    for (emit, want) in [
+        (Emit { rate: -1.0, ..dust(1.0, 1.0) }, "emit rate must be from 0 to 10000"),
+        (Emit { life: 0.0, ..dust(1.0, 1.0) }, "emit life must be above 0"),
+        (Emit { spread: 400.0, ..dust(1.0, 1.0) }, "emit spread must be from 0 to 360"),
+        (Emit { size: 0.0, ..dust(1.0, 1.0) }, "emit size must be above 0"),
+        (Emit { gravity: f64::INFINITY, ..dust(1.0, 1.0) }, "must be finite"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![EntitySpec { emit: Some(emit), ..spec("wheel", (0.0, 0.0), &d) }]).unwrap_err().to_string();
         assert!(err.contains(want), "{err} should say {want}");
         assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
     }

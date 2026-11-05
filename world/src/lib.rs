@@ -9,6 +9,7 @@
 
 mod camera;
 pub mod clip;
+mod particles;
 mod physics;
 mod physics3d;
 pub mod world3d;
@@ -25,6 +26,8 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
+pub use crate::particles::Emit;
+use crate::particles::Emitter;
 pub use crate::physics::{Collider, JointKind, Material, Motor, Shape, Surface};
 
 pub struct EntitySpec {
@@ -53,6 +56,8 @@ pub struct EntitySpec {
     /// Scenery only: how much of the camera's move it follows, across and up. 1 (the default)
     /// moves with the map, 0.3 is far hills, 0 stays put on screen, above 1 passes in front faster.
     pub parallax: Option<(f64, f64)>,
+    /// A stream of particles from a point of it: dust, spray, sparks. Paint only.
+    pub emit: Option<Emit>,
 }
 
 /// A change Lua makes at a moment, not by describing: an existing entity's description never
@@ -148,6 +153,8 @@ pub struct EntityInspection {
     /// Ids of the zones it is inside, sorted.
     pub zones: Vec<String>,
     pub clip: Option<ClipInspection>,
+    /// Its particles alive now; 0 for an entity that never emitted.
+    pub particles: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -529,6 +536,9 @@ impl World2d {
                     return Err(WorldError::Collider(spec.id.clone(), why));
                 }
             }
+            if let Some(emit) = &spec.emit {
+                emit.check().map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
+            }
             if let Some(surface) = &spec.surface {
                 let ground = match () {
                     _ if spec.collider.is_none() => Some("a surface needs a collider: it is how ground feels"),
@@ -787,6 +797,14 @@ impl World2d {
             rest,
             parallax: spec.parallax.unwrap_or((1.0, 1.0)),
         });
+        // Kept across views, so the live ones carry on; without `emit` they finish and stop.
+        match (spec.emit, e.get_mut::<Emitter>()) {
+            (spec_emit, Some(mut emitter)) => emitter.describe(spec_emit),
+            (Some(emit), None) => {
+                e.insert(Emitter::new(emit, &spec.id));
+            }
+            (None, None) => {}
+        }
         e.insert(InBlock(block.clone()));
         match spec.controller {
             Some(controller) => e.insert(controller),
@@ -956,14 +974,18 @@ impl World2d {
     /// a share `f` of the camera sits `(1 − f)` of the camera's centre further along. What it
     /// carries goes with it. Without a camera, where it is placed.
     fn drawn(&self, entity: Entity) -> Affine {
-        let placed = self.place(entity);
-        let Some(c) = &self.camera else { return placed };
+        self.held_back(entity) * self.place(entity)
+    }
+
+    /// What parallax adds to where an entity is placed: nothing but for scenery under a camera.
+    fn held_back(&self, entity: Entity) -> Affine {
+        let Some(c) = &self.camera else { return Affine::IDENTITY };
         let carrier = self.ecs.get::<Attached>(entity).map_or(entity, |a| a.to);
         let (fx, fy) = self.ecs.get::<Appearance>(carrier).map_or((1.0, 1.0), |a| a.parallax);
         if (fx, fy) == (1.0, 1.0) {
-            return placed;
+            return Affine::IDENTITY;
         }
-        Affine::translate((c.at.0 * (1.0 - fx), c.at.1 * (1.0 - fy))) * placed
+        Affine::translate((c.at.0 * (1.0 - fx), c.at.1 * (1.0 - fy)))
     }
 
     /// The bottom of the entity's box; a carried entity stands on its carrier's feet, just in
@@ -998,10 +1020,19 @@ impl World2d {
                     }
                     None => look.rest.clone(),
                 };
-                let item = Item::instance(self.drawn(entity), posed)?;
-                Ok((self.feet(entity), item.with_id(name.0.as_str())))
+                let item = Item::instance(self.drawn(entity), posed)?.with_id(name.0.as_str());
+                let feet = self.feet(entity);
+                // Its particles just under it, unnamed: paint the pointer goes through.
+                let dust = match e.get::<Emitter>().filter(|em| em.live() > 0) {
+                    Some(em) => Some(Item::group(self.held_back(entity), em.items()?)?),
+                    None => None,
+                };
+                Ok(dust.into_iter().chain([item]).map(|i| (feet, i)).collect::<Vec<_>>())
             })
-            .collect::<Result<Vec<_>, WorldError>>()?;
+            .collect::<Result<Vec<_>, WorldError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if self.stacking == Order::Feet {
             // Stable, so ties keep list order.
             items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -1112,6 +1143,21 @@ impl World2d {
             }
         }
         self.aim(dt);
+        self.emit(dt);
+    }
+
+    /// Steps every stream from where its entity is now (its layer's place, for scenery).
+    fn emit(&mut self, dt: f64) {
+        for entity in self.order.clone() {
+            if !self.ecs.get::<Emitter>(entity).is_some_and(Emitter::busy) {
+                continue;
+            }
+            let place = self.place(entity);
+            let step = self.steps;
+            if let Some(mut emitter) = self.ecs.get_mut::<Emitter>(entity) {
+                emitter.advance(dt, place, step);
+            }
+        }
     }
 
     /// Fires `Timer(name)` once `secs` have passed; the same name again starts it over.
@@ -1524,7 +1570,9 @@ impl World2d {
         let behind = (self.camera.as_ref()).is_some_and(|c| self.goal().is_some_and(|g| !c.arrived(g)));
         // A well works on sleepers and a hand holds still ones, so either needs the clock.
         let forces = !self.wells.is_empty() || !self.grabs.is_empty();
+        let streaming = |&e: &Entity| self.ecs.get::<Emitter>(e).is_some_and(Emitter::busy);
         self.ticking || forces || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
+            || self.order.iter().any(streaming)
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take
@@ -1716,6 +1764,10 @@ impl World2d {
     /// Whether an entity can show in `view`: its placed box, grown by half its size each side
     /// for what a pose swings past it, meets the view. Reaching further, it may pop at the edge.
     fn shows(&self, entity: Entity, view: Rect) -> bool {
+        // Particles drift from where they left: a stream with any alive is drawn whole.
+        if self.ecs.get::<Emitter>(entity).is_some_and(|em| em.live() > 0) {
+            return true;
+        }
         let look = self.ecs.get::<Appearance>(entity).expect("every entity has an Appearance");
         let (w, h) = look.drawing.size();
         let b = self.drawn(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
@@ -1807,7 +1859,15 @@ impl World2d {
                 length: a.clip.length(),
                 looped: a.clip.looped(),
             }),
+            particles: e.get::<Emitter>().map_or(0, Emitter::live),
         }
+    }
+
+    /// Where `id`'s live particles are, in world units (its layer's, for scenery); empty for
+    /// one that emits none.
+    pub fn particles(&self, id: &str) -> Vec<(f64, f64)> {
+        let emitter = self.by_id.get(id).and_then(|&e| self.ecs.get::<Emitter>(e));
+        emitter.map_or_else(Vec::new, Emitter::positions)
     }
 }
 

@@ -46,7 +46,14 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   camera's centre, and culled where it's drawn. Separate x/y factors (revised in the step), so
   far hills on a climbing road don't sink out of view. Checked: f 0 / 0.5 / 1 move 0 / half /
   all of the camera's move on screen, x and y apart, bodies refused. Verified: world 183,
-  app_host lib. The real-path pixel check is S-8 (step 8). Next: particles.
+  app_host lib. The real-path pixel check is S-8 (step 8).
+- Step 4 built: `emit = { rate, life, color, … }` particles (`world/src/particles.rs`): stepped
+  in Rust each fixed step, seeded from step and id (FNV-1a + SplitMix64), paint only, drawn
+  under their entity, kept across views, `particles` in the dump. Hillclimb throws dust off the
+  rear tyre under gas. Checked: rate × min(t, life) ± 1, direction in the entity's frame, the
+  same twice, a rolling ball bit-identical with and without a stream, bad streams refused; the
+  smoke sees none at rest and dust under gas, the drive unchanged (288 m). Verified: world 189,
+  app_host lib, workspace check, smoke_hillclimb. Next: stage sections.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable
