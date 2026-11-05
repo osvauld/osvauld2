@@ -30,6 +30,14 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   288 m flat out to a head-first crash, same twice), `smoke_world.py`, `smoke_gravity_lab.py`.
   Not run: the rest of `smoke.py`, windowed play, Android.
 - next: tuning by hand (the user plays it); step 6 (standing air torque) only if play wants it.
+- Played 2026-11-05. Detail art pass, and a rock wall at the road's start: reversing used to fall
+  off the world forever (the smoke checks it now).
+- **Terrain and detail** ([plan](design/hillclimb-terrain.md)), step 1 built: `surface = { grip }`
+  on fixed ground. Contact grip = √(loose grip × surface grip): Rapier's geometric-mean combine
+  rule outranks the Max every other collider uses, so only that ground's pairs change. Checked:
+  slide v²/2μg within 5%, the cart held to 0.1 g on ice with its wheels spinning, bad surfaces
+  refused whole. Verified: world 177, app_host lib, workspace check; smokes world, gravity_lab,
+  hillclimb (same 288 m as before). Next: the sky gradient.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable

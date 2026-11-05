@@ -707,7 +707,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
-        "loose", "group", "blocks",
+        "loose", "group", "blocks", "surface",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -754,6 +754,16 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             Some(list) => Some(list.sequence_values::<Value>().enumerate().map(|(i, v)| {
                 name(v?, &format!("{owner}.blocks[{}]", i + 1))
             }).collect::<mlua::Result<_>>()?),
+            None => None,
+        },
+        surface: match maybe_table(&spec, &owner, "surface")? {
+            Some(t) => {
+                let owner = format!("{owner}.surface");
+                named_fields(&t, &owner, &["grip"])?;
+                let grip = maybe_number(&t, &owner, "grip")?
+                    .ok_or_else(|| Error::runtime(format!("{owner} needs grip")))?;
+                Some(world::Surface { grip })
+            }
             None => None,
         },
     })

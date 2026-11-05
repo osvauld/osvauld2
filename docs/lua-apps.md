@@ -331,6 +331,12 @@ ui.world({
     listed left to right is ground with its solid below; list a ceiling right to left. Things
     roll and rest on it under `gravity`, cross its joints without catching, and fast ones don't
     pass through.
+  - `surface = { grip = g }` (0 or more) on fixed ground — a rect or a line — says how it
+    grips what touches it: the contact's grip is √(the loose thing's `grip` × `g`), so ice at
+    0.01 leaves a grip-1 tyre 0.1 and dirt at 1 leaves it 1. Without `surface` the loose thing's
+    own grip decides, as before. Ground only: a `surface` needs a collider and can't be loose,
+    controlled or carried. Cut a road into several line entities to give its stretches
+    different surfaces.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
   one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,

@@ -25,7 +25,7 @@ pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, JointKind, Material, Motor, Shape};
+pub use crate::physics::{Collider, JointKind, Material, Motor, Shape, Surface};
 
 pub struct EntitySpec {
     pub id: String,
@@ -47,6 +47,9 @@ pub struct EntitySpec {
     pub group: Option<String>,
     /// The groups its collider stops, by name — a line only paddles meet; without, it stops all.
     pub blocks: Option<Vec<String>>,
+    /// Fixed ground only: how it grips what touches it (ice, dirt). Without, a loose thing's own
+    /// grip decides, as it always has.
+    pub surface: Option<Surface>,
 }
 
 /// A change Lua makes at a moment, not by describing: an existing entity's description never
@@ -287,6 +290,7 @@ struct Solid {
     loose: Option<Material>,
     /// `(memberships, filter)` as Rapier bits.
     groups: (u32, u32),
+    surface: Option<Surface>,
 }
 
 /// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
@@ -503,6 +507,19 @@ impl World2d {
                 }
                 m.check().or_else(bad)?;
             }
+            if let Some(surface) = &spec.surface {
+                let ground = match () {
+                    _ if spec.collider.is_none() => Some("a surface needs a collider: it is how ground feels"),
+                    _ if spec.loose.is_some() => Some("a surface is ground's: it cannot be loose"),
+                    _ if spec.controller.is_some() => Some("a surface is ground's: it cannot have a controller"),
+                    _ if spec.attach.is_some() => Some("a surface is ground's: it cannot be carried"),
+                    _ => None,
+                };
+                let why = ground.map(String::from).or(surface.check().err());
+                if let Some(why) = why {
+                    return Err(WorldError::Collider(spec.id.clone(), why));
+                }
+            }
             for c in spec.collider.iter().chain(&spec.sensor) {
                 c.check()
                     .map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
@@ -693,9 +710,10 @@ impl World2d {
         let collider = spec.collider.filter(|_| !aloft);
         let sensor = spec.sensor.filter(|_| !aloft);
         let loose = spec.loose;
+        let surface = spec.surface;
         let kept = e.get::<Solid>().is_some_and(|s| {
             (s.collider == collider && s.sensor == sensor && s.moves == moves)
-                && (s.loose == loose && s.groups == groups)
+                && (s.loose == loose && s.groups == groups && s.surface == surface)
         });
         if !kept {
             if let Some(old) = e.take::<Solid>() {
@@ -708,10 +726,10 @@ impl World2d {
                 let kind = match (moves, thrown, &collider, loose) {
                     (true, ..) => Body::Moved,
                     // Let go as a line, a carried thing becomes ground, not a thrown body.
-                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed,
+                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed(surface),
                     (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
                     (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
-                    _ => Body::Fixed,
+                    _ => Body::Fixed(surface),
                 };
                 let dynamic = matches!(kind, Body::Dynamic(..));
                 let dropped = thrown.is_some();
@@ -737,6 +755,7 @@ impl World2d {
                     sliding: dynamic && !self.physics.asleep(body),
                     loose,
                     groups,
+                    surface,
                 });
             }
         }
@@ -1562,6 +1581,12 @@ impl World2d {
 
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
+    }
+
+    #[cfg(test)]
+    fn surface_grip(&self, id: &str) -> Option<f64> {
+        let solid = self.ecs.get::<Solid>(*self.by_id.get(id)?)?;
+        self.physics.friction_of(solid.body).map(f64::from)
     }
 }
 

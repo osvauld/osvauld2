@@ -25,9 +25,9 @@ Same letters as the first plan: `W` = `world` headless, `L` = a Luau VM through 
 
 | id | proof | step |
 |---|---|---|
-| W-G1 | `surface = { grip = g }` on a fixed entity (rect or line): a loose block with `grip = 1` slid at 800 u/s stops in `v²/(2·μ·g)` to 5 %, with μ = loose grip × surface grip. `g = 0.1` slides ~10× further than `g = 1` | 1 |
+| W-G1 | `surface = { grip = g }` on a fixed entity (rect or line): a loose block with `grip = 1` slid at 800 u/s stops in `v²/(2·μ·g)` to 5 %, with μ = √(loose grip × surface grip) (*revised 2026-11-05: Rapier can't make a product win over Max; the geometric mean does*). Grip 0 doesn't slow it | 1 |
 | W-G2 | without `surface`, every existing world is unchanged: the step-5 stopping-distance and traction tests pass as they are, and gravity_lab's numbers don't move | 1 |
-| W-G3 | a car on a line whose `surface.grip` is 0.15 spins its wheels under full torque (wheel speed ≫ ground speed) and accelerates at most 0.2 of what it does on grip 1 | 1 |
+| W-G3 | a car (tyre grip 1) on a line with `surface.grip` 0.01 (μ 0.1) under far more torque than grip allows covers no more than ½·0.1·g·t² (to 3 %), spins its wheels (rim at the motor's speed, ≥ 2× ground speed), and goes ≥ 3× as far on surface grip 1 | 1 |
 | W-G4 | bad surfaces are refused whole: grip < 0 or NaN, `surface` on a loose entity, an unknown field | 1 |
 | L-K1 | a world's `sky = { stops = … }` fills its box with a vertical gradient behind everything: offscreen pixels at the top and bottom of the world match the first and last stop | 2 |
 | L-P1 | `parallax = f` (0 to 1) on an entity with no collider: when the camera moves 1000 u, the entity moves `1000·f` on screen (from `rects`/dump), `f = 0` stays put, `f = 1` is the default. A `parallax` entity with a collider, a sensor or `loose` is refused | 3 |
@@ -56,10 +56,11 @@ the first hills (> 150 m)" stays.
 
 ## 1. Engine additions — the Lua surface (strict, refused whole)
 
-- **`surface = { grip }`** on a fixed entity. Contact friction becomes `loose grip × surface grip`
-  for that pair. Without `surface`, nothing changes (Max, as now). Rapier picks one combine rule
-  per pair by priority, and Max beats Multiply, so this is a contact-modification hook (or a
-  per-pair rule), not a collider setting. Step 1 decides which after a spike.
+- **`surface = { grip }`** on a fixed entity. Contact friction becomes `√(loose grip × surface
+  grip)` for that pair. Without `surface`, nothing changes (Max, as now). *Decided 2026-11-05:*
+  Rapier uses the higher-ranked combine rule of a pair (Average < Min < Multiply < Max <
+  ClampedSum < GeometricMean). So the geometric mean set on the ground alone wins its pairs and
+  touches nothing else. No hook needed. Ice is about 0.01, dirt 1.
 - **`sky = { stops = { {0, colour}, …, {1, colour} } }`** on `ui.world`: a screen-space vertical
   gradient under the entities. `fill` stays as it is.
 - **`parallax = f`** on a no-collider entity: drawn at `pos − camera·(1 − f)`. Hills at 0.3,

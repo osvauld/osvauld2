@@ -1121,6 +1121,35 @@ fn a_loose_thing_is_checked_strictly() {
 }
 
 #[test]
+fn a_surface_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |rest: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'floor', pos = {{ 0, 0 }}, drawing = hero, {rest} }} }})")
+    };
+    for fine in [
+        "collider = { rect = { 10, 2 } }, surface = { grip = 0.1 }",
+        "collider = { line = { 0, 0, 10, 0 } }, surface = { grip = 0 }",
+    ] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("collider = { rect = { 10, 2 } }, surface = 1", "world entity 1.surface must be a table, got integer"),
+        ("collider = { rect = { 10, 2 } }, surface = {}", "world entity 1.surface needs grip"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = 'x' }", "surface.grip must be a number, got string"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = 1, slip = 2 }", "surface: unknown field slip"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = -1 }", "surface grip must be 0 or more, got -1"),
+        ("surface = { grip = 1 }", "a surface needs a collider"),
+        ("collider = { rect = { 10, 2 } }, loose = true, surface = { grip = 1 }", "a surface is ground's: it cannot be loose"),
+    ];
+    for (rest, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(rest)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn groups_are_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

@@ -46,6 +46,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         loose: None,
         group: None,
         blocks: None,
+        surface: None,
     }
 }
 
@@ -3028,6 +3029,11 @@ impl Cart {
 
     /// The cart over line ground through `points`, placed at `at`.
     fn world_on(&self, at: (f64, f64), points: &[(f64, f64)]) -> World2d {
+        self.world_on_surface(at, points, None)
+    }
+
+    /// As `world_on`, the ground with this `surface`.
+    fn world_on_surface(&self, at: (f64, f64), points: &[(f64, f64)], surface: Option<Surface>) -> World2d {
         let d = drawing();
         let chassis = EntitySpec {
             loose: Some(Material { mass: Some(CHASSIS_KG), ..GRIPPY }),
@@ -3037,7 +3043,7 @@ impl Cart {
             loose: Some(Material { mass: Some(10.0), grip: Some(self.grip), ..GRIPPY }),
             ..solid(id, (x - 10.0, y - 10.0 - self.drop), Shape::Circle(10.0), (10.0, 10.0), &d)
         };
-        let ground = solid("ground", at, line(points), (0.0, 0.0), &d);
+        let ground = EntitySpec { surface, ..solid("ground", at, line(points), (0.0, 0.0), &d) };
         let mut world = World2d::default();
         world.set_gravity((0.0, 981.0)).unwrap();
         world.reconcile(vec![chassis, wheel("rear", MOUNTS[0]), wheel("front", MOUNTS[1]), ground]).unwrap();
@@ -3309,4 +3315,108 @@ fn a_bad_motor_is_refused() {
     }
     let err = world.set_joints(vec![rope]).unwrap_err().to_string();
     assert!(err.contains("a motor drives a pin or a wheel, not a rope"), "{err}");
+}
+
+
+// --- Surface grip (plan: docs/design/hillclimb-terrain.md, W-G1..W-G4) ---
+
+/// A 40×20 block with `grip`, slid at 800 u/s along a flat floor with `surface`: how far it goes.
+fn slide_on(grip: f64, surface: Option<Surface>) -> f64 {
+    let d = drawing();
+    let block = EntitySpec {
+        loose: Some(Material { grip: Some(grip), ..GRIPPY }),
+        ..solid("block", (0.0, -20.0), Shape::Rect(40.0, 20.0), (0.0, 0.0), &d)
+    };
+    let floor = EntitySpec { surface, ..solid("floor", (-1000.0, 0.0), Shape::Rect(20000.0, 100.0), (0.0, 0.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![block, floor]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    let start = entity(&world, "block").pos.0;
+    world.set("block", Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    for _ in 0..600 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        if entity(&world, "block").velocity.0.abs() < 1.0 {
+            break;
+        }
+    }
+    entity(&world, "block").pos.0 - start
+}
+
+#[test]
+fn a_surface_sets_how_hard_the_ground_grips_with_the_geometric_mean() {
+    // μ = √(grip × surface grip); a slide stops in v²/(2·μ·g).
+    let want = |mu: f64| 800.0_f64.powi(2) / (2.0 * mu * 981.0);
+    let dirt = slide_on(1.0, Some(Surface { grip: 1.0 }));
+    let ice = slide_on(1.0, Some(Surface { grip: 0.1 }));
+    assert!((dirt - want(1.0)).abs() < want(1.0) * 0.05, "dirt: {dirt} for {}", want(1.0));
+    assert!((ice - want(0.1_f64.sqrt())).abs() < want(0.1_f64.sqrt()) * 0.05, "ice: {ice} for {}", want(0.1_f64.sqrt()));
+    let none = slide_on(1.0, Some(Surface { grip: 0.0 }));
+    assert!(none > 5000.0, "grip 0 does not slow it: {none}");
+}
+
+#[test]
+fn without_a_surface_the_loose_things_own_grip_decides_as_before() {
+    let want = 800.0_f64.powi(2) / (2.0 * 0.5 * 981.0);
+    let bare = slide_on(0.5, None);
+    assert!((bare - want).abs() < want * 0.05, "the block's grip alone: {bare} for {want}");
+}
+
+#[test]
+fn a_cart_on_an_icy_surface_spins_its_wheels_and_barely_moves_off() {
+    let go = Motor { speed: 1440.0, torque: 2e6 };
+    let drove = |surface: Option<Surface>| {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+        let mut world = cart.world_on_surface((-1000.0, 40.0), &[(0.0, 0.0), (8000.0, 0.0)], surface);
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.0);
+        let start = entity(&world, "chassis").pos.0;
+        cart.drive(&mut world, Some(go), Some(go));
+        run(&mut world, &mut clock, 1.0);
+        let (c, w) = (entity(&world, "chassis"), entity(&world, "rear"));
+        (c.pos.0 - start, c.velocity.0, w.spin.to_radians() * 10.0)
+    };
+    let (dirt, ..) = drove(Some(Surface { grip: 1.0 }));
+    let (ice, speed, rim) = drove(Some(Surface { grip: 0.01 }));
+    // μ = √(1 × 0.01) = 0.1 caps the push at 0.1·g: ½·98.1·1² = 49 u in 1 s at most. On
+    // dirt the motor's own speed is the limit, so dirt is only "much further", not a ratio.
+    assert!(ice < 49.05 * 1.03, "ice is held to 0.1 g: {ice}");
+    assert!(dirt > 3.0 * ice, "dirt drives on: {dirt} vs ice {ice}");
+    // 1440 °/s on radius 10 is 251 u/s at the rim; the cart gets 0.1 g × 1 s = 98 u/s.
+    let motor = 1440.0_f64.to_radians() * 10.0;
+    assert!((rim - motor).abs() < motor * 0.03 && rim > 2.0 * speed, "the wheels spin: rim {rim} u/s, ground {speed}");
+}
+
+#[test]
+fn a_bad_surface_is_refused_whole() {
+    let d = drawing();
+    let floor = |surface: Surface| EntitySpec {
+        surface: Some(surface),
+        ..solid("floor", (0.0, 0.0), Shape::Rect(100.0, 10.0), (0.0, 0.0), &d)
+    };
+    for (spec, want) in [
+        (floor(Surface { grip: -1.0 }), "grip must be 0 or more"),
+        (floor(Surface { grip: f64::NAN }), "grip must be 0 or more"),
+        (EntitySpec { loose: Some(GRIPPY), ..floor(Surface { grip: 1.0 }) }, "a surface is ground's: it cannot be loose"),
+        (EntitySpec { surface: Some(Surface { grip: 1.0 }), ..spec("bare", (0.0, 0.0), &d) }, "a surface needs a collider"),
+        (EntitySpec { controller: Some(wasd(10.0)), ..floor(Surface { grip: 1.0 }) }, "a surface is ground's: it cannot have a controller"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
+}
+
+#[test]
+fn a_changed_surface_takes_effect_on_the_same_ground() {
+    let d = drawing();
+    let floor = |g: f64| EntitySpec { surface: Some(Surface { grip: g }), ..solid("floor", (0.0, 0.0), Shape::Rect(100.0, 10.0), (0.0, 0.0), &d) };
+    let mut world = World2d::default();
+    world.reconcile(vec![floor(1.0)]).unwrap();
+    world.reconcile(vec![floor(0.2)]).unwrap();
+    let grip = world.surface_grip("floor").unwrap();
+    assert!((grip - 0.2).abs() < 1e-6, "the new grip, not the old: {grip}");
 }
