@@ -149,9 +149,16 @@ local function readouts()
 	local function hidden(value, id)
 		return ui.text({value, id = id, absolute = true, left = 0, top = 0, font_size = 1, opacity = 0, no_wrap = true})
 	end
+	-- What a match with others says when it is not simply playing (jetpack-mp.md M9, M10).
+	local banner = m.status == "waiting" and ("Waiting for " .. #m.waiting .. " pilot" .. (#m.waiting == 1 and "" or "s") .. "…")
+		or m.status == "disputed" and "The pilots disagree: no result"
+		or m.status == "ended" and ("Match over" .. (m.ended and (": " .. m.ended) or ""))
+		or nil
 	return {
 		hidden(m.status .. " " .. #m.players .. " " .. m.me .. " " .. table.concat(m.desynced, ","), "match:status"),
 		hidden(table.concat(checks, " "), "match:checks"),
+		banner and ui.col({absolute = true, top = 70, w_full = true, center = true,
+			ui.text({banner, id = "match:banner", color = C.danger, font_size = 16, no_wrap = true})}) or false,
 	}
 end
 

@@ -212,3 +212,62 @@ fn a_setup_bigger_than_a_message_arrives_whole() {
     let (a, b) = (sim.apps[0].match_checks("dots"), sim.apps[1].match_checks("dots"));
     assert!(!a.is_empty() && a.iter().any(|c| b.contains(c)), "{a:?} / {b:?}");
 }
+
+/// M9's Rust half: one of three runs other rules. The two who agree drop it and play on; it ends
+/// its own match, knowing it is the odd one out.
+#[test]
+fn a_majority_drops_the_player_who_desyncs() {
+    let impure = MAIN
+        .replace("local SPEED = 2", "local SPEED = 2\nlocal calls = 0")
+        .replace("s.t += 1", "calls += 1\n\t\t\ts.t = calls");
+    let files = |main: &str| vec![("manifest.osv".to_string(), MANIFEST.to_string()), ("main.lua".to_string(), main.to_string())];
+    let mut sim = Sim::new_each(vec![files(MAIN), files(&impure), files(MAIN)], vec![Link::LAN, slow(60.0), Link::LAN], 7);
+    sim.click("script");
+    sim.click("start");
+    sim.run(8.0, 1.0 / 60.0);
+    let info: Vec<_> = sim.apps.iter().map(|a| a.match_info("dots").unwrap()).collect();
+    for i in [0, 2] {
+        assert_eq!(info[i].status, "playing", "{info:?}");
+        assert_eq!(info[i].desynced, ["p01"], "{info:?}");
+    }
+    assert_eq!(info[1].status, "ended", "{info:?}");
+    // The two play on past the drop: frames keep coming.
+    let before = sim.apps[0].match_stats()["dots"].frames;
+    sim.run(2.0, 1.0 / 60.0);
+    assert!(sim.apps[0].match_stats()["dots"].frames > before + 40);
+}
+
+#[test]
+fn two_who_disagree_have_no_result() {
+    let impure = MAIN
+        .replace("local SPEED = 2", "local SPEED = 2\nlocal calls = 0")
+        .replace("s.t += 1", "calls += 1\n\t\t\ts.t = calls");
+    let files = |main: &str| vec![("manifest.osv".to_string(), MANIFEST.to_string()), ("main.lua".to_string(), main.to_string())];
+    let mut sim = Sim::new_each(vec![files(MAIN), files(&impure)], vec![Link::LAN, slow(60.0)], 7);
+    sim.click("script");
+    sim.click("start");
+    sim.run(8.0, 1.0 / 60.0);
+    for app in &sim.apps {
+        assert_eq!(app.match_info("dots").unwrap().status, "disputed");
+    }
+}
+
+/// M10's Rust half: a device vanishes. The others wait, say for whom, and end with no result.
+#[test]
+fn a_player_gone_is_waited_for_then_the_match_ends() {
+    let mut sim = dots(vec![Link::LAN, Link::LAN, Link::LAN]);
+    sim.run(3.0, 1.0 / 60.0);
+    sim.muted[2] = true;
+    sim.run(2.0, 1.0 / 60.0);
+    for i in [0, 1] {
+        let info = sim.apps[i].match_info("dots").unwrap();
+        assert_eq!(info.status, "waiting", "{info:?}");
+        assert_eq!(info.waiting, ["p02"], "{info:?}");
+    }
+    sim.run(10.0, 1.0 / 60.0);
+    for i in [0, 1] {
+        let info = sim.apps[i].match_info("dots").unwrap();
+        assert_eq!(info.status, "ended", "{info:?}");
+        assert!(info.ended.as_deref().is_some_and(|e| e.contains("p02")), "{info:?}");
+    }
+}

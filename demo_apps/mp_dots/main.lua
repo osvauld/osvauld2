@@ -4,7 +4,7 @@
 
 local SPEED = 2
 local keys = ui.state("keys", { left = false, right = false, up = false, down = false })
-local mode = ui.state("mode", { scripted = false })
+local mode = ui.state("mode", { scripted = false, cheat = false })
 local match
 
 local function held(k)
@@ -37,8 +37,10 @@ local function start()
 			for i, d in ipairs(s.dots) do
 				local input = inputs[i]
 				if input then
-					d.x = math.clamp(d.x + input.dx * SPEED, 0, s.size)
-					d.y = math.clamp(d.y + input.dy * SPEED, 0, s.size)
+					-- "cheat" (a test seam, jetpack-mp.md M9): this device plays by other rules.
+					local speed = mode.cheat and SPEED * 2 or SPEED
+					d.x = math.clamp(d.x + input.dx * speed, 0, s.size)
+					d.y = math.clamp(d.y + input.dy * speed, 0, s.size)
 				end
 			end
 		end,
@@ -55,10 +57,19 @@ return function()
 			ui.button({ mode.scripted and "scripted" or "keys", id = "script", on_click = function()
 				mode.scripted = not mode.scripted
 			end }),
+			ui.button({ mode.cheat and "cheating" or "fair", id = "cheat", on_click = function()
+				mode.cheat = not mode.cheat
+			end }),
 		}),
 	}
 	if match then
 		rows[#rows + 1] = ui.text({ "status " .. match.status .. " frame " .. match.frame, id = "status", no_wrap = true })
+		if match.ended then
+			rows[#rows + 1] = ui.text({ "ended " .. match.ended, id = "ended", no_wrap = true })
+		end
+		if #match.waiting > 0 then
+			rows[#rows + 1] = ui.text({ "waiting for " .. table.concat(match.waiting, ","), id = "waiting", no_wrap = true })
+		end
 		local checks = {}
 		for _, c in ipairs(match.checks) do
 			checks[#checks + 1] = c.frame .. "=" .. c.hash

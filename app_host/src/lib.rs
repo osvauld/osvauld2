@@ -1052,6 +1052,10 @@ impl<M: Clone + 'static> LuaApp<M> {
         self.matches.borrow().iter().map(|(id, m)| (id.clone(), m.stats())).collect()
     }
 
+    pub fn match_info(&self, id: &str) -> Option<net_match::Info> {
+        self.matches.borrow().get(id).map(|m| m.info())
+    }
+
     /// A match's checkpoint hashes so far, `(frame, hash)`, oldest first.
     pub fn match_checks(&self, id: &str) -> Vec<(u64, String)> {
         self.matches.borrow().get(id).map(|m| m.checks()).unwrap_or_default()

@@ -49,6 +49,8 @@ pub struct Sim {
     /// Real milliseconds each app spent per render frame, in order.
     pub frame_ms: Vec<Vec<f64>>,
     pub messages: u64,
+    /// A muted app is a device gone: it neither runs nor sends, and nothing reaches it.
+    pub muted: Vec<bool>,
 }
 
 pub fn id_of(i: usize) -> String {
@@ -91,6 +93,7 @@ impl Sim {
             t: 0.0,
             frame_ms: vec![Vec::new(); n],
             messages: 0,
+            muted: vec![false; n],
         }
     }
 
@@ -124,6 +127,9 @@ impl Sim {
         while self.t < end {
             self.t += dt;
             for i in 0..self.apps.len() {
+                if self.muted[i] {
+                    continue;
+                }
                 let started = Instant::now();
                 self.apps[i].advance_simulation(self.t, true);
                 self.frame_ms[i].push(started.elapsed().as_secs_f64() * 1000.0);
@@ -144,7 +150,7 @@ impl Sim {
             self.flight = rest;
             let mut due = due;
             due.sort_by(|a, b| a.at.total_cmp(&b.at));
-            for m in due {
+            for m in due.into_iter().filter(|m| !self.muted[m.to]) {
                 self.apps[m.to].net_deliver(&m.channel, &m.from, &m.body);
             }
         }

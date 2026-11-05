@@ -246,7 +246,75 @@ def checks_of(p, item) -> dict[int, str]:
     return {int(f): h for f, h in re.findall(r"(\d+)=([0-9a-f]+)", text)}
 
 
-TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6, "m8": m8}
+def run_dots(peers, i, secs, before=None):
+    """Scripted mp_dots for `secs`, paced to real time; `before(p)` runs on each peer first."""
+    for p in peers:
+        p.rpc.click(i, "script")
+        if before:
+            before(p)
+    time.sleep(1.0)
+    for p in peers:
+        p.rpc.click(i, "start")
+    started = time.monotonic()
+    for n in range(int(secs * 60)):
+        for p in peers:
+            p.rpc.frame(1)
+        lag = started + (n + 1) / 60 - time.monotonic()
+        if lag > 0:
+            time.sleep(lag)
+
+
+def m9(net):
+    """Cheating is a desync: A and C drop B within seconds and play on; two who disagree are disputed."""
+    peers, i = setup(net, ["alice", "bob", "carol"], app=DOTS)
+    a, b, c = peers
+    run_dots(peers, i, 6, before=lambda p: p is b and p.rpc.click(i, "cheat"))
+    for p in (a, c):
+        assert short(b) in shown(p, i, "desynced"), f"{p.name}: {shown(p, i, 'desynced')}"
+        assert shown(p, i, "status").startswith("status playing"), f"{p.name}: {shown(p, i, 'status')}"
+    assert shown(b, i, "status").startswith("status ended"), shown(b, i, "status")
+    frame = int(shown(a, i, "status").split()[-1])
+    for _ in range(60):
+        for p in (a, c):
+            p.rpc.frame(1)
+        time.sleep(1 / 60)
+    assert int(shown(a, i, "status").split()[-1]) > frame + 20, "A and C did not play on"
+    shots("M9", i, a, b, c)
+    for p in peers:
+        p.stop()
+    net.peers.clear()
+    pair, i = setup(net, ["dave", "erin"], app=DOTS)
+    run_dots(pair, i, 6, before=lambda p: p is pair[1] and p.rpc.click(i, "cheat"))
+    for p in pair:
+        assert shown(p, i, "status").startswith("status disputed"), f"{p.name}: {shown(p, i, 'status')}"
+    shots("M9-pair", i, *pair)
+
+
+def m10(net):
+    """Drop-out: C's shell is killed; A and B wait for C, then end the match with no result."""
+    peers, i = setup(net, ["alice", "bob", "carol"], app=DOTS)
+    a, b, c = peers
+    run_dots(peers, i, 3)
+    gone = short(c)
+    c.session.process.kill()
+    def tick(secs):  # in game time: the stall is measured on the match's clock
+        for _ in range(int(secs * 60)):
+            for p in (a, b):
+                p.rpc.frame(1)
+            time.sleep(1 / 120)
+    tick(3)
+    for p in (a, b):
+        assert shown(p, i, "status").startswith("status waiting"), f"{p.name}: {shown(p, i, 'status')}"
+        assert gone in shown(p, i, "waiting"), f"{p.name}: {shown(p, i, 'waiting')}"
+    shots("M10-waiting", i, a, b)
+    tick(10)
+    for p in (a, b):
+        assert shown(p, i, "status").startswith("status ended"), f"{p.name}: {shown(p, i, 'status')}"
+        assert gone in shown(p, i, "ended"), f"{p.name}: {shown(p, i, 'ended')}"
+    shots("M10", i, a, b)
+
+
+TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6, "m8": m8, "m9": m9, "m10": m10}
 
 
 def main() -> int:

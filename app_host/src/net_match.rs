@@ -28,12 +28,20 @@ pub const DELAY: u64 = 1;
 pub const WINDOW: u64 = 8;
 /// Input frames run at most per render frame, so a stall's backlog is caught up gradually.
 const CATCH_UP: u32 = 8;
+/// Seconds stalled on a player before the match says it is waiting for them, and before it ends.
+const WAITING: f64 = 1.0;
+const DROP_OUT: f64 = 10.0;
+/// Checkpoints after a disagreement before its losers' inputs stop counting: every honest peer
+/// drops them from the same frame, and none may run past it before the verdict is in.
+const DROP_AFTER: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Lobby,
     Playing,
     Ended,
+    /// Players disagreed and no majority agreed: no result can stand.
+    Disputed,
 }
 
 impl Status {
@@ -42,8 +50,17 @@ impl Status {
             Status::Lobby => "lobby",
             Status::Playing => "playing",
             Status::Ended => "ended",
+            Status::Disputed => "disputed",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Info {
+    pub status: &'static str,
+    pub desynced: Vec<String>,
+    pub waiting: Vec<String>,
+    pub ended: Option<String>,
 }
 
 /// What a match did, for the player-cap sim and the tests.
@@ -94,8 +111,17 @@ struct Core {
     every: u64,
     checked: u64,
     checks: Vec<(u64, String)>,
-    theirs: BTreeMap<u64, Vec<(usize, String)>>,
+    /// Each checkpoint's hashes by player, ours included, until its verdict.
+    hashes: BTreeMap<u64, BTreeMap<usize, String>>,
+    /// The last checkpoint with a verdict.
+    settled: u64,
     desynced: BTreeSet<usize>,
+    /// Players out of the match, and the frame from which their inputs no longer count.
+    drop_from: BTreeMap<usize, u64>,
+    /// Seconds the match has been stalled on a late input, and on whom.
+    stalled_for: f64,
+    waiting_for: Vec<usize>,
+    ended: Option<String>,
     clock: Option<f64>,
     carry: f64,
     since_hello: f64,
@@ -246,11 +272,27 @@ impl Core {
         self.players.len() == 1
     }
 
+    /// Whether player `p`'s input counts at frame `f`.
+    fn live(&self, p: usize, f: u64) -> bool {
+        self.drop_from.get(&p).is_none_or(|&d| f < d)
+    }
+
+    /// The first frame some counted input is still missing for. A dropped player holds nothing up
+    /// once every input of theirs that counts is in.
     fn confirmed(&self) -> u64 {
-        self.known.iter().copied().min().unwrap_or(0)
+        (0..self.players.len())
+            .map(|p| match self.drop_from.get(&p) {
+                Some(&d) if self.known[p] >= d => u64::MAX,
+                _ => self.known[p],
+            })
+            .min()
+            .unwrap_or(0)
     }
 
     fn put_input(&mut self, p: usize, frame: u64, bytes: Vec<u8>) {
+        if !self.live(p, frame) {
+            return;
+        }
         if frame < self.known[p] && self.inputs[p].get(&frame).is_none() {
             return; // pruned: older than anything still open
         }
@@ -267,6 +309,9 @@ impl Core {
 
     /// The input player `p` ran frame `f` on: theirs if in, else their last one before it.
     fn input_for(&self, p: usize, f: u64) -> Vec<u8> {
+        if !self.live(p, f) {
+            return empty_input();
+        }
         self.inputs[p]
             .range(..=f)
             .next_back()
@@ -275,21 +320,62 @@ impl Core {
     }
 
     fn their_check(&mut self, p: usize, frame: u64, hash: String) {
-        self.theirs.entry(frame).or_default().push((p, hash));
-        self.compare(frame);
+        if frame > self.settled && self.live(p, frame) {
+            self.hashes.entry(frame).or_default().insert(p, hash);
+            self.settle();
+        }
     }
 
-    fn compare(&mut self, frame: u64) {
-        let Some(mine) = self.checks.iter().find(|(f, _)| *f == frame).map(|(_, h)| h.clone()) else {
-            return;
-        };
-        let Some(theirs) = self.theirs.remove(&frame) else {
-            return;
-        };
-        for (p, h) in theirs {
-            if h != mine && self.desynced.insert(p) {
-                self.stats.desyncs += 1;
-                eprintln!("net.match {}: {} differs at frame {frame}", self.id, self.players[p]);
+    /// Verdicts, checkpoint by checkpoint, once every counted player's hash is in. A strict
+    /// majority stands: the others are dropped `DROP_AFTER` checkpoints on — or, if we are the
+    /// odd one out, our match ends. With no majority the match is disputed.
+    fn settle(&mut self) {
+        while self.status == Status::Playing {
+            let f = self.settled + self.every;
+            let counted: Vec<usize> = (0..self.players.len()).filter(|&p| self.live(p, f)).collect();
+            let Some(hashes) = self.hashes.get(&f) else { return };
+            if !counted.iter().all(|p| hashes.contains_key(p)) {
+                return;
+            }
+            let hashes = self.hashes.remove(&f).expect("checked");
+            self.settled = f;
+            let mut groups: BTreeMap<&String, Vec<usize>> = BTreeMap::new();
+            for &p in &counted {
+                groups.entry(&hashes[&p]).or_default().push(p);
+            }
+            if groups.len() == 1 {
+                continue;
+            }
+            self.stats.desyncs += 1;
+            let majority = groups.values().find(|g| g.len() * 2 > counted.len()).cloned();
+            let Some(majority) = majority else {
+                eprintln!("net.match {}: no majority at frame {f}", self.id);
+                self.status = Status::Disputed;
+                self.ended = Some(format!("disputed at frame {f}"));
+                return;
+            };
+            let from = f + DROP_AFTER * self.every;
+            if !majority.contains(&self.me) {
+                // Out from `from`, as the others see it: play to there so they have every input of
+                // ours that still counts, then stop (`advance_inner`).
+                eprintln!("net.match {}: this device differs from the others at frame {f}", self.id);
+                let me = self.me;
+                if !self.drop_from.contains_key(&me) {
+                    self.drop_from.insert(me, from);
+                    self.ended = Some(format!("desynced at frame {f}"));
+                }
+                return;
+            }
+            // Once dropped, a player's frame stays: its own device stops there.
+            let losers: Vec<usize> =
+                counted.iter().copied().filter(|p| !majority.contains(p) && !self.drop_from.contains_key(p)).collect();
+            for p in losers {
+                eprintln!("net.match {}: {} differs at frame {f}; out from frame {from}", self.id, self.players[p]);
+                self.desynced.insert(p);
+                self.drop_from.insert(p, from);
+                if self.frame > from {
+                    self.rewind = Some(self.rewind.map_or(from, |r| r.min(from)));
+                }
             }
         }
     }
@@ -320,6 +406,19 @@ impl Match {
 
     pub fn stats(&self) -> Stats {
         self.core.borrow().stats.clone()
+    }
+
+    /// What the match says of itself: status (as Lua reads it), who was dropped as desynced, who
+    /// it waits for, why it ended.
+    pub fn info(&self) -> Info {
+        let core = self.core.borrow();
+        let names = |ps: &mut dyn Iterator<Item = usize>| ps.map(|p| core.players[p].clone()).collect();
+        Info {
+            status: if core.status == Status::Playing && core.stalled_for >= WAITING { "waiting" } else { core.status.name() },
+            desynced: names(&mut core.desynced.iter().copied()),
+            waiting: names(&mut core.waiting_for.iter().copied()),
+            ended: core.ended.clone(),
+        }
     }
 
     /// Why the match ended in error, once — for the console.
@@ -405,10 +504,13 @@ impl Match {
             core.error = Some(e.to_string());
             core.status = Status::Ended;
         }
-        self.core.borrow().status != Status::Ended
+        matches!(self.core.borrow().status, Status::Lobby | Status::Playing)
     }
 
     fn advance_inner(&self, vm: &Lua, net: &Net, now: f64, active: bool) -> mlua::Result<()> {
+        if matches!(self.status(), Status::Ended | Status::Disputed) {
+            return Ok(());
+        }
         let elapsed = {
             let mut core = self.core.borrow_mut();
             let last = core.clock.replace(now);
@@ -442,16 +544,22 @@ impl Match {
             core.carry = (core.carry + elapsed).min(core.frame_dt * f64::from(CATCH_UP));
         }
         let mut ran = 0;
+        let mut waiting: Option<bool> = None; // Some(true): on an input, Some(false): on a verdict
         loop {
-            let stalled = {
+            let (late, verdict) = {
                 let core = self.core.borrow();
-                if core.carry < core.frame_dt || ran >= CATCH_UP {
+                if core.carry < core.frame_dt || ran >= CATCH_UP || core.status != Status::Playing {
                     break;
                 }
-                core.frame >= core.confirmed() + WINDOW
+                if core.drop_from.get(&core.me).is_some_and(|&d| core.frame >= d) {
+                    break;
+                }
+                let verdict = !core.alone() && core.frame >= core.settled + (DROP_AFTER + 1) * core.every;
+                (core.frame >= core.confirmed() + WINDOW, verdict)
             };
-            if stalled {
+            if late || verdict {
                 self.core.borrow_mut().stats.stalls += 1;
+                waiting = Some(late);
                 break;
             }
             self.read_input(net)?;
@@ -464,7 +572,35 @@ impl Match {
             ran += 1;
         }
         self.check(net)?;
-        self.core.borrow_mut().prune();
+        let mut core = self.core.borrow_mut();
+        let me = core.me;
+        if core.drop_from.get(&me).is_some_and(|&d| core.frame >= d) && core.status == Status::Playing {
+            core.status = Status::Ended;
+        }
+        if let Some(on_input) = waiting {
+            core.stalled_for += elapsed;
+            let me = core.me;
+            core.waiting_for = if on_input {
+                let at = core.confirmed();
+                (0..core.players.len()).filter(|&p| p != me && core.known[p] == at && core.live(p, at)).collect()
+            } else {
+                let f = core.settled + core.every;
+                let have = core.hashes.get(&f);
+                (0..core.players.len())
+                    .filter(|&p| p != me && core.live(p, f) && !have.is_some_and(|h| h.contains_key(&p)))
+                    .collect()
+            };
+            if core.stalled_for >= DROP_OUT && core.status == Status::Playing {
+                let who: Vec<String> = core.waiting_for.iter().map(|&p| core.players[p].clone()).collect();
+                eprintln!("net.match {}: {} gone for {DROP_OUT} s; the match ends", core.id, who.join(", "));
+                core.status = Status::Ended;
+                core.ended = Some(format!("dropped out: {}", who.join(", ")));
+            }
+        } else {
+            core.stalled_for = 0.0;
+            core.waiting_for.clear();
+        }
+        core.prune();
         Ok(())
     }
 
@@ -669,7 +805,9 @@ impl Match {
                 if core.checks.len() > 64 {
                     core.checks.remove(0);
                 }
-                core.compare(f);
+                let me = core.me;
+                core.hashes.entry(f).or_default().insert(me, h.clone());
+                core.settle();
                 sent.push(Core::check_msg(f, &h));
             }
             sent
@@ -683,7 +821,15 @@ impl Match {
 
 impl UserData for Match {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
-        fields.add_field_method_get("status", |_, m| Ok(m.core.borrow().status.name()));
+        fields.add_field_method_get("status", |_, m| {
+            let core = m.core.borrow();
+            Ok(if core.status == Status::Playing && core.stalled_for >= WAITING { "waiting" } else { core.status.name() })
+        });
+        fields.add_field_method_get("waiting", |vm, m| {
+            let core = m.core.borrow();
+            vm.create_sequence_from(core.waiting_for.iter().map(|p| core.players[*p].clone()).collect::<Vec<_>>())
+        });
+        fields.add_field_method_get("ended", |_, m| Ok(m.core.borrow().ended.clone()));
         fields.add_field_method_get("state", |_, m| Ok(m.core.borrow().state.clone()));
         fields.add_field_method_get("frame", |_, m| Ok(m.core.borrow().frame));
         fields.add_field_method_get("me", |_, m| Ok(m.core.borrow().me + 1));
@@ -797,8 +943,13 @@ pub fn create(
         every: (1.0 / frame_dt).round().max(1.0) as u64,
         checked: 0,
         checks: Vec::new(),
-        theirs: BTreeMap::new(),
+        hashes: BTreeMap::new(),
+        settled: 0,
         desynced: BTreeSet::new(),
+        drop_from: BTreeMap::new(),
+        stalled_for: 0.0,
+        waiting_for: Vec::new(),
+        ended: None,
         clock: None,
         carry: 0.0,
         since_hello: 0.0,

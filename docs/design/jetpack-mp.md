@@ -1,6 +1,6 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
-Status: **in progress — steps 1–7 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
+Status: **in progress — steps 1–7 and 9 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)
 (uncommitted on `laptop-host` at writing). Absorbs the ephemeral half of
@@ -292,6 +292,20 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
    > 8. **Jetpack on `ui.world` + `net.match`**: state and rules into `step`, `physics.lua`
    >    replaced by the world, lobby and roster in the HUD. M7, M8.
 9. **Desync and drop-out**. M9, M10.
+   *As built 2026-11-05:* `net_match.rs` keeps every player's hash per checkpoint and settles
+   them in order once all counted players' are in. One hash everywhere: on. A strict majority:
+   the others are out from `DROP_AFTER` (2) checkpoints later — every honest peer computes the
+   same frame, and none runs past it before the verdict, so a drop rewinds at most to a frame
+   still held. From that frame a dropped player's input is nil and holds nothing up. The odd one
+   out plays to the same frame (the others still need its inputs until then) and ends itself:
+   `ended = "desynced at frame f"`. No majority (two who disagree, or three all different):
+   `disputed`, no result. Drop-out: stalled on a late input (or a missing hash) for 1 s the
+   status reads `waiting` with `match.waiting` naming who; at 10 s the match ends, `ended =
+   "dropped out: ids"`. Detection is at the first checkpoint after the cheat (~1 s of frames plus
+   the network); the drop lands two checkpoints later. M9 runs on `mp_dots`, whose "cheat" button
+   (a test seam) makes one device play by other rules — not Jetpack's fuel, as §0 says: the
+   mechanism is the platform's and any game's state shows it. Jetpack shows a banner for
+   waiting, ended and disputed. `e2e_mp.py` M9, M10 green; Rust: majority drop, dispute, drop-out.
 10. **Results** (after owned-entries lands): each player signs `(match_id, result_hash)` over
     `net`; when all have, one entry goes to `results`; manifest
     `rule results/* { forbid insert unless signed_by(players) }`, checked by `courier::rules` in
