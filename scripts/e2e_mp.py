@@ -25,6 +25,7 @@ from osvauld.net import Net, build, wait_until  # noqa: E402
 
 PROBE = Path(__file__).parent / "e2e_apps" / "net_probe"
 DOTS = Path(__file__).parent.parent / "demo_apps" / "mp_dots"
+HOCKEY = Path(__file__).parent.parent / "demo_apps" / "mp_hockey"
 SOON = 5.0
 
 
@@ -186,7 +187,19 @@ def m5(net):
     agree(peers, play(peers, i, 10, "M5"), 6)
 
 
-TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
+def m6(net):
+    """Hockey as a two-player match: 20 s of play, equal hashes, with and without B's delay."""
+    rounds = (("M6", ["alice", "bob"], None),
+              ("M6-delay", ["carol", "dave"], {"dave": {"OSVAULD_NET_DELAY_MS": "120"}}))
+    for label, names, env in rounds:
+        peers, i = setup(net, names, app=HOCKEY, env=env)
+        agree(peers, play(peers, i, 20, label), 15)
+        for p in peers:
+            p.stop()
+        net.peers.clear()
+
+
+TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6}
 
 
 def main() -> int:

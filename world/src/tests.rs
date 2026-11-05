@@ -3310,3 +3310,115 @@ fn a_bad_motor_is_refused() {
     let err = world.set_joints(vec![rope]).unwrap_err().to_string();
     assert!(err.contains("a motor drives a pin or a wheel, not a rope"), "{err}");
 }
+
+// ── a world under a match: snapshot, restore, step_driven (jetpack-mp.md §5) ──
+
+/// A box of walls, two bouncing balls with grip and a steered walker: enough contact, spin and
+/// sleep for a rewind to get wrong.
+fn arena(with_b: bool) -> Vec<EntitySpec> {
+    let d = drawing();
+    let wall = |id: &str, pos, w, h| solid(id, pos, Shape::Rect(w, h), (0.0, 0.0), &d);
+    let ball = |id: &str, pos| EntitySpec {
+        loose: Some(Material { bounce: 0.9, friction: 0.1, grip: Some(0.5), density: 1.0, mass: None, center: None }),
+        ..solid(id, pos, Shape::Circle(6.0), (6.0, 6.0), &d)
+    };
+    let mut specs = vec![
+        wall("top", (0.0, -10.0), 300.0, 10.0),
+        wall("bottom", (0.0, 200.0), 300.0, 10.0),
+        wall("left", (-10.0, 0.0), 10.0, 200.0),
+        wall("right", (300.0, 0.0), 10.0, 200.0),
+        ball("a", (40.0, 50.0)),
+        EntitySpec {
+            controller: Some(wasd(200.0)),
+            ..solid("walker", (150.0, 150.0), Shape::Circle(8.0), (8.0, 8.0), &d)
+        },
+    ];
+    if with_b {
+        specs.push(ball("b", (200.0, 60.0)));
+    }
+    specs
+}
+
+fn kick(world: &mut World2d) {
+    world.set("a", Set { pos: None, velocity: Some((400.0, 250.0)), spin: Some(90.0) }).unwrap();
+    if world.get("b").is_some() {
+        world.set("b", Set { pos: None, velocity: Some((-300.0, 320.0)), spin: None }).unwrap();
+    }
+}
+
+/// `n` match frames of 4 steps, the walker steered by the frame number.
+fn drive(world: &mut World2d, from: u32, n: u32) {
+    for f in from..from + n {
+        let dx = [(1.0), (0.0), (-1.0)][(f / 7 % 3) as usize];
+        world.steer("walker", (dx, 0.5)).unwrap();
+        world.step_driven(4);
+        world.drain_events();
+    }
+}
+
+#[test]
+fn a_restored_world_steps_exactly_as_the_straight_run() {
+    let mut straight = World2d::default();
+    straight.reconcile(arena(true)).unwrap();
+    kick(&mut straight);
+    drive(&mut straight, 0, 20);
+    let snap = straight.snapshot();
+    drive(&mut straight, 20, 40);
+    let want = straight.digest();
+
+    // Wander off on other inputs, come back, and run the same frames again.
+    straight.restore(&snap).unwrap();
+    straight.set("a", Set { pos: None, velocity: Some((-900.0, 10.0)), spin: None }).unwrap();
+    drive(&mut straight, 99, 15);
+    straight.restore(&snap).unwrap();
+    drive(&mut straight, 20, 40);
+    assert_eq!(straight.digest(), want);
+    assert!(straight.steps() == 240, "{}", straight.steps());
+}
+
+#[test]
+fn a_body_gone_since_the_snapshot_comes_back_with_its_motion() {
+    let mut once = World2d::default();
+    once.reconcile(arena(true)).unwrap();
+    kick(&mut once);
+    drive(&mut once, 0, 10);
+    let snap = once.snapshot();
+    drive(&mut once, 10, 30);
+    let want = once.digest();
+
+    let mut again = World2d::default();
+    again.reconcile(arena(true)).unwrap();
+    kick(&mut again);
+    drive(&mut again, 0, 10);
+    let snap_again = again.snapshot();
+    // `b` leaves the description and comes back: a new entity, a new owner for its old body.
+    again.reconcile(arena(false)).unwrap();
+    drive(&mut again, 10, 5);
+    again.reconcile(arena(true)).unwrap();
+    again.restore(&snap_again).unwrap();
+    drive(&mut again, 10, 30);
+    assert_eq!(again.digest(), want);
+    // Its hits still name it: the body's owner was re-tagged.
+    assert!(again.get("b").is_some());
+    let _ = snap;
+}
+
+#[test]
+fn restore_refuses_a_world_with_other_entities() {
+    let mut world = World2d::default();
+    world.reconcile(arena(true)).unwrap();
+    let snap = world.snapshot();
+    world.reconcile(arena(false)).unwrap();
+    assert!(matches!(world.restore(&snap), Err(WorldError::Restore(_))));
+}
+
+#[test]
+fn steer_needs_a_controller() {
+    let mut world = World2d::default();
+    world.reconcile(arena(false)).unwrap();
+    assert!(world.steer("a", (1.0, 0.0)).is_err());
+    world.steer("walker", (5.0, 0.0)).unwrap();
+    world.step_driven(12);
+    let x = world.get("walker").unwrap().pos.0;
+    assert!((x - (150.0 + 200.0 * 0.1)).abs() < 0.5, "clamped to 1: {x}");
+}

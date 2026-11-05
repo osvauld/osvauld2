@@ -11,6 +11,7 @@ mod camera;
 pub mod clip;
 mod physics;
 mod physics3d;
+mod snapshot;
 pub mod world3d;
 
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,7 @@ use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
 pub use crate::physics::{Collider, JointKind, Material, Motor, Shape};
+pub use crate::snapshot::WorldSnapshot;
 
 pub struct EntitySpec {
     pub id: String,
@@ -78,6 +80,7 @@ pub struct JointSpec {
 }
 
 /// A joint as the world holds it, and the bodies it was made for: a rebuilt body ends it.
+#[derive(Clone)]
 struct Joined {
     spec: JointSpec,
     handle: rapier2d::prelude::ImpulseJointHandle,
@@ -290,7 +293,7 @@ struct Solid {
 }
 
 /// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
-#[derive(Component, Default)]
+#[derive(Component, Clone, Copy, Default)]
 struct Velocity(f64, f64);
 
 #[derive(Component)]
@@ -303,8 +306,12 @@ struct Attached {
     turned: Option<Affine>,
 }
 
+/// A controller's axes as a match's `step` set them (`World2d::steer`), in place of held keys.
+#[derive(Component, Clone, Copy, Default, PartialEq)]
+struct Steer(f64, f64);
+
 /// The held direction `tick` last reported, so it reports only a change.
-#[derive(Component, Default, PartialEq)]
+#[derive(Component, Clone, Copy, Default, PartialEq)]
 struct Heading(i8, i8);
 
 #[derive(Component)]
@@ -376,6 +383,9 @@ pub struct World2d {
     /// Loose things a hand holds: where each is being brought to.
     grabs: HashMap<Entity, (f64, f64)>,
     joints: HashMap<String, Joined>,
+    /// Stepped by a match, not the frame clock (`snapshot.rs`); commands only while it steps.
+    driven: bool,
+    commands_open: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -410,6 +420,9 @@ pub enum WorldError {
     /// A question asked wrongly, as `"ray: why"`.
     #[error("{0}")]
     Ask(String),
+    /// A snapshot put back on the wrong world (`World2d::restore`).
+    #[error("restore: {0}")]
+    Restore(String),
     #[error(transparent)]
     Drawing(#[from] DrawingError),
     #[error(transparent)]
@@ -611,8 +624,13 @@ impl World2d {
         }
         // What was described before and is not now goes: a whole group no longer described, or
         // an entity left out of a part described afresh.
-        for gone in old.into_values().flat_map(|b| b.entities) {
-            let name = self.ecs.get::<Name>(gone).expect("every entity has a Name").0.clone();
+        // In name order: removals free Rapier slots, and the next bodies made take them — two
+        // devices running one match must hand out the same handles.
+        let mut gone: Vec<(String, Entity)> = (old.into_values().flat_map(|b| b.entities))
+            .map(|e| (self.ecs.get::<Name>(e).expect("every entity has a Name").0.clone(), e))
+            .collect();
+        gone.sort();
+        for (name, gone) in gone {
             if fresh.contains(&name) {
                 continue; // described again, in another part
             }
@@ -1010,7 +1028,10 @@ impl World2d {
             let Some(c) = self.ecs.get::<Controller>(entity) else {
                 continue;
             };
-            let (dx, dy) = (self.axis(&c.axis_x), self.axis(&c.axis_y));
+            let (dx, dy) = match self.ecs.get::<Steer>(entity) {
+                Some(s) => (s.0, s.1),
+                None => (self.axis(&c.axis_x), self.axis(&c.axis_y)),
+            };
             let (length, step) = ((dx * dx + dy * dy).sqrt(), c.speed * dt);
             let heading = Heading(dx as i8, dy as i8);
             let mut e = self.ecs.entity_mut(entity);

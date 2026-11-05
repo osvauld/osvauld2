@@ -668,7 +668,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let host_context = host::HostContext::new(budget.clone());
         let net_handlers = net::Handlers::default();
         let matches = net_match::Matches::default();
-        net::install(&vm, net.clone(), net::rules(&src.doc), net_handlers.clone(), matches.clone(), host_context.clone())?;
+        net::install(&vm, net.clone(), net::rules(&src.doc), net_handlers.clone(), matches.clone(), worlds.clone(), host_context.clone())?;
         if let Some(install) = &setup {
             install(&vm, host_context.clone())?;
         }
@@ -1368,6 +1368,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
             if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
                 match &msg {
+                    LuaMsg::TickWorld(_, _, elapsed) if world.is_driven() => world.show_at(*elapsed),
                     LuaMsg::TickWorld(_, dt, elapsed) => world.tick(*elapsed, *dt),
                     LuaMsg::KeyWorld(_, key) if key.cancelled => world.release_all(),
                     LuaMsg::KeyWorld(_, key) => {
@@ -1993,6 +1994,9 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             )));
         }
     }
+    if let Some(m) = node.get::<Option<String>>("driven")? {
+        return build_driven_world(node, &id, &m, (width, height), order, context);
+    }
     let actions = world_actions(node)?;
     let gravity = world_gravity(node, &id)?;
     let wells = gfx::wells(node, &format!("world {id:?}"))?;
@@ -2084,6 +2088,90 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         });
     }
     Ok(el)
+}
+
+/// A world a match steps (`jetpack-mp.md` §5): the view only shows it. Its entities, gravity,
+/// wells and joints come from the match's `worlds`, and what happens in it reaches `step` as
+/// events, so none of those belong here.
+fn build_driven_world<M: 'static>(
+    node: &Table,
+    id: &str,
+    by: &str,
+    (width, height): (f64, f64),
+    order: world::Order,
+    context: &mut Ctx<M>,
+) -> mlua::Result<El<M>> {
+    if max_index(node) > 0 {
+        return Err(mlua::Error::runtime(format!(
+            "world {id:?} is driven by match {by:?}: its entities come from the match's worlds.{id}"
+        )));
+    }
+    for prop in ["gravity", "wells", "joints", "actions", "on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
+        if !node.get::<Value>(prop)?.is_nil() {
+            let why = if prop.starts_with("on_") { "what happens in it arrives in step's events" } else { "describe it in the match's worlds" };
+            return Err(mlua::Error::runtime(format!("world {id:?} is driven by match {by:?}: no {prop}; {why}")));
+        }
+    }
+    let camera = gfx::camera(node)?;
+    if let Some(c) = &camera {
+        c.check().map_err(|e| mlua::Error::runtime(format!("world {id:?}: camera: {e}")))?;
+    }
+    let mut worlds = context.worlds.borrow_mut();
+    let world = worlds.entry(id.to_string()).or_default();
+    world.set_order(order);
+    world.describe_camera((width, height), camera).map_err(mlua::Error::external)?;
+    let visual = world.frame(width, height).map_err(mlua::Error::external)?;
+    let mut el = frame_el(Arc::new(visual));
+    if world.needs_ticks() {
+        let (to_msg, id) = (context.to_msg.clone(), id.to_string());
+        el = el.on_frame(id.clone(), move |tick| {
+            to_msg(LuaMsg::TickWorld(id.clone(), tick.dt.into(), tick.elapsed))
+        });
+    }
+    Ok(el)
+}
+
+/// A driven world brought to a match's description of it: `{ entity, ..., gravity = ..., wells =
+/// ..., joints = ... }`, as a `ui.world`'s own, without groups.
+pub(crate) fn describe_world(world: &mut world::World2d, desc: &Table, id: &str) -> mlua::Result<()> {
+    let owner = format!("match world {id:?}");
+    for pair in desc.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        if let Value::String(k) = k {
+            let k = k.to_str()?.to_string();
+            if !["gravity", "wells", "joints"].contains(&k.as_str()) {
+                return Err(mlua::Error::runtime(format!("{owner}: unknown field {k:?}")));
+            }
+        }
+    }
+    let gravity = world_gravity(desc, id)?;
+    let wells = gfx::wells(desc, &owner)?;
+    world::World2d::check_wells(&wells).map_err(mlua::Error::external)?;
+    let joints = gfx::joints(desc, &owner)?;
+    let mut specs = Vec::new();
+    for index in 1..=max_index(desc) {
+        match desc.get::<Value>(index)? {
+            Value::Boolean(false) => {}
+            Value::Table(t) if t.get::<Option<String>>("tag")?.as_deref() == Some("group") => {
+                return Err(mlua::Error::runtime(format!("{owner}: groups are for described worlds; list entities")));
+            }
+            Value::Table(spec) => specs.push(gfx::entity(spec, index)?),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "{owner}: entity {index} must be a table or false, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    let wrap = |e: world::WorldError| mlua::Error::runtime(format!("{owner}: {e}"));
+    if world.gravity() != gravity {
+        world.set_gravity(gravity).map_err(wrap)?;
+    }
+    world.reconcile(specs).map_err(wrap)?;
+    world.set_wells(wells).map_err(wrap)?;
+    world.set_joints(joints).map_err(wrap)?;
+    Ok(())
 }
 
 /// Runs a world group's function as `view` runs — signal writes refused — noting what it read.
@@ -2262,6 +2350,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
         "frame" => &["visual"],
         "scene3d" => &["scene", "on_zone"],
         "world" => &[
+            "driven",
             "width",
             "height",
             "camera",

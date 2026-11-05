@@ -232,7 +232,54 @@ fn shape(c: &Collider, anchor: (f64, f64)) -> ColliderBuilder {
     shape.translation(Vector::new((cx - anchor.0) as f32, (cy - anchor.1) as f32))
 }
 
+/// A whole copy, for a match's rewind (`World2d::snapshot`): every Rapier set, the solver's
+/// warm-start contacts included, so a restored world steps exactly as the original did. The
+/// pipeline is scratch space and starts fresh.
+impl Clone for Physics {
+    fn clone(&self) -> Self {
+        let w = &self.world;
+        let world = PhysicsWorld {
+            gravity: w.gravity,
+            integration_parameters: w.integration_parameters,
+            physics_pipeline: PhysicsPipeline::new(),
+            islands: w.islands.clone(),
+            broad_phase: w.broad_phase.clone(),
+            narrow_phase: w.narrow_phase.clone(),
+            bodies: w.bodies.clone(),
+            colliders: w.colliders.clone(),
+            impulse_joints: w.impulse_joints.clone(),
+            multibody_joints: w.multibody_joints.clone(),
+            ccd_solver: w.ccd_solver.clone(),
+        };
+        Self { world, ground: self.ground }
+    }
+}
+
 impl Physics {
+    /// Re-tags a body's colliders with a new owner: the entity was spawned anew since the
+    /// snapshot this body came back from.
+    pub(crate) fn set_owner(&mut self, body: RigidBodyHandle, owner: u64) {
+        let handles: Vec<_> = self.world.bodies[body].colliders().to_vec();
+        for c in handles {
+            self.world.colliders[c].user_data = owner as u128;
+        }
+    }
+
+    /// Every body's place, turn, velocity, spin and sleep, as bits in handle order: what two
+    /// devices running the same match must agree on.
+    pub(crate) fn digest(&self, out: &mut Vec<u8>) {
+        for (h, rb) in self.world.bodies.iter() {
+            let (i, g) = h.into_raw_parts();
+            out.extend(i.to_le_bytes());
+            out.extend(g.to_le_bytes());
+            let (t, v) = (rb.translation(), rb.linvel());
+            for f in [t.x, t.y, rb.rotation().angle(), v.x, v.y, rb.angvel()] {
+                out.extend(f.to_bits().to_le_bytes());
+            }
+            out.push(rb.is_sleeping() as u8);
+        }
+    }
+
     /// A body for an entity whose origin is at `origin`, sitting at its solid shape's centre (or
     /// its sensor's, with none). `owner` comes back with every overlap. Scale is not applied.
     /// `groups` is the solid shape's `(memberships, filter)` bits: two solids meet only when each

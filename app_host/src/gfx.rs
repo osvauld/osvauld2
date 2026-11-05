@@ -471,6 +471,9 @@ impl WorldHandle {
         let mut worlds = self.worlds.borrow_mut();
         let world = (worlds.get_mut(&self.id))
             .ok_or_else(|| Error::runtime(format!("{owner}: there is no such world")))?;
+        if !world.takes_commands() {
+            return Err(Error::runtime(format!("{owner}: the world is driven by a match; command it in step")));
+        }
         f(world).map_err(|e| Error::runtime(format!("world {:?}: {e}", self.id)))
     }
 
@@ -491,16 +494,25 @@ impl WorldHandle {
 impl UserData for WorldHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // `rink:set("puck", { pos = { x, y }, velocity = { vx, vy }, spin = degrees_a_second })`;
-        // any may be left out.
+        // any may be left out. `move = { x, y }` steers a controller, each axis -1..1, in place
+        // of its keys: a match's input.
         methods.add_method("set", |_, this, (entity, fields): (String, Table)| {
             let owner = format!("world {:?}:set {entity:?}", this.id);
-            named_fields(&fields, &owner, &["pos", "velocity", "spin"])?;
+            named_fields(&fields, &owner, &["pos", "velocity", "spin", "move"])?;
+            let steered = maybe_table(&fields, &owner, "move")?;
+            if let Some(t) = &steered {
+                let axes = point(t.clone(), &format!("{owner}.move"))?;
+                this.command(&owner, |w| w.steer(&entity, (axes.x, axes.y)))?;
+            }
             let pair = |field| match maybe_table(&fields, &owner, field)? {
                 Some(t) => point(t, &format!("{owner}.{field}")).map(|p| Some((p.x, p.y))),
                 None => Ok(None),
             };
             let spin = maybe_number(&fields, &owner, "spin")?;
             let to = world::Set { pos: pair("pos")?, velocity: pair("velocity")?, spin };
+            if steered.is_some() && to == world::Set::default() {
+                return Ok(());
+            }
             this.command(&owner, |w| w.set(&entity, to))
         });
         // `rink:push("ball", { vx, vy })` adds to a loose thing's velocity.

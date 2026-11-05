@@ -1,6 +1,6 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
-Status: **in progress — steps 1–5 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
+Status: **in progress — steps 1–6 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)
 (uncommitted on `laptop-host` at writing). Absorbs the ephemeral half of
@@ -29,8 +29,8 @@ the virtual clock makes every frame number exact. Each test screenshots every pe
 | M4 | `demo_apps/mp_dots` (a `net.match` with no world): 10 s of scripted inputs on A and B; state hash equal on A, B, C at every 1 s checkpoint | `net.match` convergence | 5 |
 | M5 | M4 with B's link delayed 120 ms (`OSVAULD_NET_DELAY_MS`): B's own dot moves on the frame of B's input; hashes still equal | rollback hides latency | 5 |
 | M6 | Hockey as a two-player `net.match`: 20 s of play, the puck's path and the hashes equal on both peers, with and without the delay | world rollback | 6 |
-| M7 | Jetpack single-player through `net.match` + `ui.world`: `smoke_jetpack.py` green unchanged | the port loses nothing | 8 |
-| M8 | Jetpack, A + B + C: a match starts with the same map, roster and pilots on all three even when B's workspace has other jetpack assets; 20 s of play, hashes equal, each pilot visible on the others | Jetpack multiplayer | 8 |
+| M7 | Jetpack single-player through `net.match`: `smoke_jetpack.py` green unchanged | the port loses nothing | 7 |
+| M8 | Jetpack, A + B + C: a match starts with the same map, roster and pilots on all three even when B's workspace has other jetpack assets; 20 s of play, hashes equal, each pilot visible on the others | Jetpack multiplayer | 7 |
 | M9 | B runs a modified Jetpack (no fuel drain). Within 1 s A and C flag B desynced and drop it; A and C play on. With only A and B the match ends `disputed` | cheating = desync | 9 |
 | M10 | C's shell is killed mid-match; A and B show "waiting for C", then after 10 s end the match with no result | drop-out | 9 |
 | M11 | A match ends. The `results` doc holds one entry: players, scores, a signature from every player. B writing a forged result over the bridge is refused by the host (`Rejected`) | central stats without a referee | 10 |
@@ -126,6 +126,13 @@ Bit-equal results on x86_64 and aarch64:
 - **Moments become events.** In a driven world, `on_hit`/`on_zone`/`on_timer` handlers are an
   error; what they would have reported arrives in `step`'s `events`, so a rollback replays them.
 - Commands (`set`, `push`, `blast`) are allowed inside `step`.
+- **Decided 2026-11-05 with the user: a driven world is a function of `state`.** A rewind re-runs
+  frames, so a body made at frame 2 must exist at frame 2 of the re-run, not at the next screen
+  frame. The match carries `worlds = { rink = function(state) return { entity, ... } end }`;
+  the platform reconciles each driven world from it at the start of every match frame, re-runs
+  included, and the view's `ui.world({ id = "rink", driven = "hockey", ... })` only shows it
+  (entities there are an error). Rejected: `world:spawn`/`:remove` from `step` — cheaper, but a
+  second, command-style way to make bodies that only matches would use.
 
 Jetpack needs more of the world than hockey does. Gaps, read from `lua-apps.md` 2026-11-04:
 
@@ -225,9 +232,47 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
    inputs change every 15–20 frames; real players change more often, so more rollbacks.
 6. **World under a match**: Rapier `enhanced-determinism`, `driven`, save/restore/hash, moments
    as events; hockey as a two-player match. M6.
-7. **World gaps for Jetpack**: flyer body, `:get`. Rust tests, a world demo.
-8. **Jetpack on `ui.world` + `net.match`**: state and rules into `step`, `physics.lua` replaced
-   by the world, lobby and roster in the HUD. M7, M8.
+   *As built 2026-11-05:* `world/src/snapshot.rs`. A snapshot clones Rapier whole (every set
+   is `Clone`; the solver's warm-start contacts come along, so a restored world steps exactly as
+   the original did) plus each entity's place, velocity, heading and steering, keyed by id, and
+   who is in which zone or touching what. Restore expects the world already reconciled from the
+   same frame's state; an entity spawned anew gets its old body back and its colliders re-tagged
+   with the new owner. Reconcile now removes bodies in name order, so two devices hand out the
+   same Rapier handles. `world(id):set(id, { move = { x, y } })` steers a controller in place of
+   keys (`World2d::steer`). In app_host, `net.match{ worlds = { rink = fn(state) } }` makes
+   each world driven: described at the start of every match frame, snapshotted with `state`,
+   stepped `tick / world::STEP` steps after each `step`, its hits, zone changes and moves
+   handed to the next `step` as `events` (`{ world, kind = "hit"|"zone"|"move", ... }`), its
+   bytes (`World2d::digest`) in the checkpoint hash. A driven `ui.world` only shows: entities,
+   gravity, wells, joints, actions and `on_*` moments there are errors, and commands outside
+   `step` are refused. Clips play on the render clock (`show_at`) and report nothing. Timers
+   are not driven yet — a match counts ticks in `state`. **`enhanced-determinism` is not on:**
+   it turns on `simba/libm_force`, which `rapier3d` shares, and `smoke_marble_gates` then saw
+   the 3D platform's drawn rotation and its physics rotation one f32 ulp apart. Whether x86_64
+   and aarch64 agree on a driven world without it is measured at step 11 (M12) instead.
+   `demo_apps/mp_hockey`; Rust: a restored world equals the straight run, a body gone since
+   comes back, hockey's hashes equal across a rolled-back and a near-straight run and both peers.
+   Ahead of Jetpack, two platform changes: the starter's `setup` travels in as many hellos as
+   the channel's `size` needs (Jetpack's maps, guns and pilots are ~100 KB; a peer still short
+   of it says so in its hello and is sent it again); and a one-player match starts the moment
+   it is made, with no input delay — single-player Jetpack must feel exactly as before (M7).
+7. **Jetpack in `net.match`, on its own Lua sim**: `World` (`world.lua`) becomes plain data —
+   no cycles, static map and guns in `setup` — and its `step` the match's; the player's input
+   is the match input; bots stay (every peer runs them). Lobby and roster in the HUD. M7, M8.
+8. **Jetpack on `ui.world`**: flyer body, `:get` with `grounded`, optional drawings, fixed-body
+   materials; `physics.lua` replaced by a driven world. Its own step after the multiplayer
+   ones, or its own plan.
+
+   *Revised 2026-11-05 with the user (before step 7 was started):* steps 7 and 8 were "world
+   gaps for Jetpack" then "Jetpack on `ui.world` + `net.match`". Reading the code at step 6:
+   Jetpack's game is already a deterministic pure-Lua step (box collision, a seeded minstd RNG
+   in its state), so it runs in a match almost as-is, while the Rapier port is a large rewrite
+   that changes the feel and risks M7's unchanged smokes. Multiplayer first; the port follows.
+   The old text:
+
+   > 7. **World gaps for Jetpack**: flyer body, `:get`. Rust tests, a world demo.
+   > 8. **Jetpack on `ui.world` + `net.match`**: state and rules into `step`, `physics.lua`
+   >    replaced by the world, lobby and roster in the HUD. M7, M8.
 9. **Desync and drop-out**. M9, M10.
 10. **Results** (after owned-entries lands): each player signs `(match_id, result_hash)` over
     `net`; when all have, one entry goes to `results`; manifest

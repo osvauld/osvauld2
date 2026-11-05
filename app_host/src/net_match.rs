@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::net::{Net, Outgoing, decode_body, encode};
 
 /// Input frames between reading an input and running it: one frame's head start for the network.
+/// A one-player match has no network to wait for and runs its input on the frame it was read.
 pub const DELAY: u64 = 1;
 /// Frames the local simulation may run past the last frame every input is in for; past it the
 /// match stalls until the slowest peer's input arrives.
@@ -70,6 +71,11 @@ struct Core {
     status: Status,
     hello: BTreeSet<usize>,
     setup: Option<Vec<u8>>,
+    /// The starter's setup as it arrives, in pieces that each fit a message: offset → bytes.
+    parts: BTreeMap<u64, Vec<u8>>,
+    /// The most setup bytes one hello carries.
+    chunk: usize,
+    delay: u64,
     state: Option<Table>,
     /// The next input frame to run.
     frame: u64,
@@ -79,8 +85,10 @@ struct Core {
     known: Vec<u64>,
     /// What each simulated frame ran on, per player — the predictions to check late inputs by.
     used: BTreeMap<u64, Vec<Vec<u8>>>,
-    /// `state` before each frame still open to a rewind.
-    snapshots: BTreeMap<u64, Vec<u8>>,
+    /// Everything before each frame still open to a rewind.
+    snapshots: BTreeMap<u64, Rc<Snap>>,
+    /// What the driven worlds reported on the last tick, for the next `step`.
+    pending: Vec<(String, world::WorldEvent)>,
     /// The earliest frame a late input proved mispredicted.
     rewind: Option<u64>,
     every: u64,
@@ -96,6 +104,15 @@ struct Core {
     error_told: bool,
 }
 
+/// A match before frame `f`: `state` in wire form, each driven world, the events waiting for
+/// the next `step`, and — on a checkpoint frame — the worlds as bytes for the hash.
+struct Snap {
+    state: Vec<u8>,
+    worlds: Vec<world::WorldSnapshot>,
+    pending: Vec<(String, world::WorldEvent)>,
+    digest: Vec<u8>,
+}
+
 /// One match: its core, and its functions (outside the core so no borrow is held while Lua runs).
 #[derive(Clone)]
 pub struct Match {
@@ -103,6 +120,10 @@ pub struct Match {
     state_fn: Function,
     input_fn: Function,
     step_fn: Function,
+    /// Driven worlds by id, in id order, each with the function describing it from `state`.
+    worlds: Rc<Vec<(String, Function)>>,
+    world_map: crate::Worlds,
+    steps_per_tick: u32,
 }
 
 pub type Matches = Rc<RefCell<HashMap<String, Match>>>;
@@ -156,17 +177,53 @@ impl Core {
         0
     }
 
-    fn hello(&self) -> Vec<u8> {
-        let mut out = vec![HELLO];
-        out.extend(self.players_hash);
-        match (&self.setup, self.me == self.starter()) {
+    /// This peer's hello: who it plays with and whether it still lacks the setup — and, from the
+    /// starter with `full`, the setup itself in as many pieces as the channel's size needs.
+    fn hellos(&self, full: bool) -> Vec<Vec<u8>> {
+        let head = |total: usize, offset: usize, bytes: &[u8]| {
+            let mut out = vec![HELLO];
+            out.extend(self.players_hash);
+            out.push(self.setup.is_none() as u8);
+            varint(total as u64, &mut out);
+            varint(offset as u64, &mut out);
+            out.extend(bytes);
+            out
+        };
+        match (&self.setup, full && self.me == self.starter()) {
             (Some(s), true) => {
-                varint(s.len() as u64, &mut out);
-                out.extend(s);
+                let chunks: Vec<&[u8]> = if s.is_empty() { vec![&[][..]] } else { s.chunks(self.chunk).collect() };
+                let mut offset = 0;
+                chunks
+                    .into_iter()
+                    .map(|c| {
+                        let m = head(s.len(), offset, c);
+                        offset += c.len();
+                        m
+                    })
+                    .collect()
             }
-            _ => varint(0, &mut out),
+            _ => vec![head(0, 0, &[])],
         }
-        out
+    }
+
+    /// One piece of the starter's setup; the whole once every byte is in.
+    fn setup_part(&mut self, total: u64, offset: u64, bytes: &[u8]) {
+        if self.setup.is_some() {
+            return;
+        }
+        self.parts.insert(offset, bytes.to_vec());
+        let have: u64 = self.parts.values().map(|b| b.len() as u64).sum();
+        if have >= total {
+            let mut whole = Vec::with_capacity(total as usize);
+            for (at, b) in std::mem::take(&mut self.parts) {
+                if at as usize == whole.len() {
+                    whole.extend(b);
+                }
+            }
+            if whole.len() as u64 == total {
+                self.setup = Some(whole);
+            }
+        }
     }
 
     fn input_msg(frame: u64, input: &[u8]) -> Vec<u8> {
@@ -302,13 +359,19 @@ impl Match {
                         eprintln!("net.match {}: {from} plays with other players", core.id);
                         return true;
                     }
-                    at = 33;
-                    let Some(setup) = read_bytes(body, &mut at) else { return true };
-                    if p == core.starter() && core.setup.is_none() {
-                        core.setup = Some(setup.to_vec());
+                    let needs = body.get(33).copied() == Some(1);
+                    at = 34;
+                    let (Some(total), Some(offset)) = (read_varint(body, &mut at), read_varint(body, &mut at)) else {
+                        return true;
+                    };
+                    if p == core.starter() && (total > 0 || core.setup.is_none()) {
+                        let bytes = body.get(at..).unwrap_or_default();
+                        core.setup_part(total, offset, bytes);
                     }
-                    // Answer a first hello, so a peer that made its match after ours hears us.
-                    core.hello.insert(p).then(|| core.hello())
+                    // Answer a first hello, so a peer that made its match after ours hears us; and
+                    // a peer still short of the setup, with it.
+                    let first = core.hello.insert(p);
+                    (first || needs).then(|| core.hellos(needs))
                 }
                 Some(&INPUT) => {
                     let (Some(frame), Some(input)) = (read_varint(body, &mut at), read_bytes(body, &mut at).map(<[u8]>::to_vec)) else {
@@ -328,7 +391,7 @@ impl Match {
                 _ => None,
             }
         };
-        if let Some(hello) = reply {
+        for hello in reply.into_iter().flatten() {
             self.send(net, hello);
         }
         true
@@ -363,9 +426,9 @@ impl Match {
                 if resend {
                     core.since_hello = 0.0;
                 }
-                (ready, resend.then(|| core.hello()))
+                (ready, resend.then(|| core.hellos(false)))
             };
-            if let Some(hello) = resend {
+            for hello in resend.into_iter().flatten() {
                 self.send(net, hello);
             }
             if !ready {
@@ -416,13 +479,19 @@ impl Match {
         };
         let ids = vm.create_sequence_from(players)?;
         let state: Table = self.state_fn.call((setup, ids))?;
+        for (id, _) in self.worlds.iter() {
+            let mut w = world::World2d::default();
+            w.set_driven(true);
+            self.world_map.borrow_mut().insert(id.clone(), w);
+        }
         let mut core = self.core.borrow_mut();
-        // Everyone ran frames before `DELAY` on no input; nothing to wait for there.
+        // Everyone ran frames before the delay on no input; nothing to wait for there.
+        let delay = core.delay;
         for p in 0..core.players.len() {
-            for f in 0..DELAY {
+            for f in 0..delay {
                 core.inputs[p].insert(f, empty_input());
             }
-            core.known[p] = core.known[p].max(DELAY);
+            core.known[p] = core.known[p].max(delay);
             while core.inputs[p].contains_key(&core.known[p]) {
                 let k = core.known[p];
                 core.known[p] = k + 1;
@@ -439,33 +508,111 @@ impl Match {
         encode(&v, &mut bytes, 0)?;
         let (frame, me) = {
             let core = self.core.borrow();
-            (core.frame + DELAY, core.me)
+            (core.frame + core.delay, core.me)
         };
         self.core.borrow_mut().put_input(me, frame, bytes.clone());
         self.send(net, Core::input_msg(frame, &bytes));
         Ok(())
     }
 
-    /// Frame `f` from the state now held: snapshot, then `ticks` steps on its inputs.
+    /// Each driven world brought to what `state` describes.
+    fn describe_worlds(&self, state: &Table) -> mlua::Result<()> {
+        for (id, describe) in self.worlds.iter() {
+            let desc: Table = describe.call(state.clone())?;
+            let mut map = self.world_map.borrow_mut();
+            let w = map.get_mut(id).ok_or_else(|| Error::runtime(format!("world {id:?} is gone")))?;
+            crate::describe_world(w, &desc, id)?;
+        }
+        Ok(())
+    }
+
+    fn snap(&self, state: &Table, digest: bool) -> mlua::Result<Snap> {
+        let mut bytes = Vec::new();
+        encode(&Value::Table(state.clone()), &mut bytes, 0)?;
+        let map = self.world_map.borrow();
+        let mut worlds = Vec::new();
+        let mut world_bytes = Vec::new();
+        for (id, _) in self.worlds.iter() {
+            let w = map.get(id).ok_or_else(|| Error::runtime(format!("world {id:?} is gone")))?;
+            worlds.push(w.snapshot());
+            if digest {
+                world_bytes.extend(w.digest());
+            }
+        }
+        Ok(Snap { state: bytes, worlds, pending: self.core.borrow().pending.clone(), digest: world_bytes })
+    }
+
+    fn events_table(&self, vm: &Lua) -> mlua::Result<Table> {
+        let pending = std::mem::take(&mut self.core.borrow_mut().pending);
+        let out = vm.create_table()?;
+        for (w, e) in pending {
+            let t = vm.create_table()?;
+            t.set("world", w)?;
+            match e {
+                world::WorldEvent::Hit { id, who, speed } => {
+                    (t.set("kind", "hit")?, t.set("id", id)?, t.set("who", who)?, t.set("speed", speed)?);
+                }
+                world::WorldEvent::Enter { id, who } => {
+                    (t.set("kind", "zone")?, t.set("phase", "enter")?, t.set("id", id)?, t.set("who", who)?);
+                }
+                world::WorldEvent::Exit { id, who } => {
+                    (t.set("kind", "zone")?, t.set("phase", "leave")?, t.set("id", id)?, t.set("who", who)?);
+                }
+                world::WorldEvent::Move { id, dx, dy } => {
+                    (t.set("kind", "move")?, t.set("id", id)?, t.set("dx", dx)?, t.set("dy", dy)?);
+                }
+                other => {
+                    t.set("kind", format!("{other:?}"))?;
+                }
+            }
+            out.raw_push(t)?;
+        }
+        Ok(out)
+    }
+
+    fn open_worlds(&self, open: bool) {
+        let mut map = self.world_map.borrow_mut();
+        for (id, _) in self.worlds.iter() {
+            if let Some(w) = map.get_mut(id) {
+                w.open_commands(open);
+            }
+        }
+    }
+
+    /// Frame `f` from the state now held: worlds described, snapshot, then `ticks` steps on its
+    /// inputs, each followed by the worlds' own steps.
     fn run_frame(&self, vm: &Lua, f: u64) -> mlua::Result<()> {
-        let (state, used, ticks) = {
+        let (state, used, ticks, checkpoint) = {
             let core = self.core.borrow();
             let state = core.state.clone().expect("playing");
             let used: Vec<Vec<u8>> = (0..core.players.len()).map(|p| core.input_for(p, f)).collect();
-            (state, used, core.ticks)
+            (state, used, core.ticks, f % core.every == 0)
         };
-        let mut snap = Vec::new();
-        encode(&Value::Table(state.clone()), &mut snap, 0)?;
+        self.describe_worlds(&state)?;
+        let snap = self.snap(&state, checkpoint)?;
         let inputs = vm.create_table()?;
         for (i, bytes) in used.iter().enumerate() {
             inputs.raw_set(i + 1, decode_body(vm, bytes)?)?;
         }
-        let events = vm.create_table()?;
         for _ in 0..ticks {
-            self.step_fn.call::<()>((state.clone(), inputs.clone(), events.clone()))?;
+            let events = self.events_table(vm)?;
+            self.open_worlds(true);
+            let stepped = self.step_fn.call::<()>((state.clone(), inputs.clone(), events));
+            self.open_worlds(false);
+            stepped?;
+            let mut map = self.world_map.borrow_mut();
+            let mut happened = Vec::new();
+            for (id, _) in self.worlds.iter() {
+                if let Some(w) = map.get_mut(id) {
+                    w.step_driven(self.steps_per_tick);
+                    happened.extend(w.drain_events().into_iter().map(|e| (id.clone(), e)));
+                }
+            }
+            drop(map);
+            self.core.borrow_mut().pending = happened;
         }
         let mut core = self.core.borrow_mut();
-        core.snapshots.insert(f, snap);
+        core.snapshots.insert(f, Rc::new(snap));
         core.used.insert(f, used);
         core.stats.steps += u64::from(ticks);
         Ok(())
@@ -482,10 +629,22 @@ impl Match {
             };
             (from, core.frame, snap)
         };
-        let Value::Table(state) = decode_body(vm, &snap)? else {
+        let Value::Table(state) = decode_body(vm, &snap.state)? else {
             return Err(Error::runtime("a snapshot that is not a table"));
         };
-        self.core.borrow_mut().state = Some(state);
+        // The worlds take the frame's shape from its state, then its motion from the snapshot.
+        self.describe_worlds(&state)?;
+        {
+            let mut map = self.world_map.borrow_mut();
+            for ((id, _), saved) in self.worlds.iter().zip(&snap.worlds) {
+                let w = map.get_mut(id).ok_or_else(|| Error::runtime(format!("world {id:?} is gone")))?;
+                w.restore(saved).map_err(|e| Error::runtime(format!("world {id:?}: {e}")))?;
+            }
+        }
+        let mut core = self.core.borrow_mut();
+        core.state = Some(state);
+        core.pending = snap.pending.clone();
+        drop(core);
         for f in from..to {
             self.run_frame(vm, f)?;
         }
@@ -505,7 +664,7 @@ impl Match {
                 let f = core.checked + core.every;
                 core.checked = f;
                 let Some(snap) = core.snapshots.get(&f) else { continue };
-                let h = hash_hex(snap);
+                let h = hash_hex(&[snap.state.as_slice(), &snap.digest].concat());
                 core.checks.push((f, h.clone()));
                 if core.checks.len() > 64 {
                     core.checks.remove(0);
@@ -549,7 +708,15 @@ impl UserData for Match {
 
 /// `net.match(spec)`, its channel's `rate` read from the manifest: checked, registered under its id (a second match with the id replaces the
 /// first), hello sent. `me` is this device's id; `None` plays alone as `"local"`.
-pub fn create(spec: Table, rate: u32, me: Option<String>, net: &Net, matches: &Matches) -> mlua::Result<Match> {
+pub fn create(
+    vm: &Lua,
+    spec: Table,
+    (rate, size): (u32, u32),
+    me: Option<String>,
+    net: &Net,
+    matches: &Matches,
+    world_map: &crate::Worlds,
+) -> mlua::Result<Match> {
     let id: String = spec.get("id")?;
     let tick: f64 = spec.get::<Option<f64>>("tick")?.unwrap_or(1.0 / 60.0);
     let ticks: u32 = spec.get::<Option<u32>>("frame")?.unwrap_or(1);
@@ -583,6 +750,18 @@ pub fn create(spec: Table, rate: u32, me: Option<String>, net: &Net, matches: &M
     let state_fn: Function = spec.get("state")?;
     let input_fn: Function = spec.get("input")?;
     let step_fn: Function = spec.get("step")?;
+    let mut worlds: Vec<(String, Function)> = match spec.get::<Option<Table>>("worlds")? {
+        None => Vec::new(),
+        Some(t) => t.pairs::<String, Function>().collect::<mlua::Result<_>>()?,
+    };
+    worlds.sort_by(|a, b| a.0.cmp(&b.0));
+    let steps_per_tick = (tick / world::STEP).round() as u32;
+    if !worlds.is_empty() && (steps_per_tick == 0 || (tick - f64::from(steps_per_tick) * world::STEP).abs() > 1e-9) {
+        return Err(Error::runtime(format!(
+            "net.match: a match with worlds ticks in whole world steps of 1/{} s",
+            (1.0 / world::STEP).round()
+        )));
+    }
     let mut setup = None;
     if me_at == 0 {
         let mut s = Vec::new();
@@ -601,6 +780,10 @@ pub fn create(spec: Table, rate: u32, me: Option<String>, net: &Net, matches: &M
         players_hash,
         status: Status::Lobby,
         hello: BTreeSet::from([me_at]),
+        parts: BTreeMap::new(),
+        // Room for the hello's own fields: tag, players hash, flag, two varints.
+        chunk: (size as usize).saturating_sub(64).max(64),
+        delay: if n == 1 { 0 } else { DELAY },
         setup,
         state: None,
         frame: 0,
@@ -608,6 +791,7 @@ pub fn create(spec: Table, rate: u32, me: Option<String>, net: &Net, matches: &M
         known: vec![0; n],
         used: BTreeMap::new(),
         snapshots: BTreeMap::new(),
+        pending: Vec::new(),
         rewind: None,
         every: (1.0 / frame_dt).round().max(1.0) as u64,
         checked: 0,
@@ -621,9 +805,23 @@ pub fn create(spec: Table, rate: u32, me: Option<String>, net: &Net, matches: &M
         error: None,
         error_told: false,
     };
-    let m = Match { core: Rc::new(RefCell::new(core)), state_fn, input_fn, step_fn };
-    let hello = m.core.borrow().hello();
-    m.send(net, hello);
+    let m = Match {
+        core: Rc::new(RefCell::new(core)),
+        state_fn,
+        input_fn,
+        step_fn,
+        worlds: Rc::new(worlds),
+        world_map: world_map.clone(),
+        steps_per_tick,
+    };
+    let hellos = m.core.borrow().hellos(true);
+    for hello in hellos {
+        m.send(net, hello);
+    }
+    // Alone, there is nobody to wait for: playing from the first frame, its state readable now.
+    if n == 1 {
+        m.start(vm)?;
+    }
     matches.borrow_mut().insert(id, m.clone());
     Ok(m)
 }

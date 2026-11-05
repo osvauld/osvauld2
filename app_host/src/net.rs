@@ -155,6 +155,7 @@ pub fn install(
     rules: Rules,
     handlers: Handlers,
     matches: crate::net_match::Matches,
+    worlds: crate::Worlds,
     context: HostContext,
 ) -> mlua::Result<()> {
     let api = vm.create_table()?;
@@ -162,10 +163,12 @@ pub fn install(
         let (net, rules) = (net.clone(), rules.clone());
         api.set(
             "match",
-            vm.create_function(move |_, spec: Table| {
+            vm.create_function(move |vm, spec: Table| {
                 let id: String = spec.get("id")?;
-                let rate = channel(&rules, &id)?.rate_per_sec.unwrap_or(manifest::DEFAULT_CHANNEL_RATE);
-                crate::net_match::create(spec, rate, net.me(), &net, &matches)
+                let ch = channel(&rules, &id)?;
+                let rate = ch.rate_per_sec.unwrap_or(manifest::DEFAULT_CHANNEL_RATE);
+                let size = ch.size_bytes.unwrap_or(manifest::CHANNEL_SIZE_MAX);
+                crate::net_match::create(vm, spec, (rate, size), net.me(), &net, &matches, &worlds)
             })?,
         )?;
     }
