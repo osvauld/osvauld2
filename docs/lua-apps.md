@@ -518,6 +518,10 @@ ui.world({
 })
 ```
 
+- **`sky = { stops = { {0, "#2a6ec8"}, {1, "#c8e6fa"} } }`** paints the world's box top to bottom
+  behind every entity. It is on the screen, not the map, so it stays put while the camera moves,
+  and the pointer goes through it. Two stops or more; left out, there is none (the element's
+  `fill` shows, as before).
 - **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
   changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
   falls; it comes to rest asleep on what holds it, as before.

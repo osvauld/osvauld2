@@ -4,7 +4,7 @@
 local A = {}
 
 A.colours = {
-	sky = "#9fd3f0", text = "#14202e", panel = "#ffffffcc", muted = "#4b5b6b",
+	sky = "#9fd3f0", sky_top = "#3d8fd6", sky_low = "#cdebf7", text = "#14202e", panel = "#ffffffcc", muted = "#4b5b6b",
 	fuel = "#f0a000", fuel_low = "#e03030",
 	pedal = "#2b2f3a", pedal_held = "#4a8ff0", pedal_text = "#ffffff",
 	-- buggy
@@ -297,13 +297,13 @@ local function backdrop(points, w, h)
 	end
 	local clouds = {}
 	for x = 400, w, 900 do
-		local cx, cy = x + rand() * 500, points[math.max(2, math.floor(x / 50) * 2)] - 600 - rand() * 400
+		local cx, cy = x + rand() * 500, points[math.max(2, math.floor(x / 50) * 2)] - 300 - rand() * 150
 		for k = 0, 3 do disc(cx + k * 34, cy + ((k % 2 == 0) and 0 or -14), 26 + rand() * 10, clouds) end
 	end
 	return one_part(w, h, {
 		{ path = clouds, fill = C.cloud },
-		ridge(420, 160, 900, C.hills_far),
-		ridge(220, 120, 520, C.hills),
+		ridge(150, 90, 900, C.hills_far),
+		ridge(70, 60, 520, C.hills),
 	})
 end
 

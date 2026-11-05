@@ -3420,3 +3420,41 @@ fn a_changed_surface_takes_effect_on_the_same_ground() {
     let grip = world.surface_grip("floor").unwrap();
     assert!((grip - 0.2).abs() < 1e-6, "the new grip, not the old: {grip}");
 }
+
+// --- Sky (plan: docs/design/hillclimb-terrain.md, L-K1) ---
+
+fn sky_stops() -> Vec<runtime::frame::GradientStop> {
+    use runtime::frame::GradientStop;
+    vec![
+        GradientStop::new(0.0, Color::from_rgb8(40, 110, 200)).unwrap(),
+        GradientStop::new(1.0, Color::from_rgb8(200, 230, 250)).unwrap(),
+    ]
+}
+
+#[test]
+fn a_sky_is_painted_first_fills_the_view_and_stays_put_as_the_camera_moves() {
+    let mut world = on_map(2000.0, 1500.0, follow("hero"));
+    let bare = world.frame(VIEW.0, VIEW.1).unwrap();
+    world.set_sky(sky_stops());
+    let before = world.frame(VIEW.0, VIEW.1).unwrap();
+    assert_eq!(before.items().len(), bare.items().len() + 1, "one more item: the sky");
+    let sky = format!("{:?}", before.items()[0]);
+    assert!(sky.contains("Fill") && sky.contains("Linear"), "first, a gradient fill: {sky}");
+    assert_eq!(before.items()[0].id(), None, "paint, not something to hit");
+    assert_eq!(on_screen(&world, 642.0).as_deref(), Some("hero"), "the sky doesn't take the pointer");
+    assert_eq!(on_screen(&world, 100.0), None, "nor anywhere else");
+    world.key("KeyD", true);
+    frames(&mut world, 1.0, 1.0);
+    let after = world.frame(VIEW.0, VIEW.1).unwrap();
+    assert!(camera_at(&world).0 > 2090.0, "the camera moved");
+    assert_eq!(format!("{:?}", after.items()[0]), sky, "the sky did not");
+}
+
+#[test]
+fn no_sky_paints_nothing_extra_and_clearing_it_takes_it_away() {
+    let mut world = on_map(0.0, 0.0, follow("hero"));
+    let bare = world.frame(VIEW.0, VIEW.1).unwrap().items().len();
+    world.set_sky(sky_stops());
+    world.set_sky(Vec::new());
+    assert_eq!(world.frame(VIEW.0, VIEW.1).unwrap().items().len(), bare);
+}

@@ -121,6 +121,7 @@ return function()
 	local pedals = run.over and { gas = 0, brake = 0 } or controls:state()
 	local stage_world = {
 		id = world_id(), width = W, height = H, radius = 12, fill = C.sky,
+		sky = { stops = { { 0, C.sky_top }, { 0.7, C.sky_low }, { 1, C.sky_low } } },
 		gravity = { 0, U.gravity },
 		camera = { follow = "chassis", ease = 6, bounds = looks.bounds },
 		joints = Setup.joints(car, Drive.motors(car, pedals, run)),

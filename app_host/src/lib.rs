@@ -1909,6 +1909,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     let actions = world_actions(node)?;
     let gravity = world_gravity(node, &id)?;
     let wells = gfx::wells(node, &format!("world {id:?}"))?;
+    let sky = gfx::sky(node, &format!("world {id:?}"))?;
     world::World2d::check_wells(&wells).map_err(mlua::Error::external)?;
     let joints = gfx::joints(node, &format!("world {id:?}"))?;
     // Checked before the world is touched, so a bad camera keeps the last good world whole.
@@ -1976,6 +1977,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     }
     context.groups.borrow_mut().extend(read);
     world.set_wells(wells).map_err(mlua::Error::external)?;
+    world.set_sky(sky);
     // They name entities, so only once those exist; a joint refused here leaves the last good
     // joints, though this description's bodies are already in.
     world.set_joints(joints).map_err(mlua::Error::external)?;
@@ -2181,6 +2183,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
             "order",
             "gravity",
             "wells",
+            "sky",
             "joints",
             "actions",
             "on_action",

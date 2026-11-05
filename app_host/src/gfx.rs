@@ -1101,6 +1101,22 @@ fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
 }
 
 /// The fields every gradient shares: `stops = { {offset, color}, … }` and `extend`.
+/// A world's `sky = { stops = { {0, colour}, …, {1, colour} } }`: top to bottom of its view.
+/// None when left out.
+pub(crate) fn sky(node: &Table, owner: &str) -> mlua::Result<Vec<GradientStop>> {
+    let Some(t) = maybe_table(node, owner, "sky")? else { return Ok(Vec::new()) };
+    let owner = format!("{owner}.sky");
+    named_fields(&t, &owner, &["stops"])?;
+    let (stops, _) = stops_and_extend(&t, &Vars::default(), &owner).map_err(|e| {
+        let e = e.to_string();
+        Error::runtime(if e.contains(&owner) { e } else { format!("{owner}: {e}") })
+    })?;
+    if stops.len() < 2 {
+        return Err(Error::runtime(format!("{owner} needs 2 stops or more, got {}", stops.len())));
+    }
+    Ok(stops)
+}
+
 fn stops_and_extend(
     spec: &Table,
     vars: &Vars,

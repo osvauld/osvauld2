@@ -37,7 +37,11 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   rule outranks the Max every other collider uses, so only that ground's pairs change. Checked:
   slide v²/2μg within 5%, the cart held to 0.1 g on ice with its wheels spinning, bad surfaces
   refused whole. Verified: world 177, app_host lib, workspace check; smokes world, gravity_lab,
-  hillclimb (same 288 m as before). Next: the sky gradient.
+  hillclimb (same 288 m as before).
+- Step 2 built: `sky = { stops }` on `ui.world`, a screen-space gradient painted under every
+  entity, unnamed (the pointer goes through), still while the camera moves. Hillclimb uses it;
+  its smoke reads the top stop's pixel. Verified: world, app_host lib (318); smokes hillclimb,
+  world, camera. Next: parallax.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable

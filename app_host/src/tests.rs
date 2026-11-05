@@ -1150,6 +1150,27 @@ fn a_surface_is_checked_strictly() {
 }
 
 #[test]
+fn a_world_sky_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |sky: &str| format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, sky = {sky} }})");
+    walk_world(&lua, &worlds, &room("{ stops = { { 0, '#2a6ec8' }, { 1, '#c8e6fa' } } }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ stops = { { 0, 'navy' }, { 0.6, 'skyblue' }, { 1, 'white' } } }")).unwrap();
+    let cases = [
+        ("'blue'", "world \"room\".sky must be a table, got string"),
+        ("{}", "world \"room\".sky needs stops"),
+        ("{ stops = { { 0, 'navy' } } }", "sky needs 2 stops or more, got 1"),
+        ("{ stops = { { 0, 'navy' }, { 1, 'white' } }, extend = 'repeat' }", "sky: unknown field extend"),
+        ("{ stops = { { 0, 'navy' }, { 2, 'white' } } }", "stop"),
+        ("{ stops = { { 0, 'navy' }, { 1, 'nocolour' } } }", "world \"room\".sky: "),
+    ];
+    for (sky, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(sky)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn groups_are_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

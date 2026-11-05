@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, Entity, World};
 use runtime::drawing::{Drawing, DrawingError, Pose};
-use runtime::frame::{Frame, FrameError, Item};
+use runtime::frame::{Brush, Extend, Frame, FrameError, GradientStop, Item, Path};
 use runtime::vello::kurbo::{Affine, Point, Rect};
 
 pub use crate::camera::{CameraInspection, CameraSpec, Look};
@@ -345,6 +345,8 @@ struct InBlock(Option<String>);
 #[derive(Default)]
 pub struct World2d {
     ecs: World,
+    /// Top to bottom of the view, behind everything and still while the camera moves.
+    sky: Vec<GradientStop>,
     clock: f64,
     /// Fixed steps taken since the world began.
     steps: u64,
@@ -974,8 +976,23 @@ impl World2d {
             let (dx, dy) = c.to_screen((0.0, 0.0));
             items = vec![Item::group(Affine::translate((dx, dy)), items)?];
         }
+        if !self.sky.is_empty() && width > 0.0 && height > 0.0 {
+            items.insert(0, self.sky_item(width, height)?);
+        }
         // Clipped: a head or hand spilling past the room's edge is not drawn outside it.
         Ok(Frame::new(width, height, None, items)?.clipped())
+    }
+
+    /// The sky: the view's box in screen space, unnamed so the pointer goes through it.
+    fn sky_item(&self, width: f64, height: f64) -> Result<Item, FrameError> {
+        use runtime::vello::kurbo::{PathEl, Point};
+        let corners = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)].map(Point::from);
+        let mut els = vec![PathEl::MoveTo(corners[0])];
+        els.extend(corners[1..].iter().map(|&p| PathEl::LineTo(p)));
+        els.push(PathEl::ClosePath);
+        let path = Path::new(els).map_err(|_| FrameError::InvalidSize)?;
+        let brush = Brush::linear(Point::ZERO, Point::new(0.0, height), self.sky.clone(), Extend::Pad)?;
+        Ok(Item::fill(Arc::new(path), Arc::new(brush), runtime::vello::peniko::Fill::NonZero))
     }
 
     /// One frame: `elapsed` is the runtime's frame clock, which clips and timers go by; `dt` the
@@ -1170,6 +1187,12 @@ impl World2d {
         Self::check_wells(&wells)?;
         self.wells = wells;
         Ok(())
+    }
+
+    /// The sky as described: a gradient from the view's top (offset 0) to its bottom (1), or none
+    /// when empty.
+    pub fn set_sky(&mut self, stops: Vec<GradientStop>) {
+        self.sky = stops;
     }
 
     pub fn wells(&self) -> &[Well] {

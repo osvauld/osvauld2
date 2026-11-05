@@ -3,6 +3,7 @@ the buggy settle on its springs, hold the on-screen gas pedal with a real pointe
 fuel cans and coins taken, the camera following — until the run ends, then Retry. The same drive
 twice ends in the same place. Read from the dump and the HUD labels, not from pixels."""
 
+import base64
 import os
 import re
 import sys
@@ -10,9 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from osvauld.png import Image, near
 from osvauld.session import Session, shell_binary
 
 ROOT = Path(__file__).resolve().parent.parent
+SKY_TOP = "#3d8fd6"  # art.lua's sky_top
 SHOTS = Path(os.environ.get("HILLCLIMB_SHOTS", "/tmp"))
 
 
@@ -94,6 +97,15 @@ def drive(shots=False):
         assert abs(compression - 7.9) < 2.5, ("sag on the springs", compression)
         assert g.number(tree, "distance") == 0 and g.number(tree, "coins") == 0
         start_x = c["pos"][0]
+        # L-K1 on the real path: the world's sky gradient, read from pixels at its top.
+        # The world takes no pointer, so `rects` lacks it: it is the 470-tall box one gap (10)
+        # above the pedals' row, centred in the 900 wide view (main.lua's W, H and gap).
+        pedal = next(r for r in rpc.rects() if r["id"] == "pedal_gas")
+        box = {"x": (900 - 880) / 2, "y": pedal["y"] - 10 - 470}
+        shot = Image(base64.b64decode(rpc.screenshot(g.item)["png_base64"]))
+        k = shot.width / 900
+        top = shot.at((box["x"] + 440) * k, (box["y"] + 4) * k)  # mid-top: the wall is at the left
+        assert near(top, SKY_TOP), ("the sky's top stop at the world's top", top)
         if shots:
             rpc.save_screenshot(g.item, SHOTS / "hillclimb_start.png")
 
