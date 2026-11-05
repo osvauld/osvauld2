@@ -3697,3 +3697,54 @@ fn no_sky_paints_nothing_extra_and_clearing_it_takes_it_away() {
     world.set_sky(Vec::new());
     assert_eq!(world.frame(VIEW.0, VIEW.1).unwrap().items().len(), bare);
 }
+
+/// Rapier 0.35 caches the fixed colliders its anti-tunnelling pass sweeps a fast body against,
+/// and drops that cache only on a step where something is fast. A fixed thing removed while all
+/// was slow (a coin taken at a crawl) stayed in it, and the next fast step looked the gone
+/// collider up and panicked: the app's thread died mid-drive.
+#[test]
+fn a_fixed_thing_removed_while_all_is_slow_does_not_trip_the_next_fast_step() {
+    // Speed must come from gravity, not `set`: a body set by hand counts as a change, and that
+    // alone rebuilds the cache.
+    let d = drawing();
+    let ball = |id: &str, x| EntitySpec { loose: Some(DEAD), ..solid(id, (x, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let slab = |id: &str, x, y| solid(id, (x, y), Shape::Rect(100.0, 20.0), (0.0, 0.0), &d);
+    // `a` drops far onto its floor: fast once, so the cache is built, with the shelf in it.
+    // `b` rests on the shelf.
+    let scene = |shelf: bool| {
+        let mut all = vec![ball("a", 0.0), slab("floor", -50.0, 2000.0), ball("b", 500.0)];
+        all.extend(shelf.then(|| slab("shelf", 450.0, 8.0)));
+        all
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 9000.0)).unwrap();
+    world.reconcile(scene(true)).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.5);
+    assert!(world.transform("a").unwrap().y > 1900.0, "a landed");
+    // All still: the shelf goes. Then `b` falls through where it was, fast by the fourth step.
+    world.reconcile(scene(false)).unwrap();
+    run(&mut world, &mut clock, 0.5);
+    assert!(world.transform("b").unwrap().y > 200.0, "b fell: nothing left under it");
+}
+
+/// `n` emitters each held full at the cap, a 60 fps frame: the steps (two) and the frame built.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_particles() {
+    let d = drawing();
+    for n in [1usize, 8] {
+        let mut world = World2d::default();
+        let full = Emit { spread: 360.0, ..dust(2000.0, 1.0) };
+        let specs = (0..n).map(|i| EntitySpec { emit: Some(full), ..spec(&format!("e{i}"), (i as f64 * 50.0, 100.0), &d) });
+        world.reconcile(specs.collect()).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.2);
+        assert_eq!(entity(&world, "e0").particles, crate::particles::MAX_LIVE, "full before timing");
+        bench(&format!("world_particles_{n}x1024"), 120, || {
+            clock += 1.0 / 60.0;
+            world.tick(clock, 1.0 / 60.0);
+            world.frame(1280.0, 720.0).unwrap();
+        });
+    }
+}

@@ -591,12 +591,22 @@ impl Physics {
         let resting = !pressed && rb.linvel().length() < AT_REST;
         if resting {
             rb.set_body_type(RigidBodyType::Fixed, true);
+            self.forget_ccd_targets();
         }
         resting
     }
 
     pub(crate) fn remove(&mut self, body: RigidBodyHandle) {
         self.world.remove_body(body);
+        self.forget_ccd_targets();
+    }
+
+    /// Rapier 0.35 caches the fixed colliders a fast body is swept against and drops the cache
+    /// only on a step where something is fast: removed while all was slow, a collider stayed in
+    /// it and the next fast step panicked looking it up. Dropped here instead, on our changes;
+    /// it is rebuilt on the next fast step.
+    fn forget_ccd_targets(&mut self) {
+        self.world.ccd_solver = CCDSolver::new();
     }
 
     /// Brings Rapier's picture up to date — bodies added or moved since — before anything asks it.
