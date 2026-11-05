@@ -1269,6 +1269,106 @@ The rules:
   index is answered from memo. Hits are your own app's records only.
 - Snippets are plain text around the match, no markup — draw them however you like.
 
+## Playing together — `net` and `net.match`
+
+*2026-11-05 ([design](design/jetpack-mp.md)).* Everyone with your app open in a space can talk
+over **channels**: small messages, never stored, gone once delivered. A game goes further and
+describes a **match**; the platform keeps every player's copy of it the same.
+
+### Channels
+
+A channel is declared in `manifest.osv`, with a rate and, if you like, a size:
+
+```
+app "probe" {
+  channel ping { rate 10/s }            -- no `send`: every member may send
+  channel inputs { send player  rate 40/s  size 512 }
+}
+```
+
+```lua
+net.on("ping", function(body, from) ... end)   -- once, at load; `from` is the sender's id
+net.send("ping", { text = "hi" })              -- in a handler; false if over the rate
+for _, p in ipairs(net.peers()) do ... end      -- { id, account, me }, sorted by id, you included
+```
+
+- A message is a plain value: numbers, strings, booleans, tables of those. It reaches every
+  other device with the app open — through the space's host, which checks it and passes it on
+  unread — never your own.
+- An undeclared channel is an error; a body over `size` (16 KiB at most) is an error; sending
+  faster than `rate` drops the message and says `net: over rate on "ping"` in your console (the
+  host drops it too). No `rate` means 60 a second.
+- `net.send` works only in handlers, like any command. `net.peers()` is who has the app open
+  now: read it in `view` and you see people come and go.
+
+### Matches
+
+```lua
+local match = net.match({
+	id = "arena",                       -- also its channel: declare `channel arena { rate … }`
+	tick = 1 / 120,                     -- seconds of game per step
+	frame = 4,                          -- steps per input frame: 30 inputs a second here
+	players = net.peers(),              -- or ids; sorted, fixed for the match
+	setup = { map = map },              -- the lowest id's setup is everyone's
+	state = function(setup, players) return { t = 0, ... } end,
+	input = function() return { dx = 1 } end,   -- this device's input, once per input frame
+	step = function(state, inputs, events) ... end,   -- the rules: inputs[i] is player i's
+	worlds = { rink = function(state) return { entity, ... } end },   -- optional, see below
+})
+match.state     -- the latest state, for drawing (never write it outside step)
+match.status    -- "lobby" | "playing" | "waiting" | "ended" | "disputed"
+match.me, match.players, match.frame, match.checks, match.desynced, match.waiting, match.ended
+match.ahead     -- seconds of game time not yet stepped, under one step: draw moving things this far on
+match.ping      -- { [player id] = round-trip ms }, once measured
+match.stats     -- { frames, rollbacks, rolled_frames, stalls, snapshots, slowed }, counts so far
+```
+
+The platform sends your input, guesses the ones not here yet (each player's last), and when a
+late one differs it puts `state` back to that frame and runs `step` forward again — so `step`
+runs many times for one frame, and **may change nothing but `state`** (and its worlds). Every
+second the players compare a hash of `state`; a player who disagrees with a majority is dropped,
+two who disagree have no result (`disputed`), and a player who goes quiet is waited for
+(`waiting`, `match.waiting` says who) and after 10 s the match ends.
+
+The rules that bite:
+
+- **`state` is plain data**: no functions, no cycles, no two places holding one table. It is
+  copied before any frame that ran on a guessed input (and at each checkpoint), and a rewind
+  hands back a copy, so table identity does not
+  survive — name things by id (`owner = a.id`, not `owner = a`). A copy has no metatable: set
+  it again at the top of `step` if your state uses one.
+- **What never changes goes in `setup`**, not `state` (a map, gun stats, art): it is sent once
+  and kept out of every copy and hash. Jetpack reaches it through its state's metatable.
+- **A press is a count.** `input` runs once per input frame, but its value is used for `frame`
+  steps and again after a rewind: send `reload = 3` (presses so far), and act when it grows.
+- **Iterate arrays, not `pairs`**, and keep to `math` (see the sandbox): every device must get
+  the same bits.
+- Alone (`players` left out or just you), a match starts at once with no input delay and an
+  input every step — a single-player game is a one-player match.
+- **Draw at `match.ahead`.** A step rate that isn't a multiple of the display's (120 on 75 Hz)
+  steps 1, 2, 1, 2 times a paint; drawing positions `x + vx * match.ahead` hides it.
+- With others, your input runs about 16 ms after you press (whole input frames, at least one):
+  a nearby peer's input is then usually in before its frame runs and nothing is guessed. A
+  device that started later is behind; the one ahead runs up to a tenth slow until they level.
+- With others, everyone must make the match with the same players: Jetpack sends the roster on a
+  `lobby` channel and each device calls `net.match` when it hears it.
+
+**Worlds under a match.** `worlds = { rink = fn(state) }` makes the `ui.world` of that id
+*driven*: the platform describes it from `state` at the start of every frame, steps it after
+each `step` (`tick` must be whole world steps, 1/120 s), saves it with `state` and rewinds it
+too. What happens in it arrives in the next `step` as `events` — `{ world, kind = "hit" |
+"zone" | "move", id, who, … }` — instead of `on_hit`/`on_zone`. The view only shows it:
+
+```lua
+ui.world({ id = "rink", driven = "hockey", width = 900, height = 500 })
+```
+
+Entities, gravity, wells, joints and `on_*` moments there are errors, and commands
+(`world(id):set`, `push`, `blast`) work only inside `step`. `world(id):set(id, { move = { x, y }
+})` steers a controller in place of its keys. Timers are not driven yet: count steps in `state`.
+`demo_apps/mp_dots` and `demo_apps/mp_hockey` are the small examples; `demo_apps/jetpack` the
+big one.
+
 ## Animation
 
 Presentation animation is declarative:
@@ -1378,7 +1478,7 @@ The kanban split, worth copying at any size:
 ## The sandbox, and what happens when you err
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
-only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
+only see your own folder. Available beyond plain Lua: `doc`, `ui`, `net`, `require`, `search`, `now()`
 (unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
 
 Each run of your code — a `view`, a handler, module load, a test — has a budget: about a

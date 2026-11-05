@@ -311,8 +311,34 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
     `rule results/* { forbid insert unless signed_by(players) }`, checked by `courier::rules` in
     the writer's shell and on the host — the host can refuse a forged result, not make one. M11.
 11. **Pixel**. M12.
+   *Prepared 2026-11-05 (no device attached, the arm64 mac offline):* `cargo run --release -p
+   app_host --example mp_hashes -- demo_apps/jetpack 60 match:start` runs Jetpack alone, headless,
+   on a fixed clock, and prints its checkpoint hashes — the bots against an idle pilot exercise
+   trig, rays, splash and the RNG. x86_64 on nixos: `120 890ff3fcc61a7f47`, `1200
+   df5eda8ae57a1a77`, `3600 4925baadd34880e6`, `7080 af7287662044151a`. The Pixel half builds
+   the example for `aarch64-linux-android`, pushes it with the app folder and compares; then the
+   live two-player match over n0's relay; then whether a driven world (hockey) agrees without
+   Rapier's `enhanced-determinism` (step 6 note).
 12. **Docs and smoke**: `lua-apps.md` `net` and `net.match` sections, `status.md`,
     `architecture.md`, `smoke_mp.py` in `SMOKES`.
+
+*Revised 2026-11-05, after play on a 75 Hz laptop (stutter, never 60 fps):*
+- **Frame pacing (shell).** A shown app's thread framed on its own 16 ms timer: 16 ms plus the
+  frame's work is ~50 fps, drifting against the display, so pictures held 1 or 2 refreshes. It
+  now frames on the shell's paint (`In::Tick` in `shell2/src/app_thread.rs`), one per refresh.
+  Measured after: app thread 2.5 ms median, 5.4 ms worst; shell 1.2 ms. No CPU bottleneck.
+- **`match.ahead`.** 120 steps a second on 75 Hz steps 1, 2, 1, 2 times a paint; Jetpack draws
+  actors at `x + vx * ahead`.
+- **Copies only when a rewind can reach them.** A frame run on inputs all in can never be
+  rewound to, so `state` is copied only for frames run on a guess, and at checkpoints. Alone
+  that is one a second instead of 120; on a LAN, a fraction (`stats.snapshots`).
+- **Input delay in time, not frames:** 16 ms rounded up to whole input frames (Jetpack 2, dots 1).
+- **Ping and clock sync.** Each input message carries, per player, the `known` frame we have of
+  theirs (their echo gives the round trip, `match.ping`) and our lead over them by their newest
+  input. Half the difference of the two leads is the true one — the trip cancels (GGPO's frame
+  advantage) — and the one ahead runs up to 10% slow. Without it, peers that start a round trip
+  apart stay apart the whole match, and only one of them keeps rolling back. Jetpack shows ping
+  per pilot in the HUD and rollbacks/stalls per second in F3.
 
 ## Out of scope
 

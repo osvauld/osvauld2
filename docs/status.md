@@ -10,6 +10,28 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Multiplayer as a platform feature (2026-11-05, branch `jetpack-mp`, not landed) — [plan](design/jetpack-mp.md)
+- Same math on every device (software `libm`, `math`/`vector` compiled mutable, unfused `%`
+  probe); signed channel envelopes (`courier::net`) and manifest `channel … { size }`.
+- App channels end to end: a session's second QUIC stream, the host's relay (`kunki::host::relay`:
+  signature, `send` role, size, replay, rate; presence; a 500 ms beat drops a killed peer in 2 s),
+  Lua `net.send` / `net.on` / `net.peers` (`app_host/src/net.rs`, `shell2/src/channels.rs`).
+- `net.match` (`app_host/src/net_match.rs`): lockstep with rollback, setup sent in pieces,
+  1 s state hashes; a majority drops a desynced player, two who disagree are `disputed`, a quiet
+  player is `waiting` then the match ends. Driven `ui.world`s (`worlds = { id = fn(state) }`):
+  World2d snapshot/restore/digest, events into `step`, `move` steers a controller.
+- Apps: `mp_dots`, `mp_hockey` (two-player world), Jetpack (single-player is a one-player match,
+  all its smokes unchanged; PLAY TOGETHER for up to 4 with bots). Player-cap sim
+  (`app_host --example mp_sim`): 4 comfortable on 4G, 8 on wifi; CPU cap waits on the Pixel.
+- Feel (2026-11-05): a shown app frames on the shell's paint, not its own 16 ms timer (was
+  ~50 fps and stutter on 75 Hz); `match.ahead` for drawing between steps; state copied only for
+  guessed frames and checkpoints; 16 ms input delay; `match.ping` and clock levelling (frame
+  advantage); Jetpack ping in the HUD, fps/rollbacks/stalls on F3.
+- verified: `e2e_mp.py` M1–M6, M8–M10 on nixos; `cargo test` app_host, world, courier, kunki;
+  the Jetpack smokes and `scripts/run_jetpack_lua_tests.sh`.
+- Not yet: step 10 (signed results — waits on owned entries), step 11 (Pixel, M12), Jetpack on
+  `ui.world` (moved after the multiplayer steps).
+
 ### Hillclimb (2026-11-04, branch `hillclimb`, not landed) — [plan](design/hillclimb.md)
 - Engine (`world` + `app_host`, all generic): `collider = { line = {…} }` one-sided ground
   (oriented polyline: no snag at joints); `world(id):get(id)` → `{pos, rot, velocity, spin, tick}`

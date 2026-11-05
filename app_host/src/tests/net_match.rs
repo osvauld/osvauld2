@@ -30,8 +30,58 @@ fn a_one_player_match_runs_alone() {
     let stats = &sim.apps[0].match_stats()["dots"];
     assert!((58..=61).contains(&stats.frames), "{stats:?}");
     assert_eq!(stats.rollbacks, 0);
+    // Nothing is guessed alone: only the checkpoints, one a second, are copied.
+    assert!(stats.snapshots <= 3, "{stats:?}");
     assert_eq!(sim.messages, 0, "a one-player match sends nothing");
     assert!(!sim.apps[0].match_checks("dots").is_empty());
+}
+
+#[test]
+fn on_a_lan_inputs_land_in_time_and_little_is_copied() {
+    let mut sim = dots(vec![Link::LAN, Link::LAN]);
+    sim.run(5.0, 1.0 / 60.0);
+    no_errors(&sim);
+    for app in &sim.apps {
+        let stats = &app.match_stats()["dots"];
+        assert!(stats.frames > 120, "{stats:?}");
+        assert!(stats.snapshots * 4 < stats.frames, "a LAN should guess little: {stats:?}");
+        assert_eq!(stats.desyncs, 0);
+    }
+}
+
+#[test]
+fn ping_is_the_round_trip_through_the_host() {
+    // 25 ms each player to the host: 50 ms one way, 100 ms there and back, plus up to an input
+    // frame (1/30 s here) before the answer rides on the next input.
+    let mut sim = dots(vec![slow(25.0), slow(25.0)]);
+    sim.run(3.0, 1.0 / 60.0);
+    no_errors(&sim);
+    for (i, app) in sim.apps.iter().enumerate() {
+        let info = app.match_info("dots").expect("a match");
+        let other = crate::net_sim::id_of(1 - i);
+        let ping = info.ping.iter().find(|(p, _)| *p == other).map(|(_, ms)| *ms);
+        assert!(ping.is_some_and(|ms| (95..=150).contains(&ms)), "{info:?}");
+    }
+}
+
+#[test]
+fn peers_that_start_apart_level_their_clocks() {
+    // B presses start 150 ms after A, and a hello takes 100 ms: one of them starts a round trip
+    // after the other, three frames apart at 30 a second. The one ahead slows until they level.
+    let mut sim = Sim::new(&[("manifest.osv", MANIFEST), ("main.lua", MAIN)], vec![slow(50.0), slow(50.0)], 7);
+    sim.click("script");
+    sim.click_on(0, "start");
+    sim.run(0.15, 1.0 / 60.0);
+    sim.click_on(1, "start");
+    sim.run(8.0, 1.0 / 60.0);
+    no_errors(&sim);
+    let frames: Vec<u64> = sim.apps.iter().map(|a| a.match_info("dots").expect("a match").frame).collect();
+    assert!(frames[0].abs_diff(frames[1]) <= 1, "{frames:?}");
+    let slowed: u64 = sim.apps.iter().map(|a| a.match_stats()["dots"].slowed).sum();
+    assert!(slowed > 0, "the one ahead slowed: {:?}", sim.apps.iter().map(|a| a.match_stats()).collect::<Vec<_>>());
+    for app in &sim.apps {
+        assert_eq!(app.match_stats()["dots"].desyncs, 0);
+    }
 }
 
 #[test]

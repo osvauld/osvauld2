@@ -50,6 +50,22 @@ function H.overlay(g, on)
 	})
 end
 
+-- Round trip to each other pilot (net.match measures it): green is unnoticeable, amber is
+-- rollback working hard, red is late corrections you will see.
+function H.pings(g)
+	local mt = g.match
+	if not mt or #mt.players < 2 then return false end
+	local ping, row = mt.ping, {gap=12}
+	for i, id in ipairs(mt.players) do
+		if i ~= mt.me then
+			local ms = ping[id]
+			local color = not ms and C.muted or ms < 60 and C.player or ms < 120 and C.flame or C.danger
+			table.insert(row, text("P"..i.." "..(ms and ms.." ms" or "…"), "hud:ping"..i, color, 10))
+		end
+	end
+	return ui.row(row)
+end
+
 -- Small readouts and warnings over the playfield; returned as a list.
 function H.status(g)
 	local m, map, size = g.m, g.map, g.size
@@ -76,6 +92,7 @@ function H.status(g)
 				text("SHOTS "..m.fired,"hud:fired",C.muted,10),
 				text("ALT "..math.floor(map.h-C.ry-m.player.y+0.5),"hud:altitude",C.muted,10),
 			}),
+			H.pings(g),
 		}),
 		lying and ui.col({absolute=true,top=64,w_full=true,align_center=true,
 			ui.row({px=9,py=4,radius=8,fill=C.jet_bg,

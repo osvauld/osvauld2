@@ -28,8 +28,9 @@ pub type Call = Box<dyn FnOnce(&mut Hosted) + Send>;
 /// How long the shell waits on a thread before treating it as stuck: past the Lua budget, so
 /// a killed runaway always answers first.
 const STUCK: Duration = Duration::from_secs(3);
-/// An animating, shown tile's frame interval with a window.
-const FRAME: Duration = Duration::from_millis(16);
+/// With a window, an animating tile frames on the shell's paint ([`In::Tick`]), so frames follow
+/// the display's refresh; this is only the fallback if no tick comes.
+const FRAME: Duration = Duration::from_millis(100);
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 
 /// How long a thread may stay on one batch before it counts as not responding
@@ -172,6 +173,10 @@ enum In {
     Rects(Sender<Result<crate::native_rects::Snapshot, String>>),
     Call(Call),
     Wake,
+    /// With a window: the shell is painting; an animating tile frames now, for the next paint.
+    /// A timer of its own drifts against the display's refresh — 50 frames on a 75 Hz screen
+    /// hold some pictures one refresh and some two, which reads as stutter.
+    Tick,
     Close,
 }
 
@@ -328,8 +333,15 @@ impl AppThread {
     /// `sync`'s first half: offscreen, ask for the frame at `now` without waiting for it, so
     /// several tiles can be asked before any is waited on.
     /// A stuck thread is not asked: the shell paints its last frame rather than wait on it.
+    /// With a window it asks for nothing, but ticks a shown tile: see [`In::Tick`].
     pub fn ask(&self, now: f64) -> Option<Receiver<Option<TileFrame>>> {
-        if !self.offscreen || !self.responding() {
+        if !self.offscreen {
+            if self.shown {
+                let _ = self.tx.send(In::Tick);
+            }
+            return None;
+        }
+        if !self.responding() {
             return None;
         }
         let (tx, rx) = channel();
@@ -454,6 +466,9 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
         // paint. Not by a call: the shell paints after delivering whatever sent it, and
         // offscreen an extra paint at the same instant is a zero-length tick the app can see.
         let mut woke = false;
+        // Animating with a window, only a tick (or the fallback timeout) frames: input in between
+        // waits for the next paint instead of framing off-beat.
+        let mut ticked = first.is_none();
         for msg in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             match msg {
                 In::Event(e) => tile.input(e),
@@ -480,6 +495,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                     tile.invalidate();
                     woke = true;
                 }
+                In::Tick => ticked = true,
                 In::Sync(now, reply) => {
                     settle(&mut tile, &ctx, &mut names);
                     tile.set_clock(now);
@@ -509,7 +525,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
             // the change did not touch (`signals.md` steps 4, 6).
             let _ = tile.app_mut().view();
         }
-        if shown && !ctx.offscreen && tile.wants_frame() {
+        if shown && !ctx.offscreen && (ticked || !animating) && tile.wants_frame() {
             let scene = Arc::new(tile.frame());
             painted_scope = Some(requested_scope);
             let frame = TileFrame {

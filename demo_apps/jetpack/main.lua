@@ -20,6 +20,8 @@ if gun_problem then print("jetpack-guns: " .. gun_problem .. " (using the baked 
 local loadout_asset = asset:open("jetpack-loadout")
 
 local g = {maps = maps, map = maps[1], pilots = pilots, guns = guns, size = {w = 800, h = 430}}
+-- F3 or ` (laptop F-keys are often media keys) shows frames per second and the slowest frame of each half second (a spike is what reads as lag).
+g.fps = {show = false, n = 0, t = 0, worst = 0, text = ""}
 local controls
 
 -- The match is the platform's (`net.match`, jetpack-mp.md step 7): it steps `World.step` on the
@@ -127,8 +129,24 @@ local function frame(e)
 	-- The camera eases only on new frame time (captures repeat the same elapsed), and jumps with a respawn.
 	local dt = g.last and math.max(0, math.min(0.1, e.elapsed - g.last)) or 0
 	g.last = e.elapsed
+	local f = g.fps
+	if dt > 0 then
+		f.n, f.t, f.worst = f.n + 1, f.t + dt, math.max(f.worst, dt)
+		if f.t >= 0.5 then
+			f.text = string.format("%d fps  worst %.0f ms", math.floor(f.n / f.t + 0.5), f.worst * 1000)
+			-- Together: rollbacks (a late input corrected) and stalls (waiting on one) per second.
+			local st = g.match and #g.match.players > 1 and g.match.stats
+			if st then
+				local was = f.stats or st
+				f.text = f.text .. string.format("  rb %.0f/s  stall %.0f/s",
+					(st.rollbacks - was.rollbacks) / f.t, (st.stalls - was.stalls) / f.t)
+			end
+			f.stats = st or nil
+			f.n, f.t, f.worst = 0, 0, 0
+		end
+	end
 	controls:frame(dt)
-	local px, py = p.x, p.y
+	local px, py = View.drawn(g, p)
 	if g.m.state ~= "Playing" then
 		if resized then g.camera:snap(g.size.w, g.size.h, px, py, p.aim, gun_zoom(), controls:lead()) end
 		return
@@ -168,7 +186,10 @@ return function()
 		Hud.bar(g, on, portrait),
 		ui.col({id="playfield",grow=true,w_full=true,min_h=120,
 			on_frame=frame,on_wheel=function(e) controls:wheel(e) end,
-			on_key=function(e) if not Rotate.portrait(g.size) then controls:key(e, on) end end,on_hover=function(e) controls:hover(e) end,
+			on_key=function(e)
+					if (e.code == "F3" or e.code == "Backquote") and e.down and not e.repeated then g.fps.show = not g.fps.show; return end
+					if not Rotate.portrait(g.size) then controls:key(e, on) end
+				end,on_hover=function(e) controls:hover(e) end,
 			-- A finger off the sticks and buttons is swallowed here, not turned into a mouse press (which would fire).
 			on_touch=function() end,system_cursor=not controls:crosshair(),
 			portrait and Rotate.card(g.m) or {
@@ -178,6 +199,8 @@ return function()
 			Hud.overlay(g, on),
 			Menu.maps(g, pick_map),
 			readouts(),
+			g.fps.show and ui.col({absolute = true, top = 4, right = 10, px = 7, py = 3, radius = 6, fill = C.jet_bg,
+				ui.text({g.fps.text, id = "hud:fps", color = C.text, font_size = 11, no_wrap = true})}) or false,
 			},
 		}),
 	})

@@ -121,6 +121,13 @@ impl Sim {
         }
     }
 
+    /// `on_click` on element `id`, on app `i` only: a player who acts later than the others.
+    pub fn click_on(&mut self, i: usize, id: &str) {
+        let app = &mut self.apps[i];
+        let _ = app.view();
+        app.update(LuaMsg::CallAt(Key::new(id, "on_click"), 0.0, 0.0, Shape::default(), None));
+    }
+
     /// `secs` of virtual time in render frames of `dt`.
     pub fn run(&mut self, secs: f64, dt: f64) {
         let end = self.t + secs;

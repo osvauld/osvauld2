@@ -1,8 +1,8 @@
 //! `net.match` — the platform's lockstep loop with rollback (`jetpack-mp.md` §3). A game
 //! describes its state, its local input and its rules; every peer runs the same rules on the same
 //! inputs and so holds the same state. The platform sends the local input, predicts the ones not
-//! yet here (the last one again), keeps a snapshot of `state` before every input frame, rewinds to
-//! the earliest frame a late input corrected and runs `step` forward again, and every second
+//! yet here (the last one again), keeps a snapshot of `state` before every frame run on a guess,
+//! rewinds to the earliest frame a late input corrected and runs `step` forward again, and every second
 //! hashes a state all inputs are in for and compares it with the others'.
 //!
 //! A snapshot is `state` in the wire form of `net` values (`net::encode`): copying it and checking
@@ -20,12 +20,16 @@ use sha2::{Digest, Sha256};
 
 use crate::net::{Net, Outgoing, decode_body, encode};
 
-/// Input frames between reading an input and running it: one frame's head start for the network.
-/// A one-player match has no network to wait for and runs its input on the frame it was read.
-pub const DELAY: u64 = 1;
+/// Seconds between reading an input and running it, rounded up to whole input frames (at least
+/// one): the network's head start, so a nearby peer's input is usually in before its frame runs
+/// and nothing is guessed. A one-player match has no network to wait for and runs its input on
+/// the frame it was read.
+pub const DELAY: f64 = 0.016;
 /// Frames the local simulation may run past the last frame every input is in for; past it the
 /// match stalls until the slowest peer's input arrives.
 pub const WINDOW: u64 = 8;
+/// Most a peer that is ahead slows its clock to let the others level with it.
+const MOST_SLOW: f64 = 0.1;
 /// Input frames run at most per render frame, so a stall's backlog is caught up gradually.
 const CATCH_UP: u32 = 8;
 /// Seconds stalled on a player before the match says it is waiting for them, and before it ends.
@@ -61,6 +65,10 @@ pub struct Info {
     pub desynced: Vec<String>,
     pub waiting: Vec<String>,
     pub ended: Option<String>,
+    /// The next input frame to run.
+    pub frame: u64,
+    /// Round trip to each other player measured so far, in milliseconds.
+    pub ping: Vec<(String, u64)>,
 }
 
 /// What a match did, for the player-cap sim and the tests.
@@ -74,8 +82,12 @@ pub struct Stats {
     /// Render frames on which the match could not advance: an input was too late.
     pub stalls: u64,
     pub steps: u64,
+    /// States copied for a rewind or a checkpoint.
+    pub snapshots: u64,
     /// Checkpoints where a peer's hash differed from ours.
     pub desyncs: u64,
+    /// Render frames on which the clock ran slow, being ahead of a peer.
+    pub slowed: u64,
 }
 
 struct Core {
@@ -125,6 +137,14 @@ struct Core {
     clock: Option<f64>,
     carry: f64,
     since_hello: f64,
+    /// When each of our inputs was sent, by frame, until every peer has it: the round trip is
+    /// from here to the message that says it arrived.
+    sent_at: BTreeMap<u64, f64>,
+    /// Per player: the `known` they last told us for us, and the round trip, smoothed (seconds).
+    acked: Vec<u64>,
+    ping: Vec<Option<f64>>,
+    /// Per player: how many frames ahead of us they last said they were.
+    their_lead: Vec<Option<i64>>,
     stats: Stats,
     error: Option<String>,
     error_told: bool,
@@ -252,12 +272,53 @@ impl Core {
         }
     }
 
-    fn input_msg(frame: u64, input: &[u8]) -> Vec<u8> {
+    /// An input, then per player what we have of theirs and how far ahead of them we think we
+    /// are: the first is their round trip, the second our clock's (see [`Self::lead`]).
+    fn input_msg(&self, frame: u64, input: &[u8]) -> Vec<u8> {
         let mut out = vec![INPUT];
         varint(frame, &mut out);
         varint(input.len() as u64, &mut out);
         out.extend(input);
+        for p in 0..self.players.len() {
+            varint(self.known[p], &mut out);
+            let lead = if p == self.me { 0 } else { self.local_lead(p) };
+            varint(((lead << 1) ^ (lead >> 63)) as u64, &mut out);
+        }
         out
+    }
+
+    /// Frames we are past player `p`, by the newest input of theirs: they send frame `f + delay`'s
+    /// on starting frame `f`. It counts their input's trip too; [`Self::lead`] cancels that out.
+    fn local_lead(&self, p: usize) -> i64 {
+        self.frame as i64 - (self.known[p] as i64 - self.delay as i64)
+    }
+
+    /// Frames we are ahead of the furthest-behind peer. Each side's own estimate is off by the
+    /// same one-way trip, in opposite directions, so half their difference is the true lead
+    /// (GGPO's frame advantage). A device that started later, or whose clock runs slow, is
+    /// behind; the one ahead slows, so neither guesses more than the network makes it.
+    fn lead(&self) -> f64 {
+        (0..self.players.len())
+            .filter(|&p| p != self.me && self.live(p, self.frame))
+            .filter_map(|p| Some((self.local_lead(p) - self.their_lead[p]?) as f64 / 2.0))
+            .fold(0.0, f64::max)
+    }
+
+    /// Player `p` says what it has of ours, and how far ahead of us it is.
+    fn their_view(&mut self, p: usize, known_of_me: u64, lead: i64) {
+        self.their_lead[p] = Some(lead);
+        if known_of_me > self.acked[p] {
+            self.acked[p] = known_of_me;
+            if let (Some(&sent), Some(now)) = (self.sent_at.get(&(known_of_me - 1)), self.clock) {
+                let rtt = (now - sent).max(0.0);
+                self.ping[p] = Some(self.ping[p].map_or(rtt, |was| was * 0.8 + rtt * 0.2));
+            }
+        }
+        let all = (0..self.players.len()).filter(|&q| q != self.me).map(|q| self.acked[q]).min().unwrap_or(0);
+        self.sent_at = self.sent_at.split_off(&all.saturating_sub(1));
+        while self.sent_at.len() > 512 {
+            self.sent_at.pop_first();
+        }
     }
 
     fn check_msg(frame: u64, hash: &str) -> Vec<u8> {
@@ -418,6 +479,10 @@ impl Match {
             desynced: names(&mut core.desynced.iter().copied()),
             waiting: names(&mut core.waiting_for.iter().copied()),
             ended: core.ended.clone(),
+            frame: core.frame,
+            ping: (0..core.players.len())
+                .filter_map(|p| Some((core.players[p].clone(), (core.ping[p]? * 1000.0).round() as u64)))
+                .collect(),
         }
     }
 
@@ -477,6 +542,15 @@ impl Match {
                         return true;
                     };
                     core.put_input(p, frame, input);
+                    let me = core.me;
+                    for q in 0..core.players.len() {
+                        let (Some(known), Some(lead)) = (read_varint(body, &mut at), read_varint(body, &mut at)) else {
+                            break;
+                        };
+                        if q == me {
+                            core.their_view(p, known, ((lead >> 1) as i64) ^ -((lead & 1) as i64));
+                        }
+                    }
                     None
                 }
                 Some(&CHECK) => {
@@ -541,7 +615,12 @@ impl Match {
         self.rewind(vm)?;
         {
             let mut core = self.core.borrow_mut();
-            core.carry = (core.carry + elapsed).min(core.frame_dt * f64::from(CATCH_UP));
+            // Ahead by more than half a frame: run up to a tenth slow until level.
+            let slow = ((core.lead() - 0.5) * 0.04).clamp(0.0, MOST_SLOW);
+            if slow > 0.0 && elapsed > 0.0 {
+                core.stats.slowed += 1;
+            }
+            core.carry = (core.carry + elapsed * (1.0 - slow)).min(core.frame_dt * f64::from(CATCH_UP));
         }
         let mut ran = 0;
         let mut waiting: Option<bool> = None; // Some(true): on an input, Some(false): on a verdict
@@ -646,8 +725,15 @@ impl Match {
             let core = self.core.borrow();
             (core.frame + core.delay, core.me)
         };
-        self.core.borrow_mut().put_input(me, frame, bytes.clone());
-        self.send(net, Core::input_msg(frame, &bytes));
+        let msg = {
+            let mut core = self.core.borrow_mut();
+            core.put_input(me, frame, bytes.clone());
+            if let Some(now) = core.clock {
+                core.sent_at.insert(frame, now);
+            }
+            core.input_msg(frame, &bytes)
+        };
+        self.send(net, msg);
         Ok(())
     }
 
@@ -718,14 +804,17 @@ impl Match {
     /// Frame `f` from the state now held: worlds described, snapshot, then `ticks` steps on its
     /// inputs, each followed by the worlds' own steps.
     fn run_frame(&self, vm: &Lua, f: u64) -> mlua::Result<()> {
-        let (state, used, ticks, checkpoint) = {
+        let (state, used, ticks, checkpoint, guessed) = {
             let core = self.core.borrow();
             let state = core.state.clone().expect("playing");
             let used: Vec<Vec<u8>> = (0..core.players.len()).map(|p| core.input_for(p, f)).collect();
-            (state, used, core.ticks, f % core.every == 0)
+            (state, used, core.ticks, f % core.every == 0, f >= core.confirmed())
         };
         self.describe_worlds(&state)?;
-        let snap = self.snap(&state, checkpoint)?;
+        // Only a frame run on a guessed input can be rewound to (a drop-out rewinds to a
+        // checkpoint), so only those and checkpoints are kept: alone, or on a LAN where inputs
+        // land in time, that is nearly none.
+        let snap = (checkpoint || guessed).then(|| self.snap(&state, checkpoint)).transpose()?;
         let inputs = vm.create_table()?;
         for (i, bytes) in used.iter().enumerate() {
             inputs.raw_set(i + 1, decode_body(vm, bytes)?)?;
@@ -748,7 +837,14 @@ impl Match {
             self.core.borrow_mut().pending = happened;
         }
         let mut core = self.core.borrow_mut();
-        core.snapshots.insert(f, Rc::new(snap));
+        match snap {
+            Some(snap) => core.snapshots.insert(f, Rc::new(snap)),
+            // A rerun may leave a stale one from when this frame was guessed.
+            None => core.snapshots.remove(&f),
+        };
+        if checkpoint || guessed {
+            core.stats.snapshots += 1;
+        }
         core.used.insert(f, used);
         core.stats.steps += u64::from(ticks);
         Ok(())
@@ -832,6 +928,34 @@ impl UserData for Match {
         fields.add_field_method_get("ended", |_, m| Ok(m.core.borrow().ended.clone()));
         fields.add_field_method_get("state", |_, m| Ok(m.core.borrow().state.clone()));
         fields.add_field_method_get("frame", |_, m| Ok(m.core.borrow().frame));
+        // Clock not yet stepped, under one frame: the view draws moving things this far ahead, or a
+        // display rate that isn't a multiple of the frame rate judders (1, 2, 1, 2 steps a paint).
+        fields.add_field_method_get("ahead", |_, m| {
+            let core = m.core.borrow();
+            Ok(if core.status == Status::Playing { core.carry.clamp(0.0, core.frame_dt) } else { 0.0 })
+        });
+        // Round trip to each other player, in whole milliseconds, once one has been measured.
+        fields.add_field_method_get("ping", |vm, m| {
+            let core = m.core.borrow();
+            let out = vm.create_table()?;
+            for (p, ping) in core.ping.iter().enumerate() {
+                if let Some(s) = ping {
+                    out.set(core.players[p].as_str(), (s * 1000.0).round() as i64)?;
+                }
+            }
+            Ok(out)
+        });
+        fields.add_field_method_get("stats", |vm, m| {
+            let s = m.core.borrow().stats.clone();
+            let out = vm.create_table()?;
+            out.set("frames", s.frames)?;
+            out.set("rollbacks", s.rollbacks)?;
+            out.set("rolled_frames", s.rolled_frames)?;
+            out.set("stalls", s.stalls)?;
+            out.set("snapshots", s.snapshots)?;
+            out.set("slowed", s.slowed)?;
+            Ok(out)
+        });
         fields.add_field_method_get("me", |_, m| Ok(m.core.borrow().me + 1));
         fields.add_field_method_get("players", |vm, m| vm.create_sequence_from(m.core.borrow().players.clone()));
         fields.add_field_method_get("error", |_, m| Ok(m.core.borrow().error.clone()));
@@ -930,7 +1054,7 @@ pub fn create(
         parts: BTreeMap::new(),
         // Room for the hello's own fields: tag, players hash, flag, two varints.
         chunk: (size as usize).saturating_sub(64).max(64),
-        delay: if n == 1 { 0 } else { DELAY },
+        delay: if n == 1 { 0 } else { ((DELAY / frame_dt) - 1e-9).ceil().max(1.0) as u64 },
         setup,
         state: None,
         frame: 0,
@@ -953,6 +1077,10 @@ pub fn create(
         clock: None,
         carry: 0.0,
         since_hello: 0.0,
+        sent_at: BTreeMap::new(),
+        acked: vec![0; n],
+        ping: vec![None; n],
+        their_lead: vec![None; n],
         stats: Stats::default(),
         error: None,
         error_told: false,
