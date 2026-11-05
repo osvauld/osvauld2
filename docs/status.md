@@ -10,6 +10,94 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Moon rover — gravity, terrain and first vehicle in review worktree (2026-11-05)
+
+**Earlier gravity-only checkpoint (2026-11-04):** implemented in `moon-rover`, uncommitted and awaiting acceptance
+([plan](design/moon-rover.md), step 1a): optional module-initialized
+`gfx.world3d({gravity={x,y,z}, ...})` in m/s², defaulting to Earth gravity. Zero and lunar
+gravity work; vector changes wake dynamic bodies without resetting poses or clocks. Whole-batch
+preflight and failed reloads preserve running worlds. Bridge `worlds3d` inspection reports gravity.
+Focused tests and `smoke_world3d_gravity.py` pass, including real pixels, paused time,
+observational captures, revision-checked failed activation/repair and restart from sealed source.
+Verified through LoadTable: workspace check, 1,112 workspace tests (23 ignored), and the full
+39-script smoke sweep. The two optional Android smokes skip without emulator opt-in. Terrain,
+vehicle controller, detailed rover and agent navigation remain unbuilt. `pi` review skipped
+at the user's request.
+
+**2026-11-04 terrain continuation (step 1b):** fixed, nonsensor mesh bodies reuse `gfx.mesh`
+geometry with local metre bounds and a 131,072 instanced collision-triangle cap per world.
+Equivalent geometry reloads without resetting physics; changed geometry rejects before mutation.
+`demo_apps/moon_rover` supplies a half-metre sampled course (flat, ramp, bumps, crater), shared
+visible/collision geometry, probes and Release/Pause/Reset. Grid/height contours, inspection
+presets, close focus/zoom and a default ground-following camera address play feedback. Mouse
+and keyboard controls work through the real input path; camera navigation preserves paused physics.
+The contour regression fixes ambiguous lines at a plateau's height without changing terrain.
+Workspace check and 1,116 workspace tests pass (23 ignored), as do the terrain smoke, plain-Lua
+contour test and full 40-script smoke sweep. The two optional Android smokes skip without
+emulator opt-in. A local preview uses an isolated test store; a physical rover/controller and
+agent navigation remain unbuilt.
+
+**2026-11-05 first vehicle continuation (step 1c, verified):** a bounded Rapier3D
+ray vehicle adds SI chassis mass/centre of mass, spring/damper tuning, steering, drive/brake
+forces, pose read-back and observable wheel contact/pose. Four wheels visually follow suspension,
+steering and roll. The demo has a procedural rover, keyboard/held-mouse pedals and a ground-level
+chase camera. Hillclimb's 2D work informed parameter separation, SI conventions and suspension
+sag/terrain-join tests; no 2D code or unit scaling was merged. Terrain support remains ray-based;
+wheels now have massless cylindrical obstacle contact shapes following suspension/steering. Unsprung mass and airborne motor reaction torque
+remain unbuilt. Low-block play feedback drove a failing-then-passing collision regression.
+Focused native/host and real driving checks pass; workspace check and 1,124 workspace tests
+pass (23 ignored). An additional quantitative regression verifies acceleration, coasting,
+brake priority/stopping and reversing while moving; passive rolling resistance remains unbuilt.
+The full 41-script smoke sweep passes; two optional Android smokes skip without opt-in.
+Final direction fixes also pass the 162-test native world suite (6 ignored) and repeated
+terrain/driving smokes. Positive steering now turns driver-right; chase-camera arrow orbit
+agrees with overview directions. Changes remain uncommitted/unmerged.
+
+**2026-11-05 diagnostics continuation (in review):** opt-in `OSVAULD_PERFORMANCE=1` adds a
+native FPS/work-time overlay and a read-only `Performance` RPC. History is bounded to 240 work
+samples, text/snapshots publish at 4 Hz, captures are excluded and offscreen FPS is null.
+No per-frame Lua callback or diagnostic repaint loop is added. NixOS builds/tests use LoadTable
+`--peer nixos`; the fetched release runs locally through a compatible loader. The controlled
+1920×1080 Intel Iris Xe foreground sample reports 63.37 median recent presentation FPS,
+12.89 ms median rolling-p95 CPU+wait work, 120.17 Hz physics and zero dropped time. State,
+suspension, gravity, mass, speed and actual scene/world budgets pass. These are short samples,
+not GPU timestamp/scanout or long-soak measurements. Visibility-dependent surface waiting was
+observed and recorded in the [performance plan](design/rover-performance.md). Workspace check,
+1127 workspace tests (23 ignored), timing unit tests and the diagnostics smoke pass, as does the full
+42-script sweep (two optional Android checks skip without opt-in). Uncommitted/unmerged.
+
+**2026-11-05 crater mission continuation (in review):** Lua adds a seeded 96×96 m fictional
+lunar landscape with three craters, lander, fixed rocks, route markers, a sample/return objective
+and map/chase views. Visible terrain/rock meshes are reused for collision. Stop upright near the
+site/home and press E to collect/deliver; only successful-return history is durable. A native
+fall sensor clears cargo, motion and held controls, resets at the lander and pauses. The original
+course remains selectable. No Rust was added for this continuation. Terrain sampling/slope
+checks and the actual keyboard-driven round-trip/recovery/reopen smoke pass. The controlled
+1920×1080 Iris Xe release sample reports 63.52 median presentation-call FPS, 10.85 ms median
+rolling-p95 CPU+wait work, 119.99 Hz physics and zero dropped time; all 14 audit checks pass.
+37 bodies, 53 objects and 8,336 collision triangles remain within existing limits. The live
+laptop preview includes the mission and FPS overlay. The 43-script verification is complete:
+42 pass in sweep 2556 (two optional Android skips), and the mission passes focused rerun 2559
+after correcting its assertion for an intentionally rejected edit. See the [mission plan](design/crater-mission.md)
+for verification and short-sample limits. Uncommitted/unmerged; detailed model polish and agent
+navigation remain next work.
+
+**2026-11-05 physics boundary revision (in review):** the user requires reusable native physics
+components and Lua assemblies/policies. The unmerged 3D `vehicles` recipe, normalized `drive`
+command and grouped vehicle inspection are removed. Ordinary bodies expose mass, centre of
+mass and materials; flat wheel components attach to dynamic bodies, with independent physical
+commands for torque, friction-brake torque, steering angle and bounded velocity motors. Lua
+assembles the rover and owns brake priority, input conventions and motor targets. An independent
+`mechanics_lab` wheel bench demonstrates educational reuse without a vehicle API. General
+joints, standalone springs and ideal pulleys remain unbuilt. Existing 2D APIs are untouched.
+Workspace check and 1,132 workspace tests pass (23 ignored); the earlier five focused bench/
+rover smokes pass. The full 44-script verification is complete: 43 scripts pass in sweep 2576
+(two optional Android skips), and bench rerun 2579 passes after correcting its pixel helper
+for a noninteractive viewport. The live preview includes both apps. The Nix-built release's controlled
+1080p Iris Xe run reports 63.56 median presentation-call FPS, 8.88 ms median rolling-p95 CPU+wait
+work, 120.18 Hz physics and zero drops; all 14 audit checks pass. See
+[physics-components.md](design/physics-components.md). Uncommitted/unmerged.
+
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable
   `mac` peer bundles, ad-hoc signs, installs, launches and screenshots. No Xcode project.

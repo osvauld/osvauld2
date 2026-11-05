@@ -302,6 +302,9 @@ pub enum Request {
     DumpTree {
         item_id: String,
     },
+    /// Cached native surface diagnostics, opt-in with OSVAULD_PERFORMANCE=1.
+    /// Offscreen work never reports display FPS. Does not advance simulation.
+    Performance,
     /// Click the element with `el_id` — by id, not by coordinates.
     Click {
         item_id: String,
@@ -349,7 +352,12 @@ pub enum Request {
     /// Release it. Offscreen only.
     PointerRelease {},
     /// One finger through native touch routing. Logical coordinates; offscreen only.
-    Touch { id: u64, phase: String, x: f32, y: f32 },
+    Touch {
+        id: u64,
+        phase: String,
+        x: f32,
+        y: f32,
+    },
     /// One bounded physical/logical key transition through the normal offscreen keyboard path.
     /// Separate from `Key`, which invokes Enter/Esc on a named text input.
     Keyboard {

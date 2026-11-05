@@ -3,7 +3,35 @@ use std::collections::BTreeMap;
 
 use super::{EntitySpec3d, World3d, World3dError};
 
-pub type WorldRecipes3d = BTreeMap<String, Vec<EntitySpec3d>>;
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldRecipe3d {
+    pub wheels: Vec<super::WheelSpec3d>,
+    pub properties: BTreeMap<String, super::BodyProperties3d>,
+    pub bodies: Vec<EntitySpec3d>,
+    pub gravity: [f32; 3],
+}
+
+impl Default for WorldRecipe3d {
+    fn default() -> Self {
+        Self {
+            wheels: Vec::new(),
+            properties: BTreeMap::new(),
+            bodies: Vec::new(),
+            gravity: crate::physics3d::DEFAULT_GRAVITY,
+        }
+    }
+}
+
+impl From<Vec<EntitySpec3d>> for WorldRecipe3d {
+    fn from(bodies: Vec<EntitySpec3d>) -> Self {
+        Self {
+            bodies,
+            ..Self::default()
+        }
+    }
+}
+
+pub type WorldRecipes3d = BTreeMap<String, WorldRecipe3d>;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Worlds3dError {
@@ -29,13 +57,13 @@ impl Worlds3d {
         if recipes.len() > 8 {
             return Err(Worlds3dError::Budget);
         }
-        for (id, specs) in recipes {
+        for (id, recipe) in recipes {
             if id.is_empty() || id.len() > 128 {
                 return Err(Worlds3dError::Id(id.clone()));
             }
             let result = match self.worlds.get(id) {
-                Some(world) => world.validate_reconcile(specs),
-                None => World3d::default().validate_reconcile(specs),
+                Some(world) => world.validate_recipe(recipe),
+                None => World3d::default().validate_recipe(recipe),
             };
             result.map_err(|source| Worlds3dError::Recipe {
                 id: id.clone(),
@@ -50,11 +78,10 @@ impl Worlds3d {
     pub fn reconcile(&mut self, recipes: WorldRecipes3d) -> Result<(), Worlds3dError> {
         self.validate_reconcile(&recipes)?;
         self.worlds.retain(|id, _| recipes.contains_key(id));
-        for (id, specs) in recipes {
-            self.worlds
-                .entry(id)
-                .or_default()
-                .reconcile(specs)
+        for (id, recipe) in recipes {
+            let world = self.worlds.entry(id).or_default();
+            world
+                .reconcile_recipe(recipe)
                 .expect("all recipes validated before mutation");
         }
         Ok(())

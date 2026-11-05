@@ -1318,6 +1318,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let _scope = self.host_context.enter();
         self.worlds3d.commanding.set(matches!(key.name,
             "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key" | "on_touch"));
+        self.worlds3d.control_input.set(key.name == "on_hover");
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -1328,6 +1329,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             },
         };
         self.worlds3d.commanding.set(false);
+        self.worlds3d.control_input.set(false);
         if let Err(e) = result {
             eprintln!("handler error: {e}");
             self.log(format!("handler error: {e}"));

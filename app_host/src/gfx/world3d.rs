@@ -10,6 +10,7 @@ use world::world3d::{WorldRecipes3d, Worlds3d};
 
 mod handle;
 mod recipe;
+mod wheel;
 
 #[derive(Clone, Default)]
 pub(crate) struct Host {
@@ -19,6 +20,7 @@ pub(crate) struct Host {
     routes: Rc<RefCell<BTreeMap<String, String>>>,
     ready: Rc<Cell<bool>>,
     pub(crate) commanding: Rc<Cell<bool>>,
+    pub(crate) control_input: Rc<Cell<bool>>,
 }
 
 impl Host {
@@ -106,9 +108,9 @@ impl Host {
                         "gfx.world3d is only allowed during module initialization",
                     ));
                 }
-                let (id, scene, bodies) = recipe::parse(spec)?;
+                let (id, scene, recipe) = recipe::parse(spec)?;
                 let mut recipes = host.recipes.borrow().clone();
-                if recipes.insert(id.clone(), bodies).is_some() {
+                if recipes.insert(id.clone(), recipe).is_some() {
                     return Err(Error::runtime(format!("repeated 3D world id: {id}")));
                 }
                 host.worlds

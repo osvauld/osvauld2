@@ -62,6 +62,18 @@ Rust screen: El builders (typed M) ───────────────
   promise that arbitrary user handlers cannot mutate state during capture. Offscreen ordinary
   bridge requests repaint without advancing virtual time; frame/advance and pointer drivers move
   the clock explicitly, so inspection and captures create no time debt.
+- **New 3D physics components are native; application assemblies and policies are Lua.** Rust owns
+  rigid bodies, wheel support, springs/dampers, physical actuation, contacts and fixed-step
+  scheduling. Lua composes a rover or educational apparatus and chooses throttle mapping,
+  brake priority, steering convention and motor targets. Native wheel commands are SI
+  torque/angle/velocity values; no vehicle recipe or normalized driving command remains.
+  Future native joints/pulleys follow this same boundary, not a native car/elevator API.
+- **Performance observations do not drive the clock.** Optional `OSVAULD_PERFORMANCE=1` keeps
+  bounded CPU/wait and normal-presentation samples in the surface Runner, renders a native
+  diagnostic overlay, and delivers plain `App::frame_performance` snapshots to its host.
+  Shell's `Performance` RPC reads its primary surface's cache. Offscreen rendering and app tiles
+  never report display FPS; captures are excluded. The diagnostic neither executes Lua nor
+  requests an extra repaint. Presentation cadence is distinct from GPU completion/scanout.
 - **External event sources start at `App::ready`.** Runner calls it once after winit has a
   window/renderer and is actively polling. Publishing a bridge socket from `run_with`'s builder
   creates a startup race: `EventLoopProxy::send_event` can succeed before events are deliverable.
@@ -78,7 +90,7 @@ Rust screen: El builders (typed M) ───────────────
 | crate | what it is |
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
-| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
+| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, body properties and composable ray wheel/motor components, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. |
 | `lua_tree` | isolated full-moon (Luau) parse → 22-kind semantic tree → printer groundwork. Semantic source storage and nids are deferred; the planned agent write path edits LoroText directly. See [`design/agent-source-editing.md`](design/agent-source-editing.md). |

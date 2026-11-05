@@ -1,7 +1,7 @@
 use super::*;
 use crate::world3d::Shape3d;
 
-fn recipe(height: f32) -> Vec<EntitySpec3d> {
+fn recipe(height: f32) -> WorldRecipe3d {
     vec![EntitySpec3d {
         id: "marble".into(),
         shape: Shape3d::Sphere(0.25),
@@ -10,6 +10,7 @@ fn recipe(height: f32) -> Vec<EntitySpec3d> {
         dynamic: true,
         sensor: false,
     }]
+    .into()
 }
 
 fn recipes() -> WorldRecipes3d {
@@ -33,7 +34,7 @@ fn failed_batch_changes_neither_earlier_worlds_nor_omitted_worlds() {
         .map(|(id, world)| (id.clone(), world.inspect()))
         .collect();
     let mut staged = BTreeMap::from([("a".into(), recipe(9.0)), ("b".into(), recipe(10.0))]);
-    staged.get_mut("b").unwrap()[0].shape = Shape3d::Sphere(0.5);
+    staged.get_mut("b").unwrap().bodies[0].shape = Shape3d::Sphere(0.5);
     assert_eq!(
         worlds.reconcile(staged),
         Err(Worlds3dError::Recipe {

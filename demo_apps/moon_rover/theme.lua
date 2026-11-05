@@ -1,0 +1,28 @@
+return {
+	bg = "#0b101a", panel = "#182334", hover = "#273b56", text = "#eef3fa", muted = "#9caec4",
+	ground = "#828792", ball = "#ffc66b", box = "#65d6c4", accent = "#a6c9ff",
+	width = 32, depth = 24, step = 0.5,
+	ball_radius = 0.35, ball_spawn = {-4, 2.4, 0}, box_spawn = {-9, 2.4, 0},
+	box_size = {0.7, 0.4, 0.7},
+	camera_min = 1.25, camera_max = 100, zoom_rate = 0.004,
+	camera_speed = 5, camera_turn = 1.2, camera_zoom = 1.8,
+	ground_start = {-7,4.5}, eye_height = 1.6, ground_speed = 2.5, ground_scroll = 0.01,
+	grid = "#39434f", contours = "#d9bd89", grid_width = 0.035, contour_width = 0.04,
+	guide_lift = 0.035,
+	rover = "#b4d4e5", tire = "#39404b",
+	mission = {
+		seed = 20261105, width = 96, depth = 96, step = 1.5,
+		home = {-21,-24}, site = {12,12}, crater_radius = 14, crater_depth = 2,
+		ground = "#96979d", pad = "#404959", lander = "#d0d4da", foil = "#c6a15b",
+		window = "#233d55", sample = "#f3c96e", route = "#a4afbd", earth = "#6a9fc5",
+		rocks = {"#65666e","#797a80","#535861"}, rock_count = 18,
+		pad_size = {8,0.06,8}, collect_range = 3, collect_speed = 0.6,
+		map = {target = {0,-0.5,0}, distance = 130},
+	},
+	views = {
+		flat = {target = {-9,0,0}, distance = 10},
+		ramp = {target = {-4,-0.4,0}, distance = 9},
+		bumps = {target = {4,-0.8,0}, distance = 9},
+		crater = {target = {9,-1.2,2}, distance = 10},
+	},
+}

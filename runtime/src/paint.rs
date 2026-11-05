@@ -28,6 +28,32 @@ const DEBUG_BOX: Color = Color::from_rgba8(0x53, 0xB4, 0xFF, 0xFF);
 const DEBUG_PAD: Color = Color::from_rgba8(0x7B, 0xE0, 0x8A, 0xFF);
 const DEBUG_GUIDE: Color = Color::from_rgba8(0x53, 0xB4, 0xFF, 0x80);
 const DEBUG_CHIP: Color = Color::from_rgba8(0x11, 0x11, 0x18, 0xF2);
+
+pub(crate) fn performance(
+    scene: &mut Scene,
+    text: &mut TextEngine,
+    t: Affine,
+    label: &str,
+    rect: [f32; 4],
+) {
+    let [x, y, w, h] = rect.map(f64::from);
+    scene.fill(
+        Fill::NonZero,
+        t,
+        DEBUG_CHIP,
+        None,
+        &RoundedRect::new(x, y, x + w, y + h, 6.0),
+    );
+    text.draw(
+        scene,
+        label,
+        MONO_FAMILY,
+        12.0,
+        t * Affine::translate((x + 8.0, y + 6.0)),
+        Color::from_rgba8(230, 240, 250, 255),
+        Some((w - 16.0).max(1.0) as f32),
+    );
+}
 /// Draw `placed` (in paint order) into `scene`. `t` maps logical points to physical pixels.
 /// `pointer` is the cursor in logical points, if inside the window.
 pub(crate) fn draw<M>(

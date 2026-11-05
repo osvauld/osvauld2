@@ -8,14 +8,18 @@ use rapier3d::prelude::RigidBodyHandle;
 use runtime::scene3d::{Scene3d, SceneError};
 
 use crate::physics3d::Physics3d;
+pub use crate::physics3d::{
+    BodyProperties3d, WheelInput3d, WheelMotor3d, WheelSpec3d, WheelState3d,
+};
 pub use crate::physics3d::{BodyState, Set3d, Shape3d};
 
 mod clock;
+mod components;
 mod worlds;
 mod zones;
 use clock::FixedClock;
 pub use clock::{AdvanceReport, ClockError};
-pub use worlds::{WorldRecipes3d, Worlds3d, Worlds3dError};
+pub use worlds::{WorldRecipe3d, WorldRecipes3d, Worlds3d, Worlds3dError};
 pub use zones::{ZoneEvent3d, ZonePhase3d};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,12 +37,16 @@ pub struct EntitySpec3d {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityInspection3d {
     pub authored: EntitySpec3d,
+    pub properties: BodyProperties3d,
+    pub mass: f32,
     pub resolved: BodyState,
     pub zones: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldInspection3d {
+    pub wheels: Vec<WheelState3d>,
+    pub gravity: [f32; 3],
     pub tick: u64,
     pub dropped_seconds: f64,
     pub dropped_zone_events: u64,
@@ -47,6 +55,16 @@ pub struct WorldInspection3d {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum World3dError {
+    #[error("invalid 3D wheel configuration or actuation: {0}")]
+    Wheel(String),
+    #[error("invalid 3D body properties: {0}")]
+    Properties(String),
+    #[error("3D mesh collider {0} must be fixed and cannot be a sensor")]
+    MeshBody(String),
+    #[error("3D world exceeds its 131072 collision-triangle budget")]
+    CollisionBudget,
+    #[error("3D gravity components must be finite numbers bounded to 10000 m/s²")]
+    Gravity,
     #[error(transparent)]
     Scene(#[from] SceneError),
     #[error("3D world is limited to 256 bodies")]
@@ -76,6 +94,7 @@ pub struct World3d {
     ecs: World,
     ids: HashMap<String, Entity>,
     physics: Physics3d,
+    properties: std::collections::BTreeMap<String, BodyProperties3d>,
     clock: FixedClock,
     zones: std::collections::BTreeSet<(String, String)>,
     events: std::collections::VecDeque<ZoneEvent3d>,
@@ -84,6 +103,23 @@ pub struct World3d {
 }
 
 impl World3d {
+    pub fn validate_gravity(gravity: [f32; 3]) -> Result<(), World3dError> {
+        if gravity
+            .into_iter()
+            .all(|v| v.is_finite() && v.abs() <= 10_000.0)
+        {
+            Ok(())
+        } else {
+            Err(World3dError::Gravity)
+        }
+    }
+
+    pub fn set_gravity(&mut self, gravity: [f32; 3]) -> Result<(), World3dError> {
+        Self::validate_gravity(gravity)?;
+        self.physics.set_gravity(gravity);
+        Ok(())
+    }
+
     /// Preflight a recipe without changing membership, reset targets, clocks or solver state.
     /// Hosts use this to validate every staged world before accepting a whole-VM reload.
     pub fn validate_reconcile(&self, specs: &[EntitySpec3d]) -> Result<(), World3dError> {
@@ -91,6 +127,7 @@ impl World3d {
             return Err(World3dError::Budget);
         }
         let mut seen = HashSet::new();
+        let mut collision_triangles = 0;
         // Validate the whole batch before membership, reset targets or handles can change.
         for spec in specs {
             if spec.id.is_empty() || spec.id.len() > 128 || !seen.insert(spec.id.clone()) {
@@ -99,7 +136,16 @@ impl World3d {
             if spec.sensor && spec.dynamic {
                 return Err(World3dError::Sensor(spec.id.clone()));
             }
-            Physics3d::validate(spec.shape, spec.position, spec.rotation)
+            if let Shape3d::Mesh(mesh) = &spec.shape {
+                if spec.dynamic || spec.sensor {
+                    return Err(World3dError::MeshBody(spec.id.clone()));
+                }
+                collision_triangles += mesh.triangle_count();
+                if collision_triangles > 131_072 {
+                    return Err(World3dError::CollisionBudget);
+                }
+            }
+            Physics3d::validate(&spec.shape, spec.position, spec.rotation)
                 .map_err(|_| World3dError::Body(spec.id.clone()))?;
             if let Some(e) = self.ids.get(&spec.id) {
                 let old = &self.ecs.get::<Body>(*e).unwrap().spec;
@@ -126,6 +172,7 @@ impl World3d {
         gone.sort();
         for id in gone {
             let e = self.ids.remove(&id).unwrap();
+            self.properties.remove(&id);
             self.physics.remove(self.ecs.get::<Body>(e).unwrap().handle);
             self.ecs.despawn(e);
             self.dirty = true;
@@ -138,7 +185,7 @@ impl World3d {
                 let handle = self
                     .physics
                     .add(
-                        spec.shape,
+                        spec.shape.clone(),
                         spec.position,
                         spec.rotation,
                         spec.dynamic,
@@ -213,6 +260,11 @@ impl World3d {
                         .inspect(self.ecs.get::<Body>(*e).unwrap().handle);
                     object.position = state.position.into();
                     object.rotation = glam::Quat::from_array(state.rotation);
+                } else if let Some((position, rotation)) =
+                    self.physics.wheel_pose(object.id.as_ref())
+                {
+                    object.position = position.into();
+                    object.rotation = glam::Quat::from_array(rotation);
                 }
                 object
             })
@@ -228,6 +280,12 @@ impl World3d {
                 let body = self.ecs.get::<Body>(*e).unwrap();
                 EntityInspection3d {
                     authored: body.spec.clone(),
+                    properties: self
+                        .properties
+                        .get(&body.spec.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    mass: self.physics.mass(body.handle),
                     resolved: self.physics.inspect(body.handle),
                     zones: self
                         .zones
@@ -240,6 +298,8 @@ impl World3d {
             .collect();
         entities.sort_by(|a, b| a.authored.id.cmp(&b.authored.id));
         WorldInspection3d {
+            wheels: self.physics.inspect_wheels(),
+            gravity: self.physics.gravity(),
             tick: self.tick(),
             dropped_seconds: self.dropped_seconds(),
             dropped_zone_events: self.dropped_zone_events,

@@ -4,8 +4,8 @@
 //! world sorts by feet (`Order::Feet`). Nothing
 //! outside this crate sees ECS types. Held keys and motion live here too: Lua describes a
 //! controller once, and `tick` moves the entity every frame without Lua. Moments — a press, a
-//! change of direction — queue as `WorldEvent`s for Lua to decide on. Private 3D collider/solver
-//! groundwork and retained 3D body IDs live here too; their host binding is not exposed yet.
+//! change of direction — queue as `WorldEvent`s for Lua to decide on. Retained 3D bodies,
+//! per-world gravity and clocks live here too; app_host exposes them through `gfx.world3d`.
 
 mod camera;
 pub mod clip;

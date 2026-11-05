@@ -9,6 +9,43 @@ pub(super) struct WorldHandle {
 
 impl UserData for WorldHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |lua, this, id: String| {
+            let worlds = this.host.worlds.borrow();
+            let Some(world) = worlds.get(&this.id) else {
+                return Ok(None);
+            };
+            let Ok(body) = world.body(&id) else {
+                return Ok(None);
+            };
+            let out = lua.create_table()?;
+            out.set("position", lua.create_sequence_from(body.position)?)?;
+            out.set("rotation", lua.create_sequence_from(body.rotation)?)?;
+            out.set("velocity", lua.create_sequence_from(body.velocity)?)?;
+            out.set(
+                "angular_velocity",
+                lua.create_sequence_from(body.angular_velocity)?,
+            )?;
+            out.set("sleeping", body.sleeping)?;
+            out.set("tick", world.tick())?;
+            Ok(Some(out))
+        });
+        methods.add_method("set_wheels", |_, this, spec: Table| {
+            if !this.host.ready.get()
+                || !(this.host.commanding.get() || this.host.control_input.get())
+            {
+                return Err(Error::runtime(
+                    "world3d:set_wheels is only allowed in input or zone handlers",
+                ));
+            }
+            let commands = wheel::commands(spec)?;
+            this.host
+                .worlds
+                .borrow_mut()
+                .get_mut(&this.id)
+                .ok_or_else(|| Error::runtime("3D world is not active"))?
+                .set_wheels(&commands)
+                .map_err(Error::external)
+        });
         methods.add_method(
             "scene",
             |lua, this, (camera, options): (Option<Table>, Option<Table>)| {

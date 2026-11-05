@@ -129,6 +129,13 @@ impl MeshData {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+    /// Immutable local geometry, shared by rendering and fixed collision meshes.
+    pub fn vertices(&self) -> &[Vertex] {
+        &self.vertices
+    }
+    pub fn indices(&self) -> &[u16] {
+        &self.indices
+    }
     pub fn bounds(&self) -> (Vec3, Vec3) {
         (self.min, self.max)
     }

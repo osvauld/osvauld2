@@ -19,6 +19,7 @@ fn roundtrip<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(value: &T) 
 fn every_request_roundtrips() {
     let all: Vec<Request> = vec![
         Request::Ping,
+        Request::Performance,
         Request::ListAccounts,
         Request::Signup {
             name: "abe".into(),

@@ -1,12 +1,15 @@
 use super::super::*;
 use super::specs;
 use glam::{Quat, Vec3};
-use runtime::{App, El, Headless, ScreenshotRequest};
 use runtime::scene3d::{Camera3d, Object3d, Scene3d, SceneInspection, mesh::MeshData};
+use runtime::{App, El, Headless, ScreenshotRequest};
 use std::cell::RefCell;
 
 #[derive(Clone)]
-enum Msg { Reset, Captured }
+enum Msg {
+    Reset,
+    Captured,
+}
 
 struct MarbleApp {
     world: World3d,
@@ -20,18 +23,42 @@ impl MarbleApp {
     fn new() -> Self {
         let mut world = World3d::default();
         let bodies = specs();
-        let objects = bodies.iter().map(|body| Object3d {
-            id: body.id.as_str().into(), mesh: MeshData::cube(), position: body.position.into(),
-            rotation: Quat::IDENTITY,
-            scale: match body.shape { Shape3d::Box(size) => size.into(), Shape3d::Sphere(r) => Vec3::splat(r * 2.0) },
-            color: [0.3, 0.6, 0.9, 1.0], surface: None,
-        }).collect();
+        let objects = bodies
+            .iter()
+            .map(|body| Object3d {
+                id: body.id.as_str().into(),
+                mesh: MeshData::cube(),
+                position: body.position.into(),
+                rotation: Quat::IDENTITY,
+                scale: match &body.shape {
+                    Shape3d::Box(size) => (*size).into(),
+                    Shape3d::Sphere(r) => Vec3::splat(r * 2.0),
+                    Shape3d::Mesh(_) => Vec3::ONE,
+                },
+                color: [0.3, 0.6, 0.9, 1.0],
+                surface: None,
+            })
+            .collect();
         world.reconcile(bodies).unwrap();
-        let authored = Scene3d::new(Camera3d {
-            eye: Vec3::new(8.0, 5.0, 8.0), target: Vec3::Y, up: Vec3::Y,
-            fov_y_radians: 1.0, near: 0.1, far: 100.0,
-        }, objects).unwrap();
-        Self { world, authored, rendered: RefCell::new(None), active: true, capture: None }
+        let authored = Scene3d::new(
+            Camera3d {
+                eye: Vec3::new(8.0, 5.0, 8.0),
+                target: Vec3::Y,
+                up: Vec3::Y,
+                fov_y_radians: 1.0,
+                near: 0.1,
+                far: 100.0,
+            },
+            objects,
+        )
+        .unwrap();
+        Self {
+            world,
+            authored,
+            rendered: RefCell::new(None),
+            active: true,
+            capture: None,
+        }
     }
 }
 

@@ -76,6 +76,10 @@ class Bridge:
     def ping(self) -> str:
         return self.request("Ping")
 
+    def performance(self) -> dict:
+        """Cached native frame work and presentation FPS; offscreen FPS is unavailable."""
+        return self.request("Performance")
+
     def list_accounts(self) -> list:
         return self.request("ListAccounts")
 

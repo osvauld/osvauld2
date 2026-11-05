@@ -79,11 +79,12 @@ fn invalid_rotations_reject_atomically_and_nonunit_rotations_normalize() {
 #[test]
 fn invalid_rotation_in_one_world_preserves_every_world_in_reload_batch() {
     let mut worlds = Worlds3d::default();
-    let mut recipes = WorldRecipes3d::from([("a".into(), specs()), ("b".into(), specs())]);
+    let mut recipes =
+        WorldRecipes3d::from([("a".into(), specs().into()), ("b".into(), specs().into())]);
     worlds.reconcile(recipes.clone()).unwrap();
     let before = worlds.get("a").unwrap().inspect();
-    recipes.get_mut("a").unwrap()[0].rotation = glam::Quat::from_rotation_z(0.4).to_array();
-    recipes.get_mut("b").unwrap()[0].rotation = [0.0; 4];
+    recipes.get_mut("a").unwrap().bodies[0].rotation = glam::Quat::from_rotation_z(0.4).to_array();
+    recipes.get_mut("b").unwrap().bodies[0].rotation = [0.0; 4];
     assert!(worlds.reconcile(recipes).is_err());
     assert_eq!(worlds.get("a").unwrap().inspect(), before);
 }

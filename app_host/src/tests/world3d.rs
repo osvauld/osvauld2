@@ -1,6 +1,9 @@
 use super::*;
 
 mod commands;
+mod gravity;
+mod terrain;
+mod wheels;
 
 const SOURCE: &str = r##"
 local game = gfx.world3d({ id = "game", scene = gfx.scene3d({
@@ -166,22 +169,38 @@ fn world3d_rejects_unknown_fields_bad_shapes_and_frame_or_module_resets() {
     ));
     app.view();
     let before = state(&app);
-    app.update(LuaMsg::CallFrame(Key::new("reset", "on_frame"), 0.1, 1.0, (640.0, 480.0)));
+    app.update(LuaMsg::CallFrame(
+        Key::new("reset", "on_frame"),
+        0.1,
+        1.0,
+        (640.0, 480.0),
+    ));
     assert_eq!(state(&app), before);
     assert!(app.console(1)[0].contains("only allowed in input handlers"));
 }
 
 fn zone_source(handler: &str) -> String {
-    SOURCE.replace("{id=\"platform\", box={6,0.5,4}, position={0,0,0}}",
-        "{id=\"goal\", box={1,1,1}, position={0,1.5,0}, sensor=true}")
-        .replace("local visible = true", "local visible = true\nlocal trace = ''")
+    SOURCE
+        .replace(
+            "{id=\"platform\", box={6,0.5,4}, position={0,0,0}}",
+            "{id=\"goal\", box={1,1,1}, position={0,1.5,0}, sensor=true}",
+        )
+        .replace(
+            "local visible = true",
+            "local visible = true\nlocal trace = ''",
+        )
         .replace("return ui.col({", "return ui.col({ ui.text({trace}),")
-        .replace("id=\"view\", scene=game:scene()", &format!("id=\"view\", scene=game:scene(), on_zone=function(e) {handler} end"))
+        .replace(
+            "id=\"view\", scene=game:scene()",
+            &format!("id=\"view\", scene=game:scene(), on_zone=function(e) {handler} end"),
+        )
 }
 
 #[test]
 fn world3d_zone_callbacks_are_ordered_tick_stamped_and_views_are_observational() {
-    let mut app = app(&zone_source("assert(e.tick > 0 and e.tick % 1 == 0); trace = trace .. e.phase .. ':' .. e.id .. ':' .. e.who .. '|'"));
+    let mut app = app(&zone_source(
+        "assert(e.tick > 0 and e.tick % 1 == 0); trace = trace .. e.phase .. ':' .. e.id .. ':' .. e.who .. '|'",
+    ));
     app.view();
     app.advance_simulation(0.0, true);
     for frame in 1..=100 {
@@ -206,11 +225,14 @@ fn world3d_zone_callbacks_scope_host_permissions_even_on_error() {
     let recorded = calls.clone();
     let setup: crate::host::VmSetup = Rc::new(move |vm, context| {
         let recorded = recorded.clone();
-        vm.globals().set("host_record", vm.create_function(move |_, ()| {
-            context.require_handler()?;
-            recorded.set(recorded.get() + 1);
-            Ok(())
-        })?)
+        vm.globals().set(
+            "host_record",
+            vm.create_function(move |_, ()| {
+                context.require_handler()?;
+                recorded.set(recorded.get() + 1);
+                Ok(())
+            })?,
+        )
     });
     let mut app = LuaApp::open_with_setup(
         src, Rc::new(|_| Ok(None)), noop_wake(), identity(), Some(setup),
@@ -228,7 +250,9 @@ fn world3d_zone_callbacks_scope_host_permissions_even_on_error() {
 
 #[test]
 fn world3d_zone_handlers_can_reset_and_errors_do_not_leave_commands_enabled() {
-    let mut app = app(&zone_source("if e.phase == 'enter' then game:reset('marble'); error('zone failed') end"));
+    let mut app = app(&zone_source(
+        "if e.phase == 'enter' then game:reset('marble'); error('zone failed') end",
+    ));
     app.view();
     app.advance_simulation(0.0, true);
     for frame in 1..=80 {

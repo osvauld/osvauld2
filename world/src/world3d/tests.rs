@@ -1,8 +1,11 @@
 use super::*;
 
-mod runner;
 mod commands;
+mod gravity;
 mod rotation;
+mod runner;
+mod terrain;
+mod wheels;
 mod zones;
 
 fn body_count(world: &mut World3d) -> usize {
