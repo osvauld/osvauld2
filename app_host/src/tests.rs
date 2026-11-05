@@ -1150,6 +1150,29 @@ fn a_surface_is_checked_strictly() {
 }
 
 #[test]
+fn parallax_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |rest: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, \
+            {{ id = 'hills', pos = {{ 0, 0 }}, drawing = hero, {rest} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("parallax = 0.3")).unwrap();
+    walk_world(&lua, &worlds, &room("parallax = 0")).unwrap();
+    walk_world(&lua, &worlds, &room("parallax = { 0.3, 1 }")).unwrap();
+    let cases = [
+        ("parallax = 'far'", "world entity 1.parallax must be a number or { x, y }, got string"),
+        ("parallax = { 0.3 }", "world entity 1.parallax"),
+        ("parallax = 5", "parallax must be from 0 to 4, got 5"),
+        ("parallax = 0.5, collider = { rect = { 4, 4 } }", "parallax is scenery: it cannot have a collider"),
+    ];
+    for (rest, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(rest)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
 fn a_world_sky_is_checked_strictly() {
     let (lua, _) = sandboxed_vm().unwrap();
     let worlds = Worlds::default();

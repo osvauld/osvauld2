@@ -522,6 +522,14 @@ ui.world({
   behind every entity. It is on the screen, not the map, so it stays put while the camera moves,
   and the pointer goes through it. Two stops or more; left out, there is none (the element's
   `fill` shows, as before).
+- **`parallax = f`** (or `{ fx, fy }`, each 0 to 4) on an entity makes it scenery that
+  follows only that share of the camera's move: 1 (the default) moves with the map, 0.3 is far
+  hills, 0 stays put on screen, above 1 passes in front faster. Its `pos` is where it shows
+  with the camera's centre at 0, 0, so place it at `want − camera centre × (1 − f)`. Give a
+  climbing road's far hills `{ 0.3, 1 }`, so they drift slowly across but don't sink as the
+  road climbs. Scenery has no body: a `collider`, `sensor`, `controller` or `attach` with it is
+  an error. Without a camera it changes nothing. Draw order is still list order, so list far
+  layers first.
 - **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
   changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
   falls; it comes to rest asleep on what holds it, as before.

@@ -707,7 +707,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
-        "loose", "group", "blocks", "surface",
+        "loose", "group", "blocks", "surface", "parallax",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -765,6 +765,19 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
                 Some(world::Surface { grip })
             }
             None => None,
+        },
+        parallax: match spec.get::<Value>("parallax")? {
+            Value::Nil => None,
+            Value::Integer(n) => Some((n as f64, n as f64)),
+            Value::Number(n) => Some((n, n)),
+            Value::Table(t) => {
+                let p = point(t, &format!("{owner}.parallax"))?;
+                Some((p.x, p.y))
+            }
+            other => {
+                let what = other.type_name();
+                return Err(Error::runtime(format!("{owner}.parallax must be a number or {{ x, y }}, got {what}")));
+            }
         },
     })
 }

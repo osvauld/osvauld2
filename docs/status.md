@@ -41,7 +41,12 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - Step 2 built: `sky = { stops }` on `ui.world`, a screen-space gradient painted under every
   entity, unnamed (the pointer goes through), still while the camera moves. Hillclimb uses it;
   its smoke reads the top stop's pixel. Verified: world, app_host lib (318); smokes hillclimb,
-  world, camera. Next: parallax.
+  world, camera.
+- Step 3 built: `parallax = f | { fx, fy }` on scenery (no body): drawn back by `(1 − f)` of the
+  camera's centre, and culled where it's drawn. Separate x/y factors (revised in the step), so
+  far hills on a climbing road don't sink out of view. Checked: f 0 / 0.5 / 1 move 0 / half /
+  all of the camera's move on screen, x and y apart, bodies refused. Verified: world 183,
+  app_host lib. The real-path pixel check is S-8 (step 8). Next: particles.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable

@@ -63,7 +63,9 @@ the first hills (> 150 m)" stays.
   touches nothing else. No hook needed. Ice is about 0.01, dirt 1.
 - **`sky = { stops = { {0, colour}, …, {1, colour} } }`** on `ui.world`: a screen-space vertical
   gradient under the entities. `fill` stays as it is.
-- **`parallax = f`** on a no-collider entity: drawn at `pos − camera·(1 − f)`. Hills at 0.3,
+- **`parallax = f`** or **`{ fx, fy }`** (*revised 2026-11-05: separate axes, so far hills
+  on a 30 m climb don't sink out of view*) on a no-collider entity: drawn at
+  `pos + camera centre·(1 − f)`. Hills at 0.3,
   mountains at 0.1, foreground grass at 1.1 (above 1 is allowed, for things in front).
   Draw order stays list order.
 - **`emit = {…}`**: a particle stream, visual only. It is owned by the world and seeded from the

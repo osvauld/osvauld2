@@ -50,6 +50,9 @@ pub struct EntitySpec {
     /// Fixed ground only: how it grips what touches it (ice, dirt). Without, a loose thing's own
     /// grip decides, as it always has.
     pub surface: Option<Surface>,
+    /// Scenery only: how much of the camera's move it follows, across and up. 1 (the default)
+    /// moves with the map, 0.3 is far hills, 0 stays put on screen, above 1 passes in front faster.
+    pub parallax: Option<(f64, f64)>,
 }
 
 /// A change Lua makes at a moment, not by describing: an existing entity's description never
@@ -276,6 +279,8 @@ struct Appearance {
     drawing: Arc<Drawing>,
     flip: bool,
     rest: Arc<Frame>,
+    /// The share of the camera's move it follows, across and up; 1, 1 for all but scenery.
+    parallax: (f64, f64),
 }
 
 /// The entity's body in `Physics`, rebuilt only when its collider or kind of body changes.
@@ -508,6 +513,21 @@ impl World2d {
                     return bad("loose with a controller: one thing moves it, not two".into());
                 }
                 m.check().or_else(bad)?;
+            }
+            if let Some((fx, fy)) = spec.parallax {
+                let fine = |f: f64| f.is_finite() && (0.0..=4.0).contains(&f);
+                let scenery = match () {
+                    _ if !fine(fx) => Some(format!("parallax must be from 0 to 4, got {fx}")),
+                    _ if !fine(fy) => Some(format!("parallax must be from 0 to 4, got {fy}")),
+                    _ if spec.collider.is_some() => Some("parallax is scenery: it cannot have a collider".into()),
+                    _ if spec.sensor.is_some() => Some("parallax is scenery: it cannot have a sensor".into()),
+                    _ if spec.controller.is_some() => Some("parallax is scenery: it cannot have a controller".into()),
+                    _ if spec.attach.is_some() => Some("parallax is scenery: it cannot be carried".into()),
+                    _ => None,
+                };
+                if let Some(why) = scenery {
+                    return Err(WorldError::Collider(spec.id.clone(), why));
+                }
             }
             if let Some(surface) = &spec.surface {
                 let ground = match () {
@@ -765,6 +785,7 @@ impl World2d {
             drawing: spec.drawing,
             flip: spec.flip,
             rest,
+            parallax: spec.parallax.unwrap_or((1.0, 1.0)),
         });
         e.insert(InBlock(block.clone()));
         match spec.controller {
@@ -931,6 +952,20 @@ impl World2d {
         }
     }
 
+    /// Where the entity is drawn: placed, then held back by its parallax — a layer that follows
+    /// a share `f` of the camera sits `(1 − f)` of the camera's centre further along. What it
+    /// carries goes with it. Without a camera, where it is placed.
+    fn drawn(&self, entity: Entity) -> Affine {
+        let placed = self.place(entity);
+        let Some(c) = &self.camera else { return placed };
+        let carrier = self.ecs.get::<Attached>(entity).map_or(entity, |a| a.to);
+        let (fx, fy) = self.ecs.get::<Appearance>(carrier).map_or((1.0, 1.0), |a| a.parallax);
+        if (fx, fy) == (1.0, 1.0) {
+            return placed;
+        }
+        Affine::translate((c.at.0 * (1.0 - fx), c.at.1 * (1.0 - fy))) * placed
+    }
+
     /// The bottom of the entity's box; a carried entity stands on its carrier's feet, just in
     /// front of it.
     fn feet(&self, entity: Entity) -> (f64, u8) {
@@ -963,7 +998,7 @@ impl World2d {
                     }
                     None => look.rest.clone(),
                 };
-                let item = Item::instance(self.place(entity), posed)?;
+                let item = Item::instance(self.drawn(entity), posed)?;
                 Ok((self.feet(entity), item.with_id(name.0.as_str())))
             })
             .collect::<Result<Vec<_>, WorldError>>()?;
@@ -1683,7 +1718,7 @@ impl World2d {
     fn shows(&self, entity: Entity, view: Rect) -> bool {
         let look = self.ecs.get::<Appearance>(entity).expect("every entity has an Appearance");
         let (w, h) = look.drawing.size();
-        let b = self.place(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
+        let b = self.drawn(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
         let b = b.inflate(b.width() / 2.0, b.height() / 2.0);
         b.x0 < view.x1 && b.x1 > view.x0 && b.y0 < view.y1 && b.y1 > view.y0
     }

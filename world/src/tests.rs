@@ -47,6 +47,7 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         group: None,
         blocks: None,
         surface: None,
+        parallax: None,
     }
 }
 
@@ -3448,6 +3449,102 @@ fn a_sky_is_painted_first_fills_the_view_and_stays_put_as_the_camera_moves() {
     let after = world.frame(VIEW.0, VIEW.1).unwrap();
     assert!(camera_at(&world).0 > 2090.0, "the camera moved");
     assert_eq!(format!("{:?}", after.items()[0]), sky, "the sky did not");
+}
+
+// --- Parallax (plan: docs/design/hillclimb-terrain.md, L-P1) ---
+
+/// Where on screen `id` shows, by sweeping the view's middle row for it; None if it doesn't.
+fn screen_x(world: &World2d, id: &str) -> Option<f64> {
+    let frame = world.frame(VIEW.0, VIEW.1).unwrap();
+    (0..VIEW.0 as usize).map(|x| x as f64).find(|&x| {
+        frame.hit(Point::new(x, 360.0)).is_some_and(|h| h.id.to_string() == id)
+    })
+}
+
+/// The hero, followed, with three backdrops level with it: still (0), half (0.5) and normal (1).
+fn layered() -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = EntitySpec { pos: (2000.0, 1500.0), ..controlled(&d, wasd(100.0)) };
+    // A layer's pos is where it shows with the camera's centre at 0, 0; the camera starts on the
+    // hero's centre (2004, 1504), so each is put back by (1 − f) of that to show beside it.
+    let layer = |id: &str, x: f64, f: f64| EntitySpec {
+        parallax: Some((f, f)),
+        ..spec(id, (x - 2004.0 * (1.0 - f), 1500.0 - 1504.0 * (1.0 - f)), &d)
+    };
+    world.reconcile(vec![hero, layer("far", 1600.0, 0.0), layer("mid", 1800.0, 0.5), layer("near", 2200.0, 1.0)]).unwrap();
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    world
+}
+
+#[test]
+fn a_parallax_layer_moves_by_its_share_of_the_cameras_move() {
+    let mut world = layered();
+    let before: Vec<_> = ["far", "mid", "near"].iter().map(|id| screen_x(&world, id)).collect();
+    let cam = camera_at(&world).0;
+    world.key("KeyD", true);
+    frames(&mut world, 1.0, 2.0);
+    world.key("KeyD", false);
+    let moved = camera_at(&world).0 - cam;
+    assert!(moved > 150.0, "the camera moved: {moved}");
+    let after: Vec<_> = ["far", "mid", "near"].iter().map(|id| screen_x(&world, id)).collect();
+    let shift = |i: usize| after[i].expect("on screen") - before[i].expect("on screen");
+    assert!(shift(0).abs() <= 1.0, "f = 0 stays put on screen: {}", shift(0));
+    assert!((shift(1) + moved * 0.5).abs() <= 1.5, "f = 0.5 moves half as far: {} for {moved}", shift(1));
+    assert!((shift(2) + moved).abs() <= 1.0, "f = 1 moves with the map: {} for {moved}", shift(2));
+}
+
+#[test]
+fn without_a_camera_parallax_changes_nothing() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![EntitySpec { parallax: Some((0.2, 0.2)), ..spec("far", (100.0, 356.0), &d) }]).unwrap();
+    assert_eq!(screen_x(&world, "far"), Some(104.0), "drawn at its pos, as any entity");
+}
+
+#[test]
+fn parallax_across_and_up_are_their_own() {
+    // Far hills on a road that climbs: a third of the camera's move across, all of it up.
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = EntitySpec { pos: (2000.0, 1500.0), ..controlled(&d, wasd(100.0)) };
+    let hills = EntitySpec { parallax: Some((0.3, 1.0)), ..spec("hills", (1900.0 - 2004.0 * 0.7, 1500.0), &d) };
+    world.reconcile(vec![hero, hills]).unwrap();
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    let x0 = screen_x(&world, "hills").expect("on screen");
+    let cam = camera_at(&world);
+    world.key("KeyD", true);
+    world.key("KeyS", true);
+    frames(&mut world, 1.0, 1.0);
+    let moved = (camera_at(&world).0 - cam.0, camera_at(&world).1 - cam.1);
+    assert!(moved.0 > 50.0 && moved.1 > 50.0, "the camera went across and down: {moved:?}");
+    let shot = world.frame(VIEW.0, VIEW.1).unwrap();
+    let row = 360.0 - moved.1;
+    let x1 = (0..VIEW.0 as usize).map(|x| x as f64).find(|&x| {
+        shot.hit(Point::new(x, row)).is_some_and(|h| h.id.to_string() == "hills")
+    });
+    let x1 = x1.expect("up by all of the camera's move, so on this row");
+    assert!((x1 - x0 + moved.0 * 0.3).abs() <= 1.5, "across by 0.3: {} for {}", x1 - x0, moved.0);
+}
+
+#[test]
+fn a_parallax_entity_is_scenery_and_a_body_is_refused() {
+    let d = drawing();
+    let base = || EntitySpec { parallax: Some((0.5, 0.5)), ..spec("hill", (0.0, 0.0), &d) };
+    let rect = Some(Collider { shape: Shape::Rect(5.0, 5.0), at: (0.0, 0.0) });
+    for (spec, want) in [
+        (EntitySpec { parallax: Some((-0.1, 1.0)), ..base() }, "parallax must be from 0 to 4"),
+        (EntitySpec { parallax: Some((0.5, f64::NAN)), ..base() }, "parallax must be from 0 to 4"),
+        (EntitySpec { collider: rect.clone(), ..base() }, "parallax is scenery: it cannot have a collider"),
+        (EntitySpec { sensor: rect.clone(), ..base() }, "parallax is scenery: it cannot have a sensor"),
+        (EntitySpec { controller: Some(wasd(10.0)), ..base() }, "parallax is scenery: it cannot have a controller"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
 }
 
 #[test]
