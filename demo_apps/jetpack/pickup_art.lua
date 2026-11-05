@@ -46,8 +46,8 @@ function P.items(m, guns, geo, time, near)
 	for _, g in ipairs(guns) do by_id[g.id] = g end
 	local x0, x1, y0, y1 = geo.x - 60, geo.x + geo.vw + 60, geo.y - 60, geo.y + geo.vh + 60
 	for _, pad in ipairs(m.pads) do
-		local s = pad.spawn
-		if not pad.loose and s.x > x0 and s.x < x1 and s.y > y0 and s.y < y1 then
+		local s = m.map.weapon_spawns[pad.i]
+		if not pad.full and s.x > x0 and s.x < x1 and s.y > y0 and s.y < y1 then
 			local ground = s.y + Spawns.lie
 			table.insert(items, gfx.fill({path = ellipse(s.x, ground, 16, 4), brush = brush(P.glow)}))
 			table.insert(items, gfx.stroke({path = ellipse(s.x, s.y, 9, 9), brush = brush(P.ring), width = 1.5}))

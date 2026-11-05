@@ -1,1 +1,4 @@
-app "Skyward · Jetpack Arena" {}
+app "Skyward · Jetpack Arena" {
+  channel arena { rate 60/s }
+  channel lobby { rate 10/s }
+}

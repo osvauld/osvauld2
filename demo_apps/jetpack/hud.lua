@@ -41,6 +41,9 @@ function H.overlay(g, on)
 		button(m.state=="Ready" and "DEPLOY" or "RESUME",m.state=="Ready" and "match:start" or "match:resume",
 			m.state=="Ready" and on.start or on.resume),
 		m.state=="Paused" and button("NEW MATCH","match:new",on.restart) or false,
+		-- Others have the arena open in this space: fly together (jetpack-mp.md M8).
+		#net.peers()>1 and not g.next and button("PLAY TOGETHER","match:together",on.together) or false,
+		g.next and text("Waiting for the other pilots…","match:waiting",C.muted,12) or false,
 		not tight and text("Left stick: move  ·  push up to fly",nil,C.muted,11) or false,
 		not tight and text("Right stick: aim  ·  push to the ring to fire",nil,C.muted,11) or false,
 		not compact and text("Keyboard: A/D · Space · mouse + F · R reload · Q swap · E pick up · Z / wheel zoom",nil,C.muted,11) or false,

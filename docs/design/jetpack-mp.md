@@ -1,6 +1,6 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
-Status: **in progress — steps 1–6 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
+Status: **in progress — steps 1–7 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)
 (uncommitted on `laptop-host` at writing). Absorbs the ephemeral half of
@@ -262,6 +262,24 @@ own state outside Rapier: the joint id→handle map, entity↔body handles, time
 8. **Jetpack on `ui.world`**: flyer body, `:get` with `grounded`, optional drawings, fixed-body
    materials; `physics.lua` replaced by a driven world. Its own step after the multiplayer
    ones, or its own plan.
+
+   *As built 2026-11-05 (step 7):* `world.lua`'s state is plain data — soldiers in `humans` and
+   `bots`, a soldier's spawn an index into the map's spawns, a pad's gun naming its pad by index,
+   a shot's owner by soldier id, teams by `a.team` — and what never changes in a match (map, guns,
+   pilots, solids, the loadout seam) is the setup, reached through `World.meta`'s `__index`. A
+   rewound state is a fresh copy, so the metatable goes back on before use. Presses (reload, swap,
+   pick up, start/pause/resume) travel as counts, so an input frame applied on several ticks — or
+   again after a rewind — acts once per press. Casings and back-blast smoke were spawned into the
+   state by the view; they are the view's own now (`fx_art.lua`, aged on game time). Single-player
+   is a one-player match: no delay, input every tick — all seven Jetpack smokes green unchanged
+   (M7). Together: PLAY TOGETHER (shown when `net.peers()` has others) sends the roster and map on
+   a `lobby` channel and every peer makes the match; 30 input frames a second; the starter's map,
+   guns and pilots travel in its setup (~100 KB, in pieces); pause is off; humans are a team
+   against the bots, each with their own pilot. `e2e_mp.py` M8 green: three shells, 20 s of key
+   input, equal hashes, every pilot in every view. Not yet tested: B with different jetpack assets
+   in its own workspace (the setup carries the content, so it should not matter).
+   The stock-Lua tests (`scripts/test_jetpack_*.lua`, `scripts/run_jetpack_lua_tests.sh`) drive the
+   new World through `scripts/jetpack_solo.lua`, the old single-player surface.
 
    *Revised 2026-11-05 with the user (before step 7 was started):* steps 7 and 8 were "world
    gaps for Jetpack" then "Jetpack on `ui.world` + `net.match`". Reading the code at step 6:

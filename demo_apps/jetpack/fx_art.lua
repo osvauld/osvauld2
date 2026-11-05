@@ -152,8 +152,8 @@ end
 
 local spark = gfx.frame({ width = 12, height = 12, line(-5, 0, 5, 0, C.shot, 2), line(0, -5, 0, 5, C.shot, 2) })
 
-local function effects(result, m)
-	for _, e in ipairs(m.effects) do
+local function effects(result, list)
+	for _, e in ipairs(list) do
 		if e.kind == "smoke" then
 			local u = clamp(e.age / FX.smoke_time, 0, 1)
 			for j = 1, 3 do
@@ -170,14 +170,33 @@ local function effects(result, m)
 	end
 end
 
+-- Cosmetics are the view's, not the rules': casings and back-blast smoke live on `m` as the view holds it
+-- (main.lua's wrapper, never the match state) and move on the game clock here, so a pause holds them and a
+-- rewind or a new match (the clock going back) leaves them where they are.
+local function age_cosmetics(m)
+	local now, last = m.time, m.fx_time
+	m.fx_time = now
+	local dt = last and now - last or 0
+	if dt <= 0 or dt > 0.5 then return end
+	local steps = math.floor(dt * 120 + 0.5)
+	for _ = 1, steps do FX.step_all(m.casings or {}, 1 / 120, m.solids) end
+	local smoke = m.smoke or {}
+	for i = #smoke, 1, -1 do
+		smoke[i].age = smoke[i].age + dt
+		if smoke[i].age > 0.35 then table.remove(smoke, i) end
+	end
+end
+
 -- The map-sized frame of everything fired: casings, tracers, rockets, effects.
 function X.effects(m)
+	age_cosmetics(m)
 	local result = { width = m.map.w, height = m.map.h }
 	for _, c in ipairs(m.casings or {}) do
 		table.insert(result, instance(casing(c, step_of(FX.alpha(c))), c.x, c.y, c.rot))
 	end
 	shots(result, m)
-	effects(result, m)
+	effects(result, m.effects)
+	effects(result, m.smoke or {})
 	return gfx.frame(result)
 end
 
@@ -190,9 +209,12 @@ local function spawn(m, a, gun, info, ax, ay, lag)
 	if c then
 		for _ = 1, math.floor(lag * 120) do FX.step(c, 1 / 120, m.solids or {}) end
 		FX.add(m.casings, c)
-	elseif gun.stats.kind == "rocket" and #m.effects < 40 then
-		local dx, dy = math.cos(info.aim + math.pi), math.sin(info.aim + math.pi)
-		table.insert(m.effects, { x = ex, y = ey, age = lag, kind = "smoke", dx = dx, dy = dy })
+	elseif gun.stats.kind == "rocket" then
+		m.smoke = m.smoke or {}
+		if #m.smoke < 40 then
+			local dx, dy = math.cos(info.aim + math.pi), math.sin(info.aim + math.pi)
+			table.insert(m.smoke, { x = ex, y = ey, age = lag, kind = "smoke", dx = dx, dy = dy })
+		end
 	end
 end
 

@@ -7,7 +7,6 @@ local Camera = require("camera")
 local Menu = require("menu")
 local Rotate = require("rotate")
 local F = require("format")
-local Spawns = require("spawns")
 -- The workspace's maps if the map editor made any valid one, else the baked ones.
 local maps, problem = F.load_maps(asset:open("jetpack-maps"), require("baked/maps"))
 if problem then print("jetpack-maps: " .. problem .. " (playing the baked maps)") end
@@ -23,14 +22,58 @@ local loadout_asset = asset:open("jetpack-loadout")
 local g = {maps = maps, map = maps[1], pilots = pilots, guns = guns, size = {w = 800, h = 430}}
 local controls
 
--- A fresh match on the chosen map, the camera on the player.
-local function new_match()
-	g.m = World.new(g.map, g.guns)
-	Spawns.arm(g.m, loadout_asset.loadout)
+-- The match is the platform's (`net.match`, jetpack-mp.md step 7): it steps `World.step` on the
+-- players' inputs and owns the state. `g.m` is that state as this device sees it: `player` is this
+-- device's soldier, and the view keeps its cosmetics (casings, smoke) on the wrapper, never in the state.
+local function wrap()
+	return setmetatable({}, {__index = function(_, k)
+		local s = g.match.state
+		if getmetatable(s) == nil then setmetatable(s, World.meta) end -- a rewound state is a fresh copy
+		if k == "player" then return s.humans[g.match.me] end
+		return s[k]
+	end})
+end
+
+-- What the controls hand the match each input frame (controls.lua `take_input`). Presses are counts.
+local function blank_input()
+	return {move = 0, thrust = false, fire = false, aim = 0, reload = 0, swap = 0, pickup = 0, mode = nil, mode_n = 0}
+end
+
+-- The match now shown: the view, map, guns and pilots follow its setup (in a match with others that is
+-- the starter's content, not this device's), the camera goes to this device's soldier.
+local function show(match)
+	g.match, g.next = match, nil
+	setmetatable(match.state, World.meta)
+	local ctx = World.context()
+	g.map, g.guns, g.pilots = ctx.map, ctx.guns, ctx.pilots
+	g.m = wrap()
 	g.camera = Camera.new(g.map)
 	g.camera:snap(g.size.w, g.size.h, g.m.player.x, g.m.player.y, g.m.player.aim)
 	g.last, g.cx, g.cy = nil, nil, nil
 	if controls then controls:new_match() end
+end
+
+-- A fresh match on the chosen map. Alone (`players` nil) it starts at once, Ready for DEPLOY, with the
+-- input read every tick. With others it is 30 input frames a second and starts Playing once every player
+-- has said hello; until then the last match stays on screen (`g.next` waits).
+local function new_match(players)
+	local together = players ~= nil and #players > 1
+	g.input = blank_input()
+	local setup = {map = g.map, guns = g.guns, pilots = g.pilots, loadout = loadout_asset.loadout,
+		state = together and "Playing" or nil}
+	local match = net.match({
+		id = "arena", tick = C.step, frame = together and 4 or 1,
+		players = players,
+		setup = setup,
+		state = function(given, ids) return World.new(given, #ids) end,
+		input = function() return controls:take_input() end,
+		step = function(s, inputs)
+			setmetatable(s, World.meta)
+			World.step(s, C.step, inputs)
+		end,
+	})
+	g.together = together
+	if match.state then show(match) else g.next = match end
 end
 new_match()
 controls = Controls.new(g)
@@ -42,16 +85,40 @@ local function pick_map(id)
 	new_match()
 end
 
+-- Start, pause and resume go through the input, as the match's rules decide the state.
+local function ask(mode)
+	g.input.mode, g.input.mode_n = mode, g.input.mode_n + 1
+end
 local on = {}
-function on.start() controls:reset(); g.m:start() end
-function on.pause() controls:reset(); g.m:pause() end
-function on.resume() controls:reset(); g.m:resume() end
-function on.restart() controls:reset(); new_match(); g.m:start() end
+function on.start() controls:reset(); ask("Playing") end
+-- With others nobody pauses the match for everyone.
+function on.pause() if not g.together then controls:reset(); ask("Paused") end end
+function on.resume() controls:reset(); ask("Playing") end
+function on.restart() controls:reset(); new_match(); ask("Playing") end
+
+-- Play together: everyone here gets the same roster and map from this device's `lobby` message and
+-- makes the same match (jetpack-mp.md M8). The roster is net.peers(), sorted by the platform.
+local function together(ids, map_id)
+	for _, map in ipairs(maps) do if map.id == map_id then g.map = map end end
+	controls:reset()
+	new_match(ids)
+end
+function on.together()
+	local ids = {}
+	for _, p in ipairs(net.peers()) do ids[#ids + 1] = p.id end
+	if #ids < 2 then return end
+	net.send("lobby", {start = true, players = ids, map = g.map.id})
+	together(ids, g.map.id)
+end
+net.on("lobby", function(body)
+	if type(body) == "table" and body.start and type(body.players) == "table" then together(body.players, body.map) end
+end)
 
 -- The view widens by the zoom level the player chose on the gun in hand (controls.lua; 1 = normal).
 local function gun_zoom() return (controls:zoom_info()) end
 
 local function frame(e)
+	if g.next and g.next.state then show(g.next) end
 	local p = g.m.player
 	local resized = g.size.w ~= e.width or g.size.h ~= e.height
 	if resized then g.size = {w=e.width,h=e.height} end
@@ -61,9 +128,6 @@ local function frame(e)
 	local dt = g.last and math.max(0, math.min(0.1, e.elapsed - g.last)) or 0
 	g.last = e.elapsed
 	controls:frame(dt)
-	local time = g.m.time
-	g.m:advance(e.elapsed)
-	controls:after_advance(g.m.time > time)
 	local px, py = p.x, p.y
 	if g.m.state ~= "Playing" then
 		if resized then g.camera:snap(g.size.w, g.size.h, px, py, p.aim, gun_zoom(), controls:lead()) end
@@ -74,6 +138,21 @@ local function frame(e)
 	end
 	g.cx, g.cy = px, py
 	g.camera:update(dt, g.size.w, g.size.h, px, py, p.aim, gun_zoom(), controls:lead())
+end
+
+-- For tests, never drawn: the match's status and roster, and its checkpoint hashes (jetpack-mp.md M8).
+-- Only with others: alone, the hashes keep coming while paused, and a paused game must hold still.
+local function readouts()
+	if not (g.together or g.next) then return false end
+	local m, checks = g.next or g.match, {}
+	for _, c in ipairs(m.checks) do checks[#checks + 1] = c.frame .. "=" .. c.hash end
+	local function hidden(value, id)
+		return ui.text({value, id = id, absolute = true, left = 0, top = 0, font_size = 1, opacity = 0, no_wrap = true})
+	end
+	return {
+		hidden(m.status .. " " .. #m.players .. " " .. m.me .. " " .. table.concat(m.desynced, ","), "match:status"),
+		hidden(table.concat(checks, " "), "match:checks"),
+	}
 end
 
 return function()
@@ -91,6 +170,7 @@ return function()
 			controls:view(),
 			Hud.overlay(g, on),
 			Menu.maps(g, pick_map),
+			readouts(),
 			},
 		}),
 	})

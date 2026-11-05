@@ -25,9 +25,29 @@ function K.new(g)
 end
 
 -- Keys, fingers and a held mouse button let go; the cursor's place is kept (it is still where it was).
+-- Presses already counted stay counted: the match has seen them or will.
 function K:reset()
 	self.sticks, self.held, self.armed, self.latch = {}, {}, false, false
-	self.g.m:clear_input()
+	local input = self.g.input
+	input.move, input.thrust, input.fire = 0, false, false
+end
+
+-- The match's input for one input frame (main.lua): a copy, so the match keeps what it was given. A click
+-- too quick for a frame (`latch`) has now been in one, and lets go.
+function K:take_input()
+	local input = self.g.input
+	local copy = {}
+	for k, v in pairs(input) do copy[k] = v end
+	if self.latch and not self.armed then
+		self.latch = false
+		self:apply()
+	end
+	return copy
+end
+
+-- A press of reload, swap or pick up, counted (world.lua acts once per count).
+function K:press(what)
+	self.g.input[what] = self.g.input[what] + 1
 end
 
 -- A new match starts at 1x.
@@ -88,7 +108,7 @@ end
 -- Fold sticks, keys and the pointer into the world's input.
 function K:apply()
 	local g, sticks, held = self.g, self.sticks, self.held
-	local input = g.m.input
+	local input = g.input
 	local ring = Sticks.ring(self:size())
 	local move = sticks.move
 	input.move = clamp((move and Sticks.walk(move.dx, ring) or 0)
@@ -128,9 +148,9 @@ function K:key(e, on)
 	elseif e.code == "Enter" and e.down and m.state == "Ready" then on.start()
 	else
 		if e.down and not e.repeated and m.state == "Playing" then
-			if e.code == "KeyR" then m.input.reload = true
-			elseif e.code == "KeyQ" then m.input.swap = true
-			elseif e.code == "KeyE" then m.input.pickup = true
+			if e.code == "KeyR" then self:press("reload")
+			elseif e.code == "KeyQ" then self:press("swap")
+			elseif e.code == "KeyE" then self:press("pickup")
 			elseif e.code == "KeyZ" then self:zoom_step() end
 		end
 		self.held[e.code or ""] = e.down or nil; self:apply()
@@ -165,17 +185,13 @@ function K:frame(dt)
 		local p = g.m.player
 		local geo = g.camera:geometry(g.size.w, g.size.h, p.x, p.y)
 		local sx, sy = Camera.to_screen(geo, p.x, p.y - 4)
-		g.m.input.aim = Sticks.mouse_step(self.mouse, dt or 0, self.aim_at[1], self.aim_at[2], sx, sy, Sticks.mouse_dead(geo.scale), p.aim)
+		g.input.aim = Sticks.mouse_step(self.mouse, dt or 0, self.aim_at[1], self.aim_at[2], sx, sy, Sticks.mouse_dead(geo.scale), p.aim)
 	else
 		self.mouse.angle = nil
 	end
 	self:apply()
 end
 
--- After the world advanced: a quick click has had its step once one ran.
-function K:after_advance(stepped)
-	if stepped and self.latch and not self.armed then self.latch = false end
-end
 
 -- Stick art, built once per size. The move stick marks the hover height; the aim stick draws the fire ring.
 local function circle_path(cx, cy, r)
@@ -270,15 +286,15 @@ function K:view()
 	local m = g.m
 	local playing = m.state == "Playing"
 	local out = {self:stick("move","move","MOVE / FLY",10,nil),self:stick("aim","aim","AIM / FIRE",nil,10),
-		slot_button("button:reload",slots.reload,nil,"R",function() if m.state == "Playing" then m.input.reload = true end end)}
+		slot_button("button:reload",slots.reload,nil,"R",function() if m.state == "Playing" then self:press("reload") end end)}
 	local back = m:other()
 	table.insert(out, slot_button("button:swap",slots.swap,back and Pickups.icon(back, slots.swap.w) or nil,"⇄",
-		function() if m.state == "Playing" then m.input.swap = true end end, false, not back))
+		function() if m.state == "Playing" then self:press("swap") end end, false, not back))
 	local near = playing and m:nearby() or nil
 	local gun = near and F.find(g.guns, near.gun)
 	if gun then
 		table.insert(out, slot_button("button:pickup",slots.pickup,Pickups.icon(gun, slots.pickup.w),"E",
-			function() if m.state == "Playing" then m.input.pickup = true end end, true))
+			function() if m.state == "Playing" then self:press("pickup") end end, true))
 	end
 	local level, top, count = self:zoom_info()
 	table.insert(out, ui.button({id="button:zoom",absolute=true,left=slots.zoom.x,top=slots.zoom.y,w=slots.zoom.w,h=slots.zoom.h,

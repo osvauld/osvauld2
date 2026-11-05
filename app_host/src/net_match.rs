@@ -27,7 +27,7 @@ pub const DELAY: u64 = 1;
 /// match stalls until the slowest peer's input arrives.
 pub const WINDOW: u64 = 8;
 /// Input frames run at most per render frame, so a stall's backlog is caught up gradually.
-const CATCH_UP: u32 = 4;
+const CATCH_UP: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -742,7 +742,8 @@ pub fn create(
     };
     let setup_arg: Value = spec.get("setup")?;
     let needed = (1.0 / (tick * f64::from(ticks))).ceil() as u32 + 2;
-    if rate < needed {
+    // Alone, nothing is sent: a single-player game may step its input every tick.
+    if players.len() > 1 && rate < needed {
         return Err(Error::runtime(format!(
             "net.match: channel {id:?} sends {needed}/s at this tick and frame; declare `rate {needed}/s` or more"
         )));

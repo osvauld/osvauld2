@@ -2,8 +2,8 @@
 -- virtual clock:  lua scripts/test_jetpack_pickups.lua   (from the worktree root)
 math.clamp = math.clamp or function(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
-package.path = "demo_apps/jetpack/?.lua;" .. package.path
-local World = require("world")
+package.path = "demo_apps/jetpack/?.lua;scripts/?.lua;" .. package.path
+local World = require("jetpack_solo")
 local Spawns = require("spawns")
 local Weapons = require("weapons")
 local Bots = require("bots")
@@ -51,7 +51,7 @@ check(not Spawns.swap(w, w.player), "swap with one gun does nothing")
 w, p = arena({ PAD })
 check(loose_of(w, "shotgun") == 1 and #w.pads == 1, "the pad's gun is there at the start")
 local l = w.loose[1]
-check(l.x == 140 and l.pad == w.pads[1] and l.ammo == nil, "it lies on the pad, fresh")
+check(l.x == 140 and l.pad == 1 and l.ammo == nil, "it lies on the pad, fresh")
 run(w, 1)
 check(Spawns.nearby(w, p) == l, "standing at the gun, it is the one in reach")
 check(Spawns.pickup(w, p), "pick up")
@@ -65,7 +65,7 @@ run(w, 9.5)
 check(loose_of(w, "shotgun") == 0, "not respawned yet at 9.5 s")
 run(w, 1)
 check(loose_of(w, "shotgun") == 1, "respawned after its 10 s")
-check(w.loose[#w.loose].pad == w.pads[1], "back on its pad")
+check(w.loose[#w.loose].pad == 1, "back on its pad")
 
 -- A gun hung low or high by the map's author (snapped coordinates) stays where it hangs when swapped; a
 -- falling drop that starts a few units too low still lands on the surface.

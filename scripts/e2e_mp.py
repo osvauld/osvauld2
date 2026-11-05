@@ -26,6 +26,7 @@ from osvauld.net import Net, build, wait_until  # noqa: E402
 PROBE = Path(__file__).parent / "e2e_apps" / "net_probe"
 DOTS = Path(__file__).parent.parent / "demo_apps" / "mp_dots"
 HOCKEY = Path(__file__).parent.parent / "demo_apps" / "mp_hockey"
+JETPACK = Path(__file__).parent.parent / "demo_apps" / "jetpack"
 SOON = 5.0
 
 
@@ -199,7 +200,53 @@ def m6(net):
         net.peers.clear()
 
 
-TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6}
+def m8(net):
+    """Jetpack for three: one roster everywhere, 20 s of real play, equal hashes, every pilot seen."""
+    peers, i = setup(net, ["alice", "bob", "carol"], app=JETPACK)
+    a, b, c = peers
+    for p in peers:
+        wait_until(lambda p=p: find(p.rpc.dump_tree(i), "match:together"), SOON * 2,
+                   f"{p.name} to be offered PLAY TOGETHER")
+    a.rpc.click(i, "match:together")
+    for p in peers:
+        wait_until(lambda p=p: shown(p, i, "match:status").startswith("playing 3"), SOON * 2,
+                   f"{p.name} to be playing with three")
+    mes = sorted(int(shown(p, i, "match:status").split()[2]) for p in peers)
+    assert mes == [1, 2, 3], f"each device is its own player: {mes}"
+    # Bob flies up and right, Carol walks left and fires; Alice idles. Keys in game time.
+    script = {60: (b, "Space", " ", True), 90: (b, "KeyD", "d", True), 240: (b, "Space", " ", False),
+              120: (c, "KeyA", "a", True), 150: (c, "KeyF", "f", True), 420: (c, "KeyF", "f", False),
+              600: (b, "KeyD", "d", False), 700: (c, "KeyA", "a", False)}
+    seen = [dict() for _ in peers]
+    started = time.monotonic()
+    for n in range(20 * 60):
+        if n in script:
+            p, code, key, down = script[n]
+            p.rpc.keyboard(code, key, down)
+        for k, p in enumerate(peers):
+            p.rpc.frame(1)
+            if n % 30 == 0:
+                seen[k].update(checks_of(p, i))
+        lag = started + (n + 1) / 60 - time.monotonic()
+        if lag > 0:
+            time.sleep(lag)
+    for k, p in enumerate(peers):
+        seen[k].update(checks_of(p, i))
+        status = shown(p, i, "match:status")
+        assert status.startswith("playing 3") and len(status.split()) == 3, f"{p.name}: {status}"
+        tree = p.rpc.dump_tree(i)
+        for pilot in ("player", "player:2", "player:3"):
+            assert find(tree, pilot), f"{p.name} does not show {pilot}"
+    agree(peers, seen, 15)
+    shots("M8", i, *peers)
+
+
+def checks_of(p, item) -> dict[int, str]:
+    text = shown(p, item, "match:checks")
+    return {int(f): h for f, h in re.findall(r"(\d+)=([0-9a-f]+)", text)}
+
+
+TESTS = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5, "m6": m6, "m8": m8}
 
 
 def main() -> int:

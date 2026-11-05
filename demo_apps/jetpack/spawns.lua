@@ -3,6 +3,8 @@ local Weapons = require("weapons")
 local Bots = require("bots")
 local S = {}
 
+-- Plain data only (world.lua): a soldier's spawn is `spawn_i` into `w.map.spawns`, a pad is `i` into
+-- `w.map.weapon_spawns`, a pad's gun lying on the floor says so with `pad = i`.
 -- Soldiers carry two guns: `a.gun` (in hand) and `a.other` (on the back), each with its own mag
 -- (`a.ammo`; `a.other_ammo`, nil = never used, full). A swap takes `swap_time` and no firing meanwhile.
 -- Guns lie on the floor as `w.loose` entries { gun, x, y, vy, rest, ammo (nil = full), ttl (drops
@@ -16,15 +18,20 @@ S.drop_ttl = 20                            -- seconds a dropped gun lies before 
 S.max_loose = 12                           -- dropped guns at once; the oldest goes first (pad guns do not count)
 S.fall = 900                               -- a dropped gun falls at this acceleration
 
-function S.actor(id, x, y, hp)
-	return { id = id, gun = "rifle", x = x, y = y, vx = 0, vy = 0, hp = hp, fuel = 100,
+function S.actor(id, team, x, y, hp)
+	return { id = id, team = team, gun = "rifle", x = x, y = y, vx = 0, vy = 0, hp = hp, fuel = 100,
 		aim = 0, fire_clock = 0, respawn = 0, shield = 0, thrusting = false, grounded = false, swap_left = 0 }
+end
+
+-- The index of `s` in the map's spawns.
+local function spawn_index(map, s)
+	for i, t in ipairs(map.spawns) do if t == s then return i end end
 end
 
 -- The guns a soldier starts (and respawns) with: the `jetpack-loadout` test seam (`w.arm`, a gun id for
 -- the player and for bots), else the map's `loadout`, else the default. Unknown gun ids are skipped.
 local function loadout_for(w, a)
-	local arm = w.arm and (a == w.player and w.arm.player or (a ~= w.player and w.arm.bot)) or nil
+	local arm = w.arm and (a.team == "player" and w.arm.player or (a.team ~= "player" and w.arm.bot)) or nil
 	local ids = arm and { arm } or w.map.loadout or S.default_loadout
 	local out = {}
 	for _, id in ipairs(ids) do
@@ -42,13 +49,6 @@ function S.equip(w, a)
 	Weapons.sync(w, a)
 end
 
--- Test seam: the `jetpack-loadout` asset names one gun for the player and one for bots.
-function S.arm(w, loadout)
-	if not loadout then return end
-	w.arm = { player = loadout.player, bot = loadout.bot }
-	S.equip(w, w.player)
-	for _, b in ipairs(w.bots) do S.equip(w, b) end
-end
 
 -- Weighted pick from `pool` (a gun listed twice is twice as likely) among the guns the game has;
 -- the world's RNG decides, so the same match rolls the same guns.
@@ -80,32 +80,42 @@ function S.drop(w, gun, ammo, x, y, rest)
 end
 
 local function fill_pad(w, pad)
-	local gun = S.roll(w, pad.pool)
-	if not gun then pad.timer = pad.spawn.respawn; return end
-	pad.loose = { gun = gun, x = pad.spawn.x, y = pad.spawn.y, vy = 0, rest = true, pad = pad }
-	table.insert(w.loose, pad.loose)
+	local gun = S.roll(w, w.map.weapon_spawns[pad.i].pool)
+	local spawn = w.map.weapon_spawns[pad.i]
+	if not gun then pad.timer = spawn.respawn; return end
+	table.insert(w.loose, { gun = gun, x = spawn.x, y = spawn.y, vy = 0, rest = true, pad = pad.i })
+	pad.full = true
 end
 
--- Put the player and up to `max_bots` bots on the map's spawn points, and fill the weapon spawns.
-function S.populate(w, max_bots)
-	local you = F.spawn(w.map, "player")
-	w.player = S.actor("player", you.x, you.y, 100)
-	w.player.spawn = you
-	w.bots = {}
+-- Put `humans` players and up to `max_bots` bots (fewer by the extra humans) on the map's spawn points,
+-- and fill the weapon spawns. The first human is `player`, as single-player always called it; humans past
+-- the map's player spawns start at its bot spawns.
+function S.populate(w, humans, max_bots)
+	local map = w.map
 	local n = 0
-	for _, s in ipairs(w.map.spawns) do if s.team == "bot" then n = n + 1 end end
-	for i = 1, math.min(n, max_bots) do
-		local s = F.spawn(w.map, "bot", i)
-		local b = S.actor("bot:" .. i, s.x, s.y, 60)
-		b.spawn = s
+	for _, s in ipairs(map.spawns) do if s.team == "bot" then n = n + 1 end end
+	w.humans = {}
+	local players = 0
+	for _, s in ipairs(map.spawns) do if s.team == "player" then players = players + 1 end end
+	for i = 1, humans do
+		local s = i <= players and F.spawn(map, "player", i) or F.spawn(map, "bot", i - players)
+		local h = S.actor(i == 1 and "player" or ("player:" .. i), "player", s.x, s.y, 100)
+		h.spawn_i = spawn_index(map, s)
+		table.insert(w.humans, h)
+	end
+	w.bots = {}
+	for i = 1, math.max(0, math.min(n, max_bots) - (humans - 1)) do
+		local s = F.spawn(map, "bot", i + math.max(0, humans - players))
+		local b = S.actor("bot:" .. i, "bot", s.x, s.y, 60)
+		b.spawn_i = spawn_index(map, s)
 		b.damage_scale = Bots.damage_scale
 		table.insert(w.bots, b)
 	end
-	S.equip(w, w.player)
+	for _, h in ipairs(w.humans) do S.equip(w, h) end
 	for _, b in ipairs(w.bots) do S.equip(w, b) end
 	w.loose, w.pads = {}, {}
-	for _, ws in ipairs(w.map.weapon_spawns or {}) do
-		local pad = { spawn = ws, pool = ws.pool, timer = 0 }
+	for i, ws in ipairs(map.weapon_spawns or {}) do
+		local pad = { i = i, timer = 0, full = false }
 		table.insert(w.pads, pad)
 		fill_pad(w, pad)
 	end
@@ -143,7 +153,10 @@ function S.pickup(w, a, l)
 	if not l or a.hp <= 0 or (a.swap_left or 0) > 0 then return false end
 	Weapons.sync(w, a)
 	remove(w.loose, l)
-	if l.pad then l.pad.loose, l.pad.timer = nil, l.pad.spawn.respawn end
+	if l.pad then
+		local pad = w.pads[l.pad]
+		pad.full, pad.timer = false, w.map.weapon_spawns[l.pad].respawn
+	end
 	if a.other == nil then
 		a.other, a.other_ammo = a.gun, a.ammo
 	else
@@ -155,9 +168,9 @@ function S.pickup(w, a, l)
 	return true
 end
 
--- Soldier index 1 is the player. Returns true while the soldier is alive and should act; a dead one drops
--- the gun in hand (once), counts down and returns at its spawn with the loadout.
-function S.tick(w, a, index, dt)
+-- Returns true while the soldier is alive and should act; a dead one drops the gun in hand (once), counts
+-- down and returns at its spawn with the loadout.
+function S.tick(w, a, dt)
 	if a.hp > 0 then a.dropped = false; return true end
 	if not a.dropped then
 		a.dropped = true
@@ -166,8 +179,9 @@ function S.tick(w, a, index, dt)
 	end
 	a.respawn = a.respawn - dt
 	if a.respawn <= 0 then
-		a.x, a.y = a.spawn.x, a.spawn.y
-		a.hp, a.vx, a.vy, a.fuel = index == 1 and 100 or 60, 0, 0, 100
+		local s = w.map.spawns[a.spawn_i]
+		a.x, a.y = s.x, s.y
+		a.hp, a.vx, a.vy, a.fuel = a.team == "player" and 100 or 60, 0, 0, 100
 		a.exhausted = false
 		a.shield, a.fire_clock = 1.2, 0
 		S.equip(w, a)
@@ -178,7 +192,7 @@ end
 -- Per step: pads refill, drops fall and expire.
 function S.update_pickups(w, dt)
 	for _, pad in ipairs(w.pads) do
-		if not pad.loose then
+		if not pad.full then
 			pad.timer = pad.timer - dt
 			if pad.timer <= 0 then fill_pad(w, pad) end
 		end

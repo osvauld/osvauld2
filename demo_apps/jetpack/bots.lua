@@ -29,8 +29,18 @@ end
 
 -- One bot's decision for this step: horizontal in -1..1, thrust, fire. Sets `a.aim`.
 -- `index` (>= 2) staggers the orbit side, wobble phase and fire rate.
+-- The human a bot goes after: the nearest one alive, else the first (humans in order, so ties agree).
+function B.target(w, a)
+	local best, score = w.humans[1], math.huge
+	for _, h in ipairs(w.humans) do
+		local d = math.abs(h.x - a.x) + math.abs(h.y - a.y)
+		if h.hp > 0 and d < score then best, score = h, d end
+	end
+	return best
+end
+
 function B.plan(w, a, index)
-	local p, map, solid = w.player, w.map, w.solids
+	local p, map, solid = B.target(w, a), w.map, w.solids
 	local orbit = index == 2 and -210 or 210
 	local target_x = clamp(p.x + orbit + math.sin(w.time * 0.8 + index) * 65, 55, map.w - 55)
 	local target_y = clamp(p.y - 90 + math.sin(w.time * 1.1 + index) * 45, 70, map.h - 140)

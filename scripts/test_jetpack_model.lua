@@ -1,8 +1,8 @@
 -- Plain Lua can exercise the pure Luau model without a renderer; bridge smoke proves the app.
 math.clamp = math.clamp or function(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
-package.path = "demo_apps/jetpack/?.lua;" .. package.path
-local Model = require("model")
+package.path = "demo_apps/jetpack/?.lua;scripts/?.lua;" .. package.path
+local Model = require("jetpack_solo")
 local C = require("theme")
 local function check(ok, why) assert(ok, why) end
 local function step(m, frames)

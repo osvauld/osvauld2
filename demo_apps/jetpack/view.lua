@@ -18,12 +18,12 @@ function V.scene(g)
 	local geo = V.geometry(g)
 	local scale = geo.scale
 	local actors={}
-	local all={m.player}
-	for _,b in ipairs(m.bots) do table.insert(all,b) end
-	for index,a in ipairs(all) do
+	local humans=#m.humans
+	for index,a in ipairs(m.all(m)) do
 		if a.hp>0 then
-			local team=index==1 and "player" or "bot"
-			local pilot=F.pilot_for(g.pilots,team,index-1)
+			local team=a.team
+			-- Each human flies their own pilot (the first one alone, as ever); bots cycle the list.
+			local pilot=index<=humans and g.pilots[(index-1)%math.max(1,#g.pilots)+1] or F.pilot_for(g.pilots,team,index-humans)
 			local gun=F.find(g.guns,a.gun)
 			local ax,ay=Art.anchor(pilot)
 			table.insert(actors,ui.frame({id=a.id,visual=Art.soldier(m,a,pilot,team,gun),absolute=true,
