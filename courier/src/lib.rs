@@ -25,10 +25,12 @@ pub mod attest;
 pub mod invite;
 pub mod ledger;
 pub mod link;
+pub mod ops;
 pub mod policy;
 pub mod proof;
 pub mod publish;
 pub mod role;
+pub mod rules;
 pub mod session;
 pub mod subscribe;
 pub mod sync;
@@ -113,6 +115,13 @@ pub enum CourierError {
     NoRead,
     #[error("may not write that doc")]
     NoWrite,
+    #[error("a change in another device's name")]
+    ForeignPeer,
+    #[error("update depends on changes the node lacks")]
+    Incomplete,
+    /// A manifest rule refused an op (`owned-entries.md` §2.3); the text names the rule.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 }
 
 type Result<T> = std::result::Result<T, CourierError>;

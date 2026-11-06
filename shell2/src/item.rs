@@ -186,7 +186,7 @@ impl ItemsScreen {
         };
         let files = read_app_folder(&root)?;
         let name = app_name(&files, &root);
-        let snapshot_bytes = snapshot(&files)?;
+        let snapshot_bytes = snapshot(&files, crate::device_peer(vault)?)?;
         let item = vault
             .create_item(&self.ws.id, &name, vault::ItemKind::App)
             .map_err(|e| e.to_string())?;

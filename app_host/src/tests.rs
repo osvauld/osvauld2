@@ -2014,6 +2014,7 @@ fn open_imports_and_mirrors() {
         no_cores(),
         serving("board", snapshot_of(&board(&["a", "b"]))),
         noop_wake(),
+        None,
     )
     .unwrap();
 
@@ -2035,7 +2036,7 @@ fn an_asset_and_an_own_doc_of_one_name_are_two_docs() {
     let resolve: Resolve = Rc::new(move |k: &DocKey| {
         Ok((*k == DocKey::Asset("board".into())).then(|| snapshot.clone()))
     });
-    install(&lua, docs.clone(), no_cores(), resolve, noop_wake()).unwrap();
+    install(&lua, docs.clone(), no_cores(), resolve, noop_wake(), None).unwrap();
 
     let (asset_title, own_cards): (String, bool) = lua
         .load(
@@ -2078,6 +2079,7 @@ fn open_is_idempotent() {
         no_cores(),
         serving("board", snapshot_of(&board(&["a"]))),
         noop_wake(),
+        None,
     )
     .unwrap();
 
@@ -2100,6 +2102,7 @@ fn open_missing_doc_is_empty_not_an_error() {
         no_cores(),
         Rc::new(|_| Ok(None)),
         noop_wake(),
+        None,
     )
     .unwrap();
 
@@ -2121,6 +2124,7 @@ fn open_reports_a_corrupt_snapshot() {
         no_cores(),
         serving("board", b"not a snapshot".to_vec()),
         noop_wake(),
+        None,
     )
     .unwrap();
 
@@ -2148,6 +2152,7 @@ fn open_reports_a_resolver_failure() {
         no_cores(),
         Rc::new(|_| Err("vault locked".to_string())),
         noop_wake(),
+        None,
     )
     .unwrap();
 
@@ -2936,6 +2941,7 @@ fn writing() -> (Lua, LoroDoc) {
         no_cores(),
         Rc::new(|_| Ok(None)),
         noop_wake(),
+        None,
     )
     .unwrap();
     // Roots have to be declared: nothing owns them, so `:set` cannot invent one on the way
@@ -6402,4 +6408,168 @@ fn joints_are_described_and_checked_strictly() {
     }
     walk_world(&lua, &worlds, &room("{}")).unwrap();
     assert_eq!(worlds.borrow()["room"].joint_count(), 0, "empty or left out: none");
+}
+
+// ── owned-entries §2.4 site 1, §2.5: the writer's own check, and who it is ───
+
+use crate::crdt::{Me, Rules};
+
+const CHAT_RULES: &str = r#"
+app "chat" {
+  roles moderator, member
+  doc channel/{cid} {
+    write member
+    own messages/* override moderator
+    rule messages/* { forbid insert where after.text is missing }
+  }
+}
+"#;
+
+const ALICE_PEER: loro::PeerID = 1;
+const BOB_PEER: loro::PeerID = 2;
+
+fn chat_me(peer: loro::PeerID, roles: &[&str]) -> Rc<Me> {
+    Rc::new(Me {
+        did: format!("did:test:{peer}"),
+        name: format!("peer{peer}"),
+        peer,
+        stamp: true,
+        rules: Some(Rules {
+            manifest: manifest::Manifest::parse(CHAT_RULES).unwrap(),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        }),
+    })
+}
+
+/// `channel/general` holding one message alice's device wrote.
+fn alices_channel() -> Vec<u8> {
+    let doc = LoroDoc::new();
+    doc.set_peer_id(ALICE_PEER).unwrap();
+    let m = doc
+        .get_movable_list("messages")
+        .insert_container(0, LoroMap::new())
+        .unwrap();
+    m.insert("id", "m1").unwrap();
+    m.insert("text", "alice's").unwrap();
+    doc.commit();
+    snapshot_of(&doc)
+}
+
+fn chat_vm(me: Option<Rc<Me>>) -> (Lua, Docs) {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let docs: Docs = Rc::new(RefCell::new(HashMap::new()));
+    install(
+        &lua,
+        docs.clone(),
+        no_cores(),
+        serving("channel/general", alices_channel()),
+        noop_wake(),
+        me,
+    )
+    .unwrap();
+    lua.load(r#"ch = doc:open("channel/general")"#).exec().unwrap();
+    (lua, docs)
+}
+
+fn messages_in(docs: &Docs) -> usize {
+    docs.borrow()[&own("channel/general")]
+        .core
+        .doc
+        .get_movable_list("messages")
+        .len()
+}
+
+/// O2's core: a member's delete of another's message raises at the call site, and the live
+/// doc is untouched; the button's question gets the same answer.
+#[test]
+fn a_write_the_rules_refuse_raises_and_touches_nothing() {
+    let (lua, docs) = chat_vm(Some(chat_me(BOB_PEER, &["member"])));
+    let err = lua
+        .load(r#"ch:delete({ "messages", "m1" })"#)
+        .exec()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("may not delete messages/0"), "{err}");
+    assert_eq!(messages_in(&docs), 1);
+    let (allowed, owner): (bool, String) = lua
+        .load(r#"return ch:allowed("delete", { "messages", "m1" }), ch:owner({ "messages", "m1" })"#)
+        .eval()
+        .unwrap();
+    assert!(!allowed);
+    assert_eq!(owner, ALICE_PEER.to_string());
+    // Editing a field inside it is refused the same way.
+    assert!(
+        lua.load(r#"ch:set({ "messages", "m1", "text" }, "bob's")"#)
+            .exec()
+            .is_err()
+    );
+}
+
+#[test]
+fn the_creator_and_a_moderator_may_delete() {
+    for me in [chat_me(ALICE_PEER, &["member"]), chat_me(BOB_PEER, &["moderator"])] {
+        let (lua, docs) = chat_vm(Some(me));
+        let allowed: bool = lua
+            .load(r#"return ch:allowed("delete", { "messages", "m1" })"#)
+            .eval()
+            .unwrap();
+        assert!(allowed);
+        lua.load(r#"ch:delete({ "messages", "m1" })"#).exec().unwrap();
+        assert_eq!(messages_in(&docs), 0);
+    }
+}
+
+#[test]
+fn an_insert_the_rules_refuse_leaves_the_list_as_it_was() {
+    let (lua, docs) = chat_vm(Some(chat_me(BOB_PEER, &["member"])));
+    let err = lua
+        .load(r#"ch:insert({ "messages" }, doc.map({ id = "m2" }))"#)
+        .exec()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("may not insert"), "{err}");
+    assert_eq!(messages_in(&docs), 1);
+    lua.load(r#"ch:insert({ "messages" }, doc.map({ id = "m2", text = "bob's" }))"#)
+        .exec()
+        .unwrap();
+    assert_eq!(messages_in(&docs), 2);
+    let owner: String = lua.load(r#"return ch:owner({ "messages", "m2" })"#).eval().unwrap();
+    assert_eq!(owner, BOB_PEER.to_string());
+}
+
+#[test]
+fn me_names_the_account_and_device_and_raises_without_one() {
+    let (lua, _) = chat_vm(Some(chat_me(BOB_PEER, &["member"])));
+    let (did, name, peer): (String, String, String) = lua
+        .load("local m = me() return m.did, m.name, m.peer")
+        .eval()
+        .unwrap();
+    assert_eq!((did.as_str(), name.as_str()), ("did:test:2", "peer2"));
+    assert_eq!(peer, BOB_PEER.to_string());
+
+    let (lua, docs) = chat_vm(None);
+    assert!(lua.load("return me()").exec().is_err());
+    // No identity, no rules: writes go through as before.
+    lua.load(r#"ch:delete({ "messages", "m1" })"#).exec().unwrap();
+    assert_eq!(messages_in(&docs), 0);
+}
+
+#[test]
+fn allowed_set_tries_the_value_itself() {
+    let (lua, _) = chat_vm(Some(chat_me(BOB_PEER, &["member"])));
+    let (theirs, needs_value): (bool, bool) = lua
+        .load(
+            r#"return ch:allowed("set", { "messages", "m1", "text" }, "bob's"),
+                      pcall(function() return ch:allowed("set", { "messages", "m1", "text" }) end)"#,
+        )
+        .eval()
+        .unwrap();
+    assert!(!theirs);
+    assert!(!needs_value, "a set with no value must raise");
+    let (lua, _) = chat_vm(Some(chat_me(ALICE_PEER, &["member"])));
+    let mine: bool = lua
+        .load(r#"return ch:allowed("set", { "messages", "m1", "text" }, "edited")"#)
+        .eval()
+        .unwrap();
+    assert!(mine);
 }

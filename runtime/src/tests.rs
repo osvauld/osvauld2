@@ -1326,3 +1326,45 @@ fn hover_reports_the_topmost_declared_cursor_look() {
     h.move_to(50.0, 150.0); // plain
     assert_eq!(*log.borrow(), ["enter grab", "move grab", "move -"]);
 }
+
+/// A finger that travels scrolls the list under it and clicks nothing; one that does not is
+/// still a tap. A phone has no wheel: without this no list on it moves.
+#[test]
+fn a_swipe_scrolls_and_a_tap_still_clicks() {
+    struct List {
+        clicked: usize,
+    }
+    impl App for List {
+        type Msg = ();
+        fn update(&mut self, _: ()) {
+            self.clicked += 1;
+        }
+        fn view(&self) -> El<()> {
+            let rows = (0..20).map(|i| col().id(format!("row{i}")).w_full().h(100.0).on_click(()));
+            col().full().id("list").scroll_y().children(rows)
+        }
+    }
+    let mut r = Runner::new(List { clicked: 0 }, Some((400.0, 400.0)));
+    r.frame();
+    let offset = |r: &Runner<List>| r.store.get::<Scroll>(&Id::from("list"), Slot::Scroll).map_or(0.0, |s| s.y);
+    // A swipe up by 150 points: the list shows what is below, and no row is clicked.
+    r.on_touch(TouchPhase::Started, 1, PhysicalPosition::new(200.0, 300.0));
+    for y in [295.0, 280.0, 220.0, 150.0] {
+        r.on_touch(TouchPhase::Moved, 1, PhysicalPosition::new(200.0, y));
+    }
+    r.on_touch(TouchPhase::Ended, 1, PhysicalPosition::new(200.0, 150.0));
+    r.frame();
+    assert!((offset(&r) - 150.0).abs() < 1.0, "scrolled {}", offset(&r));
+    assert_eq!(r.app.clicked, 0, "a swipe clicked a row");
+    // A wobble under the slop is a tap.
+    r.on_touch(TouchPhase::Started, 2, PhysicalPosition::new(200.0, 200.0));
+    r.on_touch(TouchPhase::Moved, 2, PhysicalPosition::new(203.0, 204.0));
+    r.on_touch(TouchPhase::Ended, 2, PhysicalPosition::new(203.0, 204.0));
+    assert_eq!(r.app.clicked, 1, "a tap did not click");
+    // Swiping back down past the top stops at the top.
+    r.on_touch(TouchPhase::Started, 3, PhysicalPosition::new(200.0, 100.0));
+    r.on_touch(TouchPhase::Moved, 3, PhysicalPosition::new(200.0, 390.0));
+    r.on_touch(TouchPhase::Ended, 3, PhysicalPosition::new(200.0, 390.0));
+    r.frame();
+    assert_eq!(offset(&r), 0.0);
+}

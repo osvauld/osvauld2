@@ -6,14 +6,14 @@ use std::collections::HashSet;
 use courier::ledger::{self, Entry};
 use courier::role::HOST;
 use courier::subscribe::desktop_start_subscribe;
-use courier::sync::{SyncLayer, SyncReply, desktop_start_sync};
+use courier::sync::{Author, SyncLayer, SyncReply, desktop_start_sync};
 use courier::token::{Scope, Token, issue_root};
 use identity::{Identity, Signer};
 use loro::LoroDoc;
 use tempfile::TempDir;
 use vault::Vault;
 
-use super::roles_tests::{NOW, acked, fixture_with, minted, rejected};
+use super::roles_tests::{NOW, acked, device, doc_of, fixture_with, minted, rejected};
 use super::*;
 use crate::node;
 use crate::push::MockPusher;
@@ -53,8 +53,9 @@ fn minted_in(vault: &Vault, aud: &str, role: &str, scope: Scope) -> Token {
         .unwrap()
 }
 
-fn text(s: &str) -> LoroDoc {
-    let doc = LoroDoc::new();
+/// `who`'s own doc with `s` written in it.
+fn text(who: &Identity, s: &str) -> LoroDoc {
+    let doc = doc_of(who);
     doc.get_text("t").insert(0, s).unwrap();
     doc
 }
@@ -138,14 +139,19 @@ fn a_hosted_admin_judges_a_chain_rooted_at_the_owner_not_at_the_vault() {
     let token = minted_by(&owner, alice.did(), "member", Scope::Workspace(ws.clone()));
     hosted.record(&token, Cause::Node, NOW).unwrap();
 
-    let hello = sync_hello(&alice, &token, &ws, &item, "board", &text("hi"));
-    acked(hosted.accept_sync(hello.clone(), NOW, &MockPusher::new()));
+    let hello = sync_hello(&alice, &token, &ws, &item, "board", &text(&alice, "hi"));
+    acked(hosted.accept_sync(hello.clone(), Some(device(&alice)), NOW, &MockPusher::new()));
     assert_eq!(stored_text(&vault, &ws, &item, "board"), "hi");
 
     // The same vault as its own authority knows nothing of the owner: the chain roots
     // elsewhere.
     assert!(matches!(
-        Admin::new(vault.clone()).accept_sync(hello, NOW, &MockPusher::new()),
+        Admin::new(vault.clone()).accept_sync(
+            hello,
+            Some(device(&alice)),
+            NOW,
+            &MockPusher::new()
+        ),
         Err(NodeError::Courier(CourierError::NodeMismatch))
     ));
 }
@@ -409,7 +415,8 @@ fn a_host_is_judged_open_on_every_doc_of_its_space() {
     // Declared and admin-only to write: a member is refused, the host is not.
     rejected(
         f.admin.accept_sync(
-            sync_hello(&bob, &bob_token, &f.ws, &f.item, "chat", &text("bob")),
+            sync_hello(&bob, &bob_token, &f.ws, &f.item, "chat", &text(&bob, "bob")),
+            Some(device(&bob)),
             NOW,
             &MockPusher::new(),
         ),
@@ -422,8 +429,9 @@ fn a_host_is_judged_open_on_every_doc_of_its_space() {
             &f.ws,
             &f.item,
             "chat",
-            &text("relayed"),
+            &text(&carol, "relayed"),
         ),
+        Some(device(&carol)),
         NOW,
         &MockPusher::new(),
     ));
@@ -431,8 +439,12 @@ fn a_host_is_judged_open_on_every_doc_of_its_space() {
 
     // Undeclared: nobody's, except a host's.
     let hello = sync_hello(&bob, &bob_token, &f.ws, &f.item, "secret", &LoroDoc::new());
-    let judged = f.admin.judge(&hello, NOW).unwrap();
+    let judged = f.admin.judge(&hello, Some(device(&bob)), NOW).unwrap();
     assert!(judged.undeclared && !judged.access.read);
+    assert!(
+        matches!(judged.author, Author::Device(_)),
+        "a member's push is bound to its device's peer"
+    );
     let hello = sync_hello(
         &carol,
         &carol_token,
@@ -441,9 +453,10 @@ fn a_host_is_judged_open_on_every_doc_of_its_space() {
         "secret",
         &LoroDoc::new(),
     );
-    let judged = f.admin.judge(&hello, NOW).unwrap();
+    let judged = f.admin.judge(&hello, Some(device(&carol)), NOW).unwrap();
     assert_eq!(judged.access, Access::OPEN);
     assert!(!judged.undeclared);
+    assert_eq!(judged.author, Author::Host, "a host relays others' changes by design");
     assert!(
         judged.rules.is_some(),
         "the rules still travel, for the fan-out's re-check"
@@ -451,9 +464,9 @@ fn a_host_is_judged_open_on_every_doc_of_its_space() {
 
     // Only on its own space.
     let other = minted('e');
-    let hello = sync_hello(&carol, &carol_token, &other, &f.item, "chat", &text("x"));
+    let hello = sync_hello(&carol, &carol_token, &other, &f.item, "chat", &text(&carol, "x"));
     assert!(matches!(
-        f.admin.accept_sync(hello, NOW, &MockPusher::new()),
+        f.admin.accept_sync(hello, Some(device(&carol)), NOW, &MockPusher::new()),
         Err(NodeError::Courier(CourierError::OutOfScope))
     ));
 }
@@ -474,7 +487,7 @@ fn a_trusted_update_is_merged_as_the_owners_and_relayed_only_when_it_moved() {
     )
     .unwrap();
 
-    let update = text("from the owner")
+    let update = text(&owner, "from the owner")
         .export(loro::ExportMode::Snapshot)
         .unwrap();
     let pusher = MockPusher::new();
@@ -508,7 +521,7 @@ fn a_trusted_update_is_merged_as_the_owners_and_relayed_only_when_it_moved() {
     );
 
     // The source layer lands in its own key.
-    let src = text("return {}")
+    let src = text(&owner, "return {}")
         .export(loro::ExportMode::Snapshot)
         .unwrap();
     assert!(
@@ -541,12 +554,13 @@ fn an_update_the_host_already_held_is_acked_but_not_relayed() {
         &f.ws,
         &f.item,
         "board",
-        &text("once"),
+        &text(&f.alice, "once"),
     );
 
     let pusher = MockPusher::new();
-    let first = acked(f.admin.accept_sync(hello.clone(), NOW, &pusher));
-    let again = acked(f.admin.accept_sync(hello.clone(), NOW, &pusher));
+    let alice = Some(device(&f.alice));
+    let first = acked(f.admin.accept_sync(hello.clone(), alice, NOW, &pusher));
+    let again = acked(f.admin.accept_sync(hello.clone(), alice, NOW, &pusher));
     assert!(first.changed && !again.changed);
     assert_eq!(
         pusher.received_by(bob.did()).len(),
@@ -557,7 +571,7 @@ fn an_update_the_host_already_held_is_acked_but_not_relayed() {
 
     // The live path keeps the same rule.
     let live = LoroDoc::new();
-    let judged = f.admin.judge(&hello, NOW).unwrap();
+    let judged = f.admin.judge(&hello, alice, NOW).unwrap();
     let pusher = MockPusher::new();
     for _ in 0..2 {
         match f

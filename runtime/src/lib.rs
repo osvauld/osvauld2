@@ -278,6 +278,16 @@ pub trait App {
     fn window_event(&mut self, _key: &str, _event: WindowIn) {}
 }
 
+/// How far a finger travels, in logical points, before a press becomes a scroll.
+const TOUCH_SLOP: f64 = 8.0;
+
+#[derive(Clone, Copy)]
+struct TouchPan {
+    start: (f64, f64),
+    last: (f64, f64),
+    panning: bool,
+}
+
 #[derive(Clone)]
 enum Capture {
     App {
@@ -351,6 +361,9 @@ struct Runner<A: App> {
     offscreen: Option<(f32, f32)>,
     pointer: Option<(f32, f32)>,
     touch_id: Option<u64>,
+    /// The pointer finger's swipe: where it last was, and whether it has travelled far
+    /// enough to be a scroll rather than a tap.
+    touch_pan: Option<TouchPan>,
     fingers: HashMap<u64, Finger>,
     text: TextEngine,
     focused: Focus,
@@ -373,6 +386,9 @@ struct Runner<A: App> {
     tile_over: Option<Id>,
     tile_grab: Option<Id>,
     tile_keys: Option<Id>,
+    /// A fresh touch went into a tile: if it is editing, show the keyboard again even though
+    /// `ime_allowed` did not change (Android dismissal leaves focus where it was).
+    ime_reshow: bool,
     /// What `tiles_sized` was last told.
     tile_sizes: Vec<(String, (f32, f32))>,
     /// The last frame's 3D viewport — what a tile hands its host with its Scene.
@@ -507,6 +523,8 @@ struct Hits<M> {
     no_cursor: Vec<Geometry>,
     looks: Vec<(Geometry, CursorLook)>,
     tile: Vec<(Geometry, Id, Rc<dyn Fn(TileEvent) -> M>, Arc<[ElRect]>)>,
+    /// Tiles whose last frame had a text field focused (`TileFrame::editing`).
+    editing_tiles: Vec<Id>,
 }
 // Hand-written: `derive(Default)` would demand `M: Default`, which no message type owes us.
 impl<M> Default for Hits<M> {
@@ -530,6 +548,7 @@ impl<M> Default for Hits<M> {
             no_cursor: Vec::new(),
             looks: Vec::new(),
             tile: Vec::new(),
+            editing_tiles: Vec::new(),
         }
     }
 }
@@ -571,6 +590,7 @@ impl<M> Hits<M> {
             no_cursor,
             looks,
             tile,
+            editing_tiles,
         } = self;
         touch.clear();
         click.clear();
@@ -590,6 +610,7 @@ impl<M> Hits<M> {
         no_cursor.clear();
         looks.clear();
         tile.clear();
+        editing_tiles.clear();
     }
 }
 
@@ -1141,6 +1162,9 @@ impl<A: App> Runner<A> {
             {
                 hits.touch.push((geometry, TouchHit::Tile(id.clone())));
                 let rects = p.appearance.tile.as_ref().map(|f| f.rects.clone());
+                if p.appearance.tile.as_ref().is_some_and(|f| f.editing) {
+                    hits.editing_tiles.push(id.clone());
+                }
                 hits.tile
                     .push((geometry, id, handler, rects.unwrap_or_else(|| Arc::new([]))));
             }
@@ -1257,8 +1281,11 @@ impl<A: App> Runner<A> {
         store.sweep();
         text.sweep();
         focused.clear_if_gone(store);
-        let ime_allowed = focused.get().is_some();
-        if self.ime_allowed != ime_allowed {
+        // A field of our own, or one in the tile that owns the keys (an app's composer).
+        let ime_allowed = focused.get().is_some()
+            || self.tile_keys.as_ref().is_some_and(|id| hits.editing_tiles.contains(id));
+        let reshow = std::mem::take(&mut self.ime_reshow) && ime_allowed;
+        if self.ime_allowed != ime_allowed || reshow {
             #[cfg(target_os = "android")]
             if let Some(adapter) = &self.android_insets {
                 adapter.keyboard(ime_allowed);
@@ -1846,6 +1873,7 @@ impl<A: App> Runner<A> {
         }
         self.button_down = false;
         self.touch_id = None;
+        self.touch_pan = None;
         self.drag = None;
         self.pressed = None;
         self.on_cursor_left();
@@ -1871,6 +1899,7 @@ impl<A: App> Runner<A> {
                 if self.tile_keys != under && let Some(old) = self.tile_keys.take() {
                     self.to_tile(&old, TileInput::Blur);
                 }
+                self.ime_reshow |= under.is_some();
                 self.tile_keys = under;
                 self.focused.blur();
                 self.fingers.insert(id, finger);
@@ -1889,13 +1918,22 @@ impl<A: App> Runner<A> {
             TouchPhase::Started if self.touch_id.is_none() => {
                 // Only the first finger owns capture; other fingers never become pinch or clicks.
                 self.touch_id = Some(id);
+                let at = (position.x, position.y);
+                self.touch_pan = Some(TouchPan { start: at, last: at, panning: false });
                 self.on_cursor_moved(position);
                 self.button(true);
             }
-            TouchPhase::Moved if self.touch_id == Some(id) => self.on_cursor_moved(position),
+            TouchPhase::Moved if self.touch_id == Some(id) => {
+                if !self.touch_pan_moved(position) {
+                    self.on_cursor_moved(position);
+                }
+            }
             TouchPhase::Ended if self.touch_id == Some(id) => {
-                self.on_cursor_moved(position);
-                self.button(false);
+                let panned = self.touch_pan.is_some_and(|p| p.panning);
+                if !panned {
+                    self.on_cursor_moved(position);
+                    self.button(false);
+                }
                 self.clear_pointer_touch();
             }
             TouchPhase::Cancelled if self.touch_id == Some(id) => self.clear_pointer_touch(),
@@ -2131,7 +2169,43 @@ impl<A: App> Runner<A> {
             }
             return;
         }
-        // The innermost scroller consumes first; only its remainder reaches the viewport camera.
+        self.scroll_at(p, rem_h, rem_v);
+    }
+
+    /// A finger moved: once it has travelled `TOUCH_SLOP` with nothing captured (no drag
+    /// source, text selection, thumb or camera under the press), the press is dropped — no
+    /// click on release — and the motion scrolls what is under the finger, like a wheel.
+    /// Returns whether the move was a scroll.
+    fn touch_pan_moved(&mut self, position: PhysicalPosition<f64>) -> bool {
+        let Some(mut pan) = self.touch_pan else { return false };
+        let scale = self.render.as_ref().map_or(1.0, |r| r.scale());
+        let at = (position.x, position.y);
+        if !pan.panning {
+            let travel = ((at.0 - pan.start.0).powi(2) + (at.1 - pan.start.1).powi(2)).sqrt();
+            if travel / scale < TOUCH_SLOP || self.drag.is_some() {
+                return false;
+            }
+            pan.panning = true;
+            if let Some(id) = self.tile_grab.take() {
+                self.to_tile(&id, TileInput::Cancel);
+            }
+            self.pressed = None;
+            self.button_down = false;
+            pan.last = pan.start;
+        }
+        let (dx, dy) = (((at.0 - pan.last.0) / scale) as f32, ((at.1 - pan.last.1) / scale) as f32);
+        pan.last = at;
+        self.touch_pan = Some(pan);
+        // The content follows the finger: moving up shows what is below.
+        let p = Point::new(pan.start.0, pan.start.1);
+        self.scroll_at(p, -dx, -dy);
+        true
+    }
+
+    /// Scrolls by (`dh`, `dv`) logical points at `p`: the innermost scroller consumes first;
+    /// only its remainder reaches the viewport camera.
+    fn scroll_at(&mut self, p: Point, dh: f32, dv: f32) {
+        let (mut rem_h, mut rem_v) = (dh, dv);
         for s in self.hits.scroll.iter().rev() {
             if !s.hit_rect.contains(p) {
                 continue;
@@ -2799,6 +2873,7 @@ impl<A: App> Runner<A> {
             offscreen,
             pointer: None,
             touch_id: None,
+            touch_pan: None,
             fingers: HashMap::new(),
             hits: Hits::default(),
             held_keys: HashSet::new(),
@@ -2818,6 +2893,7 @@ impl<A: App> Runner<A> {
             tile_over: None,
             tile_grab: None,
             tile_keys: None,
+            ime_reshow: false,
             tile_sizes: Vec::new(),
             view3d: None,
             windows: windows::Windows::default(),

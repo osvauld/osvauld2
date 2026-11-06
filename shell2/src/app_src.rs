@@ -46,8 +46,11 @@ fn keep(path: &Path) -> bool {
         .is_some_and(|e| KEEP.contains(&e))
 }
 
-pub fn snapshot(files: &[(String, String)]) -> Result<Vec<u8>, String> {
+/// The source doc of a new item, written as `peer` — this device's (`owned-entries.md` §2.1),
+/// since the item is pushed as its own.
+pub fn snapshot(files: &[(String, String)], peer: loro::PeerID) -> Result<Vec<u8>, String> {
     let doc = LoroDoc::new();
+    doc.set_peer_id(peer).map_err(|e| e.to_string())?;
     let map = doc.get_map("files");
     for (path, contents) in files {
         let text = map

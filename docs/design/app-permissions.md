@@ -127,6 +127,17 @@ already delivered; the UI says so.
 
 ## 5. Write rules in Lua
 
+> **Revised 2026-11-03 — superseded by [`owned-entries.md`](owned-entries.md) §2.3.** Write
+> rules become *data* in the manifest (`rule <path> { forbid … unless … }`, with `own` as the
+> common sugar), evaluated by one Rust engine in the writer's shell before commit, on the host
+> before merge, and on every pull — not Lua, and not node-only. The reasons: this section's
+> `ctx.now`, `rate` and `claim` make a rule non-deterministic, so it cannot run on every peer
+> without peers diverging (osvauld1's V3 §9 lesson); and a per-request Lua VM has no cost bound
+> by construction. The helper table below survives as the catalogue of what the data rules
+> must express (`owned` → `own`, `state_machine` → `from … to …`, `immutable` → `changed only`,
+> `slot` → `actor is path.<var>`); `rate`, `deny(list)`, `refs` and `locked` wait for a later,
+> refuse-only Lua hook with no clock. Nothing here was built.
+
 `validate(ctx, change)` runs on the node, sandboxed, with a step budget, no I/O, no writes.
 
 ```lua

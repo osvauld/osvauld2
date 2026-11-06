@@ -111,6 +111,8 @@ impl Launcher {
                 Ok(())
             })),
             context.entry(),
+            // Launcher documents are not configured: nothing of its is ever pushed.
+            None,
         )
         .map_err(|e| e.to_string())?;
         let mut warning = None;

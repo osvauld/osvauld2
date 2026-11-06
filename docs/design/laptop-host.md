@@ -299,6 +299,33 @@ dismissing a host (revoking the `host` token already cuts it off at the next jud
   the failover counts hosts *tried* since the last session was up, so a drop after a
   session on the last host tries the owner at once.
 
+### Mobile (step 8, as built 2026-11-03)
+
+A phone is a member like any other: it dials the link's host over iroh from its own device
+key, in `Auto` mode (a phone has no environment to set), so it reaches a laptop in `local`
+mode by the LAN address the link carries and a laptop in `auto` mode through the relay.
+
+- **The join box takes the link.** The Spaces screen's `join` box, which took a node ticket
+  or an invite for the socket route, now routes by prefix: `osvauld://s/…` goes to the shell's
+  own `JoinSpace` (`Msg::JoinLink` → `join_typed`, the bridge's path with the reply carried back
+  to the screen as `SpaceScreenMsg::JoinResult`); anything else goes where it went. On Android
+  the node route is gone — `node::connect` refuses, the box says "type a share link" — and the
+  ADB-reversed `files/kunki.sock` with it; the debug bridge at `files/shell.sock` stays, root
+  emulator only. A physical phone has no bridge: H8 is a person at the Pixel (or `adb shell
+  input text`, which is typing), the laptop half scripted.
+- **The APK asks `INTERNET` and `ACCESS_NETWORK_STATE`** (it asked nothing before: iroh's
+  sockets and interface watch need them). Debug builds pipe stdout and stderr to logcat under
+  tag `osvauld`, so `net:`/`kunki:` lines and panics can be read; an APK's own stderr goes
+  nowhere otherwise.
+- **The tree build grows its stack** (`app_host::walk` under `stacker::maybe_grow`, 128 KiB
+  red zone, 8 MiB segments). Found here: the launcher's tree overflowed the 2 MiB main thread
+  on the Pixel under twenty levels deep — the fault address was the stack pointer — in a debug
+  build whose `build` frames are large. The same thread size is every app thread's on desktop.
+- **iOS**: no code of its own. `net` is an unconditional dependency of shell2 and the iOS
+  build (`--no-default-features`) carries it; not compiled here (Linux, no mac peer online).
+- Not here: paste on the phone (the runtime has no clipboard yet; step 9's copy/paste UI),
+  a QR, an xnet name that resolves to a link (`xnet-names.md`).
+
 ## 3. What stays, what Tinline lends
 
 Stays ours: `manifest.osv` and `courier::{token, policy, role, access, invite, sync}`; the agent

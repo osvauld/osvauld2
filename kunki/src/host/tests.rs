@@ -70,6 +70,7 @@ fn a_claim_by_the_attested_account_on_the_proven_device_is_admitted() {
     let ticket = InviteTicket::from_text(&ticket).unwrap();
     let claim = desktop_start_invite_claim(ticket, &bob, NOW).unwrap();
     let admitted = admit(&admin, &ws, device, &attestation, None, Some(claim), NOW).unwrap();
+    assert_eq!(admitted.device, device, "the merge binds to the proven device");
     assert_eq!(admitted.did, bob.did());
     assert!(admitted.minted.is_some());
     // The token it minted admits the next session on its own.
@@ -311,7 +312,7 @@ impl Sink for Stub {
     fn now_ms(&self) -> u64 {
         NOW * 1000
     }
-    fn sync(&self, _: SyncHello) -> SyncFuture {
+    fn sync(&self, _: SyncHello, _: [u8; 32]) -> SyncFuture {
         Box::pin(async { Err("stub".to_string()) })
     }
     fn local_push(&self, _: &str, _: &Push) {}

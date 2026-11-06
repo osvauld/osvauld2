@@ -33,13 +33,16 @@ pub fn install(vault: &Vault, dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     roots.sort();
+    let peer = crate::device_peer(vault)?;
     let ws = vault.create_workspace("Apps").map_err(|e| e.to_string())?;
     for root in roots {
         let files = read_app_folder(&root)?;
         let item = vault
             .create_item(&ws.id, &app_name(&files, &root), ItemKind::App)
             .map_err(|e| e.to_string())?;
-        vault.put_src(&ws.id, &item.id, &snapshot(&files)?).map_err(|e| e.to_string())?;
+        vault
+            .put_src(&ws.id, &item.id, &snapshot(&files, peer)?)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

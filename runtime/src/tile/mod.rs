@@ -22,6 +22,9 @@ pub struct TileFrame {
     pub scene: Arc<Scene>,
     pub rects: Arc<[ElRect]>,
     pub view3d: Option<SceneView3d>,
+    /// A text field inside the tile has focus: the host shows the soft keyboard while this
+    /// tile owns the keys, as it would for a field of its own.
+    pub editing: bool,
 }
 
 impl Default for TileFrame {
@@ -30,6 +33,7 @@ impl Default for TileFrame {
             scene: Arc::new(Scene::new()),
             rects: Arc::new([]),
             view3d: None,
+            editing: false,
         }
     }
 }
@@ -146,6 +150,11 @@ impl<A: App> Tile<A> {
     }
 
     /// Where every reachable element is, as of the last frame — tile coordinates.
+    /// A text field has focus: what [`TileFrame::editing`] carries to the host.
+    pub fn editing(&self) -> bool {
+        self.runner.focused.get().is_some()
+    }
+
     pub fn rects(&self) -> Vec<ElRect> {
         self.runner.reachable()
     }

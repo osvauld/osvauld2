@@ -62,7 +62,7 @@ fn snapshot_stores_each_file_as_loro_text() {
         ("manifest.osv", "app \"todo\""),
     ]);
     let files = read_app_folder(tmp.path()).unwrap();
-    let bytes = snapshot(&files).unwrap();
+    let bytes = snapshot(&files, 7).unwrap();
     let doc = LoroDoc::new();
     doc.import(&bytes).unwrap();
     let map = doc.get_map("files");

@@ -14,7 +14,7 @@ mod props;
 pub(crate) mod signal;
 mod ui_group;
 pub use budget::{Budget, Policy};
-pub use crdt::{Cores, DocKey, Docs, Resolve, Wake};
+pub use crdt::{Cores, DocKey, Docs, Me, Resolve, Rules, Wake};
 pub use index::{SearchFn, SearchHit};
 
 use loro::{
@@ -452,6 +452,8 @@ pub struct LuaApp<M> {
     kept: ui_group::KeptGroups<M>,
     tracker: signal::Tracker,
     resolve: Resolve,
+    /// See [`LuaApp::open_as`].
+    me: Option<Rc<crdt::Me>>,
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
@@ -584,20 +586,39 @@ impl<M: Clone + 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         setup: Option<host::VmSetup>,
     ) -> mlua::Result<Self> {
-        Self::open_with_entry(src, resolve, wake, to_msg, setup, "main.lua")
+        Self::open_with_entry(src, resolve, wake, to_msg, setup, "main.lua", None)
+    }
+
+    /// [`open`](Self::open), run for someone (`owned-entries.md` §2.1, §2.4–§2.5): every doc
+    /// it opens is stamped with the device's peer before its first write, so a host can tell
+    /// this device's changes from anyone else's; each Lua write is judged by the manifest's
+    /// rules before it commits; and `me()` answers. The host is handed a `u64` and a DID,
+    /// never a key. `None` (as [`open`](Self::open) passes) leaves Loro's random peer, checks
+    /// nothing, and `me()` raises.
+    pub fn open_as(
+        src: LoroDoc,
+        resolve: Resolve,
+        wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+        me: Option<crdt::Me>,
+    ) -> mlua::Result<Self> {
+        Self::open_with_entry(src, resolve, wake, to_msg, None, "main.lua", me)
     }
 
     /// Trusted hosts may choose a source-map entry; ordinary apps always use main.lua.
+    /// `me` is as for [`open_as`](Self::open_as).
     pub fn open_with_entry(
         src: LoroDoc, resolve: Resolve, wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
+        me: Option<crdt::Me>,
     ) -> mlua::Result<Self> {
+        let me = me.map(Rc::new);
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
             src, cores, resolve, wake, to_msg, search, Worlds::default(),
-            gfx::world3d::Host::default(), setup, false, Rc::from(entry),
+            gfx::world3d::Host::default(), setup, false, Rc::from(entry), me,
         )?;
         if app.error.is_none() {
             if let Err(e) = app.worlds3d.commit() {
@@ -628,6 +649,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         setup: Option<host::VmSetup>,
         strict_trial: bool,
         entry: Rc<str>,
+        me: Option<Rc<crdt::Me>>,
     ) -> mlua::Result<Self> {
         // Before reading a single file, so a write landing mid-build is still counted as unseen.
         // The other order marks this VM current for an edit it never read, and that edit is then
@@ -645,6 +667,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             cores.clone(),
             resolve.clone(),
             wake.clone(),
+            me.clone(),
         )?;
         index::install_query(&vm, search.clone())?;
         // Candidate module load, like its trial view, cannot mutate retained worlds.
@@ -681,6 +704,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             docs,
             cores,
             resolve,
+            me,
             wake,
             search,
             console: Rc::new(RefCell::new(VecDeque::new())),
@@ -734,6 +758,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             self.setup.clone(),
             validate_tree,
             self.entry.clone(),
+            self.me.clone(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1745,7 +1770,14 @@ fn err_box<M>(msg: &str) -> El<M> {
     el
 }
 
+/// One level of the tree per call, and a debug frame of `build` is large: a deep tree on a
+/// thread with the 2 MiB default (Android's main thread, an app thread) ran out of stack at
+/// under twenty levels. The stack grows onto the heap when fewer than 128 KiB remain.
 pub(crate) fn walk<M: Clone + 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
+    stacker::maybe_grow(128 * 1024, 8 * 1024 * 1024, || walk_level(node, context))
+}
+
+fn walk_level<M: Clone + 'static>(node: Table, context: &mut Ctx<M>) -> mlua::Result<El<M>> {
     let tag: String = node.get("tag")?;
     // The breadcrumb is dev-only scaffolding, and it isn't cheap: a boundary get for
     // `line`, another for `id`, a `format!`, and a `push_str` — per element, per frame.

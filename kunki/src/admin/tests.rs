@@ -5,6 +5,8 @@ use courier::invite::{InviteRequest, desktop_start_invite_claim};
 use courier::publish::{PublishedItem, PublishedWorkspace, desktop_publish};
 use courier::subscribe::desktop_start_subscribe;
 use courier::sync::{SyncLayer, desktop_start_sync};
+
+use super::roles_tests::{device, doc_of};
 use courier::token::{Scope, Token, verify_chain};
 use identity::Identity;
 use loro::LoroDoc;
@@ -596,7 +598,7 @@ fn a_sync_push_lands_in_the_named_doc_layer_and_a_later_push_finds_it_there() {
     let ws_id = minted('a');
     let item_id = minted('b');
 
-    let doc = LoroDoc::new();
+    let doc = doc_of(&alice);
     doc.get_text("t").insert(0, "hello").unwrap();
     let hello = desktop_start_sync(
         alice.did(),
@@ -608,7 +610,9 @@ fn a_sync_push_lands_in_the_named_doc_layer_and_a_later_push_finds_it_there() {
         None,
     )
     .unwrap();
-    admin.accept_sync(hello, NOW, &MockPusher::new()).unwrap();
+    admin
+        .accept_sync(hello, Some(device(&alice)), NOW, &MockPusher::new())
+        .unwrap();
 
     let stored = vault.get_doc(&ws_id, &item_id, "board").unwrap().unwrap();
     let landed = LoroDoc::new();
@@ -628,7 +632,9 @@ fn a_sync_push_lands_in_the_named_doc_layer_and_a_later_push_finds_it_there() {
         None,
     )
     .unwrap();
-    admin.accept_sync(hello, NOW, &MockPusher::new()).unwrap();
+    admin
+        .accept_sync(hello, Some(device(&alice)), NOW, &MockPusher::new())
+        .unwrap();
     let stored = vault.get_doc(&ws_id, &item_id, "board").unwrap().unwrap();
     let landed = LoroDoc::new();
     landed.import(&stored).unwrap();
@@ -644,7 +650,7 @@ fn a_sync_push_to_the_src_layer_does_not_touch_the_doc_layer() {
     let ws_id = minted('a');
     let item_id = minted('b');
 
-    let doc = LoroDoc::new();
+    let doc = doc_of(&alice);
     doc.get_text("main.lua").insert(0, "return {}").unwrap();
     let hello = desktop_start_sync(
         alice.did(),
@@ -656,7 +662,9 @@ fn a_sync_push_to_the_src_layer_does_not_touch_the_doc_layer() {
         None,
     )
     .unwrap();
-    admin.accept_sync(hello, NOW, &MockPusher::new()).unwrap();
+    admin
+        .accept_sync(hello, Some(device(&alice)), NOW, &MockPusher::new())
+        .unwrap();
 
     assert!(vault.get_src(&ws_id, &item_id).unwrap().is_some());
     assert!(vault.get_doc(&ws_id, &item_id, "board").unwrap().is_none());
@@ -681,7 +689,7 @@ fn revoking_a_claimant_stops_it_syncing() {
     )
     .unwrap();
     assert!(matches!(
-        admin.accept_sync(hello, NOW, &MockPusher::new()),
+        admin.accept_sync(hello, Some(device(&alice)), NOW, &MockPusher::new()),
         Err(NodeError::Courier(courier::CourierError::Revoked))
     ));
 }
@@ -709,7 +717,7 @@ fn a_locked_node_does_not_sync() {
     // with `NodeError::Locked`, not the wrapped `NodeError::Vault(VaultError::Locked)` a
     // later store read would give.
     assert!(matches!(
-        admin.accept_sync(hello, NOW, &MockPusher::new()),
+        admin.accept_sync(hello, Some(device(&alice)), NOW, &MockPusher::new()),
         Err(NodeError::Locked)
     ));
 }
@@ -897,7 +905,7 @@ fn two_desktops_converge_through_a_push_neither_one_pulled_for() {
         )
         .unwrap();
 
-    let alice_doc = LoroDoc::new();
+    let alice_doc = doc_of(&alice);
     alice_doc
         .get_text("t")
         .insert(0, "hello from alice")
@@ -914,7 +922,9 @@ fn two_desktops_converge_through_a_push_neither_one_pulled_for() {
     .unwrap();
 
     let pusher = MockPusher::new();
-    admin.accept_sync(hello, NOW, &pusher).unwrap();
+    admin
+        .accept_sync(hello, Some(device(&alice)), NOW, &pusher)
+        .unwrap();
 
     let pushed = pusher.received_by(bob.did());
     assert_eq!(
@@ -963,7 +973,9 @@ fn a_push_never_targets_the_desktop_that_authored_the_sync() {
     .unwrap();
 
     let pusher = MockPusher::new();
-    admin.accept_sync(hello, NOW, &pusher).unwrap();
+    admin
+        .accept_sync(hello, Some(device(&alice)), NOW, &pusher)
+        .unwrap();
 
     assert!(
         pusher.received_by(alice.did()).is_empty(),

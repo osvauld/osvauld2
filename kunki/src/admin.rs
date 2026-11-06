@@ -31,7 +31,7 @@ use courier::link::HostAddr;
 use courier::publish::{PublishAck, PublishHello};
 use courier::role::{Grant, HOST, RoleRequest};
 use courier::subscribe::SubscribeHello;
-use courier::sync::{SyncHello, SyncLayer, SyncReply, item_scope, reaches};
+use courier::sync::{Author, SyncHello, SyncLayer, SyncReply, Writer, item_scope, reaches};
 use courier::token::{Scope, Token, issue_root};
 use courier::{AdminRecord, ClaimHello, ClaimWelcome, ReconnectHello};
 use identity::{Signer, public_key_from_did};
@@ -117,6 +117,26 @@ pub struct Judged {
     pub access: Access,
     pub undeclared: bool,
     pub rules: Option<Manifest>,
+    /// Whose changes the push may carry (`owned-entries.md` §2.1).
+    pub author: Author,
+    /// The caller's roles on the doc, for the manifest's rules (`actor has`).
+    pub roles: BTreeSet<String>,
+}
+
+impl Judged {
+    /// The writer as `courier::sync` judges a push: the rules are the manifest's declaration
+    /// for this doc, none for the source layer or an app without a manifest.
+    pub fn writer(&self, layer: &SyncLayer) -> Writer<'_> {
+        let rules = match (&self.rules, layer) {
+            (Some(m), SyncLayer::Doc(name)) => m.resolve(name).map(|(decl, _)| (m, decl)),
+            _ => None,
+        };
+        Writer {
+            author: self.author,
+            roles: self.roles.clone(),
+            rules,
+        }
+    }
 }
 
 /// One root's records, over an unlocked account. Cloning is cheap and shares the account.
@@ -328,19 +348,22 @@ impl Admin {
     /// `pusher` is generic, not `Admin`'s own field: `Admin` is the node's records, and which
     /// transport (or none, via `NoopPusher`) delivers a push is a different axis entirely, the
     /// same way `accept_publish` doesn't own how a publish reached it over the wire.
+    /// `device` is as for [`judge`].
     pub fn accept_sync(
         &self,
         hello: SyncHello,
+        device: Option<[u8; 32]>,
         now: u64,
         pusher: &impl Pusher,
     ) -> Result<SyncReply, NodeError> {
-        let judged = self.judge(&hello, now)?;
+        let judged = self.judge(&hello, device, now)?;
         let current = self.load_layer(&hello.ws_id, &hello.item_id, &hello.layer)?;
         let why = match courier::sync::node_accept_sync(
             &hello,
             &judged.node_did,
             current.as_deref(),
             judged.access,
+            &judged.writer(&hello.layer),
             now,
             &judged.revoked,
         ) {
@@ -370,7 +393,16 @@ impl Admin {
     /// the caller's grants against the manifest's rules. Split from [`accept_sync`] so a host
     /// with the doc *open* can judge here and merge on the app's own thread
     /// ([`accept_live`]) — the vault is read, never written, on this path.
-    pub fn judge(&self, hello: &SyncHello, now: u64) -> Result<Judged, NodeError> {
+    ///
+    /// `device` is the key the transport proved the pusher holds, which binds the push to
+    /// that device's peer (`owned-entries.md` §2.1). `None` is a caller the node trusts as
+    /// itself: its own machine over the local socket, or its own fan-out.
+    pub fn judge(
+        &self,
+        hello: &SyncHello,
+        device: Option<[u8; 32]>,
+        now: u64,
+    ) -> Result<Judged, NodeError> {
         let node_did = self.root()?;
         let revoked = self.revoked()?;
         let rules = self.rules(&hello.ws_id, &hello.item_id, &hello.layer)?;
@@ -381,6 +413,15 @@ impl Admin {
         // each subscriber. The root itself needs no case here — its own `owner` grant
         // satisfies every role rule through the manifest's `owner`.
         let host = grants.iter().any(|g| appoints(&g.role, &g.scope, ws));
+        let roles = match layer {
+            SyncLayer::Doc(name) => roles_at(&grants, ws, item, name),
+            SyncLayer::Src => BTreeSet::new(),
+        };
+        // A host carries others' changes by design; so does the node itself.
+        let author = match device {
+            Some(device) if !host => Author::Device(identity::peer_of(&device)),
+            _ => Author::Host,
+        };
         // An undeclared doc is judged as one nobody may read or write, so membership still
         // runs first and a stranger is refused as a stranger.
         let (access, undeclared) = if host {
@@ -404,6 +445,8 @@ impl Admin {
             access,
             undeclared,
             rules,
+            roles,
+            author,
         })
     }
 
@@ -428,6 +471,7 @@ impl Admin {
             hello,
             &judged.node_did,
             judged.access,
+            &judged.writer(&hello.layer),
             now,
             &judged.revoked,
         ) {

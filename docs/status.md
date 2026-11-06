@@ -208,6 +208,11 @@ cross-app refresh (the game reads assets when it opens), desktop-to-phone delive
   `smoke_android_sync.py` is registered in `SMOKES`; `OSVAULD_ANDROID_SMOKE=1` requires a
   booted root-enabled emulator and installed debug APK. This proves ADB-carried sync,
   not independent network transport or production Android IME.
+  *Revised 2026-11-03 (laptop-host step 8):* the ADB-forwarded node socket is gone — a phone
+  joins a space by its share link over iroh (`docs/design/laptop-host.md` §2 "Mobile"); the
+  debug bridge at `files/shell.sock` stays. `demo_android_sync.py` and the smoke were ported
+  to that path (desktop shares a link, Android joins by it, items found by name) and have
+  not been re-run on the emulator since; the Pixel path is H8.
 - Shared-shell narrow-width layout: login/signup and the empty-workspace field fill the
   available width with 16pt side gutters, capped at their existing desktop widths
   (460/360/420pt). Workspace header controls wrap; add-workspace and node-ticket popovers

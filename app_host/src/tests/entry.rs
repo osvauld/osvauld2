@@ -35,6 +35,7 @@ fn trusted_source_entry_is_retained_through_staging_and_reload() {
         identity(),
         None,
         "spaces_view.lua",
+        None,
     )
     .unwrap();
     assert_eq!(app.view().info().text.as_deref(), Some("first"));

@@ -285,6 +285,7 @@ fn a_tile_painted_on_another_thread_shows_in_its_slot() {
                     scene: self.0.clone(),
                     rects: Arc::new([]),
                     view3d: None,
+                    editing: false,
                 })
                 .size(150.0, 100.0),
             )
@@ -370,6 +371,7 @@ impl App for Rects {
                 scene: Arc::new(Scene::new()),
                 rects: self.rects.clone(),
                 view3d: None,
+                editing: false,
             })
             .size(200.0, 100.0)
             .on_tile("t", |e| e.input),
@@ -524,6 +526,7 @@ fn a_tiles_3d_view_lands_in_its_slot() {
         scene: Arc::new(guest.frame()),
         rects: Arc::new([]),
         view3d: guest.view3d(),
+        editing: guest.editing(),
     };
     let mut host = Tile::new(Shows(frame), (300.0, 100.0));
     host.frame();
@@ -533,4 +536,46 @@ fn a_tiles_3d_view_lands_in_its_slot() {
         (120.0, 20.0, 320.0, 80.0)
     );
     assert_eq!((view.clip.x0, view.clip.x1), (120.0, 250.0), "cut at the slot's edge");
+}
+
+/// A host whose tile says a field inside it has focus — an app's composer.
+struct Composer {
+    editing: bool,
+}
+
+impl App for Composer {
+    type Msg = TileInput;
+    fn view(&self) -> El<TileInput> {
+        row().child(col().w(100.0).h(100.0)).child(
+            tile(TileFrame { editing: self.editing, ..TileFrame::default() })
+                .size(200.0, 100.0)
+                .on_tile("t", |e| e.input),
+        )
+    }
+    fn update(&mut self, _: TileInput) {}
+}
+
+/// The soft keyboard follows a field in the tile that owns the keys, not only the host's
+/// own fields: a phone otherwise never shows it for an app's text box.
+#[test]
+fn an_editing_tile_that_owns_the_keys_asks_for_the_keyboard() {
+    let mut host = Tile::new(Composer { editing: false }, (300.0, 100.0));
+    host.frame();
+    assert!(!host.runner.ime_allowed, "nothing has focus yet");
+    // A tap into the tile gives it the keys; its field gets focus on its own thread.
+    let inside = PhysicalPosition::new(150.0, 50.0);
+    host.runner.on_touch(winit::event::TouchPhase::Started, 1, inside);
+    host.runner.on_touch(winit::event::TouchPhase::Ended, 1, inside);
+    host.frame();
+    assert!(!host.runner.ime_allowed, "the tile's field is not focused yet");
+    host.app_mut().editing = true;
+    host.runner.redraw();
+    host.frame();
+    assert!(host.runner.ime_allowed, "the tile's focused field wants the keyboard");
+    // Focus moves to the host's strip: the tile no longer owns the keys.
+    let outside = PhysicalPosition::new(20.0, 50.0);
+    host.runner.on_touch(winit::event::TouchPhase::Started, 2, outside);
+    host.runner.on_touch(winit::event::TouchPhase::Ended, 2, outside);
+    host.frame();
+    assert!(!host.runner.ime_allowed, "an editing tile without the keys asks nothing");
 }

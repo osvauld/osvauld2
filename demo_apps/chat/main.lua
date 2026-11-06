@@ -36,8 +36,10 @@ local function small_button(id, label, color, on_click)
 	})
 end
 
+-- Edit and delete appear only where the manifest's rules would let them through: your own
+-- messages, or anyone's for a moderator. The same engine refuses a write the UI never offered.
 local function message_row(m)
-	return ui.row({
+	local row = {
 		id = "msg:" .. m.id,
 		gap = 8,
 		px = 10,
@@ -47,13 +49,16 @@ local function message_row(m)
 		align_center = true,
 		ui.text({ m.author, color = C.accent_hi, font_size = 12, no_wrap = true, no_shrink = true }),
 		ui.col({ grow = true, ui.text({ m.text, id = "text:" .. m.id, color = C.text, font_size = 13 }) }),
-		small_button("edit:" .. m.id, "edit", C.muted, function()
+	}
+	if M.can_delete(m) then
+		row[#row + 1] = small_button("edit:" .. m.id, "edit", C.muted, function()
 			S.editing = m.id
-		end),
-		small_button("del:" .. m.id, "delete", C.danger, function()
+		end)
+		row[#row + 1] = small_button("del:" .. m.id, "delete", C.danger, function()
 			M.delete(m.id)
-		end),
-	})
+		end)
+	end
+	return ui.row(row)
 end
 
 local function hit_row(h)

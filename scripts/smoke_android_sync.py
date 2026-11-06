@@ -1,4 +1,8 @@
-"""Opt-in smoke: installed adb-debug APK, booted root-enabled emulator, real two-way sync."""
+"""Opt-in smoke: installed adb-debug APK, booted root-enabled emulator, real two-way sync over
+the host path — the desktop shell hosts the space, Android joins by its share link (no kunki,
+no ADB-forwarded node socket; laptop-host step 8). OSVAULD_ANDROID_SMOKE=1 runs
+demo_android_sync.py --once; the emulator must reach the laptop's LAN address, which the link
+carries."""
 import os
 import subprocess
 import sys

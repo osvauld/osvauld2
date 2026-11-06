@@ -334,8 +334,9 @@ pub fn dispatch(req: Request, vault: &Vault, pusher: &impl Pusher) -> Response {
                 Err(e) => Response::err(e.to_string()),
             }
         }
+        // The node's own machine, over its 0600 socket: trusted as the node itself.
         Request::Sync(hello) => {
-            match Admin::new(vault.clone()).accept_sync(hello, now_secs(), pusher) {
+            match Admin::new(vault.clone()).accept_sync(hello, None, now_secs(), pusher) {
                 Ok(ack) => Response::ok(ack),
                 Err(e) => Response::err(e.to_string()),
             }

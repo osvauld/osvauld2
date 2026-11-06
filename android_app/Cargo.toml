@@ -12,6 +12,11 @@ runtime = { path = "../runtime" }
 shell2 = { path = "../shell2", default-features = false, features = ["adb-debug"] }
 vault = { path = "../vault" }
 
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+# Debug builds only (see lib.rs): iroh's own tracing at debug level, into logcat.
+tracing-subscriber = "0.3"
+
 [package.metadata.android]
 package = "com.osvauld.android"
 apk_name = "osvauld-native"
@@ -30,3 +35,11 @@ has_code = true
 name = "android.hardware.vulkan.level"
 required = true
 version = 1
+
+# A phone joins a space over iroh (laptop-host step 8): sockets, and the interface watch
+# iroh keeps for its direct addresses.
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"

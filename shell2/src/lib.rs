@@ -141,7 +141,13 @@ pub enum Msg {
     NetBound(u64, Result<Slot<net::Net>, String>),
     /// A member's update reached this host (`host.rs`); the UI thread merges it — into the
     /// live doc when the app is open, into the vault when not — and answers through the slot.
-    HostSync(u64, SyncHello, Slot<tokio::sync::oneshot::Sender<Result<SyncReply, String>>>),
+    /// A member's update over a session, with the device key the connection proved.
+    HostSync(
+        u64,
+        SyncHello,
+        [u8; 32],
+        Slot<tokio::sync::oneshot::Sender<Result<SyncReply, String>>>,
+    ),
     /// A session to a joined space's host came up, dropped (with why), carried a frame, or
     /// brought the token the host minted for this account's claim.
     /// Each carries `(generation, space, the dial's sequence number, …)`: a message from a
@@ -159,6 +165,9 @@ pub enum Msg {
         std::sync::mpsc::Sender<osvauld_rpc::Response>,
         Result<Slot<sessions::Fetched>, String>,
     ),
+    /// A share link typed into the Spaces screen's join box: `JoinSpace` without a bridge
+    /// caller, answered back to the screen as `SpaceScreenMsg::JoinResult`.
+    JoinLink(String),
     /// Runtime completes this only after the driver op actually ran — see `App::take_driver`.
     DriverDone(DriverReply, Result<runtime::DriverReport, String>),
     NativeRects(
@@ -765,6 +774,15 @@ fn asset_item(vault: &Vault, ws_id: &str, name: &str) -> Result<WorkspaceItem, V
 /// window: the worker's result becomes both the bridge reply and the screen transition.
 /// A script-side signup skips the mnemonic screen — the script is the mnemonic's reader,
 /// the same "shown once" contract with a different pair of eyes.
+/// Whether a screen's move from `before` to `next` is an unlock: the lock screen's login or
+/// a signup's "I've saved this phrase" landing on Spaces with the vault open. The bridge's
+/// unlock goes through `AuthDone` instead; both start the same node, listener and endpoint,
+/// or a device unlocked by hand (a phone has no bridge) never comes online.
+fn unlocks(before: &Screen, next: Option<&Screen>) -> bool {
+    matches!(before, Screen::Login(_) | Screen::Mnemonic(_))
+        && matches!(next, Some(Screen::Spaces(_)))
+}
+
 fn finish_auth(vault: &mut Vault, outcome: AuthOutcome) -> (Response, Option<Screen>) {
     match outcome {
         AuthOutcome::Signup(job) => match job.lock().unwrap().take() {
@@ -871,11 +889,37 @@ fn valid_source_path(path: &str) -> Result<(), String> {
     }
 }
 
+/// This device's Loro peer (`owned-entries.md` §2.1): every doc it writes is stamped with it,
+/// so a host can tell its changes from anyone else's. From the per-install device key, never
+/// the account's — every install of one account shares that, and Loro allows one writer per
+/// peer.
+/// The manifest an app's source carries, if it has one that parses.
+fn app_manifest(src: &[u8]) -> Option<manifest::Manifest> {
+    let doc = LoroDoc::new();
+    doc.import(src).ok()?;
+    let Some(loro::ValueOrContainer::Container(loro::Container::Text(text))) =
+        doc.get_map("files").get("manifest.osv")
+    else {
+        return None;
+    };
+    manifest::Manifest::parse(&text.to_string())
+        .map_err(|e| eprintln!("manifest: line {}: {}", e.line, e.message))
+        .ok()
+}
+
+pub(crate) fn device_peer(vault: &Vault) -> Result<loro::PeerID, String> {
+    let key = vault.device_public_key().map_err(|e| e.to_string())?;
+    Ok(identity::peer_of(&key))
+}
+
+/// An item's stored source, as this device's own copy: what the bridge edits and writes
+/// back while the item is closed, pushed as this device's changes.
 fn source_doc(vault: &Vault, ws_id: &str, item_id: &str) -> Result<LoroDoc, String> {
     let doc = LoroDoc::new();
     if let Some(bytes) = vault.get_src(ws_id, item_id).map_err(|e| e.to_string())? {
         doc.import(&bytes).map_err(|e| e.to_string())?;
     }
+    doc.set_peer_id(device_peer(vault)?).map_err(|e| e.to_string())?;
     Ok(doc)
 }
 
@@ -1425,11 +1469,13 @@ impl Shell {
     }
 
     /// A member's update, judged by this host's records and merged into the live doc when
-    /// the app is open, into the vault when not. Answered through `reply`.
+    /// the app is open, into the vault when not. Answered through `reply`. `device` is the
+    /// key the session proved the member holds: its changes must be in that device's name.
     fn host_sync(
         &mut self,
         gen_: u64,
         hello: SyncHello,
+        device: [u8; 32],
         reply: tokio::sync::oneshot::Sender<Result<SyncReply, String>>,
     ) {
         if gen_ != self.gen_() {
@@ -1451,7 +1497,7 @@ impl Shell {
         };
         match live {
             Some((a, name)) => a.call(move |h| {
-                let judged = match admin.judge(&hello, now) {
+                let judged = match admin.judge(&hello, Some(device), now) {
                     Ok(judged) => judged,
                     Err(e) => {
                         let _ = reply.send(Err(e.to_string()));
@@ -1471,7 +1517,7 @@ impl Shell {
                 // Inline, on this thread: one merge at a time, and never while an app for this
                 // doc is opening (also here) — the vault keeps one writer per doc.
                 let outcome = admin
-                    .accept_sync(hello, now, &pusher)
+                    .accept_sync(hello, Some(device), now, &pusher)
                     .map_err(|e| e.to_string());
                 let _ = reply.send(outcome);
             }
@@ -1659,6 +1705,23 @@ impl Shell {
         std::thread::spawn(move || {
             let fetched = sessions::fetch(&rt, ep, link).map(Slot::new);
             let _ = proxy.send_event(Msg::JoinFetched(gen_, tx, fetched));
+        });
+    }
+
+    /// The join box's `JoinSpace`: the bridge's path with the reply carried back to the
+    /// Spaces screen instead of a socket. Waited on from a thread of its own, since the
+    /// reply is sent by this very UI thread (`finish_join`) once the sources have arrived.
+    fn join_typed(&mut self, link: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.join_space(link, tx);
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = match rx.recv() {
+                Ok(Response::Ok { .. }) => Ok(()),
+                Ok(Response::Err { message }) => Err(message),
+                Err(_) => Err("the join was dropped".to_string()),
+            };
+            let _ = proxy.send_event(Msg::Space(SpaceScreenMsg::JoinResult(result)));
         });
     }
 
@@ -1949,7 +2012,8 @@ impl Shell {
                     vv: doc.oplog_vv().encode(),
                     update: Vec::new(),
                 };
-                let judged = admin.judge(&hello, now).map_err(|e| e.to_string())?;
+                // A hello the host builds for itself: nothing is pushed, nothing to bind.
+                let judged = admin.judge(&hello, None, now).map_err(|e| e.to_string())?;
                 let snapshot = doc
                     .export(ExportMode::Snapshot)
                     .map_err(|e| e.to_string())?;
@@ -2141,7 +2205,9 @@ impl Shell {
                 })
                 .map_err(|e| e.to_string());
             if let Ok(bound) = &bound {
-                if let Some(port) = net::endpoint::bound_port(bound.endpoint()) {
+                let port = net::endpoint::bound_port(bound.endpoint());
+                eprintln!("net: bound {mode:?} on port {port:?}");
+                if let Some(port) = port {
                     if wanted != Some(port) {
                         let _ = vault.put_entry(PORT_KEY, &port.to_be_bytes());
                     }
@@ -2149,6 +2215,27 @@ impl Shell {
             }
             let _ = proxy.send_event(Msg::NetBound(gen_, bound.map(Slot::new)));
         });
+    }
+
+    /// What an unlock starts, whoever did it — the bridge's `AuthDone`, the lock screen's
+    /// login, a signup's last step. `Shell::new`'s own load ran while the vault was still
+    /// locked and found nothing, so the relationship is read now. An account with no node,
+    /// or one that is its own, hosts for itself: its owner grant is reissued every unlock,
+    /// like a reconnect would.
+    fn after_unlock(&mut self) {
+        self.node = match node::load_relationship(&self.vault).ok().flatten() {
+            Some(record) if !node::is_me(&self.vault, &record) => Some(record),
+            _ => node::self_claim(&self.vault, node::now_secs())
+                .map_err(|e| eprintln!("host: could not self-claim: {e}"))
+                .ok(),
+        };
+        // Whatever the previous account had in flight is answered, not replayed on this
+        // one's sessions.
+        self.drop_pending("account changed");
+        self.joined = sessions::load_joined(&self.vault);
+        // The listener first: it bumps the generation the bind is tagged with.
+        self.start_listener();
+        self.bind_net();
     }
 
     /// Closing waits for the runtime, so it happens on its own thread.
@@ -2861,6 +2948,7 @@ impl Shell {
         } else {
             None
         };
+        let me = self.me_in(&wi.ws_id, &src, true)?;
         let app = AppThread::spawn(
             Open {
                 item_id: id.clone(),
@@ -2870,6 +2958,7 @@ impl Shell {
                 persist: true,
                 node,
                 pull,
+                me,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -2880,6 +2969,37 @@ impl Shell {
         Ok(())
     }
 
+    /// Who an app in `ws_id` runs for: this account, this device, and the manifest's rules
+    /// with the account's roles in the space (`owned-entries.md` §2.4). The owner of a space it
+    /// hosts holds `owner`; a member, the role its token carries — never `owner` by default,
+    /// which would satisfy every override. A source whose manifest does not parse checks
+    /// nothing here; the host refuses its writes anyway.
+    fn me_in(&self, ws_id: &str, src: &[u8], stamp: bool) -> Result<app_host::Me, String> {
+        let did = self
+            .vault
+            .with_signer(|d| d.did().to_string())
+            .ok_or("no account is unlocked")?;
+        let name = self.vault.current().map(|a| a.label).unwrap_or_default();
+        let roles = match self.joined.get(ws_id) {
+            Some(joined) => joined
+                .token
+                .as_ref()
+                .and_then(|t| courier::role::Grant::of(t).ok())
+                .map(|g| g.role)
+                .into_iter()
+                .collect(),
+            None => [manifest::OWNER.to_string()].into(),
+        };
+        let rules = app_manifest(src).map(|manifest| app_host::Rules { manifest, roles });
+        Ok(app_host::Me {
+            did,
+            name,
+            peer: device_peer(&self.vault)?,
+            stamp,
+            rules,
+        })
+    }
+
     fn open_test_tab(
         &mut self,
         wi: &WorkspaceItem,
@@ -2888,6 +3008,7 @@ impl Shell {
     ) -> Result<Arc<str>, String> {
         let id: Arc<str> = format!("test:{}:{run}", wi.id).into();
         self.close_test_tab(&id, self.focused);
+        let me = self.me_in(&wi.ws_id, &src, false)?;
         let app = AppThread::spawn(
             Open {
                 item_id: id.clone(),
@@ -2897,6 +3018,7 @@ impl Shell {
                 persist: false,
                 node: None,
                 pull: None,
+                me,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -3496,6 +3618,10 @@ impl App for Shell {
                 self.join_space(link, tx);
                 None
             }
+            Msg::JoinLink(link) => {
+                self.join_typed(link);
+                None
+            }
             Msg::Rpc(Request::AppointHost { ws_id, did }, tx) => {
                 self.appoint_host(ws_id, did, tx);
                 None
@@ -3952,25 +4078,7 @@ impl App for Shell {
                 // belongs to the previous one, and the flush below must not see it.
                 if next.is_some() {
                     self.reset_tabs();
-                    // The account just unlocked, possibly for the first time this process —
-                    // `Shell::new`'s own load ran while it was still locked and found nothing.
-                    // Refresh from the now-unlocked vault so a persisted relationship actually
-                    // starts its listener, instead of sitting unused until the next claim.
-                    // An account with no node, or one that is its own, hosts for itself:
-                    // its owner grant is reissued every unlock, like a reconnect would.
-                    self.node = match node::load_relationship(&self.vault).ok().flatten() {
-                        Some(record) if !node::is_me(&self.vault, &record) => Some(record),
-                        _ => node::self_claim(&self.vault, node::now_secs())
-                            .map_err(|e| eprintln!("host: could not self-claim: {e}"))
-                            .ok(),
-                    };
-                    // Whatever the previous account had in flight is answered, not replayed
-                    // on this one's sessions.
-                    self.drop_pending("account changed");
-                    self.joined = sessions::load_joined(&self.vault);
-                    // The listener first: it bumps the generation the bind is tagged with.
-                    self.start_listener();
-                    self.bind_net();
+                    self.after_unlock();
                 }
                 next
             }
@@ -4081,9 +4189,9 @@ impl App for Shell {
                 None
             }
 
-            Msg::HostSync(gen_, hello, reply) => {
+            Msg::HostSync(gen_, hello, device, reply) => {
                 if let Some(reply) = reply.take() {
-                    self.host_sync(gen_, hello, reply);
+                    self.host_sync(gen_, hello, device, reply);
                 }
                 None
             }
@@ -4113,14 +4221,20 @@ impl App for Shell {
                 self.session_frame(ws, seq, frame);
                 None
             }
-            msg => match (&mut self.screen, msg) {
-                (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
-                (Screen::Mnemonic(f), Msg::Mnemonic(m)) => f.update(m, &self.vault),
-                (Screen::Login(f), Msg::Login(m)) => f.update(m, &mut self.vault, &self.proxy),
-                (Screen::Spaces(s), Msg::Space(m)) => s.update(m, &mut self.vault, &self.proxy),
-                (Screen::Items(i), Msg::Items(m)) => i.update(m, &mut self.vault, &self.proxy),
-                _ => None,
-            },
+            msg => {
+                let next = match (&mut self.screen, msg) {
+                    (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
+                    (Screen::Mnemonic(f), Msg::Mnemonic(m)) => f.update(m, &self.vault),
+                    (Screen::Login(f), Msg::Login(m)) => f.update(m, &mut self.vault, &self.proxy),
+                    (Screen::Spaces(s), Msg::Space(m)) => s.update(m, &mut self.vault, &self.proxy),
+                    (Screen::Items(i), Msg::Items(m)) => i.update(m, &mut self.vault, &self.proxy),
+                    _ => None,
+                };
+                if unlocks(&self.screen, next.as_ref()) {
+                    self.after_unlock();
+                }
+                next
+            }
         };
         // Saving, indexing and reloading happen on each app's own thread now, after every
         // batch it handles (`app_thread::settle`); the shell only keeps tiles shown or hidden.

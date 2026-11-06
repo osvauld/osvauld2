@@ -1067,6 +1067,36 @@ The rules that bite, once each:
 - **An unchanged write is a no-op.** Don't guard against writing a value that might already
   be there; the document skips it.
 
+### Who wrote what, and who may change it
+
+A doc can carry **rules** in your manifest ([design](design/owned-entries.md)):
+
+```text
+doc channel/{cid} { read member  write member  own messages/* override moderator }
+```
+
+`own messages/*` makes each message its creator's: only they — or a `moderator` — may change,
+delete or move it; anyone with `write` may still add one. A write the rules refuse raises at
+the call site (`ch:delete(...)` errors with the rule's manifest line) and changes nothing; the
+host refuses it too, so a patched app gains nothing. Fuller rules (`rule <path> { forbid … }`
+with `where`/`unless`, transitions, field checks) are in the design doc.
+
+```lua
+local who = me()                                   -- { did, name, peer } of this account/device
+ch:owner({ "messages", id })                       -- the creator's peer, or nil
+ch:allowed("delete", { "messages", id })           -- would this write pass? also "insert", "move"
+ch:allowed("set", { "messages", id, "text" }, v)   -- a set is asked with its value
+```
+
+- **Show only what the rules allow.** Draw a delete button where `allowed("delete", …)` is true;
+  it asks the same engine the write does, and is cheap to call every frame (kept until the doc
+  changes).
+- **`owner` and `me().peer` are device peers, not accounts** — a decimal string. Compare them
+  with each other, never with a DID. Until devices are tied to accounts, your own entry is
+  "someone else's" from your second device.
+- **`me().name` is a label for display** (store it as an `author` field if you like) — never
+  for a decision: anyone can write any string there. Ownership is read off the entry itself.
+
 ### Assets
 
 `local hero = asset:open("hero")` opens a **workspace asset** by name — data that belongs to the
@@ -1337,7 +1367,7 @@ The kanban split, worth copying at any size:
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
 only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
-(unix seconds as a float, wall clock), `uuid()`. A runaway loop is killed, with the line number.
+(unix seconds as a float, wall clock), `uuid()`, `me()`. A runaway loop is killed, with the line number.
 
 Each run of your code — a `view`, a handler, module load, a test — has a budget: about a
 million interrupts (loop turns and calls) **and** one second of CPU time, whichever runs out

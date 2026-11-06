@@ -112,10 +112,14 @@ fn workspace_header_wraps_without_squeezing_controls_or_cards() {
         assert!((card.w - 240.0).abs() < 0.1, "{card:?}");
         let add = rects.iter().find(|r| r.id == "add_space").unwrap();
         let claim = rects.iter().find(|r| r.id == "claim_node").unwrap();
-        if width == 320.0 {
-            assert!(add.y >= claim.y + claim.h, "header should wrap: {rects:?}");
-        } else if width == 900.0 {
-            assert_eq!(add.y, claim.y);
+        // Beside the join button when there is room, on the next row when there isn't — never
+        // over it. (Since every account hosts itself the join button is a short "join", so a
+        // phone width no longer forces the wrap it did when a node label stood there.)
+        let beside = add.y == claim.y && add.x >= claim.x + claim.w;
+        let below = add.y >= claim.y + claim.h;
+        assert!(beside || below, "header squeezed at {width}: {rects:?}");
+        if width == 900.0 {
+            assert!(beside, "header wrapped at {width}: {rects:?}");
         }
     }
 }
@@ -376,7 +380,25 @@ fn a_clean_doc_writes_nothing() {
 
 // ── bridge answers: the read-only family, without standing up a window ──────────────────
 
-use super::{AuthOutcome, Screen, answer, finish_auth, resolve_did};
+use super::{AuthOutcome, Screen, answer, finish_auth, resolve_did, unlocks};
+
+#[test]
+fn a_screen_move_is_an_unlock_only_from_the_lock_screen_onto_spaces() {
+    let (vault, _tmp, _ws, _item) = fresh();
+    let login = Screen::Login(crate::login::LoginScreen::new(&vault));
+    let phrase = Screen::Mnemonic(crate::mnemonic::Mnemonic { words: String::new(), accepted: true });
+    let spaces = Screen::Spaces(SpaceScreen::new(&vault));
+    let signup = Screen::Signup(crate::signup::SignupForm::default());
+    // The lock screen's login and a signup's last step land on Spaces with the vault open:
+    // what starts the node, the listener and the endpoint when no bridge did the unlock.
+    assert!(unlocks(&login, Some(&spaces)));
+    assert!(unlocks(&phrase, Some(&spaces)));
+    // Staying put, adding an account, or a screen that was never locked: not an unlock.
+    assert!(!unlocks(&login, None));
+    assert!(!unlocks(&login, Some(&signup)));
+    assert!(!unlocks(&spaces, Some(&spaces)));
+    assert!(!unlocks(&signup, Some(&spaces)));
+}
 use osvauld_rpc::{Request, Response};
 
 #[test]

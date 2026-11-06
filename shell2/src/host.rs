@@ -48,11 +48,11 @@ impl Sink for ShellSink {
         clock::now_ms()
     }
 
-    fn sync(&self, hello: SyncHello) -> SyncFuture {
+    fn sync(&self, hello: SyncHello, device: [u8; 32]) -> SyncFuture {
         let (tx, rx) = oneshot::channel();
         let sent = self
             .proxy
-            .send_event(Msg::HostSync(self.gen_, hello, Slot::new(tx)))
+            .send_event(Msg::HostSync(self.gen_, hello, device, Slot::new(tx)))
             .map_err(|_| "shell gone".to_string());
         Box::pin(async move {
             sent?;

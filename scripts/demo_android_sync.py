@@ -1,18 +1,30 @@
-"""Desktop uploads/publishes; Android redeems an invite and proves two-way note sync.
+"""Desktop hosts a space; Android joins it by the share link and proves two-way note sync.
 
 Install the x86_64 adb-debug APK and boot osvauld-api35 first. Run:
     python3 scripts/demo_android_sync.py --adb ~/Android/Sdk/platform-tools/adb
 Use --once for an automated run, --windowed to show the desktop. Requires root-enabled
-emulator ADB. Creates throwaway accounts/stores; never clears existing Android app data.
+emulator ADB (the debug bridge lives in the app's private files/). Creates throwaway
+accounts/stores; never clears existing Android app data.
+
+No kunki process: the desktop shell is the space's host (docs/design/laptop-host.md §2), run
+with OSVAULD_NET=local so its link carries its direct addresses — loopback and the laptop's
+LAN address — and no relay. Android joins by that link once and opens what the space lists,
+by name; no id the script knew crosses to the phone. The ADB-forwarded node socket is gone
+(`shell2::node::connect` refuses on Android); only the debug bridge `files/shell.sock` is
+forwarded.
+
+Ported to the host path 2026-11-03 (laptop-host step 8); not re-run on the emulator since —
+the first run will need the emulator to reach the laptop's LAN address, which the link carries.
 
 One-command demo: --boot starts the emulator if no device is up (-gpu host; SwiftShader lacks
 the float16 capability Vello needs), --install builds and installs the x86_64 APK, and --apps
-publishes a set of demo apps, all of which Android joins. `scratch` always goes first: it is the
-item the two-way sync check runs on.
+puts a set of demo apps in the space, all of which Android opens. `scratch` always goes first:
+it is the item the two-way sync check runs on.
 """
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -57,10 +69,11 @@ def boot_emulator(adb, serial, headless):
     subprocess.run([adb, "-s", serial, "wait-for-device"], check=True, timeout=60)
 
 
-def check_apps(android, adb, serial, items, names, outdir):
+def check_apps(android, adb, serial, items, outdir):
     """Per app: open it on the device, screenshot via adb, tap the screen centre, screenshot again.
-    The Android shell is windowed, so the offscreen-only driver ops (Frame, Rects) are not
-    available; this is the real device path instead — adb pixels and adb touches."""
+    `items` are the records Android got from the host at join, in app order. The Android shell
+    is windowed, so the offscreen-only driver ops (Frame, Rects) are not available; this is the
+    real device path instead — adb pixels and adb touches."""
     outdir.mkdir(parents=True, exist_ok=True)
 
     def shot(path):
@@ -70,7 +83,8 @@ def check_apps(android, adb, serial, items, names, outdir):
         return len(png)
 
     rows = []
-    for it, name in zip(items, names):
+    for it in items:
+        name = it["name"]
         row = {"app": name}
         try:
             android.rpc.open_item(it["id"])
@@ -94,8 +108,16 @@ def install_apk(adb, serial):
                     str(ROOT / "target/debug/apk/osvauld.apk")], check=True)
 
 
+def build_shell():
+    cmd = ["cargo", "build", "-p", "shell2"]
+    # Through the task manager (AGENTS.md § Commands): a bare cargo puts a target/ on the home partition.
+    if shutil.which("loadtable"):
+        cmd = ["loadtable", "run", "--who", "android-demo", "--pin", "--", *cmd, "-j", "2"]
+    subprocess.run(cmd, cwd=ROOT, check=True)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--serial", default="emulator-5554")
     parser.add_argument("--once", action="store_true")
@@ -106,7 +128,7 @@ def main():
     parser.add_argument("--install", action="store_true", help="build and install the x86_64 APK")
     parser.add_argument("--check", action="store_true", help="probe every app on Android; shots in shots/android-apps/")
     parser.add_argument("--apps", default=DEFAULT_APPS,
-                        help="comma-separated demo_apps folders to publish; scratch is forced first")
+                        help="comma-separated demo_apps folders to put in the space; scratch is forced first")
     args = parser.parse_args()
     apps = ["scratch"] + [a for a in args.apps.split(",") if a and a != "scratch"]
     for a in apps:
@@ -117,75 +139,78 @@ def main():
     if args.install:
         install_apk(args.adb, args.serial)
     if not args.skip_build:
-        subprocess.run(["cargo", "build", "-p", "shell2", "-p", "kunki"], cwd=ROOT, check=True)
+        build_shell()
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
-    demo_sync.KUNKI_BINARY = target / "debug" / "kunki"
     directory = Path(mkdtemp(prefix="osvauld-android-demo-"))
     print(f"Throwaway demo state: {directory}", flush=True)
-    node, socket, ticket = demo_sync.spawn_node(directory)
-    previous_socket = os.environ.get("OSVAULD_KUNKI_SOCKET")
-    os.environ["OSVAULD_KUNKI_SOCKET"] = str(socket)
+    # The desktop shell hosts the space itself, as `Net.__enter__` sets it up: no node socket
+    # (a shell still looking for one fails loudly), local reach only.
+    previous = {k: os.environ.get(k) for k in ("OSVAULD_NET", "OSVAULD_KUNKI_SOCKET")}
+    os.environ.pop("OSVAULD_KUNKI_SOCKET", None)
+    os.environ["OSVAULD_NET"] = "local"
     if args.windowed:
         os.environ.pop("OSVAULD_OFFSCREEN", None)
     alice = Session(shell_binary=target / "debug" / "shell2", data_dir=str(directory / "alice"),
                     socket_path=str(directory / "alice.sock"),
                     offscreen=None if args.windowed else (900, 700))
-    android = AndroidSession(args.adb, args.serial, directory, socket)
+    android = AndroidSession(args.adb, args.serial, directory)
     clock = demo_sync.Clock()
     try:
         clock.step("desktop ready", alice.start)
         clock.step("desktop signup", lambda: alice.rpc.signup("alice", "demo"))
-        clock.step("desktop claims node", lambda: alice.rpc.claim_node(ticket))
         ws = alice.rpc.create_workspace("Android sync demo")
-        items = []
+        hosting = alice.rpc.whoami().get("hosting") or []
+        if ws["id"] not in hosting:
+            raise RuntimeError(f"desktop does not host its own space: hosting={hosting}")
+        print("desktop hosts the space from its own endpoint", flush=True)
+        scratch = None
         for name in apps:
             it = alice.rpc.create_item(ws["id"], name, "app")
             clock.step(f"desktop uploads {name}", lambda it=it, name=name: alice.rpc.upload_folder(it["id"], ROOT / "demo_apps" / name))
-            alice.rpc.open_item(it["id"])
-            items.append(it)
-        item = items[0]
-        clock.step("desktop publishes workspace", alice.rpc.publish_all)
-        for it in items:
-            clock.step(f"desktop publishes source {it['id'][:6]}", lambda it=it: alice.rpc.push_src(it["id"]))
-        demo_sync.add_note(alice, item["id"], "published from desktop")
-        invite = clock.step("desktop issues invite", alice.rpc.invite)
-        clock.step("Android debug sockets ready", android.start)
+            scratch = scratch or it
+        # The open doc is the host's live copy; its edits fan out to sessions from there.
+        alice.rpc.open_item(scratch["id"])
+        demo_sync.add_note(alice, scratch["id"], "published from desktop")
+        link = clock.step("desktop shares the space", lambda: alice.rpc.share_space(ws["id"]))
+        print(f"share link: {link}", flush=True)
+        clock.step("Android debug bridge ready", android.start)
         account = "android-demo-" + directory.name.rsplit("-", 1)[-1]
         clock.step("Android throwaway signup", lambda: android.rpc.signup(account, "demo"))
-        clock.step("Android redeems invite", lambda: android.rpc.claim_node(invite))
-        for it in items:
-            clock.step(f"Android joins {it['id'][:6]}", lambda it=it: android.rpc.join_item(ws, it))
-        android.rpc.open_item(item["id"])
-        demo_sync.wait_for_note(android, item["id"], "published from desktop", 15)
-        demo_sync.add_note(alice, item["id"], "live from desktop")
-        clock.step("desktop edit reaches Android", lambda: demo_sync.wait_for_note(android, item["id"], "live from desktop", 15))
-        demo_sync.add_note(android, item["id"], "live from Android")
-        clock.step("Android edit reaches desktop", lambda: demo_sync.wait_for_note(alice, item["id"], "live from Android", 15))
+        # The link lists the host's direct addresses. Inside the emulator its 127.0.0.1 entry is
+        # the guest itself; the laptop's private LAN address, also in the link, is the one the
+        # guest reaches through the emulator's NAT.
+        joined = clock.step("Android joins by link", lambda: android.rpc.join_space(link))
+        by_name = {it["name"]: it for it in joined["items"]}
+        missing = [n for n in apps if n not in by_name]
+        if missing:
+            raise RuntimeError(f"Android joined but the space lists no {missing}: {joined}")
+        # Android's own records, in app order: the ids come from the host, never from this script.
+        phone = [by_name[n] for n in apps]
+        note = phone[0]["id"]
+        android.rpc.open_item(note)
+        demo_sync.wait_for_note(android, note, "published from desktop", 15)
+        demo_sync.add_note(alice, scratch["id"], "live from desktop")
+        clock.step("desktop edit reaches Android", lambda: demo_sync.wait_for_note(android, note, "live from desktop", 15))
+        demo_sync.add_note(android, note, "live from Android")
+        clock.step("Android edit reaches desktop", lambda: demo_sync.wait_for_note(alice, scratch["id"], "live from Android", 15))
         if args.check:
-            for row in check_apps(android, args.adb, args.serial, items, apps, ROOT / "shots/android-apps"):
+            for row in check_apps(android, args.adb, args.serial, phone, ROOT / "shots/android-apps"):
                 print("CHECK", row, flush=True)
         print(f"Sync verified both ways. Android account: {account}, passphrase: demo", flush=True)
-        print("Android app data was not erased. Ctrl-C stops the demo and removes its ADB mappings.", flush=True)
+        print("Android app data was not erased. Ctrl-C stops the demo and removes its ADB mapping.", flush=True)
         if not args.once:
-            while alice.process.poll() is None and node.poll() is None:
+            while alice.process.poll() is None:
                 time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
         android.close()
         alice.close()
-        try:
-            node.terminate()
-            try:
-                node.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                node.kill()
-                node.wait(timeout=10)
-        finally:
-            if previous_socket is None:
-                os.environ.pop("OSVAULD_KUNKI_SOCKET", None)
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
             else:
-                os.environ["OSVAULD_KUNKI_SOCKET"] = previous_socket
+                os.environ[key] = value
 
 
 if __name__ == "__main__":

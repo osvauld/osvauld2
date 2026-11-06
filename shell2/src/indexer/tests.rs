@@ -58,12 +58,25 @@ struct Open {
     index: Shared,
 }
 
+/// Who the app runs for, as `open_tab` supplies it: the chat stamps `me().name` on what it
+/// writes, so an app opened with no one fails to load.
+fn someone() -> Option<app_host::Me> {
+    Some(app_host::Me {
+        did: "did:test:me".into(),
+        name: "me".into(),
+        peer: 7,
+        stamp: false,
+        rules: None,
+    })
+}
+
 fn open(f: &Fixture) -> Open {
-    let mut app = LuaApp::open(
+    let mut app = LuaApp::open_as(
         chat_source(),
         resolver(&f.vault, &f.ws, &f.item),
         Arc::new(|| {}),
         Rc::new(|m| m),
+        someone(),
     )
     .unwrap();
     let index = Rc::new(RefCell::new(ItemIndex::open(&f.vault, &f.ws, &f.item).unwrap()));
@@ -296,7 +309,9 @@ fn a_doc_written_while_the_app_was_closed_is_indexed_when_it_opens() {
 #[test]
 fn a_test_tab_gets_a_working_index_that_touches_no_vault() {
     let f = fixture();
-    let mut app = LuaApp::open(chat_source(), Rc::new(|_| Ok(None)), Arc::new(|| {}), Rc::new(|m| m)).unwrap();
+    let mut app =
+        LuaApp::open_as(chat_source(), Rc::new(|_| Ok(None)), Arc::new(|| {}), Rc::new(|m| m), someone())
+            .unwrap();
     let index = Rc::new(RefCell::new(ItemIndex::in_memory().unwrap()));
     attach(&index, &mut app).unwrap();
     let mut dirtied = Vec::new();

@@ -3,7 +3,7 @@ app "chat" {
   role admin { grant moderator, member }
 
   doc chat                 { read member  write admin }
-  doc channel/{cid}        { read member  write member }
+  doc channel/{cid}        { read member  write member  own messages/* override moderator }
   doc group/{gid}/meta     { read members(group/{gid}/meta)  write member }
   doc group/{gid}/{day}    { shard by day  history all
                              read members(group/{gid}/meta)  write members(group/{gid}/meta) }

@@ -18,6 +18,7 @@ refused at `Hello` (`courier`). H5 here covers the halves a shell can.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -75,6 +76,32 @@ def wrong_code(link: str) -> str:
     raw = bytearray(b58decode(link[len("osvauld://s/"):]))
     raw[33] ^= 0x01
     return "osvauld://s/" + b58encode(bytes(raw))
+
+
+def pixel_adb() -> list[str]:
+    """`[adb, -s, SERIAL]` for the one attached phone; a Skip says what is missing. H8 is for
+    an unrooted phone, so this never runs `adb root`."""
+    adb = (os.environ.get("ADB") or shutil.which("adb")
+           or str(Path.home() / "Android/Sdk/platform-tools/adb"))
+    if not shutil.which(adb):
+        raise Skip(f"no adb ({adb}); set $ADB")
+    serial = os.environ.get("OSVAULD_ANDROID_SERIAL")
+    if not serial:
+        out = subprocess.run([adb, "devices"], capture_output=True, text=True).stdout
+        attached = [line.split("\t")[0] for line in out.splitlines() if line.endswith("\tdevice")]
+        if not attached:
+            raise Skip("no device attached")
+        if len(attached) > 1:
+            raise Skip(f"{len(attached)} devices attached; set OSVAULD_ANDROID_SERIAL to one of "
+                       + " ".join(attached))
+        serial = attached[0]
+    return [adb, "-s", serial]
+
+
+def pixel_logcat(adb: list[str], lines: int = 40) -> str:
+    """The debug APK's stderr lands in logcat under tag `osvauld` (android_app/src/lib.rs)."""
+    r = subprocess.run([*adb, "logcat", "-d", "-s", "osvauld"], capture_output=True, text=True)
+    return "\n".join(r.stdout.splitlines()[-lines:])
 
 
 # ── tests ────────────────────────────────────────────────────────────────────
@@ -217,11 +244,63 @@ def h7(net):
 
 
 def h8(net):
-    """A phone joins by a typed link over iroh — no ADB socket. Manual on the Pixel."""
-    if not os.environ.get("OSVAULD_ANDROID_E2E"):
+    """A Pixel joins by a typed link over iroh — no ADB socket — and plays the edit back.
+
+    The phone has no bridge (an unrooted phone cannot forward an app-private unix socket), so a
+    person at the Pixel does its half: this drives the laptop and talks to them through the
+    terminal. adb only types the link, reads logcat and takes the screenshot."""
+    if os.environ.get("OSVAULD_ANDROID_E2E") != "1":
         raise Skip("needs a connected Pixel with the debug APK; set OSVAULD_ANDROID_E2E=1")
-    from osvauld.android import Android  # noqa: F401 — the phone half lands with step 8
-    raise AssertionError("step 8: phone join by link is not driven yet")
+    if not sys.stdin.isatty():
+        raise Skip("needs a person at the Pixel: stdin is not a terminal")
+    adb = pixel_adb()
+
+    def pixel(*args, **kw):
+        return subprocess.run([*adb, *args], check=True, **kw)
+
+    def say(*lines):
+        print(*lines, sep="\n", flush=True)
+
+    a = net.peer("alice")
+    ws = a.rpc.create_workspace("team")
+    item = a.rpc.create_item(ws["id"], CHAT.name, "app")
+    a.rpc.upload_folder(item["id"], CHAT)
+    a.rpc.open_item(item["id"])
+    i = item["id"]
+    send(a, i, "made on the laptop")
+    link = a.rpc.share_space(ws["id"])
+
+    say("",
+        "H8: the laptop and the Pixel must share a Wi-Fi.",
+        "On the Pixel open Osvauld (the debug APK), sign up or unlock, tap `join`, then tap",
+        "the box so the keyboard shows. The link:",
+        "",
+        f"    {link}",
+        "")
+    answer = input("Press Enter here and adb types the link into the box, "
+                   "or type `done` if you typed it yourself: ")
+    if answer.strip().lower() != "done":
+        # `input text` goes through the device shell; the link has no shell-special
+        # characters, quoted all the same. 66 = KEYCODE_ENTER, the panel's only submit.
+        pixel("shell", "input", "text", f"'{link}'")
+        pixel("shell", "input", "keyevent", "66")
+    say("",
+        "On the Pixel the space `team` appears. Open it, open `chat`, and post a message",
+        "containing the word `pixel`.",
+        "")
+    try:
+        wait_until(lambda: any("pixel" in t.lower() for t in texts(a, i)),
+                   240, "the Pixel's post to reach the laptop", every=0.5)
+        send(a, i, "seen on the laptop")
+        answer = input("Does the Pixel now show 'seen on the laptop'? [y/N] ")
+        assert answer.strip().lower().startswith("y"), \
+            "the laptop's post did not play back on the Pixel"
+    except AssertionError as e:
+        raise AssertionError(f"{e}\n--- pixel logcat ---\n{pixel_logcat(adb)}") from None
+    laptop = a.shot("H8", i)
+    phone = net.shots / "H8-pixel.png"
+    phone.write_bytes(pixel("exec-out", "screencap", "-p", capture_output=True).stdout)
+    say(f"laptop: {laptop}", f"pixel:  {phone}")
 
 
 def h9(net):

@@ -1,15 +1,39 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     rc::Rc,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use loro::{
-    Container, EventTriggerKind, Index, LoroDoc, LoroMap, LoroMovableList, LoroStringValue,
-    LoroText, LoroValue, Subscription, ValueOrContainer,
+    Container, ContainerID, ContainerTrait, EventTriggerKind, Index, LoroDoc, LoroMap,
+    LoroMovableList, LoroStringValue, LoroText, LoroValue, PeerID, Subscription,
+    ValueOrContainer,
 };
+use manifest::{DocDecl, Manifest};
 use mlua::{Error, FromLua, Function, IntoLua, Lua, Table, Value};
+
+/// Who an app runs for (`owned-entries.md` §2.4–§2.5): the account, this device's peer, and
+/// the manifest's rules with the account's roles on this app. Handed in by the shell; the
+/// host never sees a key.
+pub struct Me {
+    pub did: String,
+    /// The account's label, for display (`me().name`) — never for a decision.
+    pub name: String,
+    pub peer: PeerID,
+    /// Stamp every doc with `peer` before its first write. Off for a tab whose docs are never
+    /// pushed: a second live copy under the device's peer would be a second writer.
+    pub stamp: bool,
+    pub rules: Option<Rules>,
+}
+
+pub struct Rules {
+    pub manifest: Manifest,
+    pub roles: BTreeSet<String>,
+}
 
 /// Everything about an open doc that outlives a VM.
 ///
@@ -64,22 +88,37 @@ pub type Cores = Rc<RefCell<HashMap<DocKey, Rc<DocCore>>>>;
 /// event loop to run `view()` again, which repatches on its own.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
-/// Installs `doc` and `asset`. `asset` reaches any asset in the app's workspace by name — read
-/// and write — which is the grant: data belongs to the workspace, not the app.
+/// Installs `doc`, `asset` and `me`. `asset` reaches any asset in the app's workspace by name
+/// — read and write — which is the grant: data belongs to the workspace, not the app. `me` is
+/// as for [`crate::LuaApp::open_as`].
 pub fn install(
     lua: &Lua,
     docs: Docs,
     cores: Cores,
     resolve: Resolve,
     wake: Wake,
+    me: Option<Rc<Me>>,
 ) -> mlua::Result<()> {
     let opens = |scope: fn(String) -> DocKey| {
         let (docs, cores) = (docs.clone(), cores.clone());
-        let (resolve, wake) = (resolve.clone(), wake.clone());
+        let (resolve, wake, me) = (resolve.clone(), wake.clone(), me.clone());
         lua.create_function(move |lua, (_this, name): (Value, String)| {
-            open(lua, &docs, &cores, &resolve, &wake, scope(name))
+            open(lua, &docs, &cores, &resolve, &wake, &me, scope(name))
         })
     };
+    let who = me.clone();
+    let me_fn = lua.create_function(move |lua, ()| {
+        let Some(me) = &who else {
+            return Err(Error::runtime("me(): no identity in this tab"));
+        };
+        let t = lua.create_table()?;
+        t.set("did", me.did.as_str())?;
+        t.set("name", me.name.as_str())?;
+        // A u64 does not fit a Lua number exactly.
+        t.set("peer", me.peer.to_string())?;
+        Ok(t)
+    })?;
+    lua.globals().set("me", me_fn)?;
     let t = lua.create_table()?;
     t.set("open", opens(DocKey::Own)?)?;
     install_kinds(lua, &t)?;
@@ -96,6 +135,7 @@ fn open(
     cores: &Cores,
     resolve: &Resolve,
     wake: &Wake,
+    me: &Option<Rc<Me>>,
     name: DocKey,
 ) -> mlua::Result<Table> {
     {
@@ -117,6 +157,10 @@ fn open(
                 if let Some(bytes) = resolve(&name).map_err(Error::runtime)? {
                     doc.import(&bytes).map_err(Error::external)?;
                 }
+                // Before the first write: every change this device makes is in its name.
+                if let Some(me) = me.as_ref().filter(|me| me.stamp) {
+                    doc.set_peer_id(me.peer).map_err(Error::external)?;
+                }
                 let core = new_core(doc, wake.clone(), 0);
                 cores.borrow_mut().insert(name.clone(), core.clone());
                 core
@@ -125,7 +169,7 @@ fn open(
         let mirror = lua.create_table()?;
         patch_into(lua, &mirror, &core.doc.get_deep_value())?;
         let mt = lua.create_table()?;
-        mt.set("__index", methods(lua, &docs, &name)?)?;
+        mt.set("__index", methods(lua, &docs, &name, me)?)?;
         mirror.set_metatable(Some(mt));
         docs.borrow_mut().insert(
             name,
@@ -540,30 +584,26 @@ fn show_value(v: &Value) -> String {
     }
 }
 
-fn methods(lua: &Lua, docs: &Docs, name: &DocKey) -> mlua::Result<Table> {
+fn methods(lua: &Lua, docs: &Docs, name: &DocKey, me: &Option<Rc<Me>>) -> mlua::Result<Table> {
     let methods = lua.create_table()?;
-    // One clone per method: each `create_function` closure owns its captures for the life of
-    // the VM, and they all need the same two.
-    let (docs2, name2) = (docs.clone(), name.clone());
-    let (docs3, name3) = (docs.clone(), name.clone());
-    let (docs4, name4) = (docs.clone(), name.clone());
-    let (docs, name) = (docs.clone(), name.clone());
+    // Each `create_function` closure owns its captures for the life of the VM.
+    let each = || (docs.clone(), name.clone(), me.clone());
+
+    let (docs_, name_, me_) = each();
     let set = lua.create_function(move |lua, (_this, path, val): (Value, Table, Value)| {
-        let doc = handle(&docs, &name)?;
-        match segments(&path)?.as_slice() {
-            [Seg::Name(root)] => write_root(lua, &doc, root, &val)?,
-            [Seg::Pos(_)] => return Err(Error::runtime("a root is named, not positional")),
+        let segs = segments(&path)?;
+        guarded(&docs_, &name_, &me_, &|doc| match segs.as_slice() {
+            [Seg::Name(root)] => write_root(lua, doc, root, &val),
+            [Seg::Pos(_)] => Err(Error::runtime("a root is named, not positional")),
             segs => {
-                let (parent, at) = resolve_path(&doc, segs)?;
-                write(lua, &parent, &at, &val)?;
+                let (parent, at) = resolve_path(doc, segs)?;
+                write(lua, &parent, &at, &val)
             }
-        }
-        doc.commit();
-        Ok(())
+        })
     })?;
     methods.set("set", set)?;
 
-    let (docs, name) = (docs2, name2);
+    let (docs_, name_, me_) = each();
     // `:insert(path, v)` appends; `:insert(path, pos, v)` inserts at `pos`. Unlike every other
     // method, the path names the **list itself** rather than a slot inside it — you insert
     // *into* a list, but set, delete and move act *at* an element.
@@ -574,82 +614,249 @@ fn methods(lua: &Lua, docs: &Docs, name: &DocKey) -> mlua::Result<Table> {
     // slot after the first card. Appending has to be something Lua can say without counting.
     let insert = lua.create_function(
         move |lua, (_this, path, a, b): (Value, Table, Value, Value)| {
-            let doc = handle(&docs, &name)?;
             let (pos, val) = match b {
                 Value::Nil => (None, a),
                 val => (Some(a), val),
             };
-            let Container::MovableList(l) = container_for(&doc, &segments(&path)?)? else {
-                return Err(Error::runtime(
-                    "insert needs a list — to add a key to a map, use :set",
-                ));
-            };
-            let i = match pos {
-                None => l.len(),
-                Some(p) => {
-                    let p = usize::from_lua(p, lua)?;
-                    let i = p
-                        .checked_sub(1)
-                        .ok_or_else(|| Error::runtime("list positions start at 1"))?;
-                    if i > l.len() {
-                        return Err(Error::runtime(format!(
-                            "cannot insert at {p} — the list holds {} elements",
-                            l.len()
-                        )));
+            let pos = pos.map(|p| usize::from_lua(p, lua)).transpose()?;
+            let segs = segments(&path)?;
+            guarded(&docs_, &name_, &me_, &|doc| {
+                let Container::MovableList(l) = container_for(doc, &segs)? else {
+                    return Err(Error::runtime(
+                        "insert needs a list — to add a key to a map, use :set",
+                    ));
+                };
+                let i = match pos {
+                    None => l.len(),
+                    Some(p) => {
+                        let i = p
+                            .checked_sub(1)
+                            .ok_or_else(|| Error::runtime("list positions start at 1"))?;
+                        if i > l.len() {
+                            return Err(Error::runtime(format!(
+                                "cannot insert at {p} — the list holds {} elements",
+                                l.len()
+                            )));
+                        }
+                        i
                     }
-                    i
-                }
-            };
-            insert_at(lua, &l, i, &val)?;
-            doc.commit();
-            Ok(())
+                };
+                insert_at(lua, &l, i, &val)
+            })
         },
     )?;
     methods.set("insert", insert)?;
 
-    let (docs, name) = (docs3, name3);
+    let (docs_, name_, me_) = each();
     let delete = lua.create_function(move |_, (_this, path): (Value, Table)| {
-        let doc = handle(&docs, &name)?;
-        let (parent, at) = resolve_path(&doc, &segments(&path)?)?;
-        match (&parent, &at) {
-            (Container::Map(m), Index::Key(k)) => m.delete(k).map_err(Error::external)?,
-            (Container::MovableList(l), Index::Seq(i)) => {
-                l.delete(*i, 1).map_err(Error::external)?
-            }
-            _ => return Err(mismatch(&parent, &at)),
-        }
-        doc.commit();
-        Ok(())
+        let segs = segments(&path)?;
+        guarded(&docs_, &name_, &me_, &|doc| delete_at(doc, &segs))
     })?;
     methods.set("delete", delete)?;
 
-    let (docs, name) = (docs4, name4);
+    let (docs_, name_, me_) = each();
     let mov = lua.create_function(move |_, (_this, path, to): (Value, Table, usize)| {
-        let doc = handle(&docs, &name)?;
-        let (parent, at) = resolve_path(&doc, &segments(&path)?)?;
-        let (Container::MovableList(l), Index::Seq(from)) = (&parent, &at) else {
-            return Err(Error::runtime("move needs an element of a list"));
-        };
+        let segs = segments(&path)?;
         let to = to
             .checked_sub(1)
             .ok_or_else(|| Error::runtime("list positions start at 1"))?;
-        if to >= l.len() {
-            return Err(Error::runtime(format!(
-                "cannot move to {} — the list holds {} elements",
-                to + 1,
-                l.len()
-            )));
-        }
-        // The operation the whole MovableList choice exists for: `pos` is its own LWW register,
-        // so a concurrent move and a concurrent field edit both survive. Delete-then-insert
-        // would duplicate the card instead.
-        l.mov(*from, to).map_err(Error::external)?;
-        doc.commit();
-        Ok(())
+        guarded(&docs_, &name_, &me_, &|doc| {
+            let (parent, at) = resolve_path(doc, &segs)?;
+            let (Container::MovableList(l), Index::Seq(from)) = (&parent, &at) else {
+                return Err(Error::runtime("move needs an element of a list"));
+            };
+            if to >= l.len() {
+                return Err(Error::runtime(format!(
+                    "cannot move to {} — the list holds {} elements",
+                    to + 1,
+                    l.len()
+                )));
+            }
+            // The operation the whole MovableList choice exists for: `pos` is its own LWW
+            // register, so a concurrent move and a concurrent field edit both survive.
+            // Delete-then-insert would duplicate the card instead.
+            l.mov(*from, to).map_err(Error::external)
+        })
     })?;
     methods.set("move", mov)?;
 
+    // `d:owner(path)`: who created the entry, off its Loro ID — never a field the app wrote.
+    // A device peer as a decimal string (a u64 does not fit a Lua number), `nil` for nothing.
+    let (docs_, name_, _) = each();
+    let owner = lua.create_function(move |lua, (_this, path): (Value, Table)| {
+        let doc = handle(&docs_, &name_)?;
+        let Ok((parent, at)) = resolve_path(&doc, &segments(&path)?) else {
+            return Ok(Value::Nil);
+        };
+        let peer = match (&parent, &at) {
+            (Container::MovableList(l), Index::Seq(i)) => l.get_creator_at(*i),
+            (Container::Map(m), Index::Key(k)) => match m.get(k) {
+                Some(ValueOrContainer::Container(c)) => match c.id() {
+                    ContainerID::Normal { peer, .. } => Some(peer),
+                    ContainerID::Root { .. } => None,
+                },
+                Some(ValueOrContainer::Value(_)) => m.get_last_editor(k),
+                None => None,
+            },
+            _ => None,
+        };
+        match peer {
+            Some(p) => p.to_string().into_lua(lua),
+            None => Ok(Value::Nil),
+        }
+    })?;
+    methods.set("owner", owner)?;
+
+    // `d:allowed(kind, path)`: whether that write would pass the manifest's rules — the same
+    // trial `guarded` runs, never applied. Asked per row every frame, so a verdict is kept
+    // until the doc's version moves.
+    let (docs_, name_, me_) = each();
+    let cache: RefCell<HashMap<(String, String), (u64, bool)>> = RefCell::new(HashMap::new());
+    let allowed = lua.create_function(
+        move |lua, (_this, kind, path, value): (Value, String, Table, Option<Value>)| {
+        // A mistaken question raises; only a refused write answers `false`.
+        if kind == "set" && value.is_none() {
+            return Err(Error::runtime(r#"allowed("set", path, value) needs the value"#));
+        }
+        if rules_for(&me_, &name_).is_none() {
+            return Ok(true);
+        }
+        let segs = segments(&path)?;
+        let version = docs_
+            .borrow()
+            .get(&name_)
+            .map(|e| e.core.version.load(Ordering::Relaxed))
+            .ok_or_else(|| Error::runtime("doc closed"))?;
+        // A `set` verdict depends on the value, so only the others are kept.
+        let key = (kind.clone(), path_key(&segs));
+        let keep = kind != "set";
+        if let Some(&(v, ok)) = cache.borrow().get(&key)
+            && keep
+            && v == version
+        {
+            return Ok(ok);
+        }
+        let doc = handle(&docs_, &name_)?;
+        let probe = |d: &LoroDoc| -> mlua::Result<()> {
+            match kind.as_str() {
+                "delete" => delete_at(d, &segs),
+                "move" => {
+                    let (parent, at) = resolve_path(d, &segs)?;
+                    let (Container::MovableList(l), Index::Seq(i)) = (&parent, &at) else {
+                        return Err(Error::runtime("move needs an element of a list"));
+                    };
+                    match l.len() {
+                        0 | 1 => Ok(()),
+                        _ => l.mov(*i, if *i == 0 { 1 } else { 0 }).map_err(Error::external),
+                    }
+                }
+                "insert" => match container_for(d, &segs)? {
+                    Container::MovableList(l) => l
+                        .insert_container(l.len(), LoroMap::new())
+                        .map(|_| ())
+                        .map_err(Error::external),
+                    _ => Err(Error::runtime("insert needs a list")),
+                },
+                // The write itself: an unchanged write is a no-op, so there is no stand-in.
+                "set" => {
+                    let Some(val) = &value else {
+                        return Err(Error::runtime(r#"allowed("set", path, value) needs the value"#));
+                    };
+                    match segs.as_slice() {
+                        [Seg::Name(root)] => write_root(lua, d, root, val),
+                        segs => {
+                            let (parent, at) = resolve_path(d, segs)?;
+                            write(lua, &parent, &at, val)
+                        }
+                    }
+                }
+                other => Err(Error::runtime(format!(
+                    "allowed: `{other}` is not insert, set, delete or move"
+                ))),
+            }
+        };
+        let ok = judge(&doc, &name_, &me_, &probe).is_ok();
+        if keep {
+            cache.borrow_mut().insert(key, (version, ok));
+        }
+        Ok(ok)
+    },
+    )?;
+    methods.set("allowed", allowed)?;
+
     Ok(methods)
+}
+
+fn delete_at(doc: &LoroDoc, segs: &[Seg]) -> mlua::Result<()> {
+    let (parent, at) = resolve_path(doc, segs)?;
+    match (&parent, &at) {
+        (Container::Map(m), Index::Key(k)) => m.delete(k).map_err(Error::external),
+        (Container::MovableList(l), Index::Seq(i)) => l.delete(*i, 1).map_err(Error::external),
+        _ => Err(mismatch(&parent, &at)),
+    }
+}
+
+fn path_key(segs: &[Seg]) -> String {
+    segs.iter()
+        .map(|s| match s {
+            Seg::Name(n) => format!("/{n}"),
+            Seg::Pos(p) => format!("#{p}"),
+        })
+        .collect()
+}
+
+/// A Lua write: judged first when the doc has rules, then applied and committed. A refused
+/// write is a Lua error at the call site and the live doc is never touched.
+fn guarded(
+    docs: &Docs,
+    name: &DocKey,
+    me: &Option<Rc<Me>>,
+    edit: &dyn Fn(&LoroDoc) -> mlua::Result<()>,
+) -> mlua::Result<()> {
+    let doc = handle(docs, name)?;
+    judge(&doc, name, me, edit)?;
+    edit(&doc)?;
+    doc.commit();
+    Ok(())
+}
+
+/// The manifest's rules over `edit` (`owned-entries.md` §2.4, site 1): applied to a fork under
+/// the doc's own peer, read op by op, checked against the doc as it stands. The fork is
+/// dropped either way. No rules for this doc → nothing runs.
+fn judge(
+    doc: &LoroDoc,
+    name: &DocKey,
+    me: &Option<Rc<Me>>,
+    edit: &dyn Fn(&LoroDoc) -> mlua::Result<()>,
+) -> mlua::Result<()> {
+    let Some((manifest, decl, roles)) = rules_for(me, name) else {
+        return Ok(());
+    };
+    let trial = doc.fork();
+    trial.set_peer_id(doc.peer_id()).map_err(Error::external)?;
+    let since = trial.oplog_vv();
+    edit(&trial)?;
+    trial.commit();
+    let read = courier::ops::read_since(&trial, &since).map_err(|e| Error::runtime(e.to_string()))?;
+    let actor = courier::rules::Actor {
+        peer: doc.peer_id(),
+        roles: roles.clone(),
+    };
+    courier::rules::check(manifest, decl, &actor, doc, &read)
+        .map_err(|e| Error::runtime(e.to_string()))
+}
+
+/// The rules over one of the app's own docs, if it has any. Assets are not the manifest's.
+fn rules_for<'a>(
+    me: &'a Option<Rc<Me>>,
+    name: &DocKey,
+) -> Option<(&'a Manifest, &'a DocDecl, &'a BTreeSet<String>)> {
+    let rules = me.as_ref()?.rules.as_ref()?;
+    let DocKey::Own(doc) = name else {
+        return None;
+    };
+    let (decl, _) = rules.manifest.resolve(doc)?;
+    (!decl.rules.is_empty()).then_some((&rules.manifest, decl, &rules.roles))
 }
 
 /// Insert `v` at `i`, growing the list. [`write`] replaces; this is the one that shifts.

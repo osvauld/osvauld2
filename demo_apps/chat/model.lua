@@ -24,17 +24,19 @@ function M.channel(cid)
 	return d
 end
 
+-- `author` is a display label, written by the sender; who may edit or delete a message is
+-- decided on the Loro ID (`own messages/*` in the manifest), never on this field.
+local function message(id, text, sent_at)
+	return doc.map({ id = id, author = me().name, text = text, sent_at = sent_at })
+end
+
 -- Seeded so a fresh app (and the app-shipped tests' empty tab) has something to find.
 local general = M.channel("general")
 if not general.messages then
 	general:set({ "messages" }, doc.list({
-		doc.map({ id = "seed-1", author = "anu", text = "the deploy is green", sent_at = 1 }),
-		doc.map({ id = "seed-2", author = "abe", text = "lunch at noon?", sent_at = 2 }),
+		message("seed-1", "the deploy is green", 1),
+		message("seed-2", "lunch at noon?", 2),
 	}))
-end
-
-local function message(text)
-	return doc.map({ id = uuid(), author = "me", text = text, sent_at = now() })
 end
 
 -- Read the mirror before writing: `d.messages` is a frame behind, and only decides whether the
@@ -48,10 +50,15 @@ function M.send(text)
 		d:set({ "messages", S.editing, "text" }, text)
 		S.editing = nil
 	elseif d.messages then
-		d:insert({ "messages" }, message(text))
+		d:insert({ "messages" }, message(uuid(), text, now()))
 	else
-		d:set({ "messages" }, doc.list({ message(text) }))
+		d:set({ "messages" }, doc.list({ message(uuid(), text, now()) }))
 	end
+end
+
+-- Asked per row, every view: the engine answers from a cache until the doc changes.
+function M.can_delete(m)
+	return M.channel(M.S.channel):allowed("delete", { "messages", m.id })
 end
 
 function M.delete(id)

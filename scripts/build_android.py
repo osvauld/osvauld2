@@ -1,8 +1,11 @@
 """Build the prototype debug APK, adding the Android inset listener's DEX to cargo-apk output.
 
-Requires JAVA_HOME, Android SDK/API 35/build-tools 35.0.0 and the NDK used by cargo-apk.
+Requires a JDK (JAVA_HOME, else the javac on PATH, else Android Studio's), Android SDK/API 35/
+build-tools 35.0.0 and the NDK used by cargo-apk.
     python3 scripts/build_android.py --target x86_64-linux-android
-Signing uses the prototype debug key, not a production release key.
+    loadtable run --who me --pin -- python3 scripts/build_android.py --jobs 2   # the NDK is here
+Signing uses the prototype debug key, not a production release key. A loadtable job does not
+carry the caller's environment, hence the JDK search and `--jobs` rather than CARGO_BUILD_JOBS.
 """
 import argparse
 import json
@@ -16,20 +19,41 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def run(*args):
+def run(*args, env=None):
     print(f"Android build: {args[0]}", flush=True)
-    subprocess.run([str(a) for a in args], cwd=ROOT, check=True, timeout=600)
+    subprocess.run([str(a) for a in args], cwd=ROOT, check=True, timeout=3600, env=env)
+
+
+def find_javac() -> Path:
+    home = os.environ.get("JAVA_HOME")
+    if home:
+        return Path(home) / "bin/javac"
+    on_path = shutil.which("javac")
+    if on_path:
+        return Path(on_path)
+    for studio in ("/usr/local/bin/andorid/android-studio/jbr", "/opt/android-studio/jbr"):
+        if (Path(studio) / "bin/javac").exists():
+            return Path(studio) / "bin/javac"
+    raise SystemExit("no JDK: set JAVA_HOME or put javac on PATH")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="aarch64-linux-android")
+    parser.add_argument("--jobs", type=int, help="cargo's -j for the native build")
     args = parser.parse_args()
     sdk = Path(os.environ.get("ANDROID_HOME", Path.home() / "Android/Sdk"))
     tools = sdk / "build-tools/35.0.0"
     jar = sdk / "platforms/android-35/android.jar"
-    javac = Path(os.environ["JAVA_HOME"]) / "bin/javac"
-    run("cargo", "apk", "build", "-p", "android_app", "--lib", "--target", args.target)
+    javac = find_javac()
+    ndks = sorted((sdk / "ndk").glob("*"))
+    if not ndks and "ANDROID_NDK_ROOT" not in os.environ:
+        raise SystemExit(f"no NDK under {sdk / 'ndk'}: set ANDROID_NDK_ROOT")
+    env = dict(os.environ, ANDROID_HOME=str(sdk))
+    env.setdefault("ANDROID_NDK_ROOT", str(ndks[-1]))
+    if args.jobs:
+        env["CARGO_BUILD_JOBS"] = str(args.jobs)
+    run("cargo", "apk", "build", "-p", "android_app", "--lib", "--target", args.target, env=env)
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--no-deps", "--format-version=1"], cwd=ROOT))
     native_apk = Path(metadata["target_directory"]) / "debug/apk/osvauld-native.apk"

@@ -170,7 +170,7 @@ fn a_sync_push_lands_in_the_nodes_vault_over_the_wire() {
     let ws_id = "a".repeat(32);
     let item_id = "b".repeat(32);
 
-    let doc = LoroDoc::new();
+    let doc = stamped(&alice);
     doc.get_text("t").insert(0, "hello").unwrap();
     let hello = desktop_start_sync(
         alice.did(),
@@ -298,7 +298,7 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
 
     // Alice syncs — in-process against the same registry the socket above is registered on,
     // the same way a real `Sync` request arriving over the wire would reach it.
-    let doc = LoroDoc::new();
+    let doc = stamped(&alice);
     doc.get_text("t").insert(0, "hello").unwrap();
     let sync_hello = desktop_start_sync(
         &alice.did(),
@@ -310,7 +310,9 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
         None,
     )
     .unwrap();
-    admin.accept_sync(sync_hello, now(), &registry).unwrap();
+    admin
+        .accept_sync(sync_hello, Some(alice.device_public_key()), now(), &registry)
+        .unwrap();
 
     let push: Push = serde_json::from_slice(&read_msg(&mut conn).unwrap()).unwrap();
     assert_eq!(push.item_id, item_id);
@@ -319,8 +321,16 @@ fn a_listening_desktop_receives_a_push_when_another_desktop_syncs() {
     assert_eq!(landed.get_text("t").to_string(), "hello");
 }
 
-fn alice_sync(alice: &Identity, token: Token) -> Request {
+/// `who`'s own doc, stamped with its peer as every live doc is (`owned-entries.md` §2.1);
+/// the phrase-derived key stands in for the per-install one a vault holds.
+fn stamped(who: &Identity) -> LoroDoc {
     let doc = LoroDoc::new();
+    doc.set_peer_id(identity::peer_of(&who.device_public_key())).unwrap();
+    doc
+}
+
+fn alice_sync(alice: &Identity, token: Token) -> Request {
+    let doc = stamped(alice);
     doc.get_text("t").insert(0, "hello").unwrap();
     Request::Sync(
         desktop_start_sync(

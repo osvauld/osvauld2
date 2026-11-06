@@ -18,6 +18,12 @@ world = { path = "../world" }
 csscolorparser = "0.8.3"
 glam = "0.30"
 uuid = { version = "1.24.0", features = ["v4"] }
+# The manifest's rules, judged before a Lua write commits (`owned-entries.md` §2.4, site 1).
+courier = { path = "../courier" }
+manifest = { path = "../manifest" }
+# `walk` recurses once per tree level with a large debug frame; a phone's main thread has
+# 2 MiB (laptop-host step 8 found the launcher's tree overflowing it on a Pixel).
+stacker = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

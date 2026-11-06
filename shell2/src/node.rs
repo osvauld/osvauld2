@@ -140,11 +140,14 @@ pub fn hosts(
 }
 
 fn connect(socket: &Path) -> Result<UnixStream, String> {
-    // The Android debug process has no desktop environment variables; ADB supplies this endpoint.
-    #[cfg(all(target_os = "android", debug_assertions, feature = "adb-debug"))]
-    let android_socket = crate::android_debug_dir().join("kunki.sock");
-    #[cfg(all(target_os = "android", debug_assertions, feature = "adb-debug"))]
-    let socket = android_socket.as_path();
+    // A phone reaches a space by its share link (laptop-host step 8); the node socket it once
+    // had was an ADB-forwarded debug path, and is gone.
+    #[cfg(target_os = "android")]
+    {
+        let _ = socket;
+        Err("no node socket on this device: join by a share link".to_string())
+    }
+    #[cfg(not(target_os = "android"))]
     UnixStream::connect(socket).map_err(|e| e.to_string())
 }
 

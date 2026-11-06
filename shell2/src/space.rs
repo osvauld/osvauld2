@@ -19,9 +19,14 @@ pub struct SpaceScreen {
     add_space: bool,
     error: Option<String>,
     node: Option<DesktopNodeRecord>,
+    /// The record names a node other than this account. An account that hosts itself
+    /// (every unlock since laptop-host step 4) holds its own record and still joins by link.
+    foreign_node: bool,
     claim_ticket: String,
     show_claim: bool,
     claim_error: Option<String>,
+    /// A share link went to the shell's `JoinSpace`; `JoinResult` ends it.
+    joining: bool,
     publish_status: Option<Result<String, String>>,
     invite_status: Option<Result<String, String>>,
 }
@@ -35,10 +40,18 @@ pub enum SpaceScreenMsg {
     ClaimTicket(String),
     ClaimNode,
     ClaimResult(Result<DesktopNodeRecord, String>),
+    /// The shell answered a share link from the join box (`Msg::JoinLink`).
+    JoinResult(Result<(), String>),
     PublishAll,
     PublishResult(Result<String, String>),
     InviteMint,
     InviteResult(Result<String, String>),
+}
+
+/// Whether the join box holds a space's share link (laptop-host §2 "Sharing = a link") rather
+/// than a node ticket or an invite for the socket route.
+pub(crate) fn is_share_link(text: &str) -> bool {
+    text.trim().starts_with(courier::link::PREFIX)
 }
 
 impl SpaceScreen {
@@ -53,6 +66,7 @@ impl SpaceScreen {
             Err(e) => (Vec::<WorkspaceMeta>::new(), Some(e.to_string())),
         };
         let node = node::load_relationship(vault).ok().flatten();
+        let foreign_node = node.as_ref().is_some_and(|r| !node::is_me(vault, r));
         let inventory = Rc::new(RefCell::new(crate::launcher::context::List {
             rows: spaces.clone(), ..Default::default()
         }));
@@ -63,15 +77,34 @@ impl SpaceScreen {
             space_name: String::new(),
             add_space: false,
             node,
+            foreign_node,
             claim_ticket: String::new(),
             show_claim: false,
             claim_error: None,
+            joining: false,
             publish_status: None,
             invite_status: None,
         }
     }
 
     pub(crate) fn inventory(&self) -> Spaces { self.inventory.clone() }
+
+    /// The shell's answer to a share link from the join box. A success already rebuilt this
+    /// screen with the space listed (`finish_join`), so it lands on a fresh one with nothing
+    /// to close; a failure keeps the box open with the reason.
+    fn join_answered(&mut self, result: Result<(), String>) {
+        self.joining = false;
+        match result {
+            Ok(()) => {
+                self.show_claim = false;
+                self.claim_ticket.clear();
+            }
+            Err(e) => {
+                self.show_claim = true;
+                self.claim_error = Some(e);
+            }
+        }
+    }
 
     pub(crate) fn create_workspace(&mut self, vault: &Vault, proxy: &EventLoopProxy<Msg>, value: &str) -> Result<(), String> {
         let name = crate::launcher::creation::name(value)?;
@@ -176,7 +209,7 @@ impl SpaceScreen {
     }
 
     fn claim_widget(&self) -> El<Msg> {
-        if let Some(record) = &self.node {
+        if let Some(record) = self.node.as_ref().filter(|_| self.foreign_node) {
             let did = record.node_did.chars().take(8).collect::<String>();
             return row().h(36.0).px(14.0).center().child(
                 text(format!("node {did}…"))
@@ -196,9 +229,16 @@ impl SpaceScreen {
             .hover_stroke(1.0, theme::bd_3())
             .tint(120.0)
             .on_click(Msg::Space(SpaceScreenMsg::ToggleClaim))
-            .child(text("join a node").font_size(13.0).color(theme::fg_1()));
+            .child(text("join").font_size(13.0).color(theme::fg_1()));
         if self.show_claim {
-            let caption = self.claim_error.as_deref().unwrap_or("⏎ join · esc cancel");
+            // A phone has no node socket (laptop-host step 8): the link is all it joins by.
+            const PLACEHOLDER: &str = if cfg!(target_os = "android") {
+                "type a share link"
+            } else {
+                "paste a share link, a node ticket or an invite"
+            };
+            let idle = if self.joining { "joining…" } else { "⏎ join · esc cancel" };
+            let caption = self.claim_error.as_deref().unwrap_or(idle);
             let caption_color = if self.claim_error.is_some() {
                 theme::error()
             } else {
@@ -216,7 +256,7 @@ impl SpaceScreen {
                     text_input(&self.claim_ticket, "claim_ticket", |s| {
                         Msg::Space(SpaceScreenMsg::ClaimTicket(s))
                     })
-                    .placeholder("paste a node ticket or an invite")
+                    .placeholder(PLACEHOLDER)
                     .on_enter(Msg::Space(SpaceScreenMsg::ClaimNode))
                     .on_esc(Msg::Space(SpaceScreenMsg::ToggleClaim))
                     .autofocus()
@@ -397,6 +437,13 @@ impl SpaceScreen {
             }
             SpaceScreenMsg::ClaimNode => {
                 let text = self.claim_ticket.trim().to_string();
+                self.claim_error = None;
+                if is_share_link(&text) {
+                    // The shell's own `JoinSpace`; `JoinResult` closes the box or says why not.
+                    self.joining = true;
+                    let _ = proxy.send_event(Msg::JoinLink(text));
+                    return None;
+                }
                 let vault = vault.clone();
                 let proxy = proxy.clone();
                 std::thread::spawn(move || {
@@ -410,12 +457,17 @@ impl SpaceScreen {
                 match result {
                     Ok(record) => {
                         self.node = Some(record);
+                        self.foreign_node = true;
                         self.show_claim = false;
                         self.claim_ticket.clear();
                         self.claim_error = None;
                     }
                     Err(e) => self.claim_error = Some(e),
                 }
+                None
+            }
+            SpaceScreenMsg::JoinResult(result) => {
+                self.join_answered(result);
                 None
             }
             SpaceScreenMsg::PublishAll => {

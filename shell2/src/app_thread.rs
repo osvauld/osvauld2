@@ -161,6 +161,11 @@ pub struct Open {
     pub node: Option<(String, Token)>,
     /// For a joined space: the session to pull a doc the vault lacks from, before seeding.
     pub pull: Option<crate::sessions::Pull>,
+    /// Who the app runs for (`owned-entries.md` §2.1, §2.4): the account, the device's peer
+    /// (stamped on every doc unless `stamp` is off — a test tab's docs are never pushed, and a
+    /// second live copy under the device's peer would be a second writer), and the manifest's
+    /// rules with the account's roles here.
+    pub me: app_host::Me,
 }
 
 enum In {
@@ -381,6 +386,10 @@ impl Drop for AppThread {
 fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
     let doc = LoroDoc::new();
     doc.import(&open.src).map_err(|e| e.to_string())?;
+    // The source is edited here too (the bridge's `edit_file`) and pushed as this device's.
+    if open.me.stamp {
+        doc.set_peer_id(open.me.peer).map_err(|e| e.to_string())?;
+    }
     let resolve = match (&open.node, open.persist) {
         (_, false) => std::rc::Rc::new(|_: &DocKey| Ok(None)) as app_host::Resolve,
         (_, true) if open.pull.is_some() => crate::resolver_with_session(
@@ -398,7 +407,7 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
         ),
         (None, true) => resolver(&open.vault, &open.ws_id, &open.item_id),
     };
-    let mut app = LuaApp::open(doc, resolve, wake, std::rc::Rc::new(|m| m))
+    let mut app = LuaApp::open_as(doc, resolve, wake, std::rc::Rc::new(|m| m), Some(open.me))
         .map_err(|e| e.to_string())?;
     let opened = if open.persist {
         indexer::ItemIndex::open(&open.vault, &open.ws_id, &open.item_id)
@@ -486,7 +495,9 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                     let frame = tile.wants_frame().then(|| {
                         let scene = Arc::new(tile.frame());
                         painted_scope = Some(requested_scope);
-                        TileFrame { scene, rects: tile.rects().into(), view3d: tile.view3d() }
+                        TileFrame {
+                            scene, rects: tile.rects().into(), view3d: tile.view3d(), editing: tile.editing(),
+                        }
                     });
                     let _ = reply.send(frame);
                 }
@@ -516,6 +527,7 @@ fn run(mut tile: Tile<Hosted>, rx: Receiver<In>, ctx: Ctx) {
                 scene,
                 rects: Arc::new([]),
                 view3d: tile.view3d(),
+                editing: tile.editing(),
             };
             *ctx.latest.lock().unwrap() = Some(frame);
             let _ = ctx.proxy.send_event(Msg::TileDirty(ctx.id.clone()));

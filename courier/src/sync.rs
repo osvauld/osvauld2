@@ -19,12 +19,15 @@
 //! The caller supplies the node's on-disk snapshot and persists what comes back; sync itself
 //! touches no storage.
 
-use loro::{ExportMode, LoroDoc, VersionVector};
+use loro::{ExportMode, ImportBlobMetadata, LoroDoc, PeerID, VersionVector};
+use manifest::{DocDecl, Manifest};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::access::{Access, doc_address};
+use crate::ops;
 use crate::policy;
+use crate::rules::{self, Actor};
 use crate::token::{Scope, Token};
 use crate::{CourierError, Result, nonce};
 
@@ -34,6 +37,27 @@ use crate::{CourierError, Result, nonce};
 pub enum SyncLayer {
     Src,
     Doc(String),
+}
+
+/// Whose changes a push may carry (`owned-entries.md` §2.1). A device's changes are stamped
+/// with its peer — [`identity::peer_of`] of the device key the transport proved — so the node
+/// refuses a push that carries, in another device's name, anything it doesn't already hold.
+/// A host relaying what it judged already (laptop-host §2 "Appointed hosts"), or the node's
+/// own machine over its local socket, carries others' changes by design and is not checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author {
+    Device(PeerID),
+    Host,
+}
+
+/// Who is pushing, as the node judged them before the doc is touched: whose changes the push
+/// may carry, the account's roles on this doc, and the manifest's rules over it
+/// (`owned-entries.md` §2.3) — `None` for the source layer or an app without a manifest.
+#[derive(Debug, Clone)]
+pub struct Writer<'a> {
+    pub author: Author,
+    pub roles: BTreeSet<String>,
+    pub rules: Option<(&'a Manifest, &'a DocDecl)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +136,7 @@ pub fn node_reject(
             | CourierError::NoWrite
             | CourierError::Undeclared
             | CourierError::NotPermitted
+            | CourierError::Forbidden(_)
     );
     // An empty doc still exports a header, so a pull is told apart by what the blob holds.
     let writes = !hello.update.is_empty()
@@ -165,10 +190,33 @@ pub fn desktop_roll_back(
     let doc = local
         .fork_at(&local.vv_to_frontiers(&base))
         .map_err(|_| CourierError::Decode)?;
+    // A fork starts under a fresh random peer; the device's later writes must keep its own
+    // (`owned-entries.md` §2.1). `local` is discarded, so no two writers share the peer.
+    doc.set_peer_id(local.peer_id())
+        .map_err(|_| CourierError::Decode)?;
     if let Some(state) = &rejected.state {
         doc.import(&state.update).map_err(|_| CourierError::Decode)?;
     }
     Ok(doc)
+}
+
+/// Every change the blob carries is the pusher's own, or one the node already holds (a first
+/// push carries the history a member pulled; a relayed edit comes round again). A change in
+/// another device's name that the node lacks is refused: without signatures the node cannot
+/// tell a relayed edit from a forged one, so from a device it accepts neither. An error, not
+/// a [`Rejected`]: a rollback would cut an honest writer back to what a node restored from
+/// backup holds, so the writer keeps its copy and the push is logged instead.
+fn only_the_pushers_own(
+    meta: &ImportBlobMetadata,
+    held: &VersionVector,
+    pusher: PeerID,
+) -> Result<()> {
+    for (peer, &end) in meta.partial_end_vv.iter() {
+        if *peer != pusher && held.get(peer).copied().unwrap_or(0) < end {
+            return Err(CourierError::ForeignPeer);
+        }
+    }
+    Ok(())
 }
 
 /// The version both `a` and `b` include. Each is causally closed, so their meet is too.
@@ -274,6 +322,7 @@ pub fn node_accept_sync(
     node_did: &str,
     current_snapshot: Option<&[u8]>,
     access: Access,
+    writer: &Writer,
     now: u64,
     revoked: &HashSet<[u8; 32]>,
 ) -> Result<(SyncAck, Vec<u8>)> {
@@ -281,7 +330,7 @@ pub fn node_accept_sync(
     if let Some(bytes) = current_snapshot {
         doc.import(bytes).map_err(|_| CourierError::Decode)?;
     }
-    let ack = accept_into(&doc, hello, node_did, access, now, revoked)?;
+    let ack = accept_into(&doc, hello, node_did, access, writer, now, revoked)?;
     let snapshot = doc
         .export(ExportMode::Snapshot)
         .map_err(|_| CourierError::Decode)?;
@@ -297,6 +346,7 @@ pub fn accept_into(
     hello: &SyncHello,
     node_did: &str,
     access: Access,
+    writer: &Writer,
     now: u64,
     revoked: &HashSet<[u8; 32]>,
 ) -> Result<SyncAck> {
@@ -323,6 +373,9 @@ pub fn accept_into(
     } else {
         let meta = LoroDoc::decode_import_blob_meta(&hello.update, false)
             .map_err(|_| CourierError::Decode)?;
+        if let Author::Device(peer) = writer.author {
+            only_the_pushers_own(&meta, &before, peer)?;
+        }
         meta.change_num > 0 && !before.includes_vv(&meta.partial_end_vv)
     };
     // An app's source carries its manifest — its roles and rules — so changing it is
@@ -341,7 +394,27 @@ pub fn accept_into(
             revoked,
         )?;
     }
-    if !hello.update.is_empty() {
+    // The manifest's rules over the ops the update carries (`owned-entries.md` §2.4, site 2):
+    // a device's own push that changes something; a relaying host judged it already.
+    let mut incomplete = false;
+    if changes && let (Author::Device(peer), Some((manifest, decl))) = (writer.author, writer.rules)
+        && !decl.rules.is_empty()
+    {
+        match ops::read(doc, &hello.update) {
+            Ok(read) => {
+                let actor = Actor {
+                    peer,
+                    roles: writer.roles.clone(),
+                };
+                rules::check(manifest, decl, &actor, doc, &read)?;
+            }
+            // Loro would hold these pending and apply them, unread, once their dependencies
+            // arrived: merge nothing, and the `missing` ack has the writer push everything.
+            Err(CourierError::Incomplete) => incomplete = true,
+            Err(e) => return Err(e),
+        }
+    }
+    if !hello.update.is_empty() && !incomplete {
         doc.import(&hello.update)
             .map_err(|_| CourierError::Decode)?;
     }
@@ -353,7 +426,7 @@ pub fn accept_into(
     Ok(SyncAck {
         request_id: hello.request_id.clone(),
         update: diff,
-        missing: !ours.includes_vv(&their_vv),
+        missing: incomplete || !ours.includes_vv(&their_vv),
         // Observed, not `changes`: that one is a prediction read off the blob's header.
         changed: ours != before,
         vv: ours.encode(),

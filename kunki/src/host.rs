@@ -45,8 +45,9 @@ pub trait Sink: Clone + Send + Sync + 'static {
     fn now_secs(&self) -> u64;
     fn now_ms(&self) -> u64;
     /// Merge one update: into the live doc on the shell's UI thread, into the vault inline
-    /// on the headless host. `Err` is a refusal the member hears.
-    fn sync(&self, hello: SyncHello) -> SyncFuture;
+    /// on the headless host. `Err` is a refusal the member hears. `device` is the key the
+    /// connection proved the member holds, which the merge binds its changes to.
+    fn sync(&self, hello: SyncHello, device: [u8; 32]) -> SyncFuture;
     /// The in-process listener, if the process has one.
     fn local_push(&self, subscriber_did: &str, update: &Push);
     /// Every host of `ws_id` to advertise, owner first.
@@ -470,6 +471,8 @@ pub struct Admitted {
     pub token: Token,
     /// Minted now for a claim, to be handed back in `Welcome`.
     pub minted: Option<Token>,
+    /// The device key the connection proved and the attestation named.
+    pub device: [u8; 32],
 }
 
 /// The whole of a session's admission, so it can be tested without a connection: the
@@ -517,7 +520,12 @@ pub fn admit(
     if !(space.contains(&scope) || scope.contains(&space)) {
         return Err("refused: the token is for another space".into());
     }
-    Ok(Admitted { did, token, minted })
+    Ok(Admitted {
+        did,
+        token,
+        minted,
+        device: remote,
+    })
 }
 
 /// The whole ledger of `ws`, for a host session.
@@ -624,7 +632,12 @@ async fn session<S: Sink>(
     mut send: SendStream,
     mut frames: FrameBuf,
 ) -> Result<(), String> {
-    let Admitted { did, token, minted } = admitted;
+    let Admitted {
+        did,
+        token,
+        minted,
+        device,
+    } = admitted;
     let now = ctx.sink.now_secs();
     let subscribe = |item_id: &str, layer: &SyncLayer| {
         admin.subscribe(
@@ -703,7 +716,7 @@ async fn session<S: Sink>(
                                     vv,
                                     update,
                                 };
-                                match ctx.sink.sync(hello).await {
+                                match ctx.sink.sync(hello, device).await {
                                     // The update first, always — a member pulling a doc before
                                     // it seeds waits for exactly one `Update`, empty when there
                                     // is nothing — then the ack that moves its `since`.

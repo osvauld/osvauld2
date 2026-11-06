@@ -24,6 +24,8 @@ use std::fmt;
 /// The implicit root role: may grant any declared role and satisfies every one.
 pub const OWNER: &str = "owner";
 
+pub use rules::{Forbid, Lit, OpKind, Operand, Pred, Rule, RulePath, RuleSeg};
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("manifest.osv line {line}: {message}")]
 pub struct Error {
@@ -50,6 +52,8 @@ pub struct DocDecl {
     pub shard: Option<Shard>,
     pub history: Option<History>,
     pub validate: Option<String>,
+    /// `rule` blocks and `own` lines, in file order (`owned-entries.md` §2.3).
+    pub rules: Vec<Rule>,
     pub line: usize,
 }
 
@@ -553,6 +557,8 @@ impl Parser {
         let mut pending: Vec<(usize, usize, bool, Names)> = Vec::new();
         let mut channel_names: Vec<(usize, Names)> = Vec::new();
         let mut grant_lines: Vec<(String, usize)> = Vec::new();
+        // Roles a rule names (`actor has`, `override`), checked like grants once all are read.
+        let mut role_refs: Vec<(String, usize)> = Vec::new();
         loop {
             let line = self.line();
             match self.next("a statement or `}`")? {
@@ -595,7 +601,7 @@ impl Parser {
                     "doc" => {
                         let text = self.word("a doc pattern")?;
                         let pattern = Pattern::parse(&text).map_err(|e| at(line, e))?;
-                        let (decl, raw) = self.doc_body(pattern, line)?;
+                        let (decl, raw) = self.doc_body(pattern, line, &mut role_refs)?;
                         let i = m.docs.len();
                         m.docs.push(decl);
                         for (write, names) in raw {
@@ -660,6 +666,12 @@ impl Parser {
         if let Some((name, line)) = grant_lines.iter().find(|(n, _)| !m.roles.contains(n)) {
             return Err(at(*line, format!("`{name}` is not a declared role")));
         }
+        if let Some((name, line)) = role_refs
+            .iter()
+            .find(|(n, _)| n != OWNER && !m.roles.contains(n))
+        {
+            return Err(at(*line, format!("`{name}` is not a declared role")));
+        }
         // A cycle would make roles grant and satisfy each other, themselves included.
         if let Some((role, line)) = grant_lines.iter().find(|(r, _)| m.reachable(r, r)) {
             return Err(at(
@@ -705,6 +717,7 @@ impl Parser {
         &mut self,
         pattern: Pattern,
         line: usize,
+        roles: &mut Vec<(String, usize)>,
     ) -> Result<(DocDecl, Vec<(bool, Names)>), Error> {
         self.expect(Tok::Open, "`{`")?;
         let mut decl = DocDecl {
@@ -714,6 +727,7 @@ impl Parser {
             shard: None,
             history: None,
             validate: None,
+            rules: Vec::new(),
             line,
         };
         let mut raw = Vec::new();
@@ -749,6 +763,8 @@ impl Parser {
                         });
                     }
                     "validate" => decl.validate = Some(self.string("a rule name")?),
+                    "rule" => decl.rules.push(self.rule_block(line, roles)?),
+                    "own" => decl.rules.push(self.own_clause(line, roles)?),
                     other => return Err(at(line, format!("unknown doc clause `{other}`"))),
                 },
                 t => return Err(at(line, format!("expected a clause, found {}", show(&t)))),
@@ -847,6 +863,8 @@ fn show(t: &Tok) -> String {
         Tok::RParen => "`)`".into(),
     }
 }
+
+mod rules;
 
 #[cfg(test)]
 mod tests;

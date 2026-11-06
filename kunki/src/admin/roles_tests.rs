@@ -37,6 +37,19 @@ pub(super) fn minted(byte: char) -> String {
     std::iter::repeat_n(byte, 32).collect()
 }
 
+/// A test device key, one per identity: the phrase-derived key stands in for the per-install
+/// one a vault holds, as `courier/src/sync/tests.rs` does.
+pub(super) fn device(who: &Identity) -> [u8; 32] {
+    who.device_public_key()
+}
+
+/// A device's own doc, stamped with its peer as every live doc is (`owned-entries.md` §2.1).
+pub(super) fn doc_of(who: &Identity) -> LoroDoc {
+    let doc = LoroDoc::new();
+    doc.set_peer_id(identity::peer_of(&device(who))).unwrap();
+    doc
+}
+
 fn src_with_manifest(manifest: &str) -> Vec<u8> {
     let doc = LoroDoc::new();
     let files = doc.get_map("files");
@@ -303,7 +316,7 @@ fn a_push_skips_a_subscriber_whose_grant_was_revoked() {
     f.admin.subscribe(&sub, NOW).unwrap();
     f.admin.revoke(&bob_token.id(), NOW).unwrap();
 
-    let doc = LoroDoc::new();
+    let doc = doc_of(&f.alice);
     doc.get_text("t").insert(0, "after bob left").unwrap();
     let hello = desktop_start_sync(
         f.alice.did(),
@@ -316,7 +329,9 @@ fn a_push_skips_a_subscriber_whose_grant_was_revoked() {
     )
     .unwrap();
     let pusher = MockPusher::new();
-    f.admin.accept_sync(hello, NOW, &pusher).unwrap();
+    f.admin
+        .accept_sync(hello, Some(device(&f.alice)), NOW, &pusher)
+        .unwrap();
     assert!(pusher.received_by(bob.did()).is_empty());
 }
 
@@ -335,7 +350,7 @@ fn an_app_role_alone_lets_its_holder_sync_that_item() {
     let hello = desktop_start_invite_claim(ticket, &dave, NOW).unwrap();
     let token = f.admin.accept_invite(hello, NOW).unwrap().token;
 
-    let doc = LoroDoc::new();
+    let doc = doc_of(&dave);
     doc.get_text("t").insert(0, "from dave").unwrap();
     let layer = SyncLayer::Doc("board".to_string());
     let hello = desktop_start_sync(
@@ -348,13 +363,16 @@ fn an_app_role_alone_lets_its_holder_sync_that_item() {
         None,
     )
     .unwrap();
-    f.admin.accept_sync(hello, NOW, &MockPusher::new()).unwrap();
+    f.admin
+        .accept_sync(hello, Some(device(&dave)), NOW, &MockPusher::new())
+        .unwrap();
     f.admin.authorize_listen(dave.did(), &token, NOW).unwrap();
 
     let elsewhere =
         desktop_start_sync(dave.did(), token, &f.ws, &minted('c'), layer, &doc, None).unwrap();
     refused(
-        f.admin.accept_sync(elsewhere, NOW, &MockPusher::new()),
+        f.admin
+            .accept_sync(elsewhere, Some(device(&dave)), NOW, &MockPusher::new()),
         CourierError::OutOfScope,
     );
 }
@@ -363,7 +381,7 @@ fn an_app_role_alone_lets_its_holder_sync_that_item() {
 fn a_member_cannot_rewrite_the_manifest_to_widen_its_own_cone() {
     let f = fixture();
     let (bob, bob_token) = f.member();
-    let src = LoroDoc::new();
+    let src = doc_of(&bob);
     src.import(&f.vault.get_src(&f.ws, &f.item).unwrap().unwrap())
         .unwrap();
     let forged =
@@ -384,7 +402,8 @@ fn a_member_cannot_rewrite_the_manifest_to_widen_its_own_cone() {
     )
     .unwrap();
     rejected(
-        f.admin.accept_sync(hello, NOW, &MockPusher::new()),
+        f.admin
+            .accept_sync(hello, Some(device(&bob)), NOW, &MockPusher::new()),
         &CourierError::NotPermitted.to_string(),
     );
     assert!(

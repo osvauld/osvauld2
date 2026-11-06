@@ -359,3 +359,160 @@ fn an_unclosed_block_is_an_error() {
     let e = err("app \"c\" {\n  roles member\n");
     assert!(e.message.contains("}"), "{e}");
 }
+
+// ── owned-entries §2.3: rules as data ────────────────────────────────────────
+
+const BOARD: &str = r#"
+app "board" {
+  roles admin, editor, member
+  doc board/{id} {
+    read member  write member
+    own cards/* override admin
+    rule cards/* {
+      forbid set, delete, move  unless actor is entry.creator or actor has admin
+      forbid set where changed state
+             unless state from todo to doing, doing to done, doing to todo
+      forbid insert, set where after.title is missing or len after.title above 200
+      forbid set unless changed only title, state, body
+    }
+    rule tree/** { forbid set, delete, move unless actor is entry.creator or actor has editor }
+  }
+  doc sheet/{id} { write member }
+}
+"#;
+
+fn lit(s: &str) -> Lit {
+    Lit::Str(s.into())
+}
+
+#[test]
+fn the_board_rules_parse_as_data() {
+    let m = Manifest::parse(BOARD).unwrap();
+    let board = &m.docs[0];
+    assert_eq!(board.rules.len(), 3);
+    assert_eq!(m.docs[1].rules, []);
+
+    // `own … override admin` is the first forbid of the rule block, spelled out.
+    let own = &board.rules[0];
+    assert_eq!(own.path, RulePath::parse("cards/*").unwrap());
+    assert_eq!(own.forbids.len(), 1);
+    assert_eq!(own.forbids[0], board.rules[1].forbids[0].clone_with_line(own.forbids[0].line));
+
+    let block = &board.rules[1];
+    assert_eq!(block.forbids.len(), 4);
+    assert_eq!(
+        block.forbids[0],
+        Forbid {
+            ops: vec![OpKind::Set, OpKind::Delete, OpKind::Move],
+            when: None,
+            unless: Some(Pred::Or(
+                Box::new(Pred::Is(Operand::Actor, Operand::Creator)),
+                Box::new(Pred::Has("admin".into())),
+            )),
+            line: block.forbids[0].line,
+        }
+    );
+    assert_eq!(block.forbids[1].when, Some(Pred::Changed("state".into())));
+    assert_eq!(
+        block.forbids[1].unless,
+        Some(Pred::From(
+            "state".into(),
+            vec![
+                (lit("todo"), lit("doing")),
+                (lit("doing"), lit("done")),
+                (lit("doing"), lit("todo")),
+            ]
+        ))
+    );
+    assert_eq!(block.forbids[2].ops, [OpKind::Insert, OpKind::Set]);
+    assert_eq!(
+        block.forbids[2].when,
+        Some(Pred::Or(
+            Box::new(Pred::Missing(Operand::After("title".into()))),
+            Box::new(Pred::Above(
+                Operand::Len(Box::new(Operand::After("title".into()))),
+                Lit::Int(200)
+            )),
+        ))
+    );
+    assert_eq!(
+        block.forbids[3].unless,
+        Some(Pred::ChangedOnly(vec!["title".into(), "state".into(), "body".into()]))
+    );
+    assert_eq!(
+        board.rules[2].path,
+        RulePath(vec![RuleSeg::Lit("tree".into()), RuleSeg::Rest])
+    );
+}
+
+impl Forbid {
+    fn clone_with_line(&self, line: usize) -> Self {
+        Self { line, ..self.clone() }
+    }
+}
+
+#[test]
+fn a_rule_path_covers_the_entry_and_anything_inside_it() {
+    let p = |s: &str| RulePath::parse(s).unwrap();
+    let path = |s: &str| s.split('/').map(String::from).collect::<Vec<_>>();
+    assert!(p("cards/*").covers(&path("cards/c1")));
+    assert!(p("cards/*").covers(&path("cards/c1/title")));
+    assert!(!p("cards/*").covers(&path("cards")));
+    assert!(!p("cards/*").covers(&path("notes/c1")));
+    assert!(p("tree/**").covers(&path("tree/a/b/c")));
+    assert!(!p("tree/**").covers(&path("tree")));
+    assert_eq!(p("cards/*").depth(&path("cards/c1/title")), 2);
+    assert_eq!(p("tree/**").depth(&path("tree/a/b")), 3);
+    assert_eq!(RulePath::parse("a/**/b").unwrap_err(), "`**` must end `a/**/b`");
+}
+
+#[test]
+fn precedence_is_not_then_and_then_or_and_parentheses_group() {
+    let src = |pred: &str| {
+        format!("app \"x\" {{ roles a\n doc d {{ write a  rule e/* {{ forbid set where {pred} }} }} }}")
+    };
+    let parse = |pred: &str| {
+        Manifest::parse(&src(pred)).unwrap().docs[0].rules[0].forbids[0]
+            .when
+            .clone()
+            .unwrap()
+    };
+    let t = |s: &str| Operand::Lit(lit(s));
+    let is = |a: &str, b: &str| Pred::Is(t(a), t(b));
+    assert_eq!(
+        parse("x is p or y is q and not z is r"),
+        Pred::Or(
+            Box::new(is("x", "p")),
+            Box::new(Pred::And(
+                Box::new(is("y", "q")),
+                Box::new(Pred::Not(Box::new(is("z", "r"))))
+            ))
+        )
+    );
+    assert_eq!(
+        parse("(x is p or y is q) and z is r"),
+        Pred::And(
+            Box::new(Pred::Or(Box::new(is("x", "p")), Box::new(is("y", "q")))),
+            Box::new(is("z", "r"))
+        )
+    );
+}
+
+#[test]
+fn a_rule_that_is_not_data_is_refused() {
+    let src = |body: &str| format!("app \"x\" {{ roles a\n doc d {{ write a  {body} }} }}");
+    let e = |body: &str| Manifest::parse(&src(body)).unwrap_err().message;
+    assert_eq!(e("rule e/* { }"), "a rule needs at least one `forbid`");
+    assert_eq!(e("rule e/* { forbid drop }"), "expected `insert`, `set`, `delete` or `move`, found `drop`");
+    assert_eq!(e("own e/* override mod"), "`mod` is not a declared role");
+    assert_eq!(e("rule e/* { forbid set where actor has mod }"), "`mod` is not a declared role");
+    assert_eq!(e("rule e/* { forbid set where after.x is forbid }"), "`forbid` is a keyword, not a value");
+    assert_eq!(e("rule e/**/f { forbid set }"), "`**` must end `e/**/f`");
+    assert!(e("rule e/* { forbid set where after.x }").starts_with("expected `is`, `in`, `above` or `below`"));
+}
+
+#[test]
+fn owner_may_be_named_as_an_override_without_being_declared() {
+    let src = "app \"x\" { roles a\n doc d { write a  own e/* override owner } }";
+    Manifest::parse(src).unwrap();
+}

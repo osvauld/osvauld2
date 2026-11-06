@@ -187,7 +187,7 @@ impl Sink for HeadlessSink {
         now_ms()
     }
 
-    fn sync(&self, hello: SyncHello) -> SyncFuture {
+    fn sync(&self, hello: SyncHello, device: [u8; 32]) -> SyncFuture {
         let Some(admin) = self.admin_for(&hello.ws_id) else {
             return Box::pin(async { Err("not hosting this space".to_string()) });
         };
@@ -195,7 +195,7 @@ impl Sink for HeadlessSink {
         let now = now_secs();
         let merged = serialized(self.merge.clone(), move || {
             admin
-                .accept_sync(hello, now, &pusher)
+                .accept_sync(hello, Some(device), now, &pusher)
                 .map_err(|e| e.to_string())
         });
         Box::pin(async move { merged.await? })

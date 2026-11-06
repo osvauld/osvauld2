@@ -8,7 +8,9 @@ use courier::token::{Scope, Token, issue_root};
 use identity::Identity;
 use loro::LoroDoc;
 
-use super::roles_tests::{Fixture, NOW, acked, fixture_with, minted, refused, rejected};
+use super::roles_tests::{
+    Fixture, NOW, acked, device, doc_of, fixture_with, minted, refused, rejected,
+};
 use super::*;
 use crate::push::MockPusher;
 
@@ -24,14 +26,16 @@ const CHAT: &str = r#"app "chat" {
 
 const DAY: &str = "2026-10-04";
 
-fn text(s: &str) -> LoroDoc {
-    let doc = LoroDoc::new();
+/// `who`'s own doc with `s` written in it.
+fn text(who: &Identity, s: &str) -> LoroDoc {
+    let doc = doc_of(who);
     doc.get_text("t").insert(0, s).unwrap();
     doc
 }
 
-fn group(members: &[&str]) -> LoroDoc {
-    let doc = LoroDoc::new();
+/// `who`'s own copy of a group's meta, listing `members`.
+fn group(who: &Identity, members: &[&str]) -> LoroDoc {
+    let doc = doc_of(who);
     let map = doc.get_map("members");
     for did in members {
         map.insert(did, true).unwrap();
@@ -52,7 +56,7 @@ impl Fixture {
         let layer = SyncLayer::Doc(name.to_string());
         let hello =
             desktop_start_sync(who.did(), token.clone(), &self.ws, item, layer, doc, None).unwrap();
-        self.admin.accept_sync(hello, NOW, pusher)
+        self.admin.accept_sync(hello, Some(device(who)), NOW, pusher)
     }
 
     fn sync(
@@ -87,11 +91,11 @@ impl Fixture {
 fn a_member_may_read_an_admin_doc_but_not_change_it() {
     let f = fixture_with(CHAT);
     let (bob, bob_token) = f.member();
-    f.sync(&f.alice, &f.alice_token, "chat", &text("general"))
+    f.sync(&f.alice, &f.alice_token, "chat", &text(&f.alice, "general"))
         .unwrap();
 
     let ack = acked(f.sync(&bob, &bob_token, "chat", &LoroDoc::new()));
-    let mine = LoroDoc::new();
+    let mine = doc_of(&bob);
     mine.import(&ack.update).unwrap();
     assert_eq!(mine.get_text("t").to_string(), "general");
 
@@ -115,16 +119,16 @@ fn nobody_writes_under_another_users_did() {
     let f = fixture_with(CHAT);
     let (bob, bob_token) = f.member();
     let alices = format!("user/{}", f.alice.did());
-    f.sync(&f.alice, &f.alice_token, &alices, &text("alice"))
+    f.sync(&f.alice, &f.alice_token, &alices, &text(&f.alice, "alice"))
         .unwrap();
-    let r = rejected(f.sync(&bob, &bob_token, &alices, &text("mallory")), "may not read");
+    let r = rejected(f.sync(&bob, &bob_token, &alices, &text(&bob, "mallory")), "may not read");
     assert_eq!(r.state, None, "bob learned alice's doc from a rejection");
     assert_eq!(f.stored_text(&alices), "alice");
 
     // Nor may bob create one for someone who hasn't yet.
     let (carol, _) = f.member();
     let carols = format!("user/{}", carol.did());
-    let r = rejected(f.sync(&bob, &bob_token, &carols, &text("mallory")), "may not write");
+    let r = rejected(f.sync(&bob, &bob_token, &carols, &text(&bob, "mallory")), "may not write");
     assert_eq!(r.state, None);
     assert!(f.stored(&carols).is_none());
 }
@@ -139,7 +143,7 @@ fn a_dm_reaches_its_two_people_only_asked_for_or_pushed() {
     f.subscribe(&carol, &carol_token, &dm);
 
     let pusher = MockPusher::new();
-    f.sync_on(&f.item, &f.alice, &f.alice_token, &dm, &text("hi bob"), &pusher)
+    f.sync_on(&f.item, &f.alice, &f.alice_token, &dm, &text(&f.alice, "hi bob"), &pusher)
         .unwrap();
     assert_eq!(pusher.received_by(bob.did()).len(), 1);
     assert!(pusher.received_by(carol.did()).is_empty());
@@ -150,7 +154,7 @@ fn a_dm_reaches_its_two_people_only_asked_for_or_pushed() {
     );
     // Owning the node does not open someone else's DM either.
     let carols_dm = format!("dm/{}/{}/{DAY}", bob.did(), carol.did());
-    f.sync(&bob, &bob_token, &carols_dm, &text("hi carol"))
+    f.sync(&bob, &bob_token, &carols_dm, &text(&bob, "hi carol"))
         .unwrap();
     refused(
         f.sync(&f.alice, &f.alice_token, &carols_dm, &LoroDoc::new()),
@@ -164,13 +168,14 @@ fn a_group_reaches_whoever_its_meta_lists_now() {
     let (bob, bob_token) = f.member();
     let (carol, carol_token) = f.member();
     let (meta, day) = ("group/g1/meta", format!("group/g1/{DAY}"));
-    let listed = group(&[f.alice.did(), bob.did()]);
+    let listed = group(&f.alice, &[f.alice.did(), bob.did()]);
     f.sync(&f.alice, &f.alice_token, meta, &listed).unwrap();
     f.subscribe(&bob, &bob_token, &day);
     f.subscribe(&carol, &carol_token, &day);
 
     let pusher = MockPusher::new();
-    f.sync_on(&f.item, &f.alice, &f.alice_token, &day, &text("for bob"), &pusher)
+    let today = text(&f.alice, "for bob");
+    f.sync_on(&f.item, &f.alice, &f.alice_token, &day, &today, &pusher)
         .unwrap();
     assert_eq!(pusher.received_by(bob.did()).len(), 1);
     assert!(pusher.received_by(carol.did()).is_empty());
@@ -184,16 +189,16 @@ fn a_group_reaches_whoever_its_meta_lists_now() {
         CourierError::NoRead,
     );
     let tomorrow = "group/g1/2026-10-05";
-    let r = rejected(f.sync(&carol, &carol_token, tomorrow, &text("let me in")), "may not write");
+    let r = rejected(f.sync(&carol, &carol_token, tomorrow, &text(&carol, "let me in")), "may not write");
     assert_eq!(r.state, None);
 
     // The read rule is re-read on every push: listing carol reaches her from then on.
     listed.get_map("members").insert(carol.did(), true).unwrap();
     f.sync(&f.alice, &f.alice_token, meta, &listed).unwrap();
     let pusher = MockPusher::new();
-    let next = text("for bob");
-    next.get_text("t").insert(0, "and carol ").unwrap();
-    f.sync_on(&f.item, &f.alice, &f.alice_token, &day, &next, &pusher)
+    // The same live copy edited on: one writer per peer, so never a second doc under alice's.
+    today.get_text("t").insert(0, "and carol ").unwrap();
+    f.sync_on(&f.item, &f.alice, &f.alice_token, &day, &today, &pusher)
         .unwrap();
     assert_eq!(pusher.received_by(carol.did()).len(), 1);
     f.sync(&carol, &carol_token, &day, &LoroDoc::new()).unwrap();
@@ -203,7 +208,7 @@ fn a_group_reaches_whoever_its_meta_lists_now() {
 fn an_undeclared_doc_is_refused_even_to_the_owner() {
     let f = fixture_with(CHAT);
     let r = rejected(
-        f.sync(&f.alice, &f.alice_token, "smuggled/x", &text("x")),
+        f.sync(&f.alice, &f.alice_token, "smuggled/x", &text(&f.alice, "x")),
         "does not declare",
     );
     assert_eq!(r.state, None);
@@ -227,10 +232,10 @@ fn a_one_doc_grant_writes_that_doc_and_reaches_nothing_beside_it() {
         .unwrap();
     f.admin.record(&token, Cause::Node, NOW).unwrap();
 
-    f.sync(&dave, &token, "chat", &text("dave's channels"))
+    f.sync(&dave, &token, "chat", &text(&dave, "dave's channels"))
         .unwrap();
     refused(
-        f.sync(&dave, &token, "group/g1/meta", &group(&[dave.did()])),
+        f.sync(&dave, &token, "group/g1/meta", &group(&dave, &[dave.did()])),
         CourierError::OutOfScope,
     );
 }
@@ -244,7 +249,7 @@ fn an_item_whose_source_the_node_lacks_is_membership_only() {
         &bob,
         &bob_token,
         "anything",
-        &text("x"),
+        &text(&bob, "x"),
         &MockPusher::new(),
     )
     .unwrap();
