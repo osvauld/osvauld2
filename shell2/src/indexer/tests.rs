@@ -155,7 +155,7 @@ fn seeded_messages_are_searchable_once_flushed() {
     let mut o = open(&f);
     o.flush(&f);
     assert_eq!(o.find("deploy"), ["seed-1"]);
-    assert_eq!(o.find("author:abe"), ["seed-2"]);
+    assert_eq!(o.find("author:me"), ["seed-1", "seed-2"]); // seeds carry me().name
 }
 
 #[test]
