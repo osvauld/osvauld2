@@ -39,12 +39,13 @@ class Recorder:
 
     def __init__(self, rpc, item_id: str, out: Path, *, fps: int = 24,
                  start: Point | None = None, gif: bool = False, crf: int = 18,
-                 crop_top: int = 0, upscale: int = 1):
+                 crop_top: int = 0, upscale: int = 1, shell: bool = False):
         if not shutil.which("ffmpeg"):
             raise RuntimeError("the recorder needs ffmpeg on PATH")
         self.rpc, self.item, self.out, self.fps = rpc, item_id, Path(out), fps
         self.start, self.gif, self.crf, self.crop_top = start, gif, crf, crop_top
         self.upscale = upscale
+        self.shell = shell  # film the whole shell (Home, tab bar) instead of one item
         self.captions: list[tuple[int, int, str]] = []
         self._caption: tuple[int, str] | None = None
         self.frames = 0
@@ -195,7 +196,8 @@ class Recorder:
             )
         if now < due:
             self.rpc.advance(due - now)
-        shot = self.rpc.screenshot(self.item)
+        shot = (self.rpc.request("ScreenshotShell", width=None, height=None, scale=None)
+                if self.shell else self.rpc.screenshot(self.item))
         assert self.ffmpeg and self.ffmpeg.stdin
         self.ffmpeg.stdin.write(base64.b64decode(shot["png_base64"]))
         self.frames += 1

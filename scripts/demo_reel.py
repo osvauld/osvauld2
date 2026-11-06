@@ -512,6 +512,83 @@ def asset_editor(rec: Recorder, rpc, item: str) -> None:
     rec.caption(None)
 
 
+THEME_STEPS = [  # theme.lua, one line at a time: the in-shell editor shows the file as it changes
+    ('bg = "#10141d"', 'bg = "#1a1410"'),
+    ('panel = "#1a2130"', 'panel = "#2a1f18"'),
+    ('hover = "#232e42"', 'hover = "#3c2b20"'),
+    ('line = "#34415a"', 'line = "#5c4533"'),
+    ('accent = "#83adff"', 'accent = "#ff9f6b"'),
+    ('app = "#83adff"', 'app = "#ff9f6b"'),
+]
+LAYOUT_EDITS = [  # main.lua through the same bridge edit path an agent uses
+    ("heading", "the title counts what's here",
+     [('"Your apps"', '#cards .. " things in " .. snapshot.workspace.name')]),
+    ("cards", "wide cards, one line fewer",
+     [("w = 200, min_w = 180, h = 144, pad = 18, gap = 12,", "w = 430, min_w = 180, h = 110, pad = 18, gap = 6,"),
+      ('ui.col({ grow = true }),\n\t\tui.text({ "Open app →", ', 'ui.text({ "Open " .. item.kind .. " →", ')]),
+]
+
+
+def workspace_custom(rec: Recorder, rpc, item: str) -> None:
+    """The workspace home is itself a Lua file: edit its theme in the in-shell editor, its layout
+    over the bridge (as an agent would), then reset to the shipped source."""
+    theme = rpc.read_launcher_file_versioned("theme.lua")
+
+    def tap(el: str, pause: float = 0.5) -> None:
+        rec.glide_to(el, 0.5)
+        rec.click()
+        rec.hold(pause)
+
+    cards = sorted((r for r in rpc.rects() if r["id"].startswith("launcher:item:")), key=lambda r: (r["y"], r["x"]))
+    rec.caption("the workspace home is a Lua file in the account's encrypted store\nlauncher/main.lua + theme.lua: yours to change")
+    rec.hold(1.2)
+    for c in cards[:3]:
+        rec.glide_to(c["id"], 0.45)
+        rec.hold(0.25)
+    rec.caption("Customize: the launcher's own source, edited inside the shell")
+    tap("launcher:customize", 1.0)
+    text = theme["content"]
+    for old, new in THEME_STEPS:
+        text = text.replace(old, new)
+        rec.step(lambda t=text: rpc.type_launcher("launcher:editor:source", t))
+        rec.rebase()
+        rec.hold(0.55)
+    rec.hold(0.4)
+    tap("launcher:editor:save", 0.4)
+    rec.caption("Save & apply: validated, activated, kept across restarts")
+    rec.glide_to(cards[1]["id"], 0.6)
+    rec.hold(1.6)
+    rec.caption(None)
+    for key, what, edits in LAYOUT_EDITS:
+        rec.caption(f"agent> edit_launcher_file main.lua  --  {what}\n"
+                    + "\n".join(f"- {o}\n+ {n}" for o, n in edits[:1]))
+        rec.hold(1.4)
+        cur = rpc.read_launcher_file_versioned("main.lua")
+        res = rpc.edit_launcher_file("main.lua", cur["revision"],
+                                     [{"old_text": o, "new_text": n} for o, n in edits])
+        assert res["persisted"] and res["activation"] == "activated", res
+        rpc.frame(2)
+        rec.rebase()
+        rec.hold(2.0)
+    rec.caption("a bad edit is refused and the running launcher is kept")
+    cur = rpc.read_launcher_file_versioned("main.lua")
+    try:
+        rpc.edit_launcher_file("main.lua", cur["revision"],
+                               [{"old_text": "local snapshot = shell.snapshot()", "new_text": "error('broken launcher')"}])
+        raise AssertionError("a broken launcher edit should be refused")
+    except Exception as e:
+        assert "broken launcher" in str(e), e
+    rpc.frame(2)
+    rec.rebase()
+    rec.hold(1.6)
+    rec.caption("Reset launcher: back to the shipped source, two clicks")
+    tap("shell:reset-launcher", 0.5)
+    tap("shell:reset-launcher", 0.4)
+    rec.hold(2.0)
+    assert rpc.read_launcher_file_versioned("theme.lua") == theme
+    rec.caption(None)
+
+
 # name → (app folder, item title, viewport, scripted clip)
 CLIPS = {
     "kanban": ("kanban", "Kanban", (1100, 720), kanban),
@@ -538,6 +615,7 @@ CLIPS = {
     "pie": ("pie", "Pie", (1000, 700), pie),
     "line_chart": ("line_chart", "Line chart", (1000, 700), line_chart),
     "agent_builds": (seed_dir(), "Launch checklist", (900, 700), agent_builds),
+    "workspace_custom": (None, "Studio", (1000, 700), workspace_custom),
 }
 
 
@@ -547,15 +625,25 @@ def record(name: str, out_dir: Path, fps: int, gif: bool) -> None:
     with Session(shell_binary=shell_binary(release=True), offscreen=viewport) as s:
         rpc = s.rpc
         rpc.signup("reel", "correct horse")
-        ws = rpc.create_workspace("reel")
-        item = rpc.create_item(ws["id"], title, "app")["id"]
-        rpc.upload_folder(item, APPS / folder)
-        rpc.open_item(item)
-        rpc.frame(3)
+        if folder is None:  # the shell's own Home is the subject: film it, not an app
+            ws = rpc.create_workspace(title)
+            for n, kind in (("Team chat", "app"), ("Budget", "table"), ("Sketch", "canvas"),
+                            ("Kanban", "app"), ("Dashboard", "app"), ("Notes", "doc")):
+                rpc.create_item(ws["id"], n, kind)
+            rpc.select_workspace(ws["id"])
+            rpc.frame(6)
+            item = ""
+        else:
+            ws = rpc.create_workspace("reel")
+            item = rpc.create_item(ws["id"], title, "app")["id"]
+            rpc.upload_folder(item, APPS / folder)
+            rpc.open_item(item)
+            rpc.frame(3)
         with Recorder(rpc, item, out, fps=fps, start=(viewport[0] // 2, viewport[1] - 40), gif=gif,
-                      crop_top=CHROME_TOP, upscale=2 if name == "agent_edit" else 1) as rec:
+                      crop_top=0 if folder is None else CHROME_TOP, shell=folder is None,
+                      upscale=2 if name == "agent_edit" else 1) as rec:
             clip(rec, rpc, item)
-        errors = rpc.read_console(item)
+        errors = rpc.read_launcher_console() if folder is None else rpc.read_console(item)
     print(f"{name}: {rec.frames} frames → {out}" + (f"  console: {errors[:3]}" if errors else ""))
 
 
