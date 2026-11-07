@@ -15,7 +15,15 @@ impl UserData for WorldHandle {
                 return Ok(None);
             };
             let Ok(body) = world.body(&id) else {
-                return Ok(None);
+                // A wheel reports its live pose only: it has no velocity of its own.
+                let Ok((position, rotation)) = world.pose(&id) else {
+                    return Ok(None);
+                };
+                let out = lua.create_table()?;
+                out.set("position", lua.create_sequence_from(position.to_array())?)?;
+                out.set("rotation", lua.create_sequence_from(rotation.to_array())?)?;
+                out.set("tick", world.tick())?;
+                return Ok(Some(out));
             };
             let out = lua.create_table()?;
             out.set("position", lua.create_sequence_from(body.position)?)?;
@@ -49,20 +57,30 @@ impl UserData for WorldHandle {
         methods.add_method(
             "scene",
             |lua, this, (camera, options): (Option<Table>, Option<Table>)| {
-                let running = if let Some(options) = options {
-                    named_fields(&options, "world3d:scene options", &["running"])?;
-                    match options.get::<mlua::Value>("running")? {
+                let (running, poses) = if let Some(options) = options {
+                    named_fields(&options, "world3d:scene options", &["running", "poses"])?;
+                    let running = match options.get::<mlua::Value>("running")? {
                         mlua::Value::Nil => true,
                         mlua::Value::Boolean(value) => value,
                         _ => return Err(Error::runtime("world3d:scene running must be a boolean")),
-                    }
+                    };
+                    (running, options.get::<Option<Table>>("poses")?)
                 } else {
-                    true
+                    (true, None)
                 };
-                let scene = match camera {
-                    Some(camera) => Scene3d::new(camera3d(&camera)?, this.scene.objects.to_vec())
-                        .map_err(Error::external)?,
-                    None => this.scene.clone(),
+                let scene = match (camera, poses) {
+                    (None, None) => this.scene.clone(),
+                    (camera, poses) => {
+                        let mut objects = this.scene.objects.to_vec();
+                        if let Some(poses) = poses {
+                            override_poses(&mut objects, poses)?;
+                        }
+                        let camera = match camera {
+                            Some(camera) => camera3d(&camera)?,
+                            None => this.scene.camera.clone(),
+                        };
+                        Scene3d::new(camera, objects).map_err(Error::external)?
+                    }
                 };
                 lua.create_userdata(SceneHandle {
                     id: this.id.clone(),
@@ -125,6 +143,26 @@ impl UserData for WorldHandle {
                 .map_err(Error::external)
         });
     }
+}
+
+/// This frame's authored pose for named visuals, before the world composes them: in their
+/// host's frame when attached. What moves and why is the app's; the authored scene is untouched.
+fn override_poses(objects: &mut [runtime::scene3d::Object3d], poses: Table) -> mlua::Result<()> {
+    for pair in poses.pairs::<String, Table>() {
+        let (id, pose) = pair?;
+        let object = objects
+            .iter_mut()
+            .find(|o| o.id.as_ref() == id)
+            .ok_or_else(|| Error::runtime(format!("world3d:scene poses: no visual {id}")))?;
+        named_fields(&pose, "world3d:scene pose", &["position", "rotation"])?;
+        if let Some(v) = pose.get::<Option<Table>>("position")? {
+            object.position = vec3(v, "pose.position")?;
+        }
+        if let Some(v) = pose.get::<Option<Table>>("rotation")? {
+            object.rotation = quat(v, "pose.rotation")?;
+        }
+    }
+    Ok(())
 }
 
 fn numbers(table: &Table, name: &str, size: usize) -> mlua::Result<()> {

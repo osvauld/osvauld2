@@ -7,6 +7,7 @@
 
 mod app_src;
 mod app_thread;
+mod binary_files;
 mod bridge;
 mod bundled;
 mod indexer;
@@ -586,6 +587,24 @@ fn serve(h: &mut app_thread::Hosted, req: Request, vault: &Vault) -> Response {
                 Err(e) => Response::err(e),
             }
         }
+        Request::WriteBinaryFile { path, base64, .. } => {
+            let bytes = match valid_source_path(&path).and_then(|()| binary_files::decode(&base64)) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
+            };
+            match h
+                .app
+                .bind_binary_file(&path, &bytes, binary_files::store(vault, &ws, &item))
+            {
+                Ok(bound) => binary_files::finish(vault, &ws, &item, bound),
+                Err(e) => Response::err(e),
+            }
+        }
+        Request::ListBinaryFiles { .. } => binary_files::list(h.app.binary_files()),
+        Request::ReadBinaryFile { path, .. } => {
+            let file = h.app.binary_files().into_iter().find(|f| f.path == path);
+            binary_files::read(vault, &ws, &item, file)
+        }
         Request::ReloadItem { .. } => h
             .app
             .reload()
@@ -888,6 +907,9 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
                 "rotation": object.rotation,
                 "scale": object.scale,
                 "color": object.color,
+                "texture": object.texture.map(|(resource, width, height)| serde_json::json!({
+                    "resource": resource, "width": width, "height": height,
+                })),
             })
         })
         .collect::<Vec<_>>();
@@ -1553,6 +1575,47 @@ impl Shell {
                     }
                 }
             },
+            Request::WriteBinaryFile {
+                item_id,
+                path,
+                base64,
+            } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => {
+                    let (ws, item) = (wi.ws_id.as_str(), wi.id.as_str());
+                    let bound = valid_source_path(&path)
+                        .and_then(|()| binary_files::decode(&base64))
+                        .and_then(|bytes| {
+                            let doc = source_doc(&self.vault, ws, item)?;
+                            app_host::bind_binary_file(
+                                &doc,
+                                &path,
+                                &bytes,
+                                binary_files::store(&self.vault, ws, item),
+                            )
+                        });
+                    match bound {
+                        Ok(bound) => binary_files::finish(&self.vault, ws, item, bound),
+                        Err(e) => Response::err(e),
+                    }
+                }
+            },
+            Request::ListBinaryFiles { item_id } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => source_doc(&self.vault, &wi.ws_id, &wi.id)
+                    .map(|doc| binary_files::list(app_host::binary_files(&doc)))
+                    .unwrap_or_else(Response::err),
+            },
+            Request::ReadBinaryFile { item_id, path } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => match source_doc(&self.vault, &wi.ws_id, &wi.id) {
+                    Err(e) => Response::err(e),
+                    Ok(doc) => {
+                        let file = app_host::binary_file(&doc, &path);
+                        binary_files::read(&self.vault, &wi.ws_id, &wi.id, file)
+                    }
+                },
+            },
             Request::ReloadItem { .. } => Response::err("item is not open"),
             // Slice 1 runs only source-only `t.expect` tests, but it still opens a non-persisting
             // test tab so the runner path already has a distinct retained-id/doc namespace.
@@ -1821,6 +1884,9 @@ impl Shell {
             | Request::ReadFileVersioned { item_id, .. }
             | Request::EditFile { item_id, .. }
             | Request::WriteFile { item_id, .. }
+            | Request::WriteBinaryFile { item_id, .. }
+            | Request::ListBinaryFiles { item_id }
+            | Request::ReadBinaryFile { item_id, .. }
             | Request::ReloadItem { item_id }
             | Request::DumpTree { item_id }
             | Request::Click { item_id, .. }

@@ -4,6 +4,7 @@
 //! `view()` walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update
 //! loop is unchanged — dispatch just calls whatever the latest view registered under that key.
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
+mod binary_files;
 mod crdt;
 mod gfx;
 pub mod host;
@@ -13,8 +14,15 @@ mod modules;
 mod props;
 pub(crate) mod signal;
 mod ui_group;
+pub use binary_files::{
+    BinaryFile, BoundFile, MAX_BINARY_FILE, MAX_BINARY_ITEM, binary_file, binary_files,
+    bind_binary_file,
+};
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, DocKey, Docs, Resolve, Wake};
+/// Reads one binary item file's sealed bytes by blob id (`BinaryFile::blob`); `Ok(None)` when
+/// absent. Rust loaders (`gfx.load_glb`) use it; Lua never receives the bytes.
+pub type Files = Rc<dyn Fn(&str) -> Result<Option<Vec<u8>>, String>>;
 pub use index::{SearchFn, SearchHit};
 
 use loro::{
@@ -452,6 +460,7 @@ pub struct LuaApp<M> {
     kept: ui_group::KeptGroups<M>,
     tracker: signal::Tracker,
     resolve: Resolve,
+    files: Files,
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
@@ -552,6 +561,9 @@ pub fn edit_source_file(
 }
 
 pub fn write_source_file(doc: &LoroDoc, path: &str, content: &str) -> Result<Vec<u8>, String> {
+    if binary_files::is_binary_path(doc, path) {
+        return Err(format!("{path} is a binary file"));
+    }
     let files = doc.get_map("files");
     let text = match files.get(path) {
         Some(ValueOrContainer::Container(Container::Text(t))) => t,
@@ -592,11 +604,26 @@ impl<M: Clone + 'static> LuaApp<M> {
         src: LoroDoc, resolve: Resolve, wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
     ) -> mlua::Result<Self> {
+        Self::open_full(src, resolve, Rc::new(|_| Ok(None)), wake, to_msg, setup, entry)
+    }
+
+    /// [`open`](Self::open) for a host that stores the app's binary files.
+    pub fn open_with_files(
+        src: LoroDoc, resolve: Resolve, files: Files, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    ) -> mlua::Result<Self> {
+        Self::open_full(src, resolve, files, wake, to_msg, None, "main.lua")
+    }
+
+    fn open_full(
+        src: LoroDoc, resolve: Resolve, files: Files, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
+    ) -> mlua::Result<Self> {
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
-            src, cores, resolve, wake, to_msg, search, Worlds::default(),
+            src, cores, resolve, files, wake, to_msg, search, Worlds::default(),
             gfx::world3d::Host::default(), setup, false, Rc::from(entry),
         )?;
         if app.error.is_none() {
@@ -620,6 +647,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         src: Rc<Source>,
         cores: Cores,
         resolve: Resolve,
+        files: Files,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
@@ -655,6 +683,17 @@ impl<M: Clone + 'static> LuaApp<M> {
         signal::install(&vm, viewing.clone(), tracker.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
+        // Paths resolve through the source this VM was built from, so a VM reads only its own
+        // revision's files.
+        let (from, read) = (src.clone(), files.clone());
+        gfx::glb::set_reader(
+            &vm,
+            Rc::new(move |path: &str| {
+                let file = binary_file(&from.doc, path)
+                    .ok_or_else(|| format!("no binary file {path:?}"))?;
+                read(&file.blob)?.ok_or_else(|| format!("{path}: stored bytes are missing"))
+            }),
+        );
         let host_context = host::HostContext::new(budget.clone());
         if let Some(install) = &setup {
             install(&vm, host_context.clone())?;
@@ -681,6 +720,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             docs,
             cores,
             resolve,
+            files,
             wake,
             search,
             console: Rc::new(RefCell::new(VecDeque::new())),
@@ -726,6 +766,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             source,
             self.cores.clone(),
             self.resolve.clone(),
+            self.files.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
             self.search.clone(),
@@ -884,6 +925,19 @@ impl<M: Clone + 'static> LuaApp<M> {
 
     pub fn write_source_file(&self, path: &str, content: &str) -> Result<Vec<u8>, String> {
         write_source_file(&self.src.doc, path, content)
+    }
+
+    pub fn binary_files(&self) -> Vec<BinaryFile> {
+        binary_files(&self.src.doc)
+    }
+
+    pub fn bind_binary_file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        store: impl FnOnce(&[u8]) -> Result<String, String>,
+    ) -> Result<BoundFile, String> {
+        bind_binary_file(&self.src.doc, path, bytes, store)
     }
 
     pub fn source_snapshot(&self) -> Result<Vec<u8>, String> {

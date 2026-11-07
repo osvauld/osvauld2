@@ -3,7 +3,11 @@ local M = require("model")
 local Camera = require("camera")
 local MissionView = require("mission_view")
 local Mission = require("mission")
+-- Worlds exist only from module initialization; a missing surface model leaves the rest working.
+local surface_ok,SurfaceView = pcall(require,"surface_view")
+local surface_error = not surface_ok and tostring(SurfaceView) or nil
 local in_mission = false
+local on_surface = false
 local drive_keys = {KeyW=true,KeyS=true,KeyA=true,KeyD=true,Space=true}
 
 local function overview()
@@ -55,6 +59,9 @@ local function button(id, label, action)
 end
 
 return function()
+	if on_surface then
+		return SurfaceView.view(function() require("surface").pause(); on_surface=false; Camera.ground() end)
+	end
 	if in_mission then
 		return MissionView.view(function() Mission.pause(); in_mission=false; Camera.ground() end)
 	end
@@ -74,6 +81,10 @@ return function()
 		ui.row({gap=12,align_center=true,
 			button("mission-enter","Crater expedition →",function() M.pause(); in_mission=true; MissionView.enter() end),
 			ui.text({"Drive to the crater, collect a sample, return to the lander",font_size=13,color=C.muted}),
+			surface_ok and button("surface-enter","Moon surface →",function()
+				M.pause(); on_surface=true; SurfaceView.enter()
+			end) or false,
+			surface_error and ui.text({id="surface-error",surface_error,font_size=12,color=C.accent}) or false,
 		}),
 		not M.driving and ui.text({"Gold lines: 0.2 m height steps · Dark grid: 2 m squares", color = C.contours, font_size = 12}) or false,
 		ui.scene3d({

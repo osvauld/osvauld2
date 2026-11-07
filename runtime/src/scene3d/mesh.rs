@@ -8,13 +8,13 @@ use std::sync::{
 };
 use thiserror::Error;
 
-// Per-mesh cap: at most ~1.9 MiB of vertex/index payload; scene-wide GPU budget is still open.
-pub const MAX_VERTICES: usize = 65_536;
-pub const MAX_INDICES: usize = 196_608;
+// Per-mesh cap: at most 14 MiB of vertex/index payload (32-byte vertices, u32 indices).
+pub const MAX_VERTICES: usize = 262_144;
+pub const MAX_INDICES: usize = 3 * 524_288;
 const MAX_COORD: f32 = 1_000_000.0;
 
 const fn vertex(position: [f32; 3], normal: [f32; 3]) -> Vertex {
-    Vertex { position, normal }
+    Vertex { position, normal, uv: [0.0, 0.0] }
 }
 
 const CUBE_VERTICES: [Vertex; 24] = [
@@ -43,7 +43,7 @@ const CUBE_VERTICES: [Vertex; 24] = [
     vertex([0.5, -0.5, 0.5], [0.0, -1.0, 0.0]),
     vertex([-0.5, -0.5, 0.5], [0.0, -1.0, 0.0]),
 ];
-const CUBE_INDICES: [u16; 36] = [
+const CUBE_INDICES: [u32; 36] = [
     0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17, 18,
     16, 18, 19, 20, 21, 22, 20, 22, 23,
 ];
@@ -53,13 +53,20 @@ const CUBE_INDICES: [u16; 36] = [
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// Texture coordinate, (0, 0) at the image's top-left; repeats outside 0..1.
+    pub uv: [f32; 2],
+}
+
+/// The zero-area rule [`MeshData::new`] rejects; importers drop such triangles first.
+pub fn degenerate(a: Vec3, b: Vec3, c: Vec3) -> bool {
+    (b - a).cross(c - a).length_squared() <= 1e-12
 }
 
 #[derive(Debug)]
 pub struct MeshData {
     id: u64,
     pub(super) vertices: Box<[Vertex]>,
-    pub(super) indices: Box<[u16]>,
+    pub(super) indices: Box<[u32]>,
     min: Vec3,
     max: Vec3,
 }
@@ -78,7 +85,14 @@ impl MeshData {
     pub fn cube() -> Arc<Self> {
         static CUBE: OnceLock<Arc<MeshData>> = OnceLock::new();
         CUBE.get_or_init(|| {
-            Self::new(CUBE_VERTICES.to_vec(), CUBE_INDICES.to_vec())
+            // Each face shows a whole texture, upright when viewed from outside.
+            const FACE_UV: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+            let vertices = CUBE_VERTICES
+                .iter()
+                .enumerate()
+                .map(|(i, v)| Vertex { uv: FACE_UV[i % 4], ..*v })
+                .collect();
+            Self::new(vertices, CUBE_INDICES.to_vec())
                 .expect("built-in cube must be valid")
         })
         .clone()
@@ -133,7 +147,7 @@ impl MeshData {
     pub fn vertices(&self) -> &[Vertex] {
         &self.vertices
     }
-    pub fn indices(&self) -> &[u16] {
+    pub fn indices(&self) -> &[u32] {
         &self.indices
     }
     pub fn bounds(&self) -> (Vec3, Vec3) {
@@ -141,10 +155,10 @@ impl MeshData {
     }
     pub fn payload_bytes(&self) -> usize {
         self.vertices.len() * std::mem::size_of::<Vertex>()
-            + self.indices.len() * std::mem::size_of::<u16>()
+            + self.indices.len() * std::mem::size_of::<u32>()
     }
 
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u16>) -> Result<Arc<Self>, MeshError> {
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Result<Arc<Self>, MeshError> {
         if vertices.is_empty()
             || vertices.len() > MAX_VERTICES
             || indices.is_empty()
@@ -158,7 +172,10 @@ impl MeshData {
         for vertex in &vertices {
             let p = Vec3::from_array(vertex.position);
             let n = Vec3::from_array(vertex.normal);
+            let uv = glam::Vec2::from_array(vertex.uv);
             if !p.is_finite()
+                || !uv.is_finite()
+                || uv.abs().max_element() > MAX_COORD
                 || p.abs().max_element() > MAX_COORD
                 || !n.is_finite()
                 || n.abs().max_element() > MAX_COORD
@@ -177,7 +194,7 @@ impl MeshData {
             let a = Vec3::from_array(vertices[a].position);
             let b = Vec3::from_array(vertices[b].position);
             let c = Vec3::from_array(vertices[c].position);
-            if (b - a).cross(c - a).length_squared() <= 1e-12 {
+            if degenerate(a, b, c) {
                 return Err(MeshError::InvalidTriangle);
             }
         }

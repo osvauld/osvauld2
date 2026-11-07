@@ -13,6 +13,7 @@ fn slope() -> Arc<MeshData> {
         .map(|position| Vertex {
             position,
             normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
         })
         .collect(),
         vec![0, 2, 1, 1, 2, 3],
@@ -79,14 +80,17 @@ fn terrain_rejects_dynamic_sensor_oversize_and_overbudget_before_mutation() {
             Vertex {
                 position: [10001.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [0.0, 0.0, 1.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [0.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
         ],
         vec![0, 1, 2],
@@ -100,17 +104,20 @@ fn terrain_rejects_dynamic_sensor_oversize_and_overbudget_before_mutation() {
             Vertex {
                 position: [0.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [0.0, 0.0, 1.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [1.0, 0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
+                uv: [0.0, 0.0],
             },
         ],
-        [0, 1, 2].repeat(65536),
+        [0, 1, 2].repeat(262_144),
     )
     .unwrap();
     let bad = (0..3)
@@ -165,10 +172,11 @@ fn rolling_on_a_subdivided_slope_matches_one_large_face() {
                 vertices.push(Vertex {
                     position: [x, -0.2 * x, z],
                     normal: [0.0, 1.0, 0.0],
+                    uv: [0.0, 0.0],
                 });
             }
             if i < n {
-                let a = (2 * i) as u16;
+                let a = (2 * i) as u32;
                 indices.extend([a, a + 1, a + 2, a + 2, a + 1, a + 3]);
             }
         }

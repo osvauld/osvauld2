@@ -49,6 +49,14 @@ pub struct VersionedFile {
     pub revision: String,
 }
 
+/// One binary item file (a model, an image): sealed bytes, read by Rust loaders only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryFileInfo {
+    pub path: String,
+    pub size: usize,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceTextEdit {
     pub old_text: String,
@@ -286,6 +294,22 @@ pub enum Request {
         item_id: String,
         path: String,
         content: String,
+    },
+    /// Store bytes (standard base64 on the wire) at a binary path. A path is text or binary,
+    /// never both; at most 64 MiB a file, 256 MiB an item.
+    WriteBinaryFile {
+        item_id: String,
+        path: String,
+        base64: String,
+    },
+    /// The item's binary files, sorted by path: [`BinaryFileInfo`].
+    ListBinaryFiles {
+        item_id: String,
+    },
+    /// One binary file's bytes, standard base64.
+    ReadBinaryFile {
+        item_id: String,
+        path: String,
     },
     /// Force the item's staged reload: a whole second VM; doc cores and scratch survive.
     ReloadItem {

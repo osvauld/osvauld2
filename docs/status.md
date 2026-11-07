@@ -10,6 +10,21 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Blender import — binary files, `gfx.load_glb`, textures (2026-11-05, `moon-rover` worktree)
+
+[Plan](design/blender-import.md), steps 1–5. Apps hold sealed **binary item files** (`.glb`,
+`.png`, `.jpg`; bridge `WriteBinaryFile`/`ListBinaryFiles`/`ReadBinaryFile`, 64 MiB per file,
+256 MiB per item) that only Rust reads. `gfx.load_glb(path)` returns plain node/mesh/material
+data — names, parents, TRS, Blender custom properties as `extras`, `gfx.mesh` handles and
+base-colour textures — and no Rust gives a node a meaning; Lua composes it
+(`demo_apps/glb_scene`). Meshes use 32-bit indices (262,144 vertices / 524,288 triangles per
+mesh) and carry UVs; scene objects take a `texture`; `gfx.load_texture` reads a PNG/JPEG.
+NASA's Curiosity GLB (12 MB, eight 1024² PNGs) renders textured, loading in ~0.2 s on a release
+shell (seconds on a debug one, past the 1 s entry budget — use release for heavy models).
+E1 `smoke_binary_files.py` and E2 `smoke_glb_scene.py` (hierarchy, extras, texture pixels,
+refusals, live model reload) pass; `cargo test --workspace` passes (job 2639).
+all 46 smokes green on the release build (2026-11-05) Next: hull colliders (step 6), then the moon rover from GLB (step 7).
+
 ### Moon rover — gravity, terrain and first vehicle in review worktree (2026-11-05)
 
 **Earlier gravity-only checkpoint (2026-11-04):** implemented in `moon-rover`, uncommitted and awaiting acceptance

@@ -1,6 +1,8 @@
 # Blender import — binary item files, GLB scene data, textured meshes
 
-Status: **plan, 2026-11-05; nothing built.** Continues the uncommitted `moon-rover` worktree
+Status: **steps 1–5 built 2026-11-05** (binary files, host reads, u32 limits, `gfx.load_glb`,
+textures); E1 and E2 pass; NASA's Curiosity GLB (12 MB, eight PNG textures) loads and renders
+in ~0.2 s on a release shell. Steps 6–7 next. Continues the uncommitted `moon-rover` worktree
 (gravity, fixed mesh colliders, body properties, wheel components — see
 [moon rover](moon-rover.md), [composable physics](physics-components.md)). Lua-generated terrain
 and rover geometry is impractical for real content; models are authored in Blender, exported as
@@ -56,7 +58,9 @@ outputs. A real Blender export from the user is added as an extra fixture when a
 ## 2. Steps
 
 **Step 1 — binary item files (vault, shell, bridge).**
-Bytes are stored content-addressed as sealed vault entries
+*(As built: entries are keyed by a random blob id, `…/file/<blob>`, so no plaintext hash
+appears in key names; the doc's `blobs` map holds `path → {blob, sha256, size}` and dedups
+equal bytes within the item.)* Bytes are stored content-addressed as sealed vault entries
 `ws/<ws>/item/<id>/file/<sha256>`; the item's source doc records only `path → {sha256, size}`,
 so re-exporting a model never grows CRDT history with blob bytes. New bridge requests
 `WriteBinaryFile {item_id, path, base64}` and `ListFiles`; Python client methods to match.
@@ -86,6 +90,15 @@ resource budgets). E2 minus textures passes.
 `unlit`. Bounded `image` decoding (PNG/JPEG), size cap, sRGB. Shader samples base colour ×
 texture. Built-in cube and `gfx.mesh` keep working without UVs. E2 passes.
 *Expert: runtime.*
+
+*Built 2026-11-05, revised shape:* objects take a flat `texture` next to their existing
+`color` (the multiplier) instead of a nested `material`; `unlit` is not built. Textures are
+RGBA8 with a CPU mip chain averaged in linear light, sampled with repeat wrap in the same
+sRGB-encoded space the 3D pass already shades in. Only base-colour images are decoded (normal,
+metallic and occlusion maps are skipped). Budgets: 2048² per image, 64 textures / 128 MiB per
+VM, 128 MiB unique per scene. Decoding counts against the entry's 1 s CPU budget: fine in
+release (Curiosity ~0.2 s), several seconds in a debug build — the user chose release builds
+over async loading for now.
 
 **Step 6 — hull colliders.** Body recipe accepts `hull = mesh` (dynamic allowed); Rapier
 convex hull from the mesh's positions, failure is a recipe error. Native tests for mass and

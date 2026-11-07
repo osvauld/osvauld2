@@ -86,6 +86,12 @@ pub(crate) fn src_key(ws_id: &str, item_id: &str) -> String {
     format!("ws/{ws_id}/item/{item_id}/src")
 }
 
+/// One binary item file's bytes (`…/file/<blob>`). `blob` is a random minted id, never a hash
+/// of the content: key names are not sealed.
+pub(crate) fn blob_key(ws_id: &str, item_id: &str, blob: &str) -> String {
+    format!("ws/{ws_id}/item/{item_id}/file/{blob}")
+}
+
 /// Prefix for all meta keys under a workspace — used to enumerate items.
 pub(crate) fn items_prefix(ws_id: &str) -> String {
     format!("ws/{ws_id}/item/")

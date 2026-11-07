@@ -69,13 +69,6 @@ pub(super) fn parse(spec: Table) -> mlua::Result<(String, Arc<Scene3d>, WorldRec
             }
         };
         let body_id: String = need(&body, "world3d body", "id")?;
-        if let Some(object) = scene.objects.iter().find(|o| o.id.as_ref() == body_id) {
-            if object.rotation != glam::Quat::IDENTITY && object.rotation != -glam::Quat::IDENTITY {
-                return Err(Error::runtime(
-                    "bound 3D body visuals require identity authored rotation",
-                ));
-            }
-        }
         let properties = world::world3d::BodyProperties3d {
             mass: if body.contains_key("mass")? {
                 Some(wheel::number(&body, "mass", None)?)
@@ -117,16 +110,21 @@ pub(super) fn parse(spec: Table) -> mlua::Result<(String, Arc<Scene3d>, WorldRec
     recipe.bodies = recipes;
     if let Some(wheels) = spec.get::<Option<Table>>("wheels")? {
         recipe.wheels = wheel::parse(wheels)?;
-        for object in scene
-            .objects
-            .iter()
-            .filter(|o| recipe.wheels.iter().any(|w| w.id == o.id.as_ref()))
+    }
+    for object in scene.objects.iter() {
+        let Some(host) = object.attach.as_deref() else { continue };
+        if !recipe.bodies.iter().any(|b| b.id == host) && !recipe.wheels.iter().any(|w| w.id == host)
         {
-            if object.rotation != glam::Quat::IDENTITY && object.rotation != -glam::Quat::IDENTITY {
-                return Err(Error::runtime(
-                    "bound wheel visuals require identity authored rotation",
-                ));
-            }
+            return Err(Error::runtime(format!(
+                "3D visual {} attaches to {host}, which is neither a body nor a wheel",
+                object.id
+            )));
+        }
+        let id = object.id.as_ref();
+        if recipe.bodies.iter().any(|b| b.id == id) || recipe.wheels.iter().any(|w| w.id == id) {
+            return Err(Error::runtime(format!(
+                "3D visual {id} is both bound by its id and attached to {host}"
+            )));
         }
     }
     Ok((id, scene, recipe))

@@ -114,7 +114,7 @@ impl Physics3d {
                     .collect(),
                 mesh.indices()
                     .chunks_exact(3)
-                    .map(|t| [u32::from(t[0]), u32::from(t[1]), u32::from(t[2])])
+                    .map(|t| [t[0], t[1], t[2]])
                     .collect(),
             )
             .map_err(|_| InvalidBody)?,

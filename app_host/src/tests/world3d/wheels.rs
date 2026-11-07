@@ -66,7 +66,7 @@ fn wheel_components_drive_from_lua_and_failed_reload_preserves_live_world() {
         COMPONENTS.replace("body='platform'", "body='floor'"),
         COMPONENTS.replace(
             "id='platform',color",
-            "id='wheel1',rotation={0,0.1,0,1},color",
+            "id='decal',attach='nowhere',color",
         ),
         COMPONENTS.replace("return ui.col({", "actuate(1); return ui.col({"),
         COMPONENTS.replace("mass=400", "mass=401"),
@@ -208,4 +208,47 @@ fn actual_rover_lua_defines_partial_drive_speed_reverse_and_brake_priority() {
         .velocity[2];
     assert!((speed + 1.0).abs() < 0.05, "{speed}");
     assert!(app.console(1).is_empty());
+}
+
+/// Lua reads a wheel's live pose and hands the world this frame's pose for a visual: the
+/// override is authored (in the host's frame) and composed like any attached visual.
+#[test]
+fn lua_reads_wheel_poses_and_overrides_visual_poses_per_frame() {
+    let source = COMPONENTS
+        .replace(
+            "objects={{id='platform',color='#aaccee'}}",
+            "objects={{id='platform',color='#aaccee'},{id='arm',attach='platform',color='#ffffff'}}",
+        )
+        .replace(
+            "ui.scene3d({id='view',w=400,h=300,scene=game:scene()}),",
+            "ui.scene3d({id='view',w=400,h=300,scene=game:scene(nil,{poses={arm={position={0,2,0}}}})}),
+        ui.text({id='hub',tostring(game:get('wheel1').position[2])}),
+        assert(not pcall(game.scene,game,nil,{poses={ghost={}}})) and false,",
+        );
+    let mut app = app(&source);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    app.view();
+    app.advance_simulation(0.0, true);
+    for frame in 1..=60 {
+        app.advance_simulation(frame as f64 / 60.0, true);
+        app.view();
+    }
+    let platform = state(&app)
+        .entities
+        .into_iter()
+        .find(|s| s.authored.id == "platform")
+        .unwrap()
+        .resolved;
+    let scene = find_scene(&app.view().info()).expect("scene3d leaf");
+    let arm = scene.objects.iter().find(|o| &*o.id == "arm").unwrap();
+    let turn = glam::Quat::from_array(platform.rotation);
+    let expected = glam::Vec3::from(platform.position) + turn * glam::Vec3::new(0.0, 2.0, 0.0);
+    assert!(glam::Vec3::from(arm.position).distance(expected) < 1e-4, "{:?}", arm.position);
+    assert!(app.error.is_none(), "{:?}", app.error);
+}
+
+fn find_scene(info: &runtime::ElInfo) -> Option<runtime::scene3d::SceneInspection> {
+    info.scene3d
+        .clone()
+        .or_else(|| info.children.iter().find_map(find_scene))
 }

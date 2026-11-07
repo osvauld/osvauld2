@@ -97,7 +97,7 @@ fn live_mesh_byte_budget_rejects_before_another_native_payload_is_allocated() {
         IX = {}
         for i=1,196608 do IX[i] = (i-1)%3+1 end
         held = {}
-        for i=1,17 do held[i] = gfx.mesh({vertices=V,indices=IX}) end
+        for i=1,23 do held[i] = gfx.mesh({vertices=V,indices=IX}) end
     "#,
     )
     .exec()
@@ -106,7 +106,7 @@ fn live_mesh_byte_budget_rejects_before_another_native_payload_is_allocated() {
         .load("return gfx.mesh({vertices=V,indices=IX})")
         .eval::<AnyUserData>()
         .unwrap_err();
-    assert!(err.to_string().contains("32 MiB budget"), "{err}");
+    assert!(err.to_string().contains("64 MiB budget"), "{err}");
 }
 
 #[test]
@@ -137,4 +137,26 @@ fn live_mesh_budget_is_reclaimed_after_unreferenced_resources_are_collected() {
     lua.gc_collect().unwrap();
     lua.gc_collect().unwrap();
     assert!(lua.load("return make()").eval::<AnyUserData>().is_ok());
+}
+
+#[test]
+fn vertices_take_an_optional_uv() {
+    let lua = lua();
+    lua.load(
+        r#"
+        local n = {0, 0, 1}
+        gfx.mesh({ vertices = {
+            { position = {0, 0, 0}, normal = n, uv = {0, 1} },
+            { position = {1, 0, 0}, normal = n, uv = {1, 1} },
+            { position = {0, 1, 0}, normal = n },
+        }, indices = {1, 2, 3} })
+    "#,
+    )
+    .exec()
+    .unwrap();
+    let err = lua
+        .load("gfx.mesh({vertices={{position={0,0,0},normal={0,0,1},uv={1}}},indices={1,1,1}})")
+        .exec()
+        .unwrap_err();
+    assert!(err.to_string().contains("uv needs u and v"), "{err}");
 }

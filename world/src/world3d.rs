@@ -61,7 +61,7 @@ pub enum World3dError {
     Properties(String),
     #[error("3D mesh collider {0} must be fixed and cannot be a sensor")]
     MeshBody(String),
-    #[error("3D world exceeds its 131072 collision-triangle budget")]
+    #[error("3D world exceeds its 524288 collision-triangle budget")]
     CollisionBudget,
     #[error("3D gravity components must be finite numbers bounded to 10000 m/s²")]
     Gravity,
@@ -141,7 +141,7 @@ impl World3d {
                     return Err(World3dError::MeshBody(spec.id.clone()));
                 }
                 collision_triangles += mesh.triangle_count();
-                if collision_triangles > 131_072 {
+                if collision_triangles > 524_288 {
                     return Err(World3dError::CollisionBudget);
                 }
             }
@@ -246,7 +246,9 @@ impl World3d {
             .inspect(self.ecs.get::<Body>(*e).unwrap().handle))
     }
 
-    /// Matching visual IDs take the body's simulated world pose; unbound visuals stay authored.
+    /// Matching visual IDs take the body's (or wheel's) simulated pose, their authored rotation
+    /// kept as an orientation in that frame; `attach`ed visuals compose their whole authored pose
+    /// onto their body's or wheel's, other visuals stay authored.
     /// Camera, meshes, scale and appearance remain presentation data, independent of colliders.
     pub fn resolved_scene(&self, authored: &Scene3d) -> Result<Arc<Scene3d>, World3dError> {
         let objects = authored
@@ -254,22 +256,41 @@ impl World3d {
             .iter()
             .cloned()
             .map(|mut object| {
-                if let Some(e) = self.ids.get(object.id.as_ref()) {
+                if let Some(host) = object.attach.as_deref() {
+                    let (position, rotation) = self.pose(host)?;
+                    object.position = position + rotation * object.position;
+                    object.rotation = rotation * object.rotation;
+                } else if let Some(e) = self.ids.get(object.id.as_ref()) {
                     let state = self
                         .physics
                         .inspect(self.ecs.get::<Body>(*e).unwrap().handle);
                     object.position = state.position.into();
-                    object.rotation = glam::Quat::from_array(state.rotation);
+                    object.rotation = glam::Quat::from_array(state.rotation) * object.rotation;
                 } else if let Some((position, rotation)) =
                     self.physics.wheel_pose(object.id.as_ref())
                 {
                     object.position = position.into();
-                    object.rotation = glam::Quat::from_array(rotation);
+                    object.rotation = glam::Quat::from_array(rotation) * object.rotation;
                 }
-                object
+                Ok(object)
             })
-            .collect();
+            .collect::<Result<_, World3dError>>()?;
         Ok(Scene3d::new(authored.camera.clone(), objects)?)
+    }
+
+    /// World pose of a body or wheel.
+    pub fn pose(&self, id: &str) -> Result<(glam::Vec3, glam::Quat), World3dError> {
+        let (position, rotation) = match self.ids.get(id) {
+            Some(e) => {
+                let state = self.physics.inspect(self.ecs.get::<Body>(*e).unwrap().handle);
+                (state.position, state.rotation)
+            }
+            None => self
+                .physics
+                .wheel_pose(id)
+                .ok_or_else(|| World3dError::Missing(id.to_owned()))?,
+        };
+        Ok((position.into(), glam::Quat::from_array(rotation)))
     }
 
     pub fn inspect(&self) -> WorldInspection3d {

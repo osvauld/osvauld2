@@ -37,6 +37,8 @@ impl MarbleApp {
                 },
                 color: [0.3, 0.6, 0.9, 1.0],
                 surface: None,
+                texture: None,
+                attach: None,
             })
             .collect();
         world.reconcile(bodies).unwrap();

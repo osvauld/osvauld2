@@ -152,8 +152,8 @@ def main():
                     for s in samples for e in s['world']['entities'] if e['authored']['id']=='rover'),
                 'suspension_travel': travel_ok,
                 'body_wheel_counts': len(world['entities']) == (37 if args.mission else 4) and len({w['body'] for w in wheels}) == 1 and len(wheels) == 4,
-                'collision_triangle_budget': collision_triangles <= 131072,
-                'scene_resource_budgets': scene_triangles <= 131072 and sum(meshes.values()) <= 16*1024*1024 and len(objects) <= 256,
+                'collision_triangle_budget': collision_triangles <= 524288,
+                'scene_resource_budgets': scene_triangles <= 1048576 and sum(meshes.values()) <= 64*1024*1024 and len(objects) <= 256,
                 'clean_console': not console,
             }
             args.output.parent.mkdir(parents=True, exist_ok=True)

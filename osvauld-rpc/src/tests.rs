@@ -70,6 +70,18 @@ fn every_request_roundtrips() {
             path: "main.lua".into(),
             content: "ui.col({})".into(),
         },
+        Request::WriteBinaryFile {
+            item_id: "i-9".into(),
+            path: "models/rover.glb".into(),
+            base64: "Z2xURg==".into(),
+        },
+        Request::ListBinaryFiles {
+            item_id: "i-9".into(),
+        },
+        Request::ReadBinaryFile {
+            item_id: "i-9".into(),
+            path: "models/rover.glb".into(),
+        },
         Request::ReloadItem {
             item_id: "i-9".into(),
         },

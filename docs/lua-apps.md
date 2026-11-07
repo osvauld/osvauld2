@@ -639,20 +639,65 @@ opens on click or on E, through `on_action`.
 objects. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the viewport
 size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`, `fov_y` in
 degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh` (a `gfx.mesh` handle,
-or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and
-CSS `color`. Coordinates are right-handed with Y up.
+or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale`,
+CSS `color` and an optional `texture` (a `gfx.load_texture` or GLB material handle) that
+multiplies `color` per pixel through the mesh's UVs. Coordinates are right-handed with Y up.
 
 `gfx.mesh({ vertices = {...}, indices = {...} })` constructs an immutable shared triangle mesh.
-Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz} }`; indices are a dense **1-based**
+Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz}, uv = {u,v} }` (`uv` optional,
+`{0,0}` top-left of the image, repeating outside 0..1); indices are a dense **1-based**
 list, three per triangle. Counterclockwise winding is front-facing; back faces are neither
 rendered nor picked. Positions/normals must be finite and bounded; normals cannot be zero,
 and triangles cannot be degenerate. Unknown fields, sparse arrays and fractional indices fail.
-At most 65,536 vertices and 65,536 triangles per mesh; a VM may hold at most 128 generated
-resources and 32 MiB of live mesh payload, including resources still retained by scene handles.
-Scene limits are 16 MiB of unique mesh payload and 131,072 triangles counted across instances.
+At most 262,144 vertices and 524,288 triangles per mesh (32-bit indices); a VM may hold at most
+128 generated resources and 64 MiB of live mesh payload, including resources still retained by
+scene handles and meshes from `gfx.load_glb`. Scene limits are 64 MiB of unique mesh payload and
+1,048,576 triangles counted across instances. *(Raised 2026-11-05 from 65,536/65,536, 32 MiB,
+16 MiB and 131,072 for Blender terrain, [blender-import](design/blender-import.md).)*
+The built-in cube shows a whole texture on each face.
 Create meshes outside `view`; reuse handles across objects and views. Edits create a new handle.
 `DumpTree` reports mesh resource identity (process-local, not persistent), local bounds, counts
 and payload bytes. No raw vertex dump or general curve/sweep/material constructor ships yet.
+
+#### Models from Blender: binary files, `gfx.load_glb`, textures *(2026-11-05)*
+
+An app's item can hold **binary files** next to its Lua source — `.glb`, `.png`, `.jpg`. They
+are stored sealed in the vault and read by Rust; Lua never sees their bytes. Agents write them
+with the bridge's `WriteBinaryFile` (`rpc.write_binary_file(item, path, data)`;
+`upload_folder` sends them too) and list/read them with `ListBinaryFiles` / `ReadBinaryFile`.
+At most 64 MiB per file and 256 MiB per item; a path is text or binary, never both. Replacing
+a file the open app loaded reloads the app, like a source edit.
+
+`gfx.load_glb(path)` reads a GLB (glTF binary, embedded buffers only — export from Blender as
+*glTF Binary*) and returns plain data. Rust gives no node a meaning; the app decides what each
+node is (a collider, a wheel, a prop):
+
+```lua
+local model = gfx.load_glb("models/rover.glb")
+-- model.nodes[i]    = { name, parent (index or nil), translation, rotation, scale,
+--                       mesh (index or nil), extras (Blender custom properties) }
+-- model.meshes[i]   = { { mesh = <gfx.mesh>, material = index or nil }, ... }  -- one per primitive
+-- model.materials[i] = { name, color = "#rrggbbaa", texture = <texture> or nil }
+-- model.roots       = { index, ... }   -- the scene's top-level nodes
+```
+
+Everything is 1-based. Transforms are local to the parent; compose them in Lua
+(`demo_apps/glb_scene/glb.lua` has `world` and `objects` helpers to copy). Missing normals are
+generated, zero-area triangles dropped. A material's `color` is the base colour converted to
+sRGB; its `texture` is the base-colour image (PNG or JPEG, at most 2048×2048, read through the
+material's UV set). Other material maps, animation clips and skins are not read.
+`gfx.load_texture(path)` loads a PNG/JPEG binary file as a texture handle directly.
+
+Refused with the reason: not a GLB, truncated, external buffer or image URIs, required
+extensions, non-triangle primitives, over 4,096 nodes or 128 primitives, oversize images.
+Meshes count against the VM's mesh budget above; textures against their own — 64 live
+textures and 128 MiB (mips included) per VM, and 128 MiB of unique textures per scene. A load
+is all-or-nothing: a refused file leaves both budgets as they were.
+
+Decoding is native work inside the calling entry, so it counts against the app's 1 s CPU
+budget: a 12 MB model with eight 1024² textures loads in ~0.2 s in a release build, but takes
+several seconds in a debug build — run heavy models on a release shell. Load models at module
+level, not in `view`.
 
 An optional `surface = gfx.text_surface({ text = "label", font_size = 32,
 color = "#ffffff", background = "#171923" })` is supported only on the built-in cube resource;
@@ -662,8 +707,7 @@ This is a rendering proof, not the public Environment API. It currently supports
 viewport, 4× MSAA, simple directional lighting and app-driven rebuilds. The model-viewer demo uses
 `on_drag` for orbit and `on_wheel` for zoom. An `on_click` on the scene leaf ray-picks the
 nearest rendered triangle and reports its stable ID, world hit point, normal and distance.
-Camera near/far clipping and back-face culling apply to picking. GLB assets,
-hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
+Camera near/far clipping and back-face culling apply to picking. Hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
 the validated camera,
 objects, transforms, colors and mesh summaries so an agent can inspect the same scene declaration
 that renders.
@@ -685,7 +729,7 @@ bodies must be fixed and nonsensor. The validated mesh's vertex positions and tr
 are the collision surface; normals affect rendering only. Local vertex coordinates are metres,
 bounded to ±10,000. Body position/rotation place it; visual `scale` does not resize collision.
 Reuse one handle for the scene object and the body, with unit visual scale, to share the exact
-surface (`demo_apps/moon_rover`). Each world allows at most 131,072 collision triangles,
+surface (`demo_apps/moon_rover`). Each world allows at most 524,288 collision triangles (131,072 before 2026-11-05),
 counted across mesh-body instances and checked before any world changes/native allocation.
 Equivalent positions/indices survive reload even when recreated under a new resource ID or
 with new visual normals. Different positions/indices require removing the body in an accepted
@@ -703,9 +747,12 @@ combining `sensor` and `dynamic` is an error. No separate collider or offset sen
 
 `ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
 visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
-are independent: scale does not resize a collider. Bound visuals must have identity authored
-rotation; initial physical orientation belongs in the body recipe, and resolved snapshots rotate
-the visual with the body. Invisible bodies and unbound decoration are allowed.
+are independent: scale does not resize a collider. A bound visual's authored rotation is its
+orientation in the body's frame (a model exported facing another way); initial physical
+orientation belongs in the body recipe, and resolved snapshots rotate the visual with the body.
+*(Revised 2026-11-05: bound visuals required identity rotation.)* A visual with
+`attach = "<body id>"` rides that body with its whole authored pose (position, rotation) in the
+body's frame — one body, many parts (an imported model's pieces). Invisible bodies and unbound decoration are allowed.
 `demo_apps/marble_gates` generates its sphere in Lua and offers drop and tilted-ramp modes,
 sharing visual meshes between independent worlds; the inactive level stays paused. Its
 **Play gates** mode is a complete Lua-authored level with Release, live tilt, goal/fall zones,
@@ -820,8 +867,8 @@ contacts and roll; Lua may then apply a parking brake.
 Wheel support remains ray-based with massless cylindrical obstacle contact shapes following
 suspension/steering, at 94% of tire radius to avoid replacing spring support with rigid contact.
 Independent unsprung wheel mass and airborne motor reaction torque are unbuilt. This component
-is not a rigid pulley model. Matching wheel visuals require identity authored rotation and use
-the actual native wheel poses. `demo_apps/mechanics_lab` is an independent educational wheel
+is not a rigid pulley model. Matching wheel visuals use the actual native wheel poses, their authored rotation kept as an
+orientation in the wheel's frame. `demo_apps/mechanics_lab` is an independent educational wheel
 bench; `moon_rover/vehicle.lua` assembles the rover and maps its controls into these components.
 Neither needs per-tick Lua or document writes.
 
@@ -866,7 +913,7 @@ All fields are strict, with finite numbers: mass 1–100000, speed limit 0.1–1
 0.05–20, centre components ±10, wheel mount components ±20, radius 0.05–2, width 0.02–2, rest 0.02–2,
 travel 0–rest, stiffness 1–1000000, damping 0–100000, grip 0–5, forces 0–100000 and steer 0–60.
 Wheel IDs must be unique across bodies, chassis and wheels. Matching chassis/wheel visuals use
-native poses and require identity authored rotation. Terrain support uses suspension rays. Massless cylindrical obstacle contact shapes follow
+native poses; authored rotation orients the visual within them. Terrain support uses suspension rays. Massless cylindrical obstacle contact shapes follow
 wheel suspension and steering, at 94% of the tyre radius to avoid replacing spring support
 with rigid ground contact. They collide with blocks and other vehicles, while sharing the
 chassis rigid body; unsprung wheel mass and airborne motor reaction torque are not simulated.
