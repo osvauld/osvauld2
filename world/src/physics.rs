@@ -2,7 +2,10 @@
 //! when a controller moves it. Only shapes live here; drawings never reach Rapier, and no Rapier
 //! type leaves this crate.
 
+use std::sync::Arc;
+
 use rapier2d::control::{CharacterLength, KinematicCharacterController};
+use rapier2d::parry::shape::{Polyline, PolylineFlags};
 use rapier2d::prelude::*;
 
 /// A collision shape in the entity's drawing units. Plain data, not tied to an entity, so an
@@ -10,22 +13,40 @@ use rapier2d::prelude::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Collider {
     pub shape: Shape,
-    /// From the entity's origin: a circle's centre, a rect's top-left corner.
+    /// From the entity's origin: a circle's centre, a rect's top-left corner, a line's origin.
     pub at: (f64, f64),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Circle(f64),
     Rect(f64, f64),
+    /// Ground: segments joining these points, placed from `at`. It has no area, so it is never
+    /// loose, moved or a sensor.
+    Line(Arc<[(f64, f64)]>),
 }
 
 impl Collider {
     pub(crate) fn check(&self) -> Result<(), String> {
         let size = |v: f64| v.is_finite() && v > 0.0;
-        let sized = match self.shape {
-            Shape::Circle(r) => size(r),
-            Shape::Rect(w, h) => size(w) && size(h),
+        let sized = match &self.shape {
+            Shape::Circle(r) => size(*r),
+            Shape::Rect(w, h) => size(*w) && size(*h),
+            Shape::Line(points) => {
+                if points.len() < 2 {
+                    return Err(format!("a line needs at least 2 points, got {}", points.len()));
+                }
+                // Checked as Rapier gets them: f32, where a huge finite f64 overflows and two
+                // close points can merge. A zero-length segment has no normal.
+                let f32s: Vec<_> = points.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+                if !f32s.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+                    return Err("line points must be finite".into());
+                }
+                if let Some(i) = f32s.windows(2).position(|w| w[0] == w[1]) {
+                    return Err(format!("line has two points in the same place: {} and {}", i + 1, i + 2));
+                }
+                true
+            }
         };
         if !sized {
             return Err("collider size must be a finite number above zero".into());
@@ -39,7 +60,7 @@ impl Collider {
     /// Rapier places shapes by their centre.
     pub(crate) fn centre(&self) -> (f64, f64) {
         match self.shape {
-            Shape::Circle(_) => self.at,
+            Shape::Circle(_) | Shape::Line(_) => self.at,
             Shape::Rect(w, h) => (self.at.0 + w / 2.0, self.at.1 + h / 2.0),
         }
     }
@@ -68,6 +89,47 @@ pub enum JointKind {
     Rope { length: f64 },
     /// A spring pulling the anchors to `length` apart.
     Spring { length: f64, stiffness: f64, damping: f64 },
+    /// Suspension: `b` turns freely about its anchor, which slides along `axis` (in `a`'s frame)
+    /// from `a`'s anchor, at most `travel.0` back (compressed) and `travel.1` out, sprung toward
+    /// `a`'s anchor at `stiffness` with `damping`. Held rigid across the axis.
+    Wheel { axis: (f64, f64), stiffness: f64, damping: f64, travel: (f64, f64) },
+}
+
+/// Drives a pin's or a wheel's turning: toward `speed` (degrees a second, `b` relative to `a`;
+/// with no `b`, `a` relative to the world), pushing with at most `torque` (mass × units² / s²:
+/// with kg, N·m × 10⁴). `speed` 0 with a large torque is a brake.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Motor {
+    pub speed: f64,
+    pub torque: f64,
+}
+
+impl Motor {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if !self.speed.is_finite() {
+            return Err(format!("motor speed must be a finite number, got {}", self.speed));
+        }
+        if !(self.torque.is_finite() && self.torque >= 0.0) {
+            return Err(format!("motor torque must be 0 or more, got {}", self.torque));
+        }
+        Ok(())
+    }
+}
+
+/// How hard a motor works per unit of speed it lacks (per rad/s), as a multiple of its torque:
+/// full torque by a tenth of a radian a second short.
+const MOTOR_GAIN: f32 = 10.0;
+
+/// Sets (or, with `None`, clears) the turning motor on `joint`. `to_world`: Rapier's body 2 is
+/// the world, so its relative turning is the negative of `a`'s.
+pub(crate) fn set_motor(joint: &mut GenericJoint, motor: Option<Motor>, to_world: bool) {
+    let axis = JointAxis::AngX;
+    let (speed, torque) = motor.map_or((0.0, 0.0), |m| (m.speed.to_radians() as f32, m.torque as f32));
+    let speed = if to_world { -speed } else { speed };
+    joint
+        .set_motor_model(axis, MotorModel::ForceBased)
+        .set_motor_velocity(axis, speed, torque * MOTOR_GAIN)
+        .set_motor_max_force(axis, torque);
 }
 
 /// What a body Rapier moves is made of.
@@ -84,17 +146,29 @@ pub struct Material {
     /// Mass per area: a stone ball outweighs a wooden one the same size, so it flings what it
     /// strikes and is hardly slowed by it.
     pub density: f64,
+    /// The whole body's mass, in place of density × area: a game states kilograms. Springs and
+    /// motors are force-based, so with mass in kg their stiffness is in N/m.
+    pub mass: Option<f64>,
+    /// The centre of mass in drawing units, where the shape's centroid is otherwise. How hard
+    /// it is to turn stays the shape's own (its inertia about its centroid, scaled to the mass).
+    pub center: Option<(f64, f64)>,
 }
 
 impl Default for Material {
     /// A let-go chest's: a modest bounce, at rest in about half a second.
     fn default() -> Self {
-        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0 }
+        Self { bounce: 0.5, friction: 6.0, grip: None, density: 1.0, mass: None, center: None }
     }
 }
 
 impl Material {
     pub(crate) fn check(&self) -> Result<(), String> {
+        if let Some(m) = self.mass.filter(|m| !(m.is_finite() && *m > 0.0)) {
+            return Err(format!("mass must be above 0, got {m}"));
+        }
+        if self.center.is_some_and(|(x, y)| !(x.is_finite() && y.is_finite())) {
+            return Err("center must be finite".into());
+        }
         if !(0.0..=1.0).contains(&self.bounce) {
             return Err(format!("bounce must be from 0 to 1, got {}", self.bounce));
         }
@@ -143,15 +217,69 @@ impl Default for Physics {
 
 /// A shape placed relative to its body, which sits at `anchor`.
 fn shape(c: &Collider, anchor: (f64, f64)) -> ColliderBuilder {
-    let shape = match c.shape {
-        Shape::Circle(r) => ColliderBuilder::ball(r as f32),
+    let shape = match &c.shape {
+        Shape::Circle(r) => ColliderBuilder::ball(*r as f32),
         Shape::Rect(w, h) => ColliderBuilder::cuboid((w / 2.0) as f32, (h / 2.0) as f32),
+        Shape::Line(points) => {
+            // One-sided, solid on the right of the points' direction: a left-to-right line is
+            // ground with its solid below (+y is down). Unoriented, every joint is an edge a
+            // rolling body snags on — 20% of the speed lost over 160 straight joints.
+            let points = points.iter().map(|&(x, y)| Vector::new(x as f32, y as f32)).collect();
+            ColliderBuilder::new(SharedShape::new(Polyline::with_flags(points, None, PolylineFlags::ORIENTED)))
+        }
     };
     let (cx, cy) = c.centre();
     shape.translation(Vector::new((cx - anchor.0) as f32, (cy - anchor.1) as f32))
 }
 
+/// A whole copy, for a match's rewind (`World2d::snapshot`): every Rapier set, the solver's
+/// warm-start contacts included, so a restored world steps exactly as the original did. The
+/// pipeline is scratch space and starts fresh.
+impl Clone for Physics {
+    fn clone(&self) -> Self {
+        let w = &self.world;
+        let world = PhysicsWorld {
+            gravity: w.gravity,
+            integration_parameters: w.integration_parameters,
+            physics_pipeline: PhysicsPipeline::new(),
+            islands: w.islands.clone(),
+            broad_phase: w.broad_phase.clone(),
+            narrow_phase: w.narrow_phase.clone(),
+            bodies: w.bodies.clone(),
+            colliders: w.colliders.clone(),
+            impulse_joints: w.impulse_joints.clone(),
+            multibody_joints: w.multibody_joints.clone(),
+            ccd_solver: w.ccd_solver.clone(),
+        };
+        Self { world, ground: self.ground }
+    }
+}
+
 impl Physics {
+    /// Re-tags a body's colliders with a new owner: the entity was spawned anew since the
+    /// snapshot this body came back from.
+    pub(crate) fn set_owner(&mut self, body: RigidBodyHandle, owner: u64) {
+        let handles: Vec<_> = self.world.bodies[body].colliders().to_vec();
+        for c in handles {
+            self.world.colliders[c].user_data = owner as u128;
+        }
+    }
+
+    /// Every body's place, turn, velocity, spin and sleep, as bits in handle order: what two
+    /// devices running the same match must agree on.
+    pub(crate) fn digest(&self, out: &mut Vec<u8>) {
+        for (h, rb) in self.world.bodies.iter() {
+            let (i, g) = h.into_raw_parts();
+            out.extend(i.to_le_bytes());
+            out.extend(g.to_le_bytes());
+            let (t, v) = (rb.translation(), rb.linvel());
+            for f in [t.x, t.y, rb.rotation().angle(), v.x, v.y, rb.angvel()] {
+                out.extend(f.to_bits().to_le_bytes());
+            }
+            out.push(rb.is_sleeping() as u8);
+        }
+    }
+
     /// A body for an entity whose origin is at `origin`, sitting at its solid shape's centre (or
     /// its sensor's, with none). `owner` comes back with every overlap. Scale is not applied.
     /// `groups` is the solid shape's `(memberships, filter)` bits: two solids meet only when each
@@ -183,11 +311,29 @@ impl Physics {
             Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32, m.density as f32),
             _ => (0.0, 0.0, 1.0),
         };
+        let stated = match kind {
+            Body::Dynamic(_, m) if m.mass.is_some() || m.center.is_some() => Some(m),
+            _ => None,
+        };
         let body = self.world.insert_body(body.translation(at));
         let (bodies, colliders) = (&mut self.world.bodies, &mut self.world.colliders);
         if let Some(c) = solid {
-            let solid = shape(c, anchor)
-                .density(density)
+            let solid = shape(c, anchor);
+            let solid = match stated {
+                // The shape's own props at its density, then mass and centre as stated. Body
+                // frame = the shape's centre (`anchor`), so the centre is taken from there.
+                Some(m) => {
+                    let own = solid.shape.mass_properties(density);
+                    let mass = m.mass.map_or(own.mass(), |v| v as f32);
+                    let com = m.center.map_or(own.local_com, |(x, y)| {
+                        Vector::new((x - anchor.0) as f32, (y - anchor.1) as f32)
+                    });
+                    let inertia = own.principal_inertia() * mass / own.mass();
+                    solid.mass_properties(MassProperties::new(com, mass, inertia))
+                }
+                None => solid.density(density),
+            };
+            let solid = solid
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(grip)
@@ -206,7 +352,10 @@ impl Physics {
             let kinds = ActiveCollisionTypes::default()
                 | ActiveCollisionTypes::KINEMATIC_FIXED
                 | ActiveCollisionTypes::KINEMATIC_KINEMATIC;
-            let zone = shape(c, anchor).sensor(true).active_collision_types(kinds);
+            let mut zone = shape(c, anchor).sensor(true).active_collision_types(kinds);
+            if stated.is_some() {
+                zone = zone.density(0.0); // a stated mass is the whole body's
+            }
             colliders.insert_with_parent(zone.user_data(owner as u128), body, bodies);
         }
         body
@@ -222,7 +371,9 @@ impl Physics {
         b_at: (f64, f64),
         kind: JointKind,
         contacts: bool,
+        motor: Option<Motor>,
     ) -> ImpulseJointHandle {
+        let to_world = b.is_none();
         let b = match b {
             Some(b) => b,
             None => match self.ground {
@@ -261,8 +412,34 @@ impl Physics {
                     .build()
                     .into()
             }
+            JointKind::Wheel { axis, stiffness, damping, travel } => {
+                // The joint's X is the suspension axis; Y, across it, is locked; the angle is free.
+                // Force-based, so with masses in kg the stiffness is N/m.
+                let axis = v(axis).normalize();
+                GenericJointBuilder::new(JointAxesMask::LIN_Y)
+                    .local_anchor1(v(a_at))
+                    .local_anchor2(v(b_at))
+                    .local_axis1(axis)
+                    .local_axis2(axis)
+                    .limits(JointAxis::LinX, [-travel.0 as f32, travel.1 as f32])
+                    .motor_model(JointAxis::LinX, MotorModel::ForceBased)
+                    .motor_position(JointAxis::LinX, 0.0, stiffness as f32, damping as f32)
+                    .contacts_enabled(contacts)
+                    .build()
+            }
         };
+        let mut joint = joint;
+        if motor.is_some() {
+            set_motor(&mut joint, motor, to_world);
+        }
         self.world.insert_impulse_joint(a, b, joint)
+    }
+
+    /// Changes a joint's motor in place — a pedal each view — and wakes what it joins.
+    pub(crate) fn drive(&mut self, joint: ImpulseJointHandle, motor: Option<Motor>, to_world: bool) {
+        if let Some(j) = self.world.impulse_joints.get_mut(joint, true) {
+            set_motor(&mut j.data, motor, to_world);
+        }
     }
 
     pub(crate) fn unjoin(&mut self, joint: ImpulseJointHandle) {

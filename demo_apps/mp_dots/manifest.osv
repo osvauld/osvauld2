@@ -1,0 +1,4 @@
+app "mp_dots" {
+  roles player
+  channel dots { rate 40/s  size 512 }
+}

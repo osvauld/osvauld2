@@ -1,0 +1,4 @@
+app "net_probe" {
+  roles member
+  channel ping { rate 10/s }
+}

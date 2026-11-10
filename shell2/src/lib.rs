@@ -8,6 +8,7 @@
 mod app_src;
 mod app_thread;
 mod bundled;
+mod channels;
 mod native_rects;
 mod bridge;
 mod indexer;
@@ -156,6 +157,12 @@ pub enum Msg {
     SessionDown(u64, String, u64, String),
     SessionFrame(u64, String, u64, Frame),
     SessionToken(u64, String, u64, Token),
+    /// App channels (`channels.rs`): a frame from the relay for `(generation, space, dial)` —
+    /// dial 0 is this host's own relay — the space's channel stream ending, and what an app's
+    /// thread sent.
+    NetFrame(u64, String, u64, courier::session::NetFrame),
+    NetDown(u64, String, u64),
+    NetOut(Arc<str>, Vec<app_host::net::Outgoing>),
     /// The retry ladder says it is time to dial again.
     SessionRedial(u64, String),
     /// `JoinSpace` fetched the space from the link's host; the UI thread adopts it and opens
@@ -1255,6 +1262,7 @@ pub struct Shell {
     /// tag their messages with the value they started under; stale ones are dropped, and a
     /// listener whose generation has passed stops reconnecting.
     sync_gen: Arc<AtomicU64>,
+    channels: channels::Channels,
 }
 /// A value on its way to the UI thread that `Msg`'s `Clone` cannot carry — a bound endpoint
 /// (it owns a runtime), a one-shot reply sender. The handler takes it out of the slot once.
@@ -1426,6 +1434,10 @@ impl Shell {
         self.split = self.split.take().filter(|s| *s != id);
         self.popped.retain(|p| *p != id);
         let closed = self.apps.remove(&id); // tear down: VM and doc handle both dropped
+        if let Some(o) = &closed {
+            let ws = o.ws_id.clone();
+            self.net_leave(&id, &ws);
+        }
         if let (Some(record), Some(names), Some(o)) = (
             self.node.clone(),
             self.subscribed.remove(&id),
@@ -1917,6 +1929,7 @@ impl Shell {
             },
         );
         self.sessions.insert(ws.to_string(), handle);
+        self.net_reopen(ws);
     }
 
     /// The host told this member who serves the space (`Frame::Hosts`, owner first): kept,
@@ -2371,6 +2384,7 @@ impl Shell {
     fn reset_tabs(&mut self) {
         self.fullscreen = false;
         self.tabs = vec![Tab::Home];
+        self.net_leave_all();
         self.apps.clear();
         self.launcher = Default::default();
         self.reset_launcher_pending = false;
@@ -2908,6 +2922,7 @@ impl Shell {
             failed_subs: Vec::new(),
             node_vv: HashMap::new(),
             sync_gen: Arc::new(AtomicU64::new(0)),
+            channels: Default::default(),
         };
         shell.start_listener();
         shell
@@ -2964,6 +2979,7 @@ impl Shell {
             self.offscreen,
         )?;
         self.apps.insert(id.clone(), app);
+        self.net_join(&id, &wi.ws_id);
         self.focused = self.tabs.len();
         self.tabs.push(Tab::App((id, wi.name)));
         Ok(())
@@ -4145,6 +4161,8 @@ impl App for Shell {
             | Msg::SessionFrame(gen_, _, _, _)
             | Msg::SessionToken(gen_, _, _, _)
             | Msg::SessionRedial(gen_, _)
+            | Msg::NetFrame(gen_, _, _, _)
+            | Msg::NetDown(gen_, _, _)
                 if gen_ != self.gen_() =>
             {
                 None
@@ -4221,6 +4239,18 @@ impl App for Shell {
                 self.session_frame(ws, seq, frame);
                 None
             }
+            Msg::NetFrame(_, ws, seq, frame) => {
+                self.net_frame(ws, seq, frame);
+                None
+            }
+            Msg::NetDown(_, ws, seq) => {
+                self.net_down(ws, seq);
+                None
+            }
+            Msg::NetOut(id, out) => {
+                self.net_out(id, out);
+                None
+            }
             msg => {
                 let next = match (&mut self.screen, msg) {
                     (Screen::Signup(f), Msg::Signup(m)) => f.update(m, &mut self.vault, &self.proxy),
@@ -4260,6 +4290,9 @@ impl App for Shell {
                 | Msg::SessionFrame(..)
                 | Msg::SessionToken(..)
                 | Msg::SessionRedial(..)
+                | Msg::NetFrame(..)
+                | Msg::NetDown(..)
+                | Msg::NetOut(..)
                 | Msg::JoinFetched(..)
                 | Msg::PushReceived(..)
                 | Msg::ListenUp(_)

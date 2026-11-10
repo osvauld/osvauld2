@@ -1,8 +1,8 @@
 -- Direct tests of the Jetpack Arena rules modules under stock Lua (no gfx/ui).
 math.clamp = math.clamp or function(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
-package.path = "demo_apps/jetpack/?.lua;" .. package.path
-local World = require("world")
+package.path = "demo_apps/jetpack/?.lua;scripts/?.lua;" .. package.path
+local World = require("jetpack_solo")
 local Physics = require("physics")
 local Weapons = require("weapons")
 local Spawns = require("spawns")
@@ -48,13 +48,14 @@ check(#w.effects <= 40, "effects list is unbounded")
 w = fresh()
 bot = w.bots[1]
 bot.hp, bot.respawn, bot.x, bot.y = 0, 1, 0, 0
-check(not Spawns.tick(w, bot, 2, 0.5) and bot.hp == 0, "respawned before the timer")
-check(not Spawns.tick(w, bot, 2, 0.6), "respawn tick reports a live soldier")
-check(bot.hp == 60 and bot.shield > 0 and bot.x == bot.spawn.x and bot.y == bot.spawn.y,
+check(not Spawns.tick(w, bot, 0.5) and bot.hp == 0, "respawned before the timer")
+check(not Spawns.tick(w, bot, 0.6), "respawn tick reports a live soldier")
+local home = w.map.spawns[bot.spawn_i]
+check(bot.hp == 60 and bot.shield > 0 and bot.x == home.x and bot.y == home.y,
 	"bot did not respawn with full hp and shield")
-check(Spawns.tick(w, bot, 2, 0.01), "live soldier ticked as dead")
+check(Spawns.tick(w, bot, 0.01), "live soldier ticked as dead")
 w.player.hp, w.player.respawn = 0, 0
-Spawns.tick(w, w.player, 1, 0.01)
+Spawns.tick(w, w.player, 0.01)
 check(w.player.hp == 100, "player did not respawn with 100 hp")
 
 -- bots: a clear line fires, cover in between does not.

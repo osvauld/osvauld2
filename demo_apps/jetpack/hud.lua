@@ -41,10 +41,29 @@ function H.overlay(g, on)
 		button(m.state=="Ready" and "DEPLOY" or "RESUME",m.state=="Ready" and "match:start" or "match:resume",
 			m.state=="Ready" and on.start or on.resume),
 		m.state=="Paused" and button("NEW MATCH","match:new",on.restart) or false,
+		-- Others have the arena open in this space: fly together (jetpack-mp.md M8).
+		#net.peers()>1 and not g.next and button("PLAY TOGETHER","match:together",on.together) or false,
+		g.next and text("Waiting for the other pilots…","match:waiting",C.muted,12) or false,
 		not tight and text("Left stick: move  ·  push up to fly",nil,C.muted,11) or false,
 		not tight and text("Right stick: aim  ·  push to the ring to fire",nil,C.muted,11) or false,
 		not compact and text("Keyboard: A/D · Space · mouse + F · R reload · Q swap · E pick up · Z / wheel zoom",nil,C.muted,11) or false,
 	})
+end
+
+-- Round trip to each other pilot (net.match measures it): green is unnoticeable, amber is
+-- rollback working hard, red is late corrections you will see.
+function H.pings(g)
+	local mt = g.match
+	if not mt or #mt.players < 2 then return false end
+	local ping, row = mt.ping, {gap=12}
+	for i, id in ipairs(mt.players) do
+		if i ~= mt.me then
+			local ms = ping[id]
+			local color = not ms and C.muted or ms < 60 and C.player or ms < 120 and C.flame or C.danger
+			table.insert(row, text("P"..i.." "..(ms and ms.." ms" or "…"), "hud:ping"..i, color, 10))
+		end
+	end
+	return ui.row(row)
 end
 
 -- Small readouts and warnings over the playfield; returned as a list.
@@ -73,6 +92,7 @@ function H.status(g)
 				text("SHOTS "..m.fired,"hud:fired",C.muted,10),
 				text("ALT "..math.floor(map.h-C.ry-m.player.y+0.5),"hud:altitude",C.muted,10),
 			}),
+			H.pings(g),
 		}),
 		lying and ui.col({absolute=true,top=64,w_full=true,align_center=true,
 			ui.row({px=9,py=4,radius=8,fill=C.jet_bg,

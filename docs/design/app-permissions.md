@@ -98,7 +98,7 @@ app "chat" {
 | `history since_join\|all` | for `members(...)` docs: a new member's index lists shards from the join **day** onward, or all. Day precision, decided 2026-10-04: the join-day shard shows that whole day. |
 | `validate "<module.fn>"` | Lua write rule (§5) |
 | `derive "<out>" from "<in>" by "<fn>"` | node-only projection (§6) |
-| `channel <name> { send … rate N/s slot sender }` | ephemeral, never persisted; node stamps the sender |
+| `channel <name> { send … rate N/s size N slot sender }` | ephemeral, never persisted; node stamps the sender. `size` (bytes, at most 16 KiB) added 2026-11-04 (`jetpack-mp.md` step 2) |
 | `uses "<namespace>" read\|write` | cross-app binding, approved at install; access = binding ∩ the user's roles |
 | `local "<path>"` | durable but never synced (drafts) |
 | `sim "<file>" { tick N }` | node-authoritative simulation (games); later |

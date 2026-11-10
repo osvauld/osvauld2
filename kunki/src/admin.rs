@@ -810,6 +810,38 @@ impl Admin {
         Ok(out)
     }
 
+    /// What a channel stream judges an item's messages by (`jetpack-mp.md` §6 step 3): the
+    /// item's manifest and `did`'s app roles on it. Refused unless `token` reaches the item —
+    /// the same membership a subscription proves.
+    pub fn net_rules(
+        &self,
+        did: &str,
+        token: &Token,
+        ws: &str,
+        item: &str,
+        now: u64,
+    ) -> Result<(Manifest, BTreeSet<String>), NodeError> {
+        let hello = SubscribeHello {
+            desktop_did: did.to_string(),
+            token: token.clone(),
+            ws_id: ws.to_string(),
+            item_id: item.to_string(),
+            layer: SyncLayer::Src,
+        };
+        courier::subscribe::node_accept_subscription(&hello, &self.root()?, now, &self.revoked()?)?;
+        let manifest = self.manifest(&item_scope(ws, item))?;
+        // No doc: item-wide roles only, which is what a channel is.
+        let roles = roles_at(&self.grants(did, now)?, ws, item, "");
+        Ok((manifest, roles))
+    }
+
+    /// [`Self::net_rules`] for the root itself — the host's own open app, which no token admits.
+    pub fn own_net_rules(&self, ws: &str, item: &str, now: u64) -> Result<(Manifest, BTreeSet<String>), NodeError> {
+        let manifest = self.manifest(&item_scope(ws, item))?;
+        let roles = roles_at(&self.grants(&self.root()?, now)?, ws, item, "");
+        Ok((manifest, roles))
+    }
+
     /// The app's manifest, read from the source the node holds for `scope`'s item. A source
     /// without `manifest.osv` is bare: it declares no roles.
     pub fn manifest(&self, scope: &Scope) -> Result<Manifest, NodeError> {

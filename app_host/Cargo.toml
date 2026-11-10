@@ -24,6 +24,9 @@ manifest = { path = "../manifest" }
 # `walk` recurses once per tree level with a large debug frame; a phone's main thread has
 # 2 MiB (laptop-host step 8 found the launcher's tree overflowing it on a Pixel).
 stacker = "0.1"
+# Software only: the same bits on every device is the point (`dmath.rs`). `force-soft-floats`, since
+# another crate's default features turn `arch` back on.
+libm = { version = "0.2", features = ["force-soft-floats"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

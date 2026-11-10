@@ -291,7 +291,8 @@ ui.world({
   handle) and optionally `clip` (a `gfx.clip` handle), `controller`, `flip`, `attach`,
   `collider`, `sensor`, `loose`, `group` and `blocks` — nothing else. The world itself also
   takes `camera` (see Camera, below).
-  `false` drops out, like a child element. List order is draw order,
+  `false` drops out, like a child element. Unlike child elements, a nested list of entities does
+  not splice in: build the world's table and `table.insert` each entity. List order is draw order,
   unless the world has `order = "y"`: then whoever's feet (the bottom of the drawing's box) stand
   lower draws in front, ties keeping list order — a top-down room.
 - **`pos` is where an entity spawns, and only that.** Once it exists the world owns where it
@@ -323,6 +324,13 @@ ui.world({
   one without never moves, so it is a wall. Give a character a small circle at its feet, not its
   whole drawing: top-down, the body stands up out of the floor, and only the feet meet a wall.
   Nothing checks where an entity *spawns* — a `pos` inside a wall is the author's mistake.
+  - `collider = { line = { x1, y1, x2, y2, … } }` is ground: segments joining the points, from
+    `at`, as long as you like — one entity can be a whole hilly stage. It has no inside, so it is
+    only ever a wall: never `loose`, controlled, carried or a sensor. Two points in a row must
+    differ. **It is one-sided: the solid is on your right as you walk the points**, so a line
+    listed left to right is ground with its solid below; list a ceiling right to left. Things
+    roll and rest on it under `gravity`, cross its joints without catching, and fast ones don't
+    pass through.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
   one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
@@ -512,6 +520,16 @@ ui.world({
   let `grip` (surface friction) stop the sliding. `grip` is also what lets a thing tumble.
 - **`loose = { density = n }`** (default 1, above 0): mass is density × area, so a stone block
   outweighs a wooden one the same size and flings what it hits.
+- **`loose = { mass = kg }`** states the whole thing's mass instead, whatever its size: a game
+  states a 300 kg chassis, not a density. `mass` or `density`, not both. Springs (and motors)
+  are force-based, so with masses in kg their `stiffness` is in N/m and `damping` in N·s/m:
+  a 5 kg box sags `5 · 981 / stiffness` units on a spring under `gravity = { 0, 981 }`.
+- **`loose = { center = { x, y } }`** moves the centre of mass to that point of the drawing
+  (default: the collider's middle). A car with its weight low and forward is hard to flip; a
+  plank with its weight at one end tips that way off a peg. How hard it is to turn stays the
+  shape's own.
+- Things fall asleep once nearly still. A heavily overdamped spring creeps toward its rest so
+  slowly that it can doze off short of it; damp near critical (`2·√(stiffness·mass)`) or less.
 - **`wells = { { at, radius, pull }, … }`** are standing fields, described like `gravity`: a loose
   thing whose centre is within `radius` of `at` accelerates toward it at `pull`, fading to nothing
   at the edge; a negative `pull` pushes away. They wake what they reach.
@@ -523,6 +541,22 @@ ui.world({
     it cannot turn.
   - `"rope"`: never farther apart than `length`, free to come closer — a chain is ropes between links.
   - `"spring"`: pulls toward `length` apart; needs `stiffness` and `damping`.
+  - `"wheel"`: suspension. `a` is the body, `b` the wheel (both loose with `grip`). The wheel
+    turns freely about `b_at` and slides along `axis` (a direction in `a`'s drawing, `{ 0, 1 }`
+    is straight down) from `a_at`, sprung back toward `a_at` at `stiffness` with `damping`,
+    at most `travel = { up, down }` either way. It is rigid across the axis, so the wheel never
+    wobbles sideways. `a_at` is where the wheel's centre sits unloaded; at rest the body sags
+    `weight on the wheel · gravity / stiffness` toward it. Hit hard, a stop gives a unit or two
+    before it holds.
+  - `motor = { speed = degrees_a_second, torque = n }` on a `"pin"` or `"wheel"` drives its
+    turning: `b` relative to `a` (with no `b`, `a` itself) toward `speed`, pushing with at most
+    `torque`. Positive turns the way `spin` counts, so a wheel on the ground rolls right. With
+    masses in kg, `torque` is N·m × 10 000 (units are centimetres). `speed = 0` with a large
+    torque is a brake. A pedal is just state: describe the motor from it each view — a changed
+    motor is updated in place, never rebuilt, and wakes what it drives. Whether the torque
+    turns into drive is the tyre's `grip` against the ground's; without grip the wheel spins
+    in place. A motor pushes back on `a` just as hard, so spinning a wheel up in the air turns
+    the body the other way.
   - `contacts = true` lets the two bodies collide with each other (off by default); one end at
     least must be loose. A joint naming something not in the description is an error, and the
     previous joints stay.
@@ -544,10 +578,10 @@ world("lab"):release("block")                             -- … let go: it keep
   not pull a held thing. Drags that end after the thing has gone are no error.
 - `e.shape` of an `on_drag` on a world is the entity's id — it says which body was taken.
 
-### Questions — `world(id):ray` and `:at`
+### Questions — `world(id):ray`, `:at` and `:get`
 
 Lua can ask the world what is where, and decide on the answer — can the guard see the hero, what
-is in front of the player when they press E, what did the click land on:
+is in front of the player when they press E, what did the click land on, how fast is the car:
 
 ```lua
 local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
@@ -555,7 +589,15 @@ local hit = world("map"):ray({ gx, gy }, { hx, hy }, { skip = "guard" })
 if hit and hit.id == "hero" then alarm() end           -- nothing in between: seen
 
 local here = world("map"):at({ x, y })                -- { "chest", "cellar" }, here.tick
+
+local car = world("track"):get("car")
+-- nil, or { pos = { x, y }, rot = 12, velocity = { vx, vy }, spin = -40, tick = 1042 }
 ```
+
+- `get` reads one entity back, in the dump's names and units: `pos` its box's top-left, `rot`
+  degrees turned, `velocity` per second, `spin` degrees a second. An id the world lacks is `nil`,
+  and so is everything before the world's first frame — the view that describes the world can
+  ask it without a guard. It reads the entity itself, so a `set` shows in it at once.
 
 - `ray` answers the first solid thing on the line from one point to the other: `at` where the line
   met it, `normal` the surface's outward direction there, `dist` how far along. Zones do not stop
@@ -1257,6 +1299,106 @@ The rules:
   index is answered from memo. Hits are your own app's records only.
 - Snippets are plain text around the match, no markup — draw them however you like.
 
+## Playing together — `net` and `net.match`
+
+*2026-11-05 ([design](design/jetpack-mp.md)).* Everyone with your app open in a space can talk
+over **channels**: small messages, never stored, gone once delivered. A game goes further and
+describes a **match**; the platform keeps every player's copy of it the same.
+
+### Channels
+
+A channel is declared in `manifest.osv`, with a rate and, if you like, a size:
+
+```
+app "probe" {
+  channel ping { rate 10/s }            -- no `send`: every member may send
+  channel inputs { send player  rate 40/s  size 512 }
+}
+```
+
+```lua
+net.on("ping", function(body, from) ... end)   -- once, at load; `from` is the sender's id
+net.send("ping", { text = "hi" })              -- in a handler; false if over the rate
+for _, p in ipairs(net.peers()) do ... end      -- { id, account, me }, sorted by id, you included
+```
+
+- A message is a plain value: numbers, strings, booleans, tables of those. It reaches every
+  other device with the app open — through the space's host, which checks it and passes it on
+  unread — never your own.
+- An undeclared channel is an error; a body over `size` (16 KiB at most) is an error; sending
+  faster than `rate` drops the message and says `net: over rate on "ping"` in your console (the
+  host drops it too). No `rate` means 60 a second.
+- `net.send` works only in handlers, like any command. `net.peers()` is who has the app open
+  now: read it in `view` and you see people come and go.
+
+### Matches
+
+```lua
+local match = net.match({
+	id = "arena",                       -- also its channel: declare `channel arena { rate … }`
+	tick = 1 / 120,                     -- seconds of game per step
+	frame = 4,                          -- steps per input frame: 30 inputs a second here
+	players = net.peers(),              -- or ids; sorted, fixed for the match
+	setup = { map = map },              -- the lowest id's setup is everyone's
+	state = function(setup, players) return { t = 0, ... } end,
+	input = function() return { dx = 1 } end,   -- this device's input, once per input frame
+	step = function(state, inputs, events) ... end,   -- the rules: inputs[i] is player i's
+	worlds = { rink = function(state) return { entity, ... } end },   -- optional, see below
+})
+match.state     -- the latest state, for drawing (never write it outside step)
+match.status    -- "lobby" | "playing" | "waiting" | "ended" | "disputed"
+match.me, match.players, match.frame, match.checks, match.desynced, match.waiting, match.ended
+match.ahead     -- seconds of game time not yet stepped, under one step: draw moving things this far on
+match.ping      -- { [player id] = round-trip ms }, once measured
+match.stats     -- { frames, rollbacks, rolled_frames, stalls, snapshots, slowed }, counts so far
+```
+
+The platform sends your input, guesses the ones not here yet (each player's last), and when a
+late one differs it puts `state` back to that frame and runs `step` forward again — so `step`
+runs many times for one frame, and **may change nothing but `state`** (and its worlds). Every
+second the players compare a hash of `state`; a player who disagrees with a majority is dropped,
+two who disagree have no result (`disputed`), and a player who goes quiet is waited for
+(`waiting`, `match.waiting` says who) and after 10 s the match ends.
+
+The rules that bite:
+
+- **`state` is plain data**: no functions, no cycles, no two places holding one table. It is
+  copied before any frame that ran on a guessed input (and at each checkpoint), and a rewind
+  hands back a copy, so table identity does not
+  survive — name things by id (`owner = a.id`, not `owner = a`). A copy has no metatable: set
+  it again at the top of `step` if your state uses one.
+- **What never changes goes in `setup`**, not `state` (a map, gun stats, art): it is sent once
+  and kept out of every copy and hash. Jetpack reaches it through its state's metatable.
+- **A press is a count.** `input` runs once per input frame, but its value is used for `frame`
+  steps and again after a rewind: send `reload = 3` (presses so far), and act when it grows.
+- **Iterate arrays, not `pairs`**, and keep to `math` (see the sandbox): every device must get
+  the same bits.
+- Alone (`players` left out or just you), a match starts at once with no input delay and an
+  input every step — a single-player game is a one-player match.
+- **Draw at `match.ahead`.** A step rate that isn't a multiple of the display's (120 on 75 Hz)
+  steps 1, 2, 1, 2 times a paint; drawing positions `x + vx * match.ahead` hides it.
+- With others, your input runs about 16 ms after you press (whole input frames, at least one):
+  a nearby peer's input is then usually in before its frame runs and nothing is guessed. A
+  device that started later is behind; the one ahead runs up to a tenth slow until they level.
+- With others, everyone must make the match with the same players: Jetpack sends the roster on a
+  `lobby` channel and each device calls `net.match` when it hears it.
+
+**Worlds under a match.** `worlds = { rink = fn(state) }` makes the `ui.world` of that id
+*driven*: the platform describes it from `state` at the start of every frame, steps it after
+each `step` (`tick` must be whole world steps, 1/120 s), saves it with `state` and rewinds it
+too. What happens in it arrives in the next `step` as `events` — `{ world, kind = "hit" |
+"zone" | "move", id, who, … }` — instead of `on_hit`/`on_zone`. The view only shows it:
+
+```lua
+ui.world({ id = "rink", driven = "hockey", width = 900, height = 500 })
+```
+
+Entities, gravity, wells, joints and `on_*` moments there are errors, and commands
+(`world(id):set`, `push`, `blast`) work only inside `step`. `world(id):set(id, { move = { x, y }
+})` steers a controller in place of its keys. Timers are not driven yet: count steps in `state`.
+`demo_apps/mp_dots` and `demo_apps/mp_hockey` are the small examples; `demo_apps/jetpack` the
+big one.
+
 ## Animation
 
 Presentation animation is declarative:
@@ -1366,7 +1508,7 @@ The kanban split, worth copying at any size:
 ## The sandbox, and what happens when you err
 
 Your code runs sandboxed: no `io`, no filesystem, no network, no `os` — and `require` can
-only see your own folder. Available beyond plain Lua: `doc`, `ui`, `require`, `search`, `now()`
+only see your own folder. Available beyond plain Lua: `doc`, `ui`, `net`, `require`, `search`, `now()`
 (unix seconds as a float, wall clock), `uuid()`, `me()`. A runaway loop is killed, with the line number.
 
 Each run of your code — a `view`, a handler, module load, a test — has a budget: about a
@@ -1379,6 +1521,13 @@ the app and its siblings keep going.
 measuring how long something took: it follows the system clock, so it can jump, including
 backwards. Anything timing a gesture or an animation wants the monotonic clock instead, which
 reaches Lua as `e.t` on `on_drag` and `e.elapsed` on `on_frame`.
+
+`math` gives the same bits on every device — a laptop and a phone running the same code with the
+same numbers get the same answer, which is what lets players' copies of a game agree. Outside
+that promise: the `^` operator (write `x * x` or `math.pow(x, y)` where it must agree), and
+`string.format` of floats (keep game state as numbers, not formatted strings). `math.noise` and
+the `vector` library are refused (build noise from `math.random` with a seed; use plain numbers).
+Iterate arrays, not `pairs`, where order changes the result.
 
 Errors are for reading, not for fearing:
 

@@ -2,8 +2,8 @@
 -- kill, rate, mag, reload, semi/auto, pellets and cone, falloff, rocket splash and knockback, bot rate.
 math.clamp = math.clamp or function(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
-package.path = "demo_apps/jetpack/?.lua;" .. package.path
-local World = require("world")
+package.path = "demo_apps/jetpack/?.lua;scripts/?.lua;" .. package.path
+local World = require("jetpack_solo")
 local Weapons = require("weapons")
 local Bots = require("bots")
 local F = require("format")
@@ -206,7 +206,7 @@ local function dmg_at(distance)
 	w = arena(); local t = w.bots[1]
 	place(w.player, 3000, 100) -- far away
 	place(t, 1000 + distance, 500); t.hp = 100
-	Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player, "player")
+	Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player.id, "player")
 	return 100 - t.hp, t
 end
 check(dmg_at(0) == 80, "splash at the centre is the gun damage")
@@ -217,24 +217,24 @@ check(dmg_at(rs.splash * 0.25) > dmg_at(rs.splash * 0.75), "splash falls linearl
 -- knockback: away from the centre, weaker farther out
 w = arena(); place(w.player, 3000, 100)
 local t = w.bots[1]; place(t, 960, 540); t.hp = 100
-Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player, "player")
+Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player.id, "player")
 check(t.vx < 0 and t.vy > 0, "knockback pushes away from the blast")
 local near_push = math.sqrt(t.vx ^ 2 + t.vy ^ 2)
 place(t, 1000 + 20, 500 - 5); t.hp = 100
-Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player, "player")
+Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player.id, "player")
 check(t.vx > 0 and t.vy < 0, "knockback direction follows the side of the blast")
 place(t, 1000 + 60, 500); t.hp = 100
-Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player, "player")
+Weapons.explode(w, 1000, 500, rs.splash, rs.damage, w.player.id, "player")
 check(math.sqrt(t.vx ^ 2 + t.vy ^ 2) < near_push, "farther targets are pushed less")
 -- self-splash is allowed; a bot's rocket spares other bots
 w = arena(); local p, b = w.player, w.bots[1]
 place(p, 1000, 500); p.hp = 100; place(b, 1000, 500); b.hp = 100
-Weapons.explode(w, 1000, 500, rs.splash, rs.damage, p, "player")
+Weapons.explode(w, 1000, 500, rs.splash, rs.damage, p.id, "player")
 check(p.hp == 20 and b.hp == 20, "the owner takes their own splash")
 w.bots[2].hp, w.bots[2].respawn = 100, 0
 if w.bots[2] then
 	place(p, 3000, 100); p.hp = 100; place(b, 1000, 500); b.hp = 100; place(w.bots[2], 1000, 500)
-	Weapons.explode(w, 1000, 500, rs.splash, rs.damage, b, "bot")
+	Weapons.explode(w, 1000, 500, rs.splash, rs.damage, b.id, "bot")
 	check(w.bots[2].hp == 100 and b.hp == 20, "bot splash hurts its owner, not its team")
 end
 -- through the real shot path: slow shell, explodes against a wall, splash hits the neighbour

@@ -1,0 +1,4 @@
+app "mp_hockey" {
+  roles player
+  channel hockey { rate 40/s  size 512 }
+}

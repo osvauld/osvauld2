@@ -49,7 +49,7 @@ function W.effect(w, x, y, kind, radius)
 	end
 end
 
-function W.team(w, a) return a == w.player and "player" or "bot" end
+function W.team(w, a) return a.team end
 
 -- Spawn the shot(s) of one trigger pull from the soldier's gun now: no ammo or interval rules.
 function W.shoot(w, a, team)
@@ -62,7 +62,7 @@ function W.shoot(w, a, team)
 		local ang = a.aim + (W.random(w) * 2 - 1) * s.spread
 		-- Start at the actor, so cover cannot be bypassed by putting a muzzle through it.
 		table.insert(w.shots, {x = a.x, y = a.y - 4, vx = math.cos(ang) * s.shot_speed,
-			vy = math.sin(ang) * s.shot_speed, team = team, owner = a, dist = 0, maxd = maxd,
+			vy = math.sin(ang) * s.shot_speed, team = team, owner = a.id, dist = 0, maxd = maxd,
 			life = maxd / s.shot_speed + 1, range = s.range, rocket = rocket, splash = s.splash,
 			damage = s.damage * (a.damage_scale or 1)})
 	end
@@ -114,19 +114,19 @@ function W.damage(w, a, amount)
 	if a.hp == 0 then
 		a.respawn, a.thrusting = 2.2, false
 		W.effect(w, a.x, a.y, "burst")
-		if a == w.player then w.deaths = w.deaths + 1; w:clear_input()
+		-- Counted for the humans' side; each soldier keeps its own too.
+		a.deaths = (a.deaths or 0) + 1
+		if a.team == "player" then w.deaths = w.deaths + 1
 		else w.kills = w.kills + 1 end
 	end
 end
 
 -- Splash at (x, y): `damage` at the centre to 0 at `radius`, plus the push. Spares the owner's
--- teammates (not the owner).
+-- teammates (not the owner, named by id).
 function W.explode(w, x, y, radius, damage, owner, team)
 	W.effect(w, x, y, "burst", radius)
-	local all = {w.player}
-	for _, b in ipairs(w.bots) do table.insert(all, b) end
-	for _, a in ipairs(all) do
-		if a.hp > 0 and (a == owner or W.team(w, a) ~= team) then
+	for _, a in ipairs(w.all(w)) do
+		if a.hp > 0 and (a.id == owner or a.team ~= team) then
 			local dx, dy = a.x - x, a.y - y
 			local d = math.sqrt(dx * dx + dy * dy)
 			if d < radius then
@@ -145,7 +145,7 @@ end
 
 -- Advance shots (cover first, then actors, swept) and age out effects.
 function W.update(w, dt)
-	local solid, p = w.solids, w.player
+	local solid = w.solids
 	for i = #w.shots, 1, -1 do
 		local b = w.shots[i]
 		local dx, dy = b.vx * dt, b.vy * dt
@@ -160,7 +160,7 @@ function W.update(w, dt)
 			local t = Physics.segment(b.x, b.y, dx, dy, r, 0, 0)
 			if t and t < first then first, victim = t, nil end
 		end
-		local targets = b.team == "player" and w.bots or {p}
+		local targets = b.team == "player" and w.bots or w.humans
 		for _, a in ipairs(targets) do
 			if a.hp > 0 then
 				local t = Physics.segment(b.x, b.y, dx, dy,
@@ -195,7 +195,6 @@ function W.update(w, dt)
 		w.effects[i].age = w.effects[i].age + dt
 		if w.effects[i].age > (w.effects[i].life or 0.35) then table.remove(w.effects, i) end
 	end
-	if w.casings then FX.step_all(w.casings, dt, solid) end
 end
 
 return W

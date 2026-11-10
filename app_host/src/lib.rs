@@ -8,8 +8,12 @@ mod crdt;
 mod gfx;
 pub mod host;
 mod budget;
+mod dmath;
 pub mod index;
 mod modules;
+pub mod net;
+pub mod net_match;
+pub mod net_sim;
 mod props;
 pub(crate) mod signal;
 mod ui_group;
@@ -457,6 +461,11 @@ pub struct LuaApp<M> {
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
+    /// Who is here and what waits to go out; outlives the VM. Its `net.on` handlers do not.
+    net: net::Net,
+    net_handlers: net::Handlers,
+    /// This VM's matches: their functions and state are its own.
+    matches: net_match::Matches,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -618,7 +627,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
             src, cores, resolve, wake, to_msg, search, Worlds::default(),
-            gfx::world3d::Host::default(), setup, false, Rc::from(entry), me,
+            gfx::world3d::Host::default(), net::Net::default(), setup, false, Rc::from(entry), me,
         )?;
         if app.error.is_none() {
             if let Err(e) = app.worlds3d.commit() {
@@ -646,6 +655,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         search: index::SearchHook,
         worlds: Worlds,
         worlds3d: gfx::world3d::Host,
+        net: net::Net,
         setup: Option<host::VmSetup>,
         strict_trial: bool,
         entry: Rc<str>,
@@ -679,6 +689,9 @@ impl<M: Clone + 'static> LuaApp<M> {
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
         let host_context = host::HostContext::new(budget.clone());
+        let net_handlers = net::Handlers::default();
+        let matches = net_match::Matches::default();
+        net::install(&vm, net.clone(), net::rules(&src.doc), net_handlers.clone(), matches.clone(), worlds.clone(), host_context.clone())?;
         if let Some(install) = &setup {
             install(&vm, host_context.clone())?;
         }
@@ -717,6 +730,9 @@ impl<M: Clone + 'static> LuaApp<M> {
             groups: Groups::default(),
             kept: Default::default(),
             tracker,
+            net,
+            net_handlers,
+            matches,
         })
     }
 
@@ -755,6 +771,8 @@ impl<M: Clone + 'static> LuaApp<M> {
             self.search.clone(),
             self.worlds.clone(),
             if validate_tree { gfx::world3d::Host::default() } else { self.worlds3d.staged() },
+            // A candidate's load sends nothing (`net.send` needs a handler), so it shares the core.
+            self.net.clone(),
             self.setup.clone(),
             validate_tree,
             self.entry.clone(),
@@ -848,6 +866,42 @@ impl<M: Clone + 'static> LuaApp<M> {
     /// belongs beside what the app did itself.
     pub fn note(&self, line: String) {
         self.log(line);
+    }
+
+    /// Who is here on this app, as the host tells it (`net.peers()`).
+    pub fn net(&self) -> &net::Net {
+        &self.net
+    }
+
+    /// What the app sent since the last take, for the host to sign and route; the local
+    /// refusals (`net: over rate`) go to the console on the way.
+    pub fn net_take(&self) -> Vec<net::Outgoing> {
+        let (out, notes) = self.net.take();
+        for line in notes {
+            self.log(line);
+        }
+        out
+    }
+
+    /// One message from `from` (a peer's id) to its channel's `net.on` handler; none, dropped.
+    pub fn net_deliver(&mut self, channel: &str, from: &str, body: &[u8]) {
+        let m = self.matches.borrow().get(channel).cloned();
+        if let Some(m) = m {
+            if m.feed(&self.net, from, body) {
+                (self.wake)();
+                return;
+            }
+        }
+        let Some(h) = self.net_handlers.borrow().get(channel).cloned() else {
+            return;
+        };
+        let _armed = self.budget.arm();
+        let _scope = self.host_context.enter();
+        let result = net::decode_body(&self.vm, body).and_then(|v| h.call::<()>((v, from)));
+        if let Err(e) = result {
+            self.log(format!("handler error: {e}"));
+        }
+        (self.wake)();
     }
 
     /// Reload if the source has moved since this VM was built; `None` if it had not.
@@ -1018,7 +1072,42 @@ impl<M: Clone + 'static> LuaApp<M> {
         true
     }
 
+    /// What each match did so far, by id — for the player-cap sim and the tests.
+    pub fn match_stats(&self) -> HashMap<String, net_match::Stats> {
+        self.matches.borrow().iter().map(|(id, m)| (id.clone(), m.stats())).collect()
+    }
+
+    pub fn match_info(&self, id: &str) -> Option<net_match::Info> {
+        self.matches.borrow().get(id).map(|m| m.info())
+    }
+
+    /// A match's checkpoint hashes so far, `(frame, hash)`, oldest first.
+    pub fn match_checks(&self, id: &str) -> Vec<(u64, String)> {
+        self.matches.borrow().get(id).map(|m| m.checks()).unwrap_or_default()
+    }
+
     pub fn advance_simulation(&mut self, elapsed: f64, active: bool) -> bool {
+        let playing = self.advance_matches(elapsed, active);
+        self.advance_worlds3d(elapsed, active) | playing
+    }
+
+    fn advance_matches(&mut self, now: f64, active: bool) -> bool {
+        let all: Vec<net_match::Match> = self.matches.borrow().values().cloned().collect();
+        if all.is_empty() {
+            return false;
+        }
+        let _armed = self.budget.arm();
+        let mut playing = false;
+        for m in all {
+            playing |= m.advance(&self.vm, &self.net, now, active);
+            if let Some(e) = m.take_error() {
+                self.log(format!("net.match: {e}"));
+            }
+        }
+        playing
+    }
+
+    fn advance_worlds3d(&mut self, elapsed: f64, active: bool) -> bool {
         match self.worlds3d.advance(elapsed, active) {
             Ok(ticking) => {
                 let _armed = self.budget.arm();
@@ -1308,6 +1397,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         if let LuaMsg::TickWorld(id, ..) | LuaMsg::KeyWorld(id, _) = &msg {
             if let Some(world) = self.worlds.borrow_mut().get_mut(id) {
                 match &msg {
+                    LuaMsg::TickWorld(_, _, elapsed) if world.is_driven() => world.show_at(*elapsed),
                     LuaMsg::TickWorld(_, dt, elapsed) => world.tick(*elapsed, *dt),
                     LuaMsg::KeyWorld(_, key) if key.cancelled => world.release_all(),
                     LuaMsg::KeyWorld(_, key) => {
@@ -1620,6 +1710,7 @@ fn shadow_os(vm: &Lua) -> mlua::Result<()> {
 
 fn test_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
+    dmath::install(&vm)?;
     shadow_os(&vm)?;
     let _ = vm.sandbox(true)?;
     let budget = budget::install(&vm, budget::Policy::app())?;
@@ -1657,6 +1748,7 @@ fn install_test_bindings(vm: &Lua) -> mlua::Result<()> {
 
 pub fn sandboxed_vm() -> mlua::Result<(Lua, Arc<Budget>)> {
     let vm = Lua::new();
+    dmath::install(&vm)?;
     let now_fn = vm.create_function(|_, ()| wall_clock())?;
     let uuid_fn = vm.create_function(|_, ()| Ok(uuid::Uuid::new_v4().to_string()))?;
     vm.load(PRELUDE).exec()?;
@@ -1938,6 +2030,9 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
             )));
         }
     }
+    if let Some(m) = node.get::<Option<String>>("driven")? {
+        return build_driven_world(node, &id, &m, (width, height), order, context);
+    }
     let actions = world_actions(node)?;
     let gravity = world_gravity(node, &id)?;
     let wells = gfx::wells(node, &format!("world {id:?}"))?;
@@ -2029,6 +2124,90 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
         });
     }
     Ok(el)
+}
+
+/// A world a match steps (`jetpack-mp.md` §5): the view only shows it. Its entities, gravity,
+/// wells and joints come from the match's `worlds`, and what happens in it reaches `step` as
+/// events, so none of those belong here.
+fn build_driven_world<M: 'static>(
+    node: &Table,
+    id: &str,
+    by: &str,
+    (width, height): (f64, f64),
+    order: world::Order,
+    context: &mut Ctx<M>,
+) -> mlua::Result<El<M>> {
+    if max_index(node) > 0 {
+        return Err(mlua::Error::runtime(format!(
+            "world {id:?} is driven by match {by:?}: its entities come from the match's worlds.{id}"
+        )));
+    }
+    for prop in ["gravity", "wells", "joints", "actions", "on_action", "on_move", "on_clip_end", "on_zone", "on_timer", "on_hit"] {
+        if !node.get::<Value>(prop)?.is_nil() {
+            let why = if prop.starts_with("on_") { "what happens in it arrives in step's events" } else { "describe it in the match's worlds" };
+            return Err(mlua::Error::runtime(format!("world {id:?} is driven by match {by:?}: no {prop}; {why}")));
+        }
+    }
+    let camera = gfx::camera(node)?;
+    if let Some(c) = &camera {
+        c.check().map_err(|e| mlua::Error::runtime(format!("world {id:?}: camera: {e}")))?;
+    }
+    let mut worlds = context.worlds.borrow_mut();
+    let world = worlds.entry(id.to_string()).or_default();
+    world.set_order(order);
+    world.describe_camera((width, height), camera).map_err(mlua::Error::external)?;
+    let visual = world.frame(width, height).map_err(mlua::Error::external)?;
+    let mut el = frame_el(Arc::new(visual));
+    if world.needs_ticks() {
+        let (to_msg, id) = (context.to_msg.clone(), id.to_string());
+        el = el.on_frame(id.clone(), move |tick| {
+            to_msg(LuaMsg::TickWorld(id.clone(), tick.dt.into(), tick.elapsed))
+        });
+    }
+    Ok(el)
+}
+
+/// A driven world brought to a match's description of it: `{ entity, ..., gravity = ..., wells =
+/// ..., joints = ... }`, as a `ui.world`'s own, without groups.
+pub(crate) fn describe_world(world: &mut world::World2d, desc: &Table, id: &str) -> mlua::Result<()> {
+    let owner = format!("match world {id:?}");
+    for pair in desc.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        if let Value::String(k) = k {
+            let k = k.to_str()?.to_string();
+            if !["gravity", "wells", "joints"].contains(&k.as_str()) {
+                return Err(mlua::Error::runtime(format!("{owner}: unknown field {k:?}")));
+            }
+        }
+    }
+    let gravity = world_gravity(desc, id)?;
+    let wells = gfx::wells(desc, &owner)?;
+    world::World2d::check_wells(&wells).map_err(mlua::Error::external)?;
+    let joints = gfx::joints(desc, &owner)?;
+    let mut specs = Vec::new();
+    for index in 1..=max_index(desc) {
+        match desc.get::<Value>(index)? {
+            Value::Boolean(false) => {}
+            Value::Table(t) if t.get::<Option<String>>("tag")?.as_deref() == Some("group") => {
+                return Err(mlua::Error::runtime(format!("{owner}: groups are for described worlds; list entities")));
+            }
+            Value::Table(spec) => specs.push(gfx::entity(spec, index)?),
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "{owner}: entity {index} must be a table or false, got {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    let wrap = |e: world::WorldError| mlua::Error::runtime(format!("{owner}: {e}"));
+    if world.gravity() != gravity {
+        world.set_gravity(gravity).map_err(wrap)?;
+    }
+    world.reconcile(specs).map_err(wrap)?;
+    world.set_wells(wells).map_err(wrap)?;
+    world.set_joints(joints).map_err(wrap)?;
+    Ok(())
 }
 
 /// Runs a world group's function as `view` runs — signal writes refused — noting what it read.
@@ -2207,6 +2386,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
         "frame" => &["visual"],
         "scene3d" => &["scene", "on_zone"],
         "world" => &[
+            "driven",
             "width",
             "height",
             "camera",

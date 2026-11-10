@@ -4,10 +4,19 @@ local F = require("format")
 local Pickups = require("pickup_art")
 local V = {}
 
+-- Where to draw a soldier: its state, carried on along its velocity by the clock the match has not
+-- stepped yet (`match.ahead`, under one frame). Steps don't land evenly on paints (120 a second on a
+-- 75 Hz screen is 1, 2, 1, 2 a paint), so drawing the state alone judders. Contact zeroes the velocity,
+-- so nothing is drawn into a wall. Drawing only: the rules never see it.
+function V.drawn(g, a)
+	local t = (g.m.state == "Playing" and a.hp > 0 and g.match) and g.match.ahead or 0
+	return a.x + a.vx * t, a.y + a.vy * t
+end
+
 -- The camera's geometry for the current playfield size, framed on the player.
 function V.geometry(g)
-	local p = g.m.player
-	return g.camera:geometry(g.size.w, g.size.h, p.x, p.y)
+	local x, y = V.drawn(g, g.m.player)
+	return g.camera:geometry(g.size.w, g.size.h, x, y)
 end
 
 -- The clipped map viewport: themed background (parallax layers), actors and effects. `g.pilots` is the
@@ -18,16 +27,17 @@ function V.scene(g)
 	local geo = V.geometry(g)
 	local scale = geo.scale
 	local actors={}
-	local all={m.player}
-	for _,b in ipairs(m.bots) do table.insert(all,b) end
-	for index,a in ipairs(all) do
+	local humans=#m.humans
+	for index,a in ipairs(m.all(m)) do
 		if a.hp>0 then
-			local team=index==1 and "player" or "bot"
-			local pilot=F.pilot_for(g.pilots,team,index-1)
+			local team=a.team
+			-- Each human flies their own pilot (the first one alone, as ever); bots cycle the list.
+			local pilot=index<=humans and g.pilots[(index-1)%math.max(1,#g.pilots)+1] or F.pilot_for(g.pilots,team,index-humans)
 			local gun=F.find(g.guns,a.gun)
 			local ax,ay=Art.anchor(pilot)
+			local x,y=V.drawn(g,a)
 			table.insert(actors,ui.frame({id=a.id,visual=Art.soldier(m,a,pilot,team,gun),absolute=true,
-				left=(a.x-ax-geo.x)*scale+geo.ox,top=(a.y-ay-geo.y)*scale+geo.oy,scale=scale,
+				left=(x-ax-geo.x)*scale+geo.ox,top=(y-ay-geo.y)*scale+geo.oy,scale=scale,
 				on_hover=function() end}))
 		end
 	end
