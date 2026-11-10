@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90" height="56" viewBox="0 0 90 56">
+  <!-- A boulder, 0.9 m wide; its foot is the bottom centre. Agent-drawn for the maps. -->
+  <defs>
+    <linearGradient id="stone" x1="0" y1="4" x2="0" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b3aa9d"/><stop offset="0.6" stop-color="#8d8478"/><stop offset="1" stop-color="#5c554c"/>
+    </linearGradient>
+  </defs>
+  <g id="rock" stroke-linejoin="round">
+    <path d="M4 56 L10 26 L30 8 L56 4 L76 16 L88 40 L86 56 Z" fill="url(#stone)" stroke="#5c554c" stroke-width="3"/>
+    <path d="M30 8 L38 30 L56 4 M38 30 L76 16 M38 30 L30 56" fill="none" stroke="#5c554c" stroke-opacity="0.6" stroke-width="2"/>
+    <path d="M18 24 L30 12" fill="none" stroke="#d8d1c6" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

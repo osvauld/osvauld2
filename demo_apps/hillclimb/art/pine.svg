@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="110" height="280" viewBox="0 0 110 280">
+  <!-- A tall pine, 2.8 m; its foot is the bottom centre. Agent-drawn for the maps. -->
+  <g id="trunk">
+    <rect x="48" y="220" width="14" height="60" fill="#5a3c22"/>
+  </g>
+  <g id="boughs" stroke-linejoin="round">
+    <path d="M55 0 L82 70 L66 66 L96 140 L72 134 L108 226 L2 226 L38 134 L14 140 L44 66 L28 70 Z" fill="#2e7d4f" stroke="#1d5a37" stroke-width="3"/>
+    <path d="M55 0 L82 70 L66 66 L96 140 L72 134 L108 226 L55 226 Z" fill="#1d5a37" fill-opacity="0.45"/>
+    <path d="M48 40 L40 62 M40 100 L28 128 M34 170 L20 210" fill="none" stroke="#5fb07a" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

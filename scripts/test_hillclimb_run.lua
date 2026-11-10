@@ -10,7 +10,7 @@ local car = Vehicle.check(Vehicle.car)
 local function near(a, b, eps) return math.abs(a - b) <= (eps or 1e-9) end
 
 -- P-S1: a seed is a stage, the same every time.
-local a, b, c = Stage.build(7), Stage.build(7), Stage.build(8)
+local a, b, c = Stage.from_map(Stage.generate(7)), Stage.from_map(Stage.generate(7)), Stage.from_map(Stage.generate(8))
 assert(#a.points == #b.points, "same seed, same length")
 for i = 1, #a.points do assert(a.points[i] == b.points[i], "same seed, same point " .. i) end
 local differs = false

@@ -146,57 +146,18 @@ local function chassis(w, h, m)
 	return one_part(w, h, s)
 end
 
--- A knobbly tyre, an alloy rim, spokes and hub: a turning wheel shows that it turns.
-local function wheel(d)
-	local r = d / 2
-	local s = {}
-	local knobs = {}
-	for k = 0, 17 do
-		local a, half = k * math.pi * 2 / 18, 0.07
-		local function at(rr, da) return r + math.cos(a + da) * rr, r + math.sin(a + da) * rr end
-		local x1, y1 = at(r * 0.88, -half)
-		local x2, y2 = at(r * 1.0, -half * 0.8)
-		local x3, y3 = at(r * 1.0, half * 0.8)
-		local x4, y4 = at(r * 0.88, half)
-		for _, c in ipairs({ { "move", x1, y1 }, { "line", x2, y2 }, { "line", x3, y3 }, { "line", x4, y4 }, { "close" } }) do
-			table.insert(knobs, c)
-		end
-	end
-	table.insert(s, { path = knobs, fill = C.tyre_edge })
-	table.insert(s, { path = disc(r, r, r * 0.92), fill = radial(r, r, r * 0.92, { { 0.55, C.tread }, { 1, C.tyre } }) })
-	table.insert(s, { path = disc(r, r, r * 0.78), stroke = { 1.5, "#3a3e46" } })
-	table.insert(s, { path = disc(r, r, r * 0.6), fill = radial(r * 0.8, r * 0.75, r * 0.7, { { 0, "#ffffff" }, { 0.4, C.rim }, { 1, C.rim_dark } }), stroke = { 2, C.tyre_edge } })
-	for k = 0, 4 do
-		local a = k * math.pi * 2 / 5
-		local dx, dy = math.cos(a), math.sin(a)
-		table.insert(s, {
-			path = poly({ r + dx * r * 0.16 - dy * 3, r + dy * r * 0.16 + dx * 3, r + dx * r * 0.55 - dy * 2, r + dy * r * 0.55 + dx * 2,
-				r + dx * r * 0.55 + dy * 2, r + dy * r * 0.55 - dx * 2, r + dx * r * 0.16 + dy * 3, r + dy * r * 0.16 - dx * 3 }),
-			fill = C.rim_dark,
-		})
-	end
-	table.insert(s, { path = disc(r, r, r * 0.2), fill = C.metal_dark, stroke = { 1.5, C.tyre_edge } })
-	local nuts = {}
-	for k = 0, 4 do
-		local a = k * math.pi * 2 / 5 + 0.6
-		disc(r + math.cos(a) * r * 0.11, r + math.sin(a) * r * 0.11, 1.4, nuts)
-	end
-	table.insert(s, { path = nuts, fill = C.rim })
-	return one_part(d, d, s)
+-- Drawn in an SVG editor: art/wheel.svg (a knobbly tyre, an alloy rim, spokes, so a turning
+-- wheel shows that it turns) and art/helmet.svg. Each is drawn at the size its body has; a
+-- tuned car with another size needs its file redrawn, so a mismatch is an error, not a stretch.
+local function from_svg(name, d)
+	local spec = gfx.svg(name)
+	assert(spec.size[1] == d and spec.size[2] == d,
+		string.format("%s is drawn %gx%g; this body needs %gx%g", name, spec.size[1], spec.size[2], d, d))
+	return gfx.drawing(spec)
 end
 
--- A helmet facing right: lit dome, a stripe, a visor with a glint, a chin guard.
-local function head(d)
-	local r = d / 2
-	return one_part(d, d, {
-		{ path = disc(r, r, r), fill = radial(r * 0.7, r * 0.6, r * 1.3, { { 0, "#fff3b8" }, { 0.45, C.helmet }, { 1, C.helmet_dark } }), stroke = { 1.5, C.dirt_deep } },
-		{ path = { { "move", r * 0.25, r * 0.35 }, { "quad", r, -r * 0.15, r * 1.75, r * 0.35 } }, stroke = { 3, C.stripe } },
-		{ path = { { "move", r * 0.95, r * 0.6 }, { "line", r * 1.95, r * 0.65 }, { "quad", r * 2.02, r * 0.95, r * 1.92, r * 1.25 }, { "line", r * 0.95, r * 1.2 }, { "close" } },
-			fill = vertical(r * 0.6, r * 1.25, { { 0, "#3d5a80" }, { 1, C.visor } }) },
-		{ path = { { "move", r * 1.15, r * 0.72 }, { "line", r * 1.65, r * 0.74 } }, stroke = { 1.5, "#ffffffaa" } },
-		{ path = { { "move", r * 1.1, r * 1.45 }, { "quad", r * 1.6, r * 1.6, r * 1.85, r * 1.4 } }, stroke = { 2.5, C.helmet_dark } },
-	})
-end
+local function wheel(d) return from_svg("art/wheel.svg", d) end
+local function head(d) return from_svg("art/helmet.svg", d) end
 
 -- A jerrycan: shaded body, a carry handle, the spout cap, the X pressed into its side.
 local function fuel_can(w, h)

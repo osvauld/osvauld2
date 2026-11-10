@@ -11,11 +11,13 @@ mod budget;
 pub mod index;
 mod modules;
 mod props;
+mod sound;
 pub(crate) mod signal;
 mod ui_group;
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, DocKey, Docs, Resolve, Wake};
 pub use index::{SearchFn, SearchHit};
+pub use sound::SoundOut;
 
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
@@ -455,6 +457,8 @@ pub struct LuaApp<M> {
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
+    /// Where `sound` plays: set by the host, kept across reloads like the cores.
+    sound: sound::Hook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,7 +600,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
-            src, cores, resolve, wake, to_msg, search, Worlds::default(),
+            src, cores, resolve, wake, to_msg, search, sound::Hook::default(), Worlds::default(),
             gfx::world3d::Host::default(), setup, false, Rc::from(entry),
         )?;
         if app.error.is_none() {
@@ -623,6 +627,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
+        sound: sound::Hook,
         worlds: Worlds,
         worlds3d: gfx::world3d::Host,
         setup: Option<host::VmSetup>,
@@ -651,6 +656,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let viewing = Rc::new(Cell::new(strict_trial));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         worlds3d.install(&vm, viewing.clone())?;
+        sound::install(&vm, sound.clone(), viewing.clone())?;
         let tracker = signal::Tracker::default();
         signal::install(&vm, viewing.clone(), tracker.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
@@ -683,6 +689,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             resolve,
             wake,
             search,
+            sound,
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds,
             worlds3d,
@@ -710,6 +717,11 @@ impl<M: Clone + 'static> LuaApp<M> {
     /// The three stages are load, setup and **first render**, and the third is not optional: a
     /// `main.lua` that compiles and returns a closure which throws on its first call is the
     /// ordinary case, and without the trial frame we would have swapped before finding out.
+    /// Where this app's `sound` calls play from now on. Without it they play nothing.
+    pub fn set_sound(&self, out: SoundOut) {
+        sound::connect(&self.sound, out);
+    }
+
     pub fn reload(&mut self) -> Result<(), String> {
         *self = self.stage_reload(self.src.clone(), false)?;
         Ok(())
@@ -729,6 +741,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             self.wake.clone(),
             self.to_msg.clone(),
             self.search.clone(),
+            self.sound.clone(),
             self.worlds.clone(),
             if validate_tree { gfx::world3d::Host::default() } else { self.worlds3d.staged() },
             self.setup.clone(),

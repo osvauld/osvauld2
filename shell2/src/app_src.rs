@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use loro::{LoroDoc, LoroText};
-const KEEP: [&str; 2] = ["lua", "osv"];
+const KEEP: [&str; 3] = ["lua", "osv", "svg"];
 
 pub fn read_app_folder(root: &Path) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();

@@ -10,6 +10,48 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Sound (2026-11-06, branch `hillclimb`, not landed; steps 1–2 of 5) — [plan](design/sound.md)
+- `audio` crate: generated sounds (`Synth`: square/saw/sine/noise, slide, attack/sustain/decay)
+  and a `Mixer` (one bus per app, volume/pitch glide, 10 ms stop fade, peak limiter, per-bus
+  event log and recent samples). No device, no Lua, no clock of its own.
+- shell2 owns the one mixer (`sound.rs`): the sound card through `cpal` when windowed (a silent
+  wall-clock renderer if there is no device; Android silent for now), the virtual frame clock
+  offscreen, so a capture after N frames is exact. Bus = the app thread's instance; closing the
+  app closes its bus.
+- Lua: `sound.synth{…}` (strict), `sound.play(s, {volume, pitch})` from handlers, not from
+  `view()`. Bridge: `SoundLog`, `SoundCapture` (WAV); client `sound_log`, `sound_capture`.
+- verified: `cargo test -p audio` (U-1, U-2); `smoke_sound.py` (S-1 beep logged and heard at its
+  pitch, S-2 strict errors on the console). Next: `ui.sound` loops (step 3), Hillclimb's sounds
+  (4), sound files after binary item files land (5).
+
+### Hillclimb maps (2026-11-05, branch `hillclimb`, not landed) — [plan](design/hillclimb-maps.md)
+- A course is a map file, `maps/<name>.lua`: plain data in metres (ground control points,
+  start, finish, fuel, coin rows, SVG scenery) that an agent writes and edits over the bridge.
+  `Stage.check` refuses a bad map naming the field and point; `Stage.from_map` smooths the
+  points (monotone cubic, never overshoots) into the 0.5 m line. No Rust changes.
+- `maps/green_hills.lua` (500 m, hand-written, the default) with agent-drawn `art/tree.svg`,
+  `pine.svg`, `bush.svg`, `rock.svg`, `flag.svg`; `maps/seeded.lua` is the old seed-7
+  kilometre via `Stage.generate`. `Map:` / `Car:` buttons cycle them. The monster truck
+  (CC0, `truck.lua`, mirrored to face forward) is the second car.
+- The world id carries a fingerprint of the course: worlds outlive hot reload and never move
+  what exists, so an edited map must be a new world.
+- verified: `scripts/test_hillclimb_maps.lua` (P-M1–M3, incl. the seed-7 stage unchanged);
+  offscreen `smoke_hillclimb_maps.py` (S-M1–M3: default map + scenery, a live edit raises the
+  ground 5 m exactly, a broken edit names the point and the fix restores it), `smoke_hillclimb.py`
+  (288 m, deterministic) and `smoke_svg.py`.
+
+### SVG drawings (2026-11-05, branch `hillclimb`, not landed) — [plan](design/svg-drawings.md)
+- `gfx.svg(name)` → `spec, report`: an SVG from the app's own files as a drawing module (usvg
+  0.48, no text, no image loading). `<g id>` → parts, `data-pivot`, continuation parts for draw
+  order, transforms baked, exact skewed linear gradients, a `report.dropped` list.
+- Drawing shapes gained `rule` and named stroke style (`cap`, `join`, `miter_limit`, `dashes`,
+  `dash_offset`); unnamed strokes stay round. `.svg` uploads (`app_src` KEEP, `client.py`).
+- Hillclimb's wheels and helmet are `art/wheel.svg` / `art/helmet.svg`; the chassis stays Lua
+  (its geometry follows `vehicle.lua`'s mounts).
+- verified: `cargo test -p app_host --lib` (13 `tests::svg`, all green with the rest);
+  offscreen `smoke_svg.py` (S-V1–V3: upload, draw, a bridge edit to `wheel.svg` recolours the
+  spokes on screen) and `smoke_hillclimb.py` (288 m, deterministic).
+
 ### Hillclimb (2026-11-04, branch `hillclimb`, not landed) — [plan](design/hillclimb.md)
 - Engine (`world` + `app_host`, all generic): `collider = { line = {…} }` one-sided ground
   (oriented polyline: no snag at joints); `world(id):get(id)` → `{pos, rot, velocity, spin, tick}`

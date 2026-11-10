@@ -86,6 +86,7 @@ def drive(shots=False):
     with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
         g = Game(s)
         rpc = g.rpc
+        rpc.click(g.item, "swap_map")  # the seeded kilometre these asserts were written for
 
         # S-1: it settles on its springs, level, at the start.
         rpc.frame(240)
@@ -177,7 +178,7 @@ def drive(shots=False):
 def pure_tests():
     """The vehicle setup and run rules in plain Lua: no shell, but run here so they are run."""
     import subprocess
-    for test in ("test_hillclimb_vehicle.lua", "test_hillclimb_run.lua"):
+    for test in ("test_hillclimb_vehicle.lua", "test_hillclimb_run.lua", "test_hillclimb_maps.lua"):
         out = subprocess.run(["lua", f"scripts/{test}"], cwd=ROOT, capture_output=True, text=True)
         assert out.returncode == 0, (test, out.stdout, out.stderr)
         print(" ", out.stdout.strip())

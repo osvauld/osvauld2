@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="240" viewBox="0 0 160 240">
+  <!-- A round leafy tree, 2.4 m tall; its foot is the bottom centre. Agent-drawn for the maps. -->
+  <defs>
+    <linearGradient id="bark" x1="66" y1="0" x2="94" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5a3c22"/><stop offset="0.5" stop-color="#7a5434"/><stop offset="1" stop-color="#4a3019"/>
+    </linearGradient>
+    <radialGradient id="leaves" cx="62" cy="58" r="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8fdc6e"/><stop offset="0.55" stop-color="#4caf50"/><stop offset="1" stop-color="#2f7d32"/>
+    </radialGradient>
+  </defs>
+  <g id="trunk">
+    <path d="M70 240 L72 150 Q60 128 48 120 L54 116 Q68 124 76 136 L78 104 L84 104 L85 132 Q96 118 110 112 L114 118 Q98 128 88 150 L90 240 Z" fill="url(#bark)"/>
+  </g>
+  <g id="crown">
+    <circle cx="80" cy="78" r="62" fill="url(#leaves)"/>
+    <circle cx="38" cy="104" r="34" fill="url(#leaves)"/>
+    <circle cx="124" cy="100" r="34" fill="url(#leaves)"/>
+    <circle cx="80" cy="120" r="30" fill="#2f7d32" fill-opacity="0.35"/>
+    <path d="M44 62 Q60 34 90 28" fill="none" stroke="#c4f0a8" stroke-opacity="0.6" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

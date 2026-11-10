@@ -14,6 +14,7 @@ mod round_trip;
 mod scratch;
 mod source_edit;
 mod ui_groups;
+mod svg;
 mod world3d;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.

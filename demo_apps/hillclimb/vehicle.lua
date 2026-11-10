@@ -39,6 +39,23 @@ V.car = {
 	},
 }
 
+-- The monster truck (art/monster_truck.svg at half size, truck.lua): measured off the drawing, so
+-- its wheels are the buggy's size and the buggy's tuning carries over. Positions are from the
+-- collider box over the lower body; the head is a crash sensor up in the cab, not drawn. The
+-- artist drew it facing left; truck.lua mirrors it, and these are the mirrored measurements.
+V.truck = {
+	chassis = { mass = 220, size = { 2.345, 0.355 }, center = { 1.195, 0.25 } },
+	driver = { mass = 70, head_radius = 0.16, neck = { 1.22, 0.125 } },
+	wheels = {
+		{ at = { 0.5725, 0.685 }, radius = 0.32, mass = 20, grip = 1.1, driven = true },
+		{ at = { 1.855, 0.685 }, radius = 0.32, mass = 20, grip = 1.1, driven = true },
+	},
+	suspension = V.car.suspension,
+	drive = V.car.drive,
+	brake = V.car.brake,
+	fuel = V.car.fuel,
+}
+
 local FIELDS = {
 	car = { chassis = true, driver = true, wheels = true, suspension = true, drive = true, brake = true, fuel = true },
 	chassis = { mass = true, size = true, center = true },

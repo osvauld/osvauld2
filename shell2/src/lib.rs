@@ -19,6 +19,7 @@ mod names;
 mod node;
 mod shell_api;
 mod signup;
+mod sound;
 mod space;
 #[cfg(test)]
 mod tests;
@@ -1094,6 +1095,8 @@ pub struct Shell {
     offscreen: Option<(f32, f32)>,
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
     clock: f64,
+    /// The one mixer every app plays into (`sound.rs`).
+    sound: sound::SoundHost,
     error: Option<String>,
     reset_launcher_pending: bool,
     fullscreen: bool,
@@ -1361,6 +1364,20 @@ impl Shell {
     /// screen that shows what they changed.
     fn answer_mut(&mut self, req: Request) -> Response {
         let response = match req {
+            Request::SoundLog { item_id } => match self.apps.get(item_id.as_str()) {
+                Some(a) => Response::ok(self.sound.log_json(a.instance())),
+                None => Response::err("item is not open"),
+            },
+            Request::SoundCapture { item_id, seconds } => match self.apps.get(item_id.as_str()) {
+                Some(a) => {
+                    let (wav, clock) = self.sound.capture_wav(a.instance(), seconds);
+                    Response::ok(serde_json::json!({
+                        "wav_base64": base64::engine::general_purpose::STANDARD.encode(wav),
+                        "clock": clock,
+                    }))
+                }
+                None => Response::err("item is not open"),
+            },
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -1825,6 +1842,7 @@ impl Shell {
             focused: 0,
             split: None,
             popped: Vec::new(),
+            sound: sound::SoundHost::new(offscreen.is_some()),
             offscreen,
             clock: 0.0,
             error: None,
@@ -1877,6 +1895,7 @@ impl Shell {
                 vault: self.vault.clone(),
                 persist: true,
                 node,
+                sound: Some(self.sound.sender()),
             },
             self.proxy.clone(),
             self.offscreen,
@@ -1903,6 +1922,7 @@ impl Shell {
                 vault: self.vault.clone(),
                 persist: false,
                 node: None,
+                sound: None,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -3048,6 +3068,8 @@ impl App for Shell {
 
     fn before_frame(&mut self, now: f64) {
         self.clock = now;
+        // What apps played since the last frame starts at the last frame's time: exact offscreen.
+        self.sound.advance_to(now);
         // Ask every shown tile first, then collect: they frame in parallel, not in turn.
         let asked: Vec<_> = self
             .apps

@@ -159,6 +159,8 @@ pub struct Open {
     /// test tab: no vault reads or writes, an in-memory index.
     pub persist: bool,
     pub node: Option<(String, Token)>,
+    /// The shell's mixer; `None` plays silently (a test tab).
+    pub sound: Option<std::sync::mpsc::Sender<audio::Command>>,
 }
 
 enum In {
@@ -191,6 +193,7 @@ pub struct AppThread {
     /// The docs the app had open at its last save — what sync subscribes to.
     pub doc_names: Vec<String>,
     beat: Arc<Beat>,
+    sound: Option<std::sync::mpsc::Sender<audio::Command>>,
 }
 
 impl AppThread {
@@ -207,6 +210,8 @@ impl AppThread {
         let latest = Arc::new(Mutex::new(None));
         let closed = Arc::new(AtomicBool::new(false));
         let instance = NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
+        // The app's bus is its instance: a reopened item is a new bus, so its log starts empty.
+        let sound = open.sound.clone();
         let ws_id = open.ws_id.clone();
         let size = offscreen.unwrap_or((800.0, 600.0));
         let beat = Arc::new(Beat::default());
@@ -234,7 +239,7 @@ impl AppThread {
                 let wake: app_host::Wake = Arc::new(move || {
                     let _ = wake_tx.send(In::Wake);
                 });
-                let tile = match build(open, wake) {
+                let tile = match build(open, wake, instance) {
                     Ok(hosted) => {
                         let tile = Tile::new(hosted, size);
                         if ctx.offscreen { tile.with_virtual_clock() } else { tile }
@@ -266,7 +271,13 @@ impl AppThread {
             size: None,
             doc_names: Vec::new(),
             beat,
+            sound,
         })
+    }
+
+    /// Unique per open: also the app's bus on the shell's mixer.
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     pub fn call(&self, f: impl FnOnce(&mut Hosted) + Send + 'static) {
@@ -367,6 +378,9 @@ impl Drop for AppThread {
     /// if the watchdog already flagged it, so closing a hung app does not hang the shell.
     fn drop(&mut self) {
         let _ = self.tx.send(In::Close);
+        if let Some(tx) = &self.sound {
+            let _ = tx.send(audio::Command::Close { bus: self.instance });
+        }
         if !self.responding() {
             eprintln!("app thread is not responding; abandoning it");
         } else if self.done.recv_timeout(STUCK).is_err() {
@@ -376,7 +390,7 @@ impl Drop for AppThread {
     }
 }
 
-fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
+fn build(open: Open, wake: app_host::Wake, bus: u64) -> Result<Hosted, String> {
     let doc = LoroDoc::new();
     doc.import(&open.src).map_err(|e| e.to_string())?;
     let resolve = match (&open.node, open.persist) {
@@ -398,6 +412,9 @@ fn build(open: Open, wake: app_host::Wake) -> Result<Hosted, String> {
         // A tab that persists nothing still searches: its own index, in memory, gone with it.
         indexer::ItemIndex::in_memory()
     };
+    if let Some(tx) = open.sound.clone() {
+        app.set_sound(app_host::SoundOut { tx, bus });
+    }
     let index = attach_index(&mut app, opened);
     Ok(Hosted {
         app,

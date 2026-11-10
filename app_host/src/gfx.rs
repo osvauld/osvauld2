@@ -2,6 +2,7 @@
 //! aggregate values; it never renders or retains VM callbacks.
 
 mod mesh;
+mod svg;
 pub(crate) mod world3d;
 
 use std::cell::Cell;
@@ -104,6 +105,7 @@ impl UserData for LuaTextSurface {}
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
     mesh::install(lua, &gfx)?;
+    svg::install(lua, &gfx)?;
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
@@ -321,6 +323,12 @@ fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
         None => Vars::default(),
     };
     if let Some(options) = options {
+        if options.contains_key("dropped")? {
+            return Err(Error::runtime(
+                "drawing options: got gfx.svg's report — gfx.svg returns spec, report; \
+                 keep one value with gfx.drawing((gfx.svg(name)))",
+            ));
+        }
         named_fields(options, "drawing options", &["vars"])?;
         if let Some(t) = options.get::<Option<Table>>("vars")? {
             vars.overridden_by(Vars::read(&t, "drawing options.vars")?, "drawing options.vars")?;
@@ -1281,7 +1289,8 @@ fn shadow(spec: &Table, vars: &Vars, owner: &str) -> mlua::Result<Item> {
         .map_err(|e| Error::runtime(format!("{owner}: {e}")))
 }
 
-/// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
+/// Fill under stroke, sharing one path. Outlines join and cap round unless the stroke names a
+/// style — drawn art by default, an imported SVG's exact strokes when it says so.
 fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
     if let Some(s) = spec.get::<Option<Table>>("shadow")? {
         named_fields(&spec, owner, &["shadow"])?;
@@ -1289,36 +1298,75 @@ fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
         named_fields(&s, &owner, &["rect", "radius", "blur", "color"])?;
         return Ok(vec![shadow(&s, vars, &owner)?]);
     }
-    named_fields(&spec, owner, &["path", "fill", "stroke"])?;
+    named_fields(&spec, owner, &["path", "fill", "stroke", "rule"])?;
     let path = Arc::new(path(
         &need(&spec, owner, "path")?,
         &format!("{owner}.path"),
     )?);
+    let rule = match spec.get::<Option<String>>("rule")?.as_deref() {
+        None | Some("nonzero") => Fill::NonZero,
+        Some("evenodd") => Fill::EvenOdd,
+        Some(value) => return Err(Error::runtime(format!("{owner}: unknown fill rule {value:?}"))),
+    };
     let mut items = Vec::new();
     match spec.get::<Value>("fill")? {
         Value::Nil => {}
         fill => {
             let brush = paint(fill, vars, &format!("{owner}.fill"))?;
-            items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+            items.push(Item::fill(path.clone(), Arc::new(brush), rule));
         }
     }
     if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
-        if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
-            return Err(Error::runtime(format!(
-                "{owner}.stroke needs width and color"
-            )));
+        let at = format!("{owner}.stroke");
+        // `{ width, color }`, then the style by name; unnamed, an outline joins and caps round.
+        for pair in stroke.clone().pairs::<Value, Value>() {
+            match pair?.0 {
+                Value::Integer(1 | 2) => {}
+                Value::String(k)
+                    if ["cap", "join", "miter_limit", "dashes", "dash_offset"]
+                        .contains(&k.to_str()?.as_ref()) => {}
+                Value::String(k) => {
+                    return Err(Error::runtime(format!("{at}: unknown field {}", k.to_str()?)));
+                }
+                _ => return Err(Error::runtime(format!("{at} needs width and color"))),
+            }
+        }
+        if stroke.raw_len() != 2 {
+            return Err(Error::runtime(format!("{at} needs width and color")));
         }
         let ink = vars.colour(stroke.get(2)?, &format!("{owner}.stroke color"))?;
         let brush = Brush::solid(ink).map_err(Error::external)?;
+        let cap = match stroke.get::<Option<String>>("cap")?.as_deref() {
+            None | Some("round") => StrokeCap::Round,
+            Some("butt") => StrokeCap::Butt,
+            Some("square") => StrokeCap::Square,
+            Some(value) => return Err(Error::runtime(format!("{at}: unknown cap {value:?}"))),
+        };
+        let join = match stroke.get::<Option<String>>("join")?.as_deref() {
+            None | Some("round") => StrokeJoin::Round,
+            Some("miter") => StrokeJoin::Miter,
+            Some("bevel") => StrokeJoin::Bevel,
+            Some(value) => return Err(Error::runtime(format!("{at}: unknown join {value:?}"))),
+        };
+        let dashes = match stroke.get::<Option<Table>>("dashes")? {
+            None => Vec::new(),
+            Some(values) => {
+                let len = positional_len(&values, &format!("{at}.dashes"))?;
+                if len > MAX_STROKE_DASHES {
+                    return Err(Error::runtime(format!("{at} has too many dashes: {len}")));
+                }
+                (1..=len).map(|i| values.get(i)).collect::<mlua::Result<Vec<f64>>>()?
+            }
+        };
         let style = StrokeStyle::new(
             vars.number(stroke.get(1)?, &format!("{owner}.stroke width"))?,
-            StrokeCap::Round,
-            StrokeJoin::Round,
-            4.0,
-            Vec::new(),
-            0.0,
+            cap,
+            join,
+            stroke.get::<Option<f64>>("miter_limit")?.unwrap_or(4.0),
+            dashes,
+            stroke.get::<Option<f64>>("dash_offset")?.unwrap_or(0.0),
         )
-        .map_err(Error::external)?;
+        .map_err(|e| Error::runtime(format!("{at}: {e}")))?;
         items.push(Item::stroke(path, Arc::new(brush), style));
     }
     if items.is_empty() {
