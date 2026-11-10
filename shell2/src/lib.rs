@@ -23,6 +23,7 @@ mod node;
 mod sessions;
 mod shell_api;
 mod signup;
+mod sound;
 mod space;
 #[cfg(test)]
 mod tests;
@@ -1078,7 +1079,7 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
         serde_json::json!({
             "id": e.id, "pos": [e.pos.0, e.pos.1], "body": e.body,
             "velocity": [e.velocity.0, e.velocity.1], "rot": e.rot, "spin": e.spin,
-            "attached": attached, "zones": e.zones, "clip": clip,
+            "attached": attached, "zones": e.zones, "clip": clip, "particles": e.particles,
         })
     });
     let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
@@ -1217,6 +1218,8 @@ pub struct Shell {
     offscreen: Option<(f32, f32)>,
     /// The time of the last paint, for a resize that has to wait for a tile's frame.
     clock: f64,
+    /// The one mixer every app plays into (`sound.rs`).
+    sound: sound::SoundHost,
     error: Option<String>,
     reset_launcher_pending: bool,
     fullscreen: bool,
@@ -2426,6 +2429,20 @@ impl Shell {
             },
             Request::Hosts { ws_id } => self.hosts(&ws_id),
             Request::ShareSpace { ws_id } => self.share_space(&ws_id),
+            Request::SoundLog { item_id } => match self.apps.get(item_id.as_str()) {
+                Some(a) => Response::ok(self.sound.log_json(a.instance())),
+                None => Response::err("item is not open"),
+            },
+            Request::SoundCapture { item_id, seconds } => match self.apps.get(item_id.as_str()) {
+                Some(a) => {
+                    let (wav, clock) = self.sound.capture_wav(a.instance(), seconds);
+                    Response::ok(serde_json::json!({
+                        "wav_base64": base64::engine::general_purpose::STANDARD.encode(wav),
+                        "clock": clock,
+                    }))
+                }
+                None => Response::err("item is not open"),
+            },
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -2899,6 +2916,7 @@ impl Shell {
             focused: 0,
             split: None,
             popped: Vec::new(),
+            sound: sound::SoundHost::new(offscreen.is_some()),
             offscreen,
             clock: 0.0,
             error: None,
@@ -2974,6 +2992,7 @@ impl Shell {
                 node,
                 pull,
                 me,
+                sound: Some(self.sound.sender()),
             },
             self.proxy.clone(),
             self.offscreen,
@@ -3035,6 +3054,7 @@ impl Shell {
                 node: None,
                 pull: None,
                 me,
+                sound: None,
             },
             self.proxy.clone(),
             self.offscreen,
@@ -4304,6 +4324,8 @@ impl App for Shell {
 
     fn before_frame(&mut self, now: f64) {
         self.clock = now;
+        // What apps played since the last frame starts at the last frame's time: exact offscreen.
+        self.sound.advance_to(now);
         // Ask every shown tile first, then collect: they frame in parallel, not in turn.
         let asked: Vec<_> = self
             .apps

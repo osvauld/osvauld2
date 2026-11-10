@@ -72,6 +72,7 @@ class Session:
         show_shell_output: bool = False,
         offscreen: tuple[int, int] | None = None,
         stdout_path: str | None = None,
+        stderr_path: str | None = None,
     ):
         self.tmp = tempfile.mkdtemp(prefix="osvauld-test-")
         self.data_dir = data_dir or os.path.join(self.tmp, "data")
@@ -87,7 +88,10 @@ class Session:
         self.offscreen = offscreen if offscreen is not None else offscreen_default()
         # Where the shell's stdout goes (Lua `print` lands there), for a test that reads it back.
         self.stdout_path = stdout_path
+        # Where its stderr goes (panics, the watchdog's notes), so a crash leaves its message.
+        self.stderr_path = stderr_path
         self._stdout = None
+        self._stderr = None
         self.process: subprocess.Popen | None = None
         self.rpc = Bridge(self.socket_path)
 
@@ -109,10 +113,12 @@ class Session:
             argv += ["--offscreen", "%dx%d" % self.offscreen]
         if self.stdout_path:
             self._stdout = open(self.stdout_path, "ab")
+        if self.stderr_path:
+            self._stderr = open(self.stderr_path, "ab")
         self.process = subprocess.Popen(
             argv, env=env,
             stdout=self._stdout or (None if self.show_shell_output else subprocess.DEVNULL),
-            stderr=None if self.show_shell_output else subprocess.DEVNULL,
+            stderr=self._stderr or (None if self.show_shell_output else subprocess.DEVNULL),
         )
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
@@ -139,4 +145,7 @@ class Session:
         if self._stdout:
             self._stdout.close()
             self._stdout = None
+        if self._stderr:
+            self._stderr.close()
+            self._stderr = None
         shutil.rmtree(self.tmp, ignore_errors=True)

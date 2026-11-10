@@ -9,6 +9,7 @@
 
 mod camera;
 pub mod clip;
+mod particles;
 mod physics;
 mod physics3d;
 mod snapshot;
@@ -19,15 +20,17 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, Entity, World};
 use runtime::drawing::{Drawing, DrawingError, Pose};
-use runtime::frame::{Frame, FrameError, Item};
+use runtime::frame::{Brush, Extend, Frame, FrameError, GradientStop, Item, Path};
 use runtime::vello::kurbo::{Affine, Point, Rect};
 
 pub use crate::camera::{CameraInspection, CameraSpec, Look};
 use crate::camera::Camera;
 use crate::clip::Clip;
 use crate::physics::{Body, Physics};
-pub use crate::physics::{Collider, JointKind, Material, Motor, Shape};
 pub use crate::snapshot::WorldSnapshot;
+pub use crate::particles::Emit;
+use crate::particles::Emitter;
+pub use crate::physics::{Collider, JointKind, Material, Motor, Shape, Surface};
 
 pub struct EntitySpec {
     pub id: String,
@@ -49,6 +52,14 @@ pub struct EntitySpec {
     pub group: Option<String>,
     /// The groups its collider stops, by name — a line only paddles meet; without, it stops all.
     pub blocks: Option<Vec<String>>,
+    /// Fixed ground only: how it grips what touches it (ice, dirt). Without, a loose thing's own
+    /// grip decides, as it always has.
+    pub surface: Option<Surface>,
+    /// Scenery only: how much of the camera's move it follows, across and up. 1 (the default)
+    /// moves with the map, 0.3 is far hills, 0 stays put on screen, above 1 passes in front faster.
+    pub parallax: Option<(f64, f64)>,
+    /// A stream of particles from a point of it: dust, spray, sparks. Paint only.
+    pub emit: Option<Emit>,
 }
 
 /// A change Lua makes at a moment, not by describing: an existing entity's description never
@@ -145,6 +156,8 @@ pub struct EntityInspection {
     /// Ids of the zones it is inside, sorted.
     pub zones: Vec<String>,
     pub clip: Option<ClipInspection>,
+    /// Its particles alive now; 0 for an entity that never emitted.
+    pub particles: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -276,6 +289,8 @@ struct Appearance {
     drawing: Arc<Drawing>,
     flip: bool,
     rest: Arc<Frame>,
+    /// The share of the camera's move it follows, across and up; 1, 1 for all but scenery.
+    parallax: (f64, f64),
 }
 
 /// The entity's body in `Physics`, rebuilt only when its collider or kind of body changes.
@@ -290,6 +305,7 @@ struct Solid {
     loose: Option<Material>,
     /// `(memberships, filter)` as Rapier bits.
     groups: (u32, u32),
+    surface: Option<Surface>,
 }
 
 /// How fast a controlled entity moved on its last tick, so what it lets go of keeps that speed.
@@ -348,6 +364,8 @@ struct InBlock(Option<String>);
 #[derive(Default)]
 pub struct World2d {
     ecs: World,
+    /// Top to bottom of the view, behind everything and still while the camera moves.
+    sky: Vec<GradientStop>,
     clock: f64,
     /// Fixed steps taken since the world began.
     steps: u64,
@@ -515,6 +533,37 @@ impl World2d {
                     return bad("loose with a controller: one thing moves it, not two".into());
                 }
                 m.check().or_else(bad)?;
+            }
+            if let Some((fx, fy)) = spec.parallax {
+                let fine = |f: f64| f.is_finite() && (0.0..=4.0).contains(&f);
+                let scenery = match () {
+                    _ if !fine(fx) => Some(format!("parallax must be from 0 to 4, got {fx}")),
+                    _ if !fine(fy) => Some(format!("parallax must be from 0 to 4, got {fy}")),
+                    _ if spec.collider.is_some() => Some("parallax is scenery: it cannot have a collider".into()),
+                    _ if spec.sensor.is_some() => Some("parallax is scenery: it cannot have a sensor".into()),
+                    _ if spec.controller.is_some() => Some("parallax is scenery: it cannot have a controller".into()),
+                    _ if spec.attach.is_some() => Some("parallax is scenery: it cannot be carried".into()),
+                    _ => None,
+                };
+                if let Some(why) = scenery {
+                    return Err(WorldError::Collider(spec.id.clone(), why));
+                }
+            }
+            if let Some(emit) = &spec.emit {
+                emit.check().map_err(|why| WorldError::Collider(spec.id.clone(), why))?;
+            }
+            if let Some(surface) = &spec.surface {
+                let ground = match () {
+                    _ if spec.collider.is_none() => Some("a surface needs a collider: it is how ground feels"),
+                    _ if spec.loose.is_some() => Some("a surface is ground's: it cannot be loose"),
+                    _ if spec.controller.is_some() => Some("a surface is ground's: it cannot have a controller"),
+                    _ if spec.attach.is_some() => Some("a surface is ground's: it cannot be carried"),
+                    _ => None,
+                };
+                let why = ground.map(String::from).or(surface.check().err());
+                if let Some(why) = why {
+                    return Err(WorldError::Collider(spec.id.clone(), why));
+                }
             }
             for c in spec.collider.iter().chain(&spec.sensor) {
                 c.check()
@@ -711,9 +760,10 @@ impl World2d {
         let collider = spec.collider.filter(|_| !aloft);
         let sensor = spec.sensor.filter(|_| !aloft);
         let loose = spec.loose;
+        let surface = spec.surface;
         let kept = e.get::<Solid>().is_some_and(|s| {
             (s.collider == collider && s.sensor == sensor && s.moves == moves)
-                && (s.loose == loose && s.groups == groups)
+                && (s.loose == loose && s.groups == groups && s.surface == surface)
         });
         if !kept {
             if let Some(old) = e.take::<Solid>() {
@@ -726,10 +776,10 @@ impl World2d {
                 let kind = match (moves, thrown, &collider, loose) {
                     (true, ..) => Body::Moved,
                     // Let go as a line, a carried thing becomes ground, not a thrown body.
-                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed,
+                    (false, _, Some(c), _) if matches!(c.shape, Shape::Line(_)) => Body::Fixed(surface),
                     (false, v, Some(_), Some(m)) => Body::Dynamic(v.unwrap_or_default(), m),
                     (false, Some(v), Some(_), None) => Body::Dynamic(v, Material::default()),
-                    _ => Body::Fixed,
+                    _ => Body::Fixed(surface),
                 };
                 let dynamic = matches!(kind, Body::Dynamic(..));
                 let dropped = thrown.is_some();
@@ -755,6 +805,7 @@ impl World2d {
                     sliding: dynamic && !self.physics.asleep(body),
                     loose,
                     groups,
+                    surface,
                 });
             }
         }
@@ -762,7 +813,16 @@ impl World2d {
             drawing: spec.drawing,
             flip: spec.flip,
             rest,
+            parallax: spec.parallax.unwrap_or((1.0, 1.0)),
         });
+        // Kept across views, so the live ones carry on; without `emit` they finish and stop.
+        match (spec.emit, e.get_mut::<Emitter>()) {
+            (spec_emit, Some(mut emitter)) => emitter.describe(spec_emit),
+            (Some(emit), None) => {
+                e.insert(Emitter::new(emit, &spec.id));
+            }
+            (None, None) => {}
+        }
         e.insert(InBlock(block.clone()));
         match spec.controller {
             Some(controller) => e.insert(controller),
@@ -928,6 +988,24 @@ impl World2d {
         }
     }
 
+    /// Where the entity is drawn: placed, then held back by its parallax — a layer that follows
+    /// a share `f` of the camera sits `(1 − f)` of the camera's centre further along. What it
+    /// carries goes with it. Without a camera, where it is placed.
+    fn drawn(&self, entity: Entity) -> Affine {
+        self.held_back(entity) * self.place(entity)
+    }
+
+    /// What parallax adds to where an entity is placed: nothing but for scenery under a camera.
+    fn held_back(&self, entity: Entity) -> Affine {
+        let Some(c) = &self.camera else { return Affine::IDENTITY };
+        let carrier = self.ecs.get::<Attached>(entity).map_or(entity, |a| a.to);
+        let (fx, fy) = self.ecs.get::<Appearance>(carrier).map_or((1.0, 1.0), |a| a.parallax);
+        if (fx, fy) == (1.0, 1.0) {
+            return Affine::IDENTITY;
+        }
+        Affine::translate((c.at.0 * (1.0 - fx), c.at.1 * (1.0 - fy)))
+    }
+
     /// The bottom of the entity's box; a carried entity stands on its carrier's feet, just in
     /// front of it.
     fn feet(&self, entity: Entity) -> (f64, u8) {
@@ -960,10 +1038,19 @@ impl World2d {
                     }
                     None => look.rest.clone(),
                 };
-                let item = Item::instance(self.place(entity), posed)?;
-                Ok((self.feet(entity), item.with_id(name.0.as_str())))
+                let item = Item::instance(self.drawn(entity), posed)?.with_id(name.0.as_str());
+                let feet = self.feet(entity);
+                // Its particles just under it, unnamed: paint the pointer goes through.
+                let dust = match e.get::<Emitter>().filter(|em| em.live() > 0) {
+                    Some(em) => Some(Item::group(self.held_back(entity), em.items()?)?),
+                    None => None,
+                };
+                Ok(dust.into_iter().chain([item]).map(|i| (feet, i)).collect::<Vec<_>>())
             })
-            .collect::<Result<Vec<_>, WorldError>>()?;
+            .collect::<Result<Vec<_>, WorldError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         if self.stacking == Order::Feet {
             // Stable, so ties keep list order.
             items.sort_by(|(a, _), (b, _)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -973,8 +1060,23 @@ impl World2d {
             let (dx, dy) = c.to_screen((0.0, 0.0));
             items = vec![Item::group(Affine::translate((dx, dy)), items)?];
         }
+        if !self.sky.is_empty() && width > 0.0 && height > 0.0 {
+            items.insert(0, self.sky_item(width, height)?);
+        }
         // Clipped: a head or hand spilling past the room's edge is not drawn outside it.
         Ok(Frame::new(width, height, None, items)?.clipped())
+    }
+
+    /// The sky: the view's box in screen space, unnamed so the pointer goes through it.
+    fn sky_item(&self, width: f64, height: f64) -> Result<Item, FrameError> {
+        use runtime::vello::kurbo::{PathEl, Point};
+        let corners = [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)].map(Point::from);
+        let mut els = vec![PathEl::MoveTo(corners[0])];
+        els.extend(corners[1..].iter().map(|&p| PathEl::LineTo(p)));
+        els.push(PathEl::ClosePath);
+        let path = Path::new(els).map_err(|_| FrameError::InvalidSize)?;
+        let brush = Brush::linear(Point::ZERO, Point::new(0.0, height), self.sky.clone(), Extend::Pad)?;
+        Ok(Item::fill(Arc::new(path), Arc::new(brush), runtime::vello::peniko::Fill::NonZero))
     }
 
     /// One frame: `elapsed` is the runtime's frame clock, which clips and timers go by; `dt` the
@@ -1062,6 +1164,21 @@ impl World2d {
             }
         }
         self.aim(dt);
+        self.emit(dt);
+    }
+
+    /// Steps every stream from where its entity is now (its layer's place, for scenery).
+    fn emit(&mut self, dt: f64) {
+        for entity in self.order.clone() {
+            if !self.ecs.get::<Emitter>(entity).is_some_and(Emitter::busy) {
+                continue;
+            }
+            let place = self.place(entity);
+            let step = self.steps;
+            if let Some(mut emitter) = self.ecs.get_mut::<Emitter>(entity) {
+                emitter.advance(dt, place, step);
+            }
+        }
     }
 
     /// Fires `Timer(name)` once `secs` have passed; the same name again starts it over.
@@ -1172,6 +1289,12 @@ impl World2d {
         Self::check_wells(&wells)?;
         self.wells = wells;
         Ok(())
+    }
+
+    /// The sky as described: a gradient from the view's top (offset 0) to its bottom (1), or none
+    /// when empty.
+    pub fn set_sky(&mut self, stops: Vec<GradientStop>) {
+        self.sky = stops;
     }
 
     pub fn wells(&self) -> &[Well] {
@@ -1468,7 +1591,9 @@ impl World2d {
         let behind = (self.camera.as_ref()).is_some_and(|c| self.goal().is_some_and(|g| !c.arrived(g)));
         // A well works on sleepers and a hand holds still ones, so either needs the clock.
         let forces = !self.wells.is_empty() || !self.grabs.is_empty();
+        let streaming = |&e: &Entity| self.ecs.get::<Emitter>(e).is_some_and(Emitter::busy);
         self.ticking || forces || !self.timers.is_empty() || self.order.iter().any(sliding) || behind
+            || self.order.iter().any(streaming)
     }
 
     /// Whether any entity has a controller or the world has actions — only then should it take
@@ -1584,6 +1709,12 @@ impl World2d {
     pub fn transform(&self, id: &str) -> Option<Transform> {
         self.ecs.get::<Transform>(*self.by_id.get(id)?).copied()
     }
+
+    #[cfg(test)]
+    fn surface_grip(&self, id: &str) -> Option<f64> {
+        let solid = self.ecs.get::<Solid>(*self.by_id.get(id)?)?;
+        self.physics.friction_of(solid.body).map(f64::from)
+    }
 }
 
 impl World2d {
@@ -1654,9 +1785,13 @@ impl World2d {
     /// Whether an entity can show in `view`: its placed box, grown by half its size each side
     /// for what a pose swings past it, meets the view. Reaching further, it may pop at the edge.
     fn shows(&self, entity: Entity, view: Rect) -> bool {
+        // Particles drift from where they left: a stream with any alive is drawn whole.
+        if self.ecs.get::<Emitter>(entity).is_some_and(|em| em.live() > 0) {
+            return true;
+        }
         let look = self.ecs.get::<Appearance>(entity).expect("every entity has an Appearance");
         let (w, h) = look.drawing.size();
-        let b = self.place(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
+        let b = self.drawn(entity).transform_rect_bbox(Rect::new(0.0, 0.0, w, h));
         let b = b.inflate(b.width() / 2.0, b.height() / 2.0);
         b.x0 < view.x1 && b.x1 > view.x0 && b.y0 < view.y1 && b.y1 > view.y0
     }
@@ -1745,7 +1880,15 @@ impl World2d {
                 length: a.clip.length(),
                 looped: a.clip.looped(),
             }),
+            particles: e.get::<Emitter>().map_or(0, Emitter::live),
         }
+    }
+
+    /// Where `id`'s live particles are, in world units (its layer's, for scenery); empty for
+    /// one that emits none.
+    pub fn particles(&self, id: &str) -> Vec<(f64, f64)> {
+        let emitter = self.by_id.get(id).and_then(|&e| self.ecs.get::<Emitter>(e));
+        emitter.map_or_else(Vec::new, Emitter::positions)
     }
 }
 

@@ -46,6 +46,9 @@ fn spec(id: &str, pos: (f64, f64), drawing: &Arc<Drawing>) -> EntitySpec {
         loose: None,
         group: None,
         blocks: None,
+        surface: None,
+        parallax: None,
+        emit: None,
     }
 }
 
@@ -3028,6 +3031,11 @@ impl Cart {
 
     /// The cart over line ground through `points`, placed at `at`.
     fn world_on(&self, at: (f64, f64), points: &[(f64, f64)]) -> World2d {
+        self.world_on_surface(at, points, None)
+    }
+
+    /// As `world_on`, the ground with this `surface`.
+    fn world_on_surface(&self, at: (f64, f64), points: &[(f64, f64)], surface: Option<Surface>) -> World2d {
         let d = drawing();
         let chassis = EntitySpec {
             loose: Some(Material { mass: Some(CHASSIS_KG), ..GRIPPY }),
@@ -3037,7 +3045,7 @@ impl Cart {
             loose: Some(Material { mass: Some(10.0), grip: Some(self.grip), ..GRIPPY }),
             ..solid(id, (x - 10.0, y - 10.0 - self.drop), Shape::Circle(10.0), (10.0, 10.0), &d)
         };
-        let ground = solid("ground", at, line(points), (0.0, 0.0), &d);
+        let ground = EntitySpec { surface, ..solid("ground", at, line(points), (0.0, 0.0), &d) };
         let mut world = World2d::default();
         world.set_gravity((0.0, 981.0)).unwrap();
         world.reconcile(vec![chassis, wheel("rear", MOUNTS[0]), wheel("front", MOUNTS[1]), ground]).unwrap();
@@ -3421,4 +3429,433 @@ fn steer_needs_a_controller() {
     world.step_driven(12);
     let x = world.get("walker").unwrap().pos.0;
     assert!((x - (150.0 + 200.0 * 0.1)).abs() < 0.5, "clamped to 1: {x}");
+}
+
+// --- Surface grip (plan: docs/design/hillclimb-terrain.md, W-G1..W-G4) ---
+
+/// A 40×20 block with `grip`, slid at 800 u/s along a flat floor with `surface`: how far it goes.
+fn slide_on(grip: f64, surface: Option<Surface>) -> f64 {
+    let d = drawing();
+    let block = EntitySpec {
+        loose: Some(Material { grip: Some(grip), ..GRIPPY }),
+        ..solid("block", (0.0, -20.0), Shape::Rect(40.0, 20.0), (0.0, 0.0), &d)
+    };
+    let floor = EntitySpec { surface, ..solid("floor", (-1000.0, 0.0), Shape::Rect(20000.0, 100.0), (0.0, 0.0), &d) };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 981.0)).unwrap();
+    world.reconcile(vec![block, floor]).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    let start = entity(&world, "block").pos.0;
+    world.set("block", Set { velocity: Some((800.0, 0.0)), ..Set::default() }).unwrap();
+    for _ in 0..600 {
+        run(&mut world, &mut clock, 1.0 / 60.0);
+        if entity(&world, "block").velocity.0.abs() < 1.0 {
+            break;
+        }
+    }
+    entity(&world, "block").pos.0 - start
+}
+
+#[test]
+fn a_surface_sets_how_hard_the_ground_grips_with_the_geometric_mean() {
+    // μ = √(grip × surface grip); a slide stops in v²/(2·μ·g).
+    let want = |mu: f64| 800.0_f64.powi(2) / (2.0 * mu * 981.0);
+    let dirt = slide_on(1.0, Some(Surface { grip: 1.0 }));
+    let ice = slide_on(1.0, Some(Surface { grip: 0.1 }));
+    assert!((dirt - want(1.0)).abs() < want(1.0) * 0.05, "dirt: {dirt} for {}", want(1.0));
+    assert!((ice - want(0.1_f64.sqrt())).abs() < want(0.1_f64.sqrt()) * 0.05, "ice: {ice} for {}", want(0.1_f64.sqrt()));
+    let none = slide_on(1.0, Some(Surface { grip: 0.0 }));
+    assert!(none > 5000.0, "grip 0 does not slow it: {none}");
+}
+
+#[test]
+fn without_a_surface_the_loose_things_own_grip_decides_as_before() {
+    let want = 800.0_f64.powi(2) / (2.0 * 0.5 * 981.0);
+    let bare = slide_on(0.5, None);
+    assert!((bare - want).abs() < want * 0.05, "the block's grip alone: {bare} for {want}");
+}
+
+#[test]
+fn a_cart_on_an_icy_surface_spins_its_wheels_and_barely_moves_off() {
+    let go = Motor { speed: 1440.0, torque: 2e6 };
+    let drove = |surface: Option<Surface>| {
+        let cart = Cart { stiffness: 5000.0, damping: 300.0, travel: (15.0, 20.0), drop: 0.0, grip: 1.0 };
+        let mut world = cart.world_on_surface((-1000.0, 40.0), &[(0.0, 0.0), (8000.0, 0.0)], surface);
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.0);
+        let start = entity(&world, "chassis").pos.0;
+        cart.drive(&mut world, Some(go), Some(go));
+        run(&mut world, &mut clock, 1.0);
+        let (c, w) = (entity(&world, "chassis"), entity(&world, "rear"));
+        (c.pos.0 - start, c.velocity.0, w.spin.to_radians() * 10.0)
+    };
+    let (dirt, ..) = drove(Some(Surface { grip: 1.0 }));
+    let (ice, speed, rim) = drove(Some(Surface { grip: 0.01 }));
+    // μ = √(1 × 0.01) = 0.1 caps the push at 0.1·g: ½·98.1·1² = 49 u in 1 s at most. On
+    // dirt the motor's own speed is the limit, so dirt is only "much further", not a ratio.
+    assert!(ice < 49.05 * 1.03, "ice is held to 0.1 g: {ice}");
+    assert!(dirt > 3.0 * ice, "dirt drives on: {dirt} vs ice {ice}");
+    // 1440 °/s on radius 10 is 251 u/s at the rim; the cart gets 0.1 g × 1 s = 98 u/s.
+    let motor = 1440.0_f64.to_radians() * 10.0;
+    assert!((rim - motor).abs() < motor * 0.03 && rim > 2.0 * speed, "the wheels spin: rim {rim} u/s, ground {speed}");
+}
+
+#[test]
+fn a_bad_surface_is_refused_whole() {
+    let d = drawing();
+    let floor = |surface: Surface| EntitySpec {
+        surface: Some(surface),
+        ..solid("floor", (0.0, 0.0), Shape::Rect(100.0, 10.0), (0.0, 0.0), &d)
+    };
+    for (spec, want) in [
+        (floor(Surface { grip: -1.0 }), "grip must be 0 or more"),
+        (floor(Surface { grip: f64::NAN }), "grip must be 0 or more"),
+        (EntitySpec { loose: Some(GRIPPY), ..floor(Surface { grip: 1.0 }) }, "a surface is ground's: it cannot be loose"),
+        (EntitySpec { surface: Some(Surface { grip: 1.0 }), ..spec("bare", (0.0, 0.0), &d) }, "a surface needs a collider"),
+        (EntitySpec { controller: Some(wasd(10.0)), ..floor(Surface { grip: 1.0 }) }, "a surface is ground's: it cannot have a controller"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
+}
+
+#[test]
+fn a_changed_surface_takes_effect_on_the_same_ground() {
+    let d = drawing();
+    let floor = |g: f64| EntitySpec { surface: Some(Surface { grip: g }), ..solid("floor", (0.0, 0.0), Shape::Rect(100.0, 10.0), (0.0, 0.0), &d) };
+    let mut world = World2d::default();
+    world.reconcile(vec![floor(1.0)]).unwrap();
+    world.reconcile(vec![floor(0.2)]).unwrap();
+    let grip = world.surface_grip("floor").unwrap();
+    assert!((grip - 0.2).abs() < 1e-6, "the new grip, not the old: {grip}");
+}
+
+// --- Sky (plan: docs/design/hillclimb-terrain.md, L-K1) ---
+
+fn sky_stops() -> Vec<runtime::frame::GradientStop> {
+    use runtime::frame::GradientStop;
+    vec![
+        GradientStop::new(0.0, Color::from_rgb8(40, 110, 200)).unwrap(),
+        GradientStop::new(1.0, Color::from_rgb8(200, 230, 250)).unwrap(),
+    ]
+}
+
+#[test]
+fn a_sky_is_painted_first_fills_the_view_and_stays_put_as_the_camera_moves() {
+    let mut world = on_map(2000.0, 1500.0, follow("hero"));
+    let bare = world.frame(VIEW.0, VIEW.1).unwrap();
+    world.set_sky(sky_stops());
+    let before = world.frame(VIEW.0, VIEW.1).unwrap();
+    assert_eq!(before.items().len(), bare.items().len() + 1, "one more item: the sky");
+    let sky = format!("{:?}", before.items()[0]);
+    assert!(sky.contains("Fill") && sky.contains("Linear"), "first, a gradient fill: {sky}");
+    assert_eq!(before.items()[0].id(), None, "paint, not something to hit");
+    assert_eq!(on_screen(&world, 642.0).as_deref(), Some("hero"), "the sky doesn't take the pointer");
+    assert_eq!(on_screen(&world, 100.0), None, "nor anywhere else");
+    world.key("KeyD", true);
+    frames(&mut world, 1.0, 1.0);
+    let after = world.frame(VIEW.0, VIEW.1).unwrap();
+    assert!(camera_at(&world).0 > 2090.0, "the camera moved");
+    assert_eq!(format!("{:?}", after.items()[0]), sky, "the sky did not");
+}
+
+// --- Parallax (plan: docs/design/hillclimb-terrain.md, L-P1) ---
+
+/// Where on screen `id` shows, by sweeping the view's middle row for it; None if it doesn't.
+fn screen_x(world: &World2d, id: &str) -> Option<f64> {
+    let frame = world.frame(VIEW.0, VIEW.1).unwrap();
+    (0..VIEW.0 as usize).map(|x| x as f64).find(|&x| {
+        frame.hit(Point::new(x, 360.0)).is_some_and(|h| h.id.to_string() == id)
+    })
+}
+
+/// The hero, followed, with three backdrops level with it: still (0), half (0.5) and normal (1).
+fn layered() -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = EntitySpec { pos: (2000.0, 1500.0), ..controlled(&d, wasd(100.0)) };
+    // A layer's pos is where it shows with the camera's centre at 0, 0; the camera starts on the
+    // hero's centre (2004, 1504), so each is put back by (1 − f) of that to show beside it.
+    let layer = |id: &str, x: f64, f: f64| EntitySpec {
+        parallax: Some((f, f)),
+        ..spec(id, (x - 2004.0 * (1.0 - f), 1500.0 - 1504.0 * (1.0 - f)), &d)
+    };
+    world.reconcile(vec![hero, layer("far", 1600.0, 0.0), layer("mid", 1800.0, 0.5), layer("near", 2200.0, 1.0)]).unwrap();
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    world
+}
+
+#[test]
+fn a_parallax_layer_moves_by_its_share_of_the_cameras_move() {
+    let mut world = layered();
+    let before: Vec<_> = ["far", "mid", "near"].iter().map(|id| screen_x(&world, id)).collect();
+    let cam = camera_at(&world).0;
+    world.key("KeyD", true);
+    frames(&mut world, 1.0, 2.0);
+    world.key("KeyD", false);
+    let moved = camera_at(&world).0 - cam;
+    assert!(moved > 150.0, "the camera moved: {moved}");
+    let after: Vec<_> = ["far", "mid", "near"].iter().map(|id| screen_x(&world, id)).collect();
+    let shift = |i: usize| after[i].expect("on screen") - before[i].expect("on screen");
+    assert!(shift(0).abs() <= 1.0, "f = 0 stays put on screen: {}", shift(0));
+    assert!((shift(1) + moved * 0.5).abs() <= 1.5, "f = 0.5 moves half as far: {} for {moved}", shift(1));
+    assert!((shift(2) + moved).abs() <= 1.0, "f = 1 moves with the map: {} for {moved}", shift(2));
+}
+
+#[test]
+fn without_a_camera_parallax_changes_nothing() {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![EntitySpec { parallax: Some((0.2, 0.2)), ..spec("far", (100.0, 356.0), &d) }]).unwrap();
+    assert_eq!(screen_x(&world, "far"), Some(104.0), "drawn at its pos, as any entity");
+}
+
+#[test]
+fn parallax_across_and_up_are_their_own() {
+    // Far hills on a road that climbs: a third of the camera's move across, all of it up.
+    let d = drawing();
+    let mut world = World2d::default();
+    let hero = EntitySpec { pos: (2000.0, 1500.0), ..controlled(&d, wasd(100.0)) };
+    let hills = EntitySpec { parallax: Some((0.3, 1.0)), ..spec("hills", (1900.0 - 2004.0 * 0.7, 1500.0), &d) };
+    world.reconcile(vec![hero, hills]).unwrap();
+    world.describe_camera(VIEW, Some(follow("hero"))).unwrap();
+    let x0 = screen_x(&world, "hills").expect("on screen");
+    let cam = camera_at(&world);
+    world.key("KeyD", true);
+    world.key("KeyS", true);
+    frames(&mut world, 1.0, 1.0);
+    let moved = (camera_at(&world).0 - cam.0, camera_at(&world).1 - cam.1);
+    assert!(moved.0 > 50.0 && moved.1 > 50.0, "the camera went across and down: {moved:?}");
+    let shot = world.frame(VIEW.0, VIEW.1).unwrap();
+    let row = 360.0 - moved.1;
+    let x1 = (0..VIEW.0 as usize).map(|x| x as f64).find(|&x| {
+        shot.hit(Point::new(x, row)).is_some_and(|h| h.id.to_string() == "hills")
+    });
+    let x1 = x1.expect("up by all of the camera's move, so on this row");
+    assert!((x1 - x0 + moved.0 * 0.3).abs() <= 1.5, "across by 0.3: {} for {}", x1 - x0, moved.0);
+}
+
+#[test]
+fn a_parallax_entity_is_scenery_and_a_body_is_refused() {
+    let d = drawing();
+    let base = || EntitySpec { parallax: Some((0.5, 0.5)), ..spec("hill", (0.0, 0.0), &d) };
+    let rect = Some(Collider { shape: Shape::Rect(5.0, 5.0), at: (0.0, 0.0) });
+    for (spec, want) in [
+        (EntitySpec { parallax: Some((-0.1, 1.0)), ..base() }, "parallax must be from 0 to 4"),
+        (EntitySpec { parallax: Some((0.5, f64::NAN)), ..base() }, "parallax must be from 0 to 4"),
+        (EntitySpec { collider: rect.clone(), ..base() }, "parallax is scenery: it cannot have a collider"),
+        (EntitySpec { sensor: rect.clone(), ..base() }, "parallax is scenery: it cannot have a sensor"),
+        (EntitySpec { controller: Some(wasd(10.0)), ..base() }, "parallax is scenery: it cannot have a controller"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![spec]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
+}
+
+// --- Particles (plan: docs/design/hillclimb-terrain.md, L-E1, W-E2) ---
+
+fn dust(rate: f64, life: f64) -> Emit {
+    Emit {
+        rate,
+        life,
+        speed: 100.0,
+        angle: 0.0,
+        spread: 0.0,
+        size: 2.0,
+        grow: 0.0,
+        color: Color::from_rgb8(150, 120, 90),
+        at: (4.0, 4.0),
+        gravity: 0.0,
+    }
+}
+
+fn emitting(emit: Option<Emit>) -> World2d {
+    let d = drawing();
+    let mut world = World2d::default();
+    world.reconcile(vec![EntitySpec { emit, ..spec("wheel", (100.0, 100.0), &d) }]).unwrap();
+    world
+}
+
+fn live(world: &World2d) -> usize {
+    entity(world, "wheel").particles
+}
+
+#[test]
+fn a_stream_keeps_rate_times_life_alive_and_the_world_asks_for_the_clock() {
+    let mut world = emitting(Some(dust(60.0, 0.5)));
+    assert!(world.needs_ticks(), "emitting, it needs the clock");
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.25);
+    assert!((live(&world) as f64 - 60.0 * 0.25).abs() <= 1.0, "rate × t while young: {}", live(&world));
+    run(&mut world, &mut clock, 1.0);
+    assert!((live(&world) as f64 - 60.0 * 0.5).abs() <= 1.0, "then rate × life: {}", live(&world));
+}
+
+#[test]
+fn particles_leave_from_at_along_angle_in_the_entitys_frame() {
+    let mut world = emitting(Some(dust(120.0, 1.0)));
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.5);
+    let ps = world.particles("wheel");
+    assert!(!ps.is_empty());
+    // From (104, 104), along +x at 60 to 100 u/s: x ahead of the start, y on the line.
+    for &(x, y) in &ps {
+        assert!((y - 104.0).abs() < 1e-6, "spread 0 keeps them on the line: {y}");
+        assert!((104.0..=104.0 + 100.0 * 0.5 + 1.0).contains(&x), "ahead of at, no faster than speed: {x}");
+    }
+    let flipped = |angle: f64| {
+        let mut world = emitting(Some(Emit { angle, ..dust(120.0, 1.0) }));
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 0.5);
+        world.particles("wheel")
+    };
+    assert!(flipped(90.0).iter().all(|&(x, y)| (x - 104.0).abs() < 1e-6 && y > 104.0 - 1e-6), "90° is down");
+}
+
+#[test]
+fn without_emit_the_live_ones_finish_and_no_more_come() {
+    let mut world = emitting(Some(dust(60.0, 0.5)));
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.0);
+    let d = drawing();
+    world.reconcile(vec![spec("wheel", (100.0, 100.0), &d)]).unwrap();
+    let left = live(&world);
+    assert!(left > 0, "the live ones are kept");
+    run(&mut world, &mut clock, 0.25);
+    assert!(live(&world) < left, "they die off, none come");
+    run(&mut world, &mut clock, 0.5);
+    assert_eq!(live(&world), 0);
+    assert!(!world.needs_ticks(), "done, the world rests");
+}
+
+#[test]
+fn particles_are_paint_under_their_entity_and_never_take_the_pointer() {
+    let mut world = emitting(Some(Emit { speed: 0.0, size: 6.0, ..dust(60.0, 1.0) }));
+    let bare = world.frame(200.0, 200.0).unwrap().items().len();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 0.2);
+    let frame = world.frame(200.0, 200.0).unwrap();
+    assert_eq!(frame.items().len(), bare + 1, "one group of particles, beside the entity");
+    assert_eq!(frame.items()[0].id(), None, "drawn first, under it, unnamed");
+    // The test drawing is hit on its row y = 4, x 4..8: there, the entity, not its dust.
+    assert_eq!(frame.hit(Point::new(106.0, 104.0)).map(|h| h.id.to_string()).as_deref(), Some("wheel"));
+    assert_eq!(frame.hit(Point::new(101.0, 106.0)), None, "dust beside it isn't something to hit");
+}
+
+#[test]
+fn the_same_run_streams_the_same_particles_and_bodies_never_feel_them() {
+    let scattered = || {
+        let mut world = emitting(Some(Emit { spread: 360.0, ..dust(200.0, 1.0) }));
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 0.75);
+        world.particles("wheel")
+    };
+    let (a, b) = (scattered(), scattered());
+    assert!(a.len() > 100);
+    assert_eq!(a, b, "seeded from the step and the id: the same twice");
+    // A ball rolling down a slope, with a stream pouring over it or not.
+    let rolled = |emit: Option<Emit>| {
+        let d = drawing();
+        let mut world = World2d::default();
+        world.set_gravity((0.0, 981.0)).unwrap();
+        let ball = EntitySpec {
+            loose: Some(Material { grip: Some(1.0), ..GRIPPY }),
+            ..solid("ball", (0.0, -30.0), Shape::Circle(10.0), (10.0, 10.0), &d)
+        };
+        let slope = solid("slope", (-100.0, 0.0), line(&[(0.0, 0.0), (2000.0, 600.0)]), (0.0, 0.0), &d);
+        let puffer = EntitySpec { emit, ..spec("puffer", (0.0, -40.0), &d) };
+        world.reconcile(vec![ball, slope, puffer]).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 2.0);
+        let e = entity(&world, "ball");
+        (e.pos, e.rot, e.velocity)
+    };
+    let bare = rolled(None);
+    assert!(bare.0.0 > 300.0, "it rolled: {bare:?}");
+    assert_eq!(bare, rolled(Some(Emit { spread: 360.0, ..dust(500.0, 2.0) })), "particles touch no body");
+}
+
+#[test]
+fn a_bad_stream_is_refused_whole() {
+    let d = drawing();
+    for (emit, want) in [
+        (Emit { rate: -1.0, ..dust(1.0, 1.0) }, "emit rate must be from 0 to 10000"),
+        (Emit { life: 0.0, ..dust(1.0, 1.0) }, "emit life must be above 0"),
+        (Emit { spread: 400.0, ..dust(1.0, 1.0) }, "emit spread must be from 0 to 360"),
+        (Emit { size: 0.0, ..dust(1.0, 1.0) }, "emit size must be above 0"),
+        (Emit { gravity: f64::INFINITY, ..dust(1.0, 1.0) }, "must be finite"),
+    ] {
+        let mut world = World2d::default();
+        world.reconcile(vec![solid("kept", (0.0, 0.0), Shape::Rect(5.0, 5.0), (0.0, 0.0), &d)]).unwrap();
+        let err = world.reconcile(vec![EntitySpec { emit: Some(emit), ..spec("wheel", (0.0, 0.0), &d) }]).unwrap_err().to_string();
+        assert!(err.contains(want), "{err} should say {want}");
+        assert!(world.inspect().iter().any(|e| e.id == "kept"), "the last good world stays");
+    }
+}
+
+#[test]
+fn no_sky_paints_nothing_extra_and_clearing_it_takes_it_away() {
+    let mut world = on_map(0.0, 0.0, follow("hero"));
+    let bare = world.frame(VIEW.0, VIEW.1).unwrap().items().len();
+    world.set_sky(sky_stops());
+    world.set_sky(Vec::new());
+    assert_eq!(world.frame(VIEW.0, VIEW.1).unwrap().items().len(), bare);
+}
+
+/// Rapier 0.35 caches the fixed colliders its anti-tunnelling pass sweeps a fast body against,
+/// and drops that cache only on a step where something is fast. A fixed thing removed while all
+/// was slow (a coin taken at a crawl) stayed in it, and the next fast step looked the gone
+/// collider up and panicked: the app's thread died mid-drive.
+#[test]
+fn a_fixed_thing_removed_while_all_is_slow_does_not_trip_the_next_fast_step() {
+    // Speed must come from gravity, not `set`: a body set by hand counts as a change, and that
+    // alone rebuilds the cache.
+    let d = drawing();
+    let ball = |id: &str, x| EntitySpec { loose: Some(DEAD), ..solid(id, (x, 0.0), Shape::Circle(4.0), (4.0, 4.0), &d) };
+    let slab = |id: &str, x, y| solid(id, (x, y), Shape::Rect(100.0, 20.0), (0.0, 0.0), &d);
+    // `a` drops far onto its floor: fast once, so the cache is built, with the shelf in it.
+    // `b` rests on the shelf.
+    let scene = |shelf: bool| {
+        let mut all = vec![ball("a", 0.0), slab("floor", -50.0, 2000.0), ball("b", 500.0)];
+        all.extend(shelf.then(|| slab("shelf", 450.0, 8.0)));
+        all
+    };
+    let mut world = World2d::default();
+    world.set_gravity((0.0, 9000.0)).unwrap();
+    world.reconcile(scene(true)).unwrap();
+    let mut clock = 0.0;
+    run(&mut world, &mut clock, 1.5);
+    assert!(world.transform("a").unwrap().y > 1900.0, "a landed");
+    // All still: the shelf goes. Then `b` falls through where it was, fast by the fourth step.
+    world.reconcile(scene(false)).unwrap();
+    run(&mut world, &mut clock, 0.5);
+    assert!(world.transform("b").unwrap().y > 200.0, "b fell: nothing left under it");
+}
+
+/// `n` emitters each held full at the cap, a 60 fps frame: the steps (two) and the frame built.
+#[test]
+#[ignore = "benchmark: scripts/bench.py"]
+fn bench_world_particles() {
+    let d = drawing();
+    for n in [1usize, 8] {
+        let mut world = World2d::default();
+        let full = Emit { spread: 360.0, ..dust(2000.0, 1.0) };
+        let specs = (0..n).map(|i| EntitySpec { emit: Some(full), ..spec(&format!("e{i}"), (i as f64 * 50.0, 100.0), &d) });
+        world.reconcile(specs.collect()).unwrap();
+        let mut clock = 0.0;
+        run(&mut world, &mut clock, 1.2);
+        assert_eq!(entity(&world, "e0").particles, crate::particles::MAX_LIVE, "full before timing");
+        bench(&format!("world_particles_{n}x1024"), 120, || {
+            clock += 1.0 / 60.0;
+            world.tick(clock, 1.0 / 60.0);
+            world.frame(1280.0, 720.0).unwrap();
+        });
+    }
 }

@@ -1,0 +1,10 @@
+[package]
+name = "audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Mixer and synth: plain sample maths. No device and no Lua — the shell owns the sound card and
+# the clock, app_host owns the `sound` binding (docs/design/sound.md §1.1).
+[dependencies]
+thiserror = { workspace = true }

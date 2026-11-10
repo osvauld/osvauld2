@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="110" height="62" viewBox="0 0 110 62">
+  <!-- A low bush with berries, 1.1 m wide; its foot is the bottom centre. Agent-drawn. -->
+  <g id="bush">
+    <path d="M6 62 Q0 40 18 34 Q20 12 42 16 Q54 0 70 14 Q92 8 94 30 Q112 34 104 62 Z" fill="#3f9a45" stroke="#2f7d32" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M24 30 Q34 22 46 26 M62 22 Q74 18 84 26" fill="none" stroke="#7fd36b" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="32" cy="44" r="4" fill="#e8533f"/>
+    <circle cx="58" cy="36" r="4" fill="#e8533f"/>
+    <circle cx="80" cy="46" r="4" fill="#e8533f"/>
+  </g>
+</svg>

@@ -239,7 +239,9 @@ ui.frame({ id = "hero", visual = waving })
 ```
 
 - **Parts** are what move; **shapes** are the painting inside a part — fill under stroke, sharing
-  one path. A shape needs `fill`, `stroke` or both; strokes join and cap round.
+  one path. A shape needs `fill`, `stroke` or both. `stroke = { width, colour }` joins and caps
+  round; it may also name `cap` (`butt`/`round`/`square`), `join` (`miter`/`round`/`bevel`),
+  `miter_limit`, `dashes` and `dash_offset`. `rule = "evenodd"` cuts holes (default `nonzero`).
 - `parent` is the hierarchy and list order is draw order, independently: a far arm belongs to the
   body and still draws behind it. A parent may be listed after its child.
 - Coordinates, paths and `pivot` (required) are all in the drawing's own space.
@@ -270,6 +272,32 @@ ui.frame({ id = "hero", visual = waving })
   built yet — `clips = …` and `use = …` are errors.
 
 `demo_apps/hero` is the reference.
+
+### Drawings from SVG
+
+`local spec, report = gfx.svg("art/wheel.svg")` reads an SVG out of your own folder (the upload
+keeps `.svg` beside `.lua`) and returns a **drawing module**: the plain table above, so you can
+read or change it before `gfx.drawing(spec)`. Draw in Inkscape or any editor, name the parts
+there ([plan](design/svg-drawings.md)):
+
+- Every `<g id>` (or `<use id>`) is a part; a nested one's `parent` is the enclosing part.
+  Shapes outside any named group go in a part `root`. Shapes of a part drawn after one of its
+  child parts go in `<id>~2`, `~3`… (children of `<id>`), so posing the part still moves them.
+- `pivot` is the group's `data-pivot="x y"` (drawing coordinates) if set, else its box centre.
+- `size` and coordinates are what a browser draws at 100 %: the viewBox is applied, transforms
+  are baked into the points, arcs become curves.
+- Fills (colour, linear/radial gradients, opacity, even-odd) and strokes (width, colour, caps,
+  joins, dashes) carry over. What can't — filters, masks, clip paths, patterns, images, text
+  (convert it to a path first), blend modes, gradient strokes, stroke-under-fill — is drawn
+  without the effect or skipped, and listed in `report.dropped` as `{ feature, id }`. Opacity on
+  a group goes onto each of its shapes (listed when there are several).
+- Only names inside your app ending in `.svg`. Over 4 MiB, 200 000 path commands, an
+  `<!ENTITY`, or a malformed file is an error naming the file. Nothing outside the app is read.
+- `gfx.svg` returns two values: `gfx.drawing(gfx.svg(name))` would pass the report as options,
+  and says so — write `gfx.drawing((gfx.svg(name)))` or keep `spec` first.
+- Edit the `.svg` over the bridge (`read_file_versioned` + `edit_file`) and the app reloads.
+
+`demo_apps/hillclimb/art/` is the reference.
 
 ## Worlds (experimental)
 
@@ -331,6 +359,12 @@ ui.world({
     listed left to right is ground with its solid below; list a ceiling right to left. Things
     roll and rest on it under `gravity`, cross its joints without catching, and fast ones don't
     pass through.
+  - `surface = { grip = g }` (0 or more) on fixed ground — a rect or a line — says how it
+    grips what touches it: the contact's grip is √(the loose thing's `grip` × `g`), so ice at
+    0.01 leaves a grip-1 tyre 0.1 and dirt at 1 leaves it 1. Without `surface` the loose thing's
+    own grip decides, as before. Ground only: a `surface` needs a collider and can't be loose,
+    controlled or carried. Cut a road into several line entities to give its stretches
+    different surfaces.
 - The bridge's `dump_tree` shows a world's entities on its element, under `world.entities`: each
   one's `id`, `pos` (box top-left), `body` (`fixed`, `moved`, `thrown`, `loose` or `none`), `velocity`
   per second, `attached` (`{ to, part }`), the `zones` it is in, and its `clip` (`time`,
@@ -512,6 +546,30 @@ ui.world({
 })
 ```
 
+- **`sky = { stops = { {0, "#2a6ec8"}, {1, "#c8e6fa"} } }`** paints the world's box top to bottom
+  behind every entity. It is on the screen, not the map, so it stays put while the camera moves,
+  and the pointer goes through it. Two stops or more; left out, there is none (the element's
+  `fill` shows, as before).
+- **`parallax = f`** (or `{ fx, fy }`, each 0 to 4) on an entity makes it scenery that
+  follows only that share of the camera's move: 1 (the default) moves with the map, 0.3 is far
+  hills, 0 stays put on screen, above 1 passes in front faster. Its `pos` is where it shows
+  with the camera's centre at 0, 0, so place it at `want − camera centre × (1 − f)`. Give a
+  climbing road's far hills `{ 0.3, 1 }`, so they drift slowly across but don't sink as the
+  road climbs. Scenery has no body: a `collider`, `sensor`, `controller` or `attach` with it is
+  an error. Without a camera it changes nothing. Draw order is still list order, so list far
+  layers first.
+- **`emit = { rate, life, color, … }`** on an entity streams particles: dust, spray, sparks,
+  smoke. `rate` a second (0 stops new ones), `life` seconds each (they fade over it), `color`;
+  then `speed` (0), `angle` (degrees in the entity's frame, 0 = +x, 90 = down), `spread` (360),
+  `size` (radius, 3), `grow` (radius a second, 0), `at` (in the drawing box, `{0, 0}`),
+  `gravity` (+y down, 0; negative rises). Rust moves them each fixed step; no Lua runs per
+  particle. They leave from where the entity is and don't follow it after, so a moving car
+  leaves a trail. They are paint: they touch no body and the pointer goes through them; they
+  draw just under their entity. Describe `emit` from game state each view (dust only while the
+  gas is down); the stream is kept across views, and without `emit` the live ones finish. The
+  dump shows `particles`, the live count. Seeded from the world's step and the entity's id, so
+  the same run paints the same particles. At most 1024 alive per entity. A spinning wheel
+  would spray in circles, so emit from the body beside it.
 - **`gravity = { gx, gy }`** is the whole of it: left out it is none, and the next view is what
   changes it. A change wakes everything resting. Under gravity a loose thing spawns awake and
   falls; it comes to rest asleep on what holds it, as before.
@@ -1247,6 +1305,31 @@ end
   group again.
 - Writing a signal inside the function is an error, as in `view`. A bad element inside it shows
   its error card and the group is not kept, so the next view tries again.
+
+## Sound (experimental)
+
+Generated sounds, written as settings (plan: `docs/design/sound.md`). Make them once, at the top of
+a module, and play them from handlers:
+
+```lua
+local coin = sound.synth{ name = "coin", wave = "square", freq = 880, slide = 600,
+	sustain = 0.05, decay = 0.15, volume = 0.4 }
+-- in on_zone, on_click, on_frame…
+sound.play(coin)                              -- or sound.play(coin, { volume = 0.5, pitch = 1.5 })
+```
+
+- `sound.synth` fields, all optional: `name` (what the sound log calls it), `wave` (`"square"`,
+  `"saw"`, `"sine"`, `"noise"`), `freq` (Hz, default 440), `slide` (Hz per second, negative
+  falls), `attack`, `sustain`, `decay` (seconds, each 0–10; the sound lasts their sum), `volume`
+  (0–1, default 0.5), `duty` (square only, 0–1), `loop`. Unknown fields and bad values are errors
+  naming the field.
+- `sound.play(s, { volume, pitch })`: volume 0–1, pitch above 0 up to 8 (2 is an octave up, and
+  twice as fast). It plays once and is gone. A `loop = true` sound cannot be played this way: it
+  would never stop.
+- Not from `view()`: a view runs every frame, so it would play every frame. That is an error.
+- Checking it: `rpc.sound_log(item)` lists what started and stopped, with times on the mixer's
+  clock; `rpc.sound_capture(item, seconds)` returns the samples your app played. Offscreen both
+  follow the virtual clock, so they are the same every run.
 
 ## Search
 

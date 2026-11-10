@@ -403,6 +403,17 @@ pub enum Request {
         #[serde(default)]
         ctrl: bool,
     },
+    /// What the open app's sounds did, oldest first: `[{event: "start"|"stop", voice, name,
+    /// at (seconds on the mixer's clock), volume, pitch | why}]` (docs/design/sound.md).
+    SoundLog {
+        item_id: String,
+    },
+    /// The last `seconds` of the open app's mix: `{wav_base64, clock}`, mono 16-bit 48 kHz.
+    /// Offscreen the mixer runs on the virtual clock, so this is exact.
+    SoundCapture {
+        item_id: String,
+        seconds: f32,
+    },
     /// The app's console (errors, newest last) — at most `last` lines.
     ReadConsole {
         item_id: String,

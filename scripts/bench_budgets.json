@@ -109,6 +109,16 @@
     "budget_us": 700,
     "note": "the dump's world inspection of 5000 entities."
   },
+  "world_particles_1x1024": {
+    "baseline_us": 478.2,
+    "budget_us": 1000,
+    "note": "one emitter held full at the 1024 cap: a 60 fps frame's steps and the frame built. Baseline from a busy worker run (others ~2x their baselines that run)."
+  },
+  "world_particles_8x1024": {
+    "baseline_us": 4049.5,
+    "budget_us": 8000,
+    "note": "eight full emitters: 8192 particles, over a world's 2 ms share; the cap is per emitter, not per world."
+  },
   "world_rays_1000": {
     "baseline_us": 257.3,
     "budget_us": 600,

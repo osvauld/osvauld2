@@ -32,6 +32,48 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 - Not yet: step 10 (signed results — waits on owned entries), step 11 (Pixel, M12), Jetpack on
   `ui.world` (moved after the multiplayer steps).
 
+### Sound (2026-11-06, branch `hillclimb`, not landed; steps 1–2 of 5) — [plan](design/sound.md)
+- `audio` crate: generated sounds (`Synth`: square/saw/sine/noise, slide, attack/sustain/decay)
+  and a `Mixer` (one bus per app, volume/pitch glide, 10 ms stop fade, peak limiter, per-bus
+  event log and recent samples). No device, no Lua, no clock of its own.
+- shell2 owns the one mixer (`sound.rs`): the sound card through `cpal` when windowed (a silent
+  wall-clock renderer if there is no device; Android silent for now), the virtual frame clock
+  offscreen, so a capture after N frames is exact. Bus = the app thread's instance; closing the
+  app closes its bus.
+- Lua: `sound.synth{…}` (strict), `sound.play(s, {volume, pitch})` from handlers, not from
+  `view()`. Bridge: `SoundLog`, `SoundCapture` (WAV); client `sound_log`, `sound_capture`.
+- verified: `cargo test -p audio` (U-1, U-2); `smoke_sound.py` (S-1 beep logged and heard at its
+  pitch, S-2 strict errors on the console). Next: `ui.sound` loops (step 3), Hillclimb's sounds
+  (4), sound files after binary item files land (5).
+
+### Hillclimb maps (2026-11-05, branch `hillclimb`, not landed) — [plan](design/hillclimb-maps.md)
+- A course is a map file, `maps/<name>.lua`: plain data in metres (ground control points,
+  start, finish, fuel, coin rows, SVG scenery) that an agent writes and edits over the bridge.
+  `Stage.check` refuses a bad map naming the field and point; `Stage.from_map` smooths the
+  points (monotone cubic, never overshoots) into the 0.5 m line. No Rust changes.
+- `maps/green_hills.lua` (500 m, hand-written, the default) with agent-drawn `art/tree.svg`,
+  `pine.svg`, `bush.svg`, `rock.svg`, `flag.svg`; `maps/seeded.lua` is the old seed-7
+  kilometre via `Stage.generate`. `Map:` / `Car:` buttons cycle them. The monster truck
+  (CC0, `truck.lua`, mirrored to face forward) is the second car.
+- The world id carries a fingerprint of the course: worlds outlive hot reload and never move
+  what exists, so an edited map must be a new world.
+- verified: `scripts/test_hillclimb_maps.lua` (P-M1–M3, incl. the seed-7 stage unchanged);
+  offscreen `smoke_hillclimb_maps.py` (S-M1–M3: default map + scenery, a live edit raises the
+  ground 5 m exactly, a broken edit names the point and the fix restores it), `smoke_hillclimb.py`
+  (288 m, deterministic) and `smoke_svg.py`.
+
+### SVG drawings (2026-11-05, branch `hillclimb`, not landed) — [plan](design/svg-drawings.md)
+- `gfx.svg(name)` → `spec, report`: an SVG from the app's own files as a drawing module (usvg
+  0.48, no text, no image loading). `<g id>` → parts, `data-pivot`, continuation parts for draw
+  order, transforms baked, exact skewed linear gradients, a `report.dropped` list.
+- Drawing shapes gained `rule` and named stroke style (`cap`, `join`, `miter_limit`, `dashes`,
+  `dash_offset`); unnamed strokes stay round. `.svg` uploads (`app_src` KEEP, `client.py`).
+- Hillclimb's wheels and helmet are `art/wheel.svg` / `art/helmet.svg`; the chassis stays Lua
+  (its geometry follows `vehicle.lua`'s mounts).
+- verified: `cargo test -p app_host --lib` (13 `tests::svg`, all green with the rest);
+  offscreen `smoke_svg.py` (S-V1–V3: upload, draw, a bridge edit to `wheel.svg` recolours the
+  spokes on screen) and `smoke_hillclimb.py` (288 m, deterministic).
+
 ### Hillclimb (2026-11-04, branch `hillclimb`, not landed) — [plan](design/hillclimb.md)
 - Engine (`world` + `app_host`, all generic): `collider = { line = {…} }` one-sided ground
   (oriented polyline: no snag at joints); `world(id):get(id)` → `{pos, rot, velocity, spin, tick}`
@@ -52,6 +94,30 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   288 m flat out to a head-first crash, same twice), `smoke_world.py`, `smoke_gravity_lab.py`.
   Not run: the rest of `smoke.py`, windowed play, Android.
 - next: tuning by hand (the user plays it); step 6 (standing air torque) only if play wants it.
+- Played 2026-11-05. Detail art pass, and a rock wall at the road's start: reversing used to fall
+  off the world forever (the smoke checks it now).
+- **Terrain and detail** ([plan](design/hillclimb-terrain.md)), step 1 built: `surface = { grip }`
+  on fixed ground. Contact grip = √(loose grip × surface grip): Rapier's geometric-mean combine
+  rule outranks the Max every other collider uses, so only that ground's pairs change. Checked:
+  slide v²/2μg within 5%, the cart held to 0.1 g on ice with its wheels spinning, bad surfaces
+  refused whole. Verified: world 177, app_host lib, workspace check; smokes world, gravity_lab,
+  hillclimb (same 288 m as before).
+- Step 2 built: `sky = { stops }` on `ui.world`, a screen-space gradient painted under every
+  entity, unnamed (the pointer goes through), still while the camera moves. Hillclimb uses it;
+  its smoke reads the top stop's pixel. Verified: world, app_host lib (318); smokes hillclimb,
+  world, camera.
+- Step 3 built: `parallax = f | { fx, fy }` on scenery (no body): drawn back by `(1 − f)` of the
+  camera's centre, and culled where it's drawn. Separate x/y factors (revised in the step), so
+  far hills on a climbing road don't sink out of view. Checked: f 0 / 0.5 / 1 move 0 / half /
+  all of the camera's move on screen, x and y apart, bodies refused. Verified: world 183,
+  app_host lib. The real-path pixel check is S-8 (step 8).
+- Step 4 built: `emit = { rate, life, color, … }` particles (`world/src/particles.rs`): stepped
+  in Rust each fixed step, seeded from step and id (FNV-1a + SplitMix64), paint only, drawn
+  under their entity, kept across views, `particles` in the dump. Hillclimb throws dust off the
+  rear tyre under gas. Checked: rate × min(t, life) ± 1, direction in the entity's frame, the
+  same twice, a rolling ball bit-identical with and without a stream, bad streams refused; the
+  smoke sees none at rest and dust under gas, the drive unchanged (288 m). Verified: world 189,
+  app_host lib, workspace check, smoke_hillclimb. Next: stage sections.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable

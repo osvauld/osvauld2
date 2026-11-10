@@ -185,13 +185,31 @@ impl Material {
     }
 }
 
+/// What fixed ground is like to touch. Its `grip` meets a loose thing's as the geometric mean,
+/// √(grip × surface grip): ice at 0.01 leaves a grip-1 tyre 0.1. Rapier takes the higher-ranked
+/// combine rule of a pair, and the geometric mean outranks the Max every other collider uses, so
+/// only contacts with this ground change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surface {
+    pub grip: f64,
+}
+
+impl Surface {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if !(self.grip.is_finite() && self.grip >= 0.0) {
+            return Err(format!("surface grip must be 0 or more, got {}", self.grip));
+        }
+        Ok(())
+    }
+}
+
 /// Slower than this, in drawing units a second, a sliding body has come to rest.
 const AT_REST: f32 = 4.0;
 
 /// What moves a body: nothing, the world's controller, or Rapier from a starting velocity.
 #[derive(Clone, Copy)]
 pub(crate) enum Body {
-    Fixed,
+    Fixed(Option<Surface>),
     Moved,
     Dynamic((f64, f64), Material),
 }
@@ -296,7 +314,7 @@ impl Physics {
         let anchor = solid.or(sensor).expect("a body has a shape").centre();
         let at = Vector::new((origin.0 + anchor.0) as f32, (origin.1 + anchor.1) as f32);
         let body = match kind {
-            Body::Fixed => RigidBodyBuilder::fixed(),
+            Body::Fixed(_) => RigidBodyBuilder::fixed(),
             Body::Moved => RigidBodyBuilder::kinematic_position_based(),
             Body::Dynamic((vx, vy), m) => {
                 let b = RigidBodyBuilder::dynamic()
@@ -309,7 +327,12 @@ impl Physics {
         // Walls and walkers keep nothing; a bounce is the moving body's own (the larger of two).
         let (bounce, grip, density) = match kind {
             Body::Dynamic(_, m) => (m.bounce as f32, m.grip.unwrap_or(0.0) as f32, m.density as f32),
+            Body::Fixed(Some(s)) => (0.0, s.grip as f32, 1.0),
             _ => (0.0, 0.0, 1.0),
+        };
+        let grip_rule = match kind {
+            Body::Fixed(Some(_)) => CoefficientCombineRule::GeometricMean,
+            _ => CoefficientCombineRule::Max,
         };
         let stated = match kind {
             Body::Dynamic(_, m) if m.mass.is_some() || m.center.is_some() => Some(m),
@@ -337,7 +360,7 @@ impl Physics {
                 .restitution(bounce)
                 .restitution_combine_rule(CoefficientCombineRule::Max)
                 .friction(grip)
-                .friction_combine_rule(CoefficientCombineRule::Max)
+                .friction_combine_rule(grip_rule)
                 .collision_groups(InteractionGroups::new(
                     Group::from_bits_retain(groups.0),
                     Group::from_bits_retain(groups.1),
@@ -576,6 +599,14 @@ impl Physics {
         self.world.bodies[body].is_sleeping()
     }
 
+    /// The friction of a body's solid collider, as Rapier holds it.
+    #[cfg(test)]
+    pub(crate) fn friction_of(&self, body: RigidBodyHandle) -> Option<f32> {
+        let colliders = &self.world.colliders;
+        let solid = self.world.bodies[body].colliders().iter().find(|&&c| !colliders[c].is_sensor())?;
+        Some(colliders[*solid].friction())
+    }
+
     /// How far a body has turned and how fast it turns, in degrees and degrees a second.
     pub(crate) fn turn(&self, body: RigidBodyHandle) -> (f64, f64) {
         let rb = &self.world.bodies[body];
@@ -607,12 +638,22 @@ impl Physics {
         let resting = !pressed && rb.linvel().length() < AT_REST;
         if resting {
             rb.set_body_type(RigidBodyType::Fixed, true);
+            self.forget_ccd_targets();
         }
         resting
     }
 
     pub(crate) fn remove(&mut self, body: RigidBodyHandle) {
         self.world.remove_body(body);
+        self.forget_ccd_targets();
+    }
+
+    /// Rapier 0.35 caches the fixed colliders a fast body is swept against and drops the cache
+    /// only on a step where something is fast: removed while all was slow, a collider stayed in
+    /// it and the next fast step panicked looking it up. Dropped here instead, on our changes;
+    /// it is rebuilt on the next fast step.
+    fn forget_ccd_targets(&mut self) {
+        self.world.ccd_solver = CCDSolver::new();
     }
 
     /// Brings Rapier's picture up to date — bodies added or moved since — before anything asks it.

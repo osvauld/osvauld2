@@ -248,6 +248,22 @@ class Bridge:
     def read_console(self, item_id: str, last: int = 100) -> list[str]:
         return self.request("ReadConsole", item_id=item_id, last=last)
 
+    def sound_log(self, item_id: str) -> list[dict]:
+        """What the app's sounds did: start/stop events, `at` in seconds on the mixer's clock."""
+        return self.request("SoundLog", item_id=item_id)
+
+    def sound_capture(self, item_id: str, seconds: float) -> tuple[list[float], float]:
+        """The last `seconds` of the app's mix as samples in -1..1 (48 kHz mono), and the
+        mixer's clock at its end."""
+        import struct
+        import wave
+        import io
+
+        result = self.request("SoundCapture", item_id=item_id, seconds=seconds)
+        with wave.open(io.BytesIO(base64.b64decode(result["wav_base64"], validate=True))) as w:
+            raw = w.readframes(w.getnframes())
+        return [v / 32767 for v in struct.unpack(f"<{len(raw) // 2}h", raw)], result["clock"]
+
     def screenshot(
         self,
         item_id: str,
@@ -341,7 +357,7 @@ class Bridge:
         )
 
     def upload_folder(self, item_id: str, root) -> list:
-        """Mirror the shell's GUI upload: walk `root`, keep *.lua/*.osv (skipping dotfiles),
+        """Mirror the shell's GUI upload: walk `root`, keep *.lua/*.osv/*.svg (skipping dotfiles),
         one WriteFile per file. Root main.lua is required — the same contract as the picker."""
         from pathlib import Path
         root = Path(root)
@@ -349,7 +365,7 @@ class Bridge:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
             for fn in sorted(filenames):
-                if fn.startswith(".") or os.path.splitext(fn)[1] not in (".lua", ".osv"):
+                if fn.startswith(".") or os.path.splitext(fn)[1] not in (".lua", ".osv", ".svg"):
                     continue
                 full = Path(dirpath) / fn
                 files.append((full.relative_to(root).as_posix(), full.read_text(encoding="utf-8")))

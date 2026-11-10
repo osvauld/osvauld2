@@ -15,11 +15,13 @@ pub mod net;
 pub mod net_match;
 pub mod net_sim;
 mod props;
+mod sound;
 pub(crate) mod signal;
 mod ui_group;
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, DocKey, Docs, Me, Resolve, Rules, Wake};
 pub use index::{SearchFn, SearchHit};
+pub use sound::SoundOut;
 
 use loro::{
     Container, EventTriggerKind, ExportMode, LoroDoc, LoroText, Subscription, ValueOrContainer,
@@ -466,6 +468,8 @@ pub struct LuaApp<M> {
     net_handlers: net::Handlers,
     /// This VM's matches: their functions and state are its own.
     matches: net_match::Matches,
+    /// Where `sound` plays: set by the host, kept across reloads like the cores.
+    sound: sound::Hook,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -626,7 +630,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
-            src, cores, resolve, wake, to_msg, search, Worlds::default(),
+            src, cores, resolve, wake, to_msg, search, sound::Hook::default(), Worlds::default(),
             gfx::world3d::Host::default(), net::Net::default(), setup, false, Rc::from(entry), me,
         )?;
         if app.error.is_none() {
@@ -653,6 +657,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
+        sound: sound::Hook,
         worlds: Worlds,
         worlds3d: gfx::world3d::Host,
         net: net::Net,
@@ -684,6 +689,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let viewing = Rc::new(Cell::new(strict_trial));
         gfx::install_world(&vm, worlds.clone(), viewing.clone())?;
         worlds3d.install(&vm, viewing.clone())?;
+        sound::install(&vm, sound.clone(), viewing.clone())?;
         let tracker = signal::Tracker::default();
         signal::install(&vm, viewing.clone(), tracker.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
@@ -720,6 +726,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             me,
             wake,
             search,
+            sound,
             console: Rc::new(RefCell::new(VecDeque::new())),
             worlds,
             worlds3d,
@@ -750,6 +757,11 @@ impl<M: Clone + 'static> LuaApp<M> {
     /// The three stages are load, setup and **first render**, and the third is not optional: a
     /// `main.lua` that compiles and returns a closure which throws on its first call is the
     /// ordinary case, and without the trial frame we would have swapped before finding out.
+    /// Where this app's `sound` calls play from now on. Without it they play nothing.
+    pub fn set_sound(&self, out: SoundOut) {
+        sound::connect(&self.sound, out);
+    }
+
     pub fn reload(&mut self) -> Result<(), String> {
         *self = self.stage_reload(self.src.clone(), false)?;
         Ok(())
@@ -769,6 +781,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             self.wake.clone(),
             self.to_msg.clone(),
             self.search.clone(),
+            self.sound.clone(),
             self.worlds.clone(),
             if validate_tree { gfx::world3d::Host::default() } else { self.worlds3d.staged() },
             // A candidate's load sends nothing (`net.send` needs a handler), so it shares the core.
@@ -2036,6 +2049,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     let actions = world_actions(node)?;
     let gravity = world_gravity(node, &id)?;
     let wells = gfx::wells(node, &format!("world {id:?}"))?;
+    let sky = gfx::sky(node, &format!("world {id:?}"))?;
     world::World2d::check_wells(&wells).map_err(mlua::Error::external)?;
     let joints = gfx::joints(node, &format!("world {id:?}"))?;
     // Checked before the world is touched, so a bad camera keeps the last good world whole.
@@ -2103,6 +2117,7 @@ fn build_world<M: 'static>(node: &Table, context: &mut Ctx<M>) -> mlua::Result<E
     }
     context.groups.borrow_mut().extend(read);
     world.set_wells(wells).map_err(mlua::Error::external)?;
+    world.set_sky(sky);
     // They name entities, so only once those exist; a joint refused here leaves the last good
     // joints, though this description's bodies are already in.
     world.set_joints(joints).map_err(mlua::Error::external)?;
@@ -2393,6 +2408,7 @@ fn build<M: Clone + 'static>(node: Table, context: &mut Ctx<M>, tag: &str) -> ml
             "order",
             "gravity",
             "wells",
+            "sky",
             "joints",
             "actions",
             "on_action",

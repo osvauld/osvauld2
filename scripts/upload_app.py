@@ -36,7 +36,10 @@ def main() -> None:
                     help="spawn target/release/shell2; debug lags under a drag")
     ap.add_argument("--no-build", action="store_true",
                     help="skip the cargo build and run whatever binary is there")
+    ap.add_argument("--log", default="/tmp/osvauld-upload-app.log",
+                    help="the shell's stderr (panics, watchdog notes) goes here")
     args = ap.parse_args()
+    os.environ.setdefault("RUST_BACKTRACE", "1")
 
     folder = Path(args.folder).resolve()
     if not folder.is_dir():
@@ -46,7 +49,8 @@ def main() -> None:
         build_shell(args.release)
 
     data_dir = os.path.abspath("osvauld-drive-data") if args.keep else None
-    with Session(data_dir=data_dir, shell_binary=shell_binary(args.release)) as s:
+    print("shell log:", args.log)
+    with Session(data_dir=data_dir, shell_binary=shell_binary(args.release), stderr_path=args.log) as s:
         accounts = s.rpc.list_accounts()
         if accounts:
             print("unlock:", s.rpc.unlock(accounts[0]["name"], "correct horse" if args.keep else "test"))

@@ -30,6 +30,9 @@ const LOADED: &str = "osv.modules.loaded";
 /// that already captured it.
 pub fn install(lua: &Lua, src: &LoroDoc) -> mlua::Result<()> {
     lua.set_named_registry_value(LOADED, lua.create_table()?)?;
+    // `gfx.svg` reads data files out of the same map. It is installed before the sandbox seals
+    // `gfx`, so it finds the source here instead of capturing it.
+    lua.set_app_data(AppFiles(src.clone()));
     let src = src.clone(); // reference clone: the same doc, not a fork
     // The modules currently being evaluated, innermost last — only non-empty *during* a require,
     // so it costs nothing at rest. Its whole job is to make a cycle nameable.
@@ -84,7 +87,10 @@ fn resolve(asked: &str) -> String {
     }
 }
 
-fn read(src: &LoroDoc, key: &str) -> Option<String> {
+/// The app's own source doc, for host functions that read its data files (`gfx.svg`).
+pub(crate) struct AppFiles(pub LoroDoc);
+
+pub(crate) fn read(src: &LoroDoc, key: &str) -> Option<String> {
     match src.get_map("files").get(key) {
         Some(ValueOrContainer::Container(Container::Text(t))) => Some(t.to_string()),
         _ => None,

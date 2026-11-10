@@ -17,6 +17,7 @@ mod round_trip;
 mod scratch;
 mod source_edit;
 mod ui_groups;
+mod svg;
 mod world3d;
 
 // Phase 1's to_msg is the identity — these tests only care that walk builds a tree.
@@ -1119,6 +1120,107 @@ fn a_loose_thing_is_checked_strictly() {
     ];
     for (loose, wanted) in cases {
         let err = walk_world(&lua, &worlds, &room(loose)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn a_surface_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |rest: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 1, height = 1, \
+            {{ id = 'floor', pos = {{ 0, 0 }}, drawing = hero, {rest} }} }})")
+    };
+    for fine in [
+        "collider = { rect = { 10, 2 } }, surface = { grip = 0.1 }",
+        "collider = { line = { 0, 0, 10, 0 } }, surface = { grip = 0 }",
+    ] {
+        walk_world(&lua, &worlds, &room(fine)).unwrap();
+    }
+    let cases = [
+        ("collider = { rect = { 10, 2 } }, surface = 1", "world entity 1.surface must be a table, got integer"),
+        ("collider = { rect = { 10, 2 } }, surface = {}", "world entity 1.surface needs grip"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = 'x' }", "surface.grip must be a number, got string"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = 1, slip = 2 }", "surface: unknown field slip"),
+        ("collider = { rect = { 10, 2 } }, surface = { grip = -1 }", "surface grip must be 0 or more, got -1"),
+        ("surface = { grip = 1 }", "a surface needs a collider"),
+        ("collider = { rect = { 10, 2 } }, loose = true, surface = { grip = 1 }", "a surface is ground's: it cannot be loose"),
+    ];
+    for (rest, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(rest)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn parallax_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |rest: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, \
+            {{ id = 'hills', pos = {{ 0, 0 }}, drawing = hero, {rest} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("parallax = 0.3")).unwrap();
+    walk_world(&lua, &worlds, &room("parallax = 0")).unwrap();
+    walk_world(&lua, &worlds, &room("parallax = { 0.3, 1 }")).unwrap();
+    let cases = [
+        ("parallax = 'far'", "world entity 1.parallax must be a number or { x, y }, got string"),
+        ("parallax = { 0.3 }", "world entity 1.parallax"),
+        ("parallax = 5", "parallax must be from 0 to 4, got 5"),
+        ("parallax = 0.5, collider = { rect = { 4, 4 } }", "parallax is scenery: it cannot have a collider"),
+    ];
+    for (rest, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(rest)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn emit_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |emit: &str| {
+        format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, \
+            {{ id = 'wheel', pos = {{ 0, 0 }}, drawing = hero, emit = {emit} }} }})")
+    };
+    walk_world(&lua, &worlds, &room("{ rate = 30, life = 0.8, color = '#a08060' }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ rate = 0, life = 1, color = 'white', speed = 40, angle = -90, \
+        spread = 50, size = 4, grow = 6, at = { 2, 3 }, gravity = -50 }")).unwrap();
+    let cases = [
+        ("1", "world entity 1.emit must be a table, got integer"),
+        ("{ life = 1, color = 'red' }", "world entity 1.emit needs rate"),
+        ("{ rate = 1, color = 'red' }", "world entity 1.emit needs life"),
+        ("{ rate = 1, life = 1 }", "world entity 1.emit needs color"),
+        ("{ rate = 1, life = 1, color = 'red', colour = 'red' }", "emit: unknown field colour"),
+        ("{ rate = 1, life = 1, color = 'nocolour' }", "world entity 1.emit.color: "),
+        ("{ rate = 1, life = 1, color = 'red', at = { 1 } }", "emit.at"),
+        ("{ rate = -1, life = 1, color = 'red' }", "emit rate must be from 0 to 10000"),
+        ("{ rate = 1, life = 1, color = 'red', spread = 999 }", "emit spread must be from 0 to 360"),
+    ];
+    for (emit, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(emit)).unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+}
+
+#[test]
+fn a_world_sky_is_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let worlds = Worlds::default();
+    let room = |sky: &str| format!("{HERO} return ui.world({{ id = 'room', width = 10, height = 10, sky = {sky} }})");
+    walk_world(&lua, &worlds, &room("{ stops = { { 0, '#2a6ec8' }, { 1, '#c8e6fa' } } }")).unwrap();
+    walk_world(&lua, &worlds, &room("{ stops = { { 0, 'navy' }, { 0.6, 'skyblue' }, { 1, 'white' } } }")).unwrap();
+    let cases = [
+        ("'blue'", "world \"room\".sky must be a table, got string"),
+        ("{}", "world \"room\".sky needs stops"),
+        ("{ stops = { { 0, 'navy' } } }", "sky needs 2 stops or more, got 1"),
+        ("{ stops = { { 0, 'navy' }, { 1, 'white' } }, extend = 'repeat' }", "sky: unknown field extend"),
+        ("{ stops = { { 0, 'navy' }, { 2, 'white' } } }", "stop"),
+        ("{ stops = { { 0, 'navy' }, { 1, 'nocolour' } } }", "world \"room\".sky: "),
+    ];
+    for (sky, wanted) in cases {
+        let err = walk_world(&lua, &worlds, &room(sky)).unwrap_err().to_string();
         assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
     }
 }

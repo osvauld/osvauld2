@@ -2,6 +2,7 @@
 //! aggregate values; it never renders or retains VM callbacks.
 
 mod mesh;
+mod svg;
 pub(crate) mod world3d;
 
 use std::cell::Cell;
@@ -104,6 +105,7 @@ impl UserData for LuaTextSurface {}
 pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
     mesh::install(lua, &gfx)?;
+    svg::install(lua, &gfx)?;
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
@@ -321,6 +323,12 @@ fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
         None => Vars::default(),
     };
     if let Some(options) = options {
+        if options.contains_key("dropped")? {
+            return Err(Error::runtime(
+                "drawing options: got gfx.svg's report — gfx.svg returns spec, report; \
+                 keep one value with gfx.drawing((gfx.svg(name)))",
+            ));
+        }
         named_fields(options, "drawing options", &["vars"])?;
         if let Some(t) = options.get::<Option<Table>>("vars")? {
             vars.overridden_by(Vars::read(&t, "drawing options.vars")?, "drawing options.vars")?;
@@ -719,7 +727,7 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
     let owner = format!("world entity {index}");
     let fields = [
         "id", "pos", "drawing", "clip", "controller", "flip", "attach", "collider", "sensor",
-        "loose", "group", "blocks",
+        "loose", "group", "blocks", "surface", "parallax", "emit",
     ];
     named_fields(&spec, &owner, &fields)?;
     let pos = point(need(&spec, &owner, "pos")?, &format!("{owner}.pos"))?;
@@ -768,6 +776,64 @@ pub(crate) fn entity(spec: Table, index: usize) -> mlua::Result<world::EntitySpe
             }).collect::<mlua::Result<_>>()?),
             None => None,
         },
+        surface: match maybe_table(&spec, &owner, "surface")? {
+            Some(t) => {
+                let owner = format!("{owner}.surface");
+                named_fields(&t, &owner, &["grip"])?;
+                let grip = maybe_number(&t, &owner, "grip")?
+                    .ok_or_else(|| Error::runtime(format!("{owner} needs grip")))?;
+                Some(world::Surface { grip })
+            }
+            None => None,
+        },
+        parallax: match spec.get::<Value>("parallax")? {
+            Value::Nil => None,
+            Value::Integer(n) => Some((n as f64, n as f64)),
+            Value::Number(n) => Some((n, n)),
+            Value::Table(t) => {
+                let p = point(t, &format!("{owner}.parallax"))?;
+                Some((p.x, p.y))
+            }
+            other => {
+                let what = other.type_name();
+                return Err(Error::runtime(format!("{owner}.parallax must be a number or {{ x, y }}, got {what}")));
+            }
+        },
+        emit: match maybe_table(&spec, &owner, "emit")? {
+            Some(t) => Some(emit(&t, &format!("{owner}.emit"))?),
+            None => None,
+        },
+    })
+}
+
+/// `emit = { rate, life, color, … }`: rate, life and color are needed, the rest default (still,
+/// all round, radius 3, from the box's top-left, no gravity). The world checks the ranges.
+fn emit(t: &Table, owner: &str) -> mlua::Result<world::Emit> {
+    let fields = ["rate", "life", "color", "speed", "angle", "spread", "size", "grow", "at", "gravity"];
+    named_fields(t, owner, &fields)?;
+    let needed = |field: &str| {
+        maybe_number(t, owner, field)?.ok_or_else(|| Error::runtime(format!("{owner} needs {field}")))
+    };
+    let or = |field: &str, default: f64| Ok::<_, Error>(maybe_number(t, owner, field)?.unwrap_or(default));
+    let color: String = need(t, owner, "color")?;
+    let at = match maybe_table(t, owner, "at")? {
+        Some(p) => {
+            let p = point(p, &format!("{owner}.at"))?;
+            (p.x, p.y)
+        }
+        None => (0.0, 0.0),
+    };
+    Ok(world::Emit {
+        rate: needed("rate")?,
+        life: needed("life")?,
+        color: crate::parse_color(&color).map_err(|e| Error::runtime(format!("{owner}.color: {e}")))?,
+        speed: or("speed", 0.0)?,
+        angle: or("angle", 0.0)?,
+        spread: or("spread", 360.0)?,
+        size: or("size", 3.0)?,
+        grow: or("grow", 0.0)?,
+        at,
+        gravity: or("gravity", 0.0)?,
     })
 }
 
@@ -1103,6 +1169,22 @@ fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
 }
 
 /// The fields every gradient shares: `stops = { {offset, color}, … }` and `extend`.
+/// A world's `sky = { stops = { {0, colour}, …, {1, colour} } }`: top to bottom of its view.
+/// None when left out.
+pub(crate) fn sky(node: &Table, owner: &str) -> mlua::Result<Vec<GradientStop>> {
+    let Some(t) = maybe_table(node, owner, "sky")? else { return Ok(Vec::new()) };
+    let owner = format!("{owner}.sky");
+    named_fields(&t, &owner, &["stops"])?;
+    let (stops, _) = stops_and_extend(&t, &Vars::default(), &owner).map_err(|e| {
+        let e = e.to_string();
+        Error::runtime(if e.contains(&owner) { e } else { format!("{owner}: {e}") })
+    })?;
+    if stops.len() < 2 {
+        return Err(Error::runtime(format!("{owner} needs 2 stops or more, got {}", stops.len())));
+    }
+    Ok(stops)
+}
+
 fn stops_and_extend(
     spec: &Table,
     vars: &Vars,
@@ -1219,7 +1301,8 @@ fn shadow(spec: &Table, vars: &Vars, owner: &str) -> mlua::Result<Item> {
         .map_err(|e| Error::runtime(format!("{owner}: {e}")))
 }
 
-/// Fill under stroke, sharing one path. Outlines join and cap round: drawn art, not diagrams.
+/// Fill under stroke, sharing one path. Outlines join and cap round unless the stroke names a
+/// style — drawn art by default, an imported SVG's exact strokes when it says so.
 fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
     if let Some(s) = spec.get::<Option<Table>>("shadow")? {
         named_fields(&spec, owner, &["shadow"])?;
@@ -1227,36 +1310,75 @@ fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
         named_fields(&s, &owner, &["rect", "radius", "blur", "color"])?;
         return Ok(vec![shadow(&s, vars, &owner)?]);
     }
-    named_fields(&spec, owner, &["path", "fill", "stroke"])?;
+    named_fields(&spec, owner, &["path", "fill", "stroke", "rule"])?;
     let path = Arc::new(path(
         &need(&spec, owner, "path")?,
         &format!("{owner}.path"),
     )?);
+    let rule = match spec.get::<Option<String>>("rule")?.as_deref() {
+        None | Some("nonzero") => Fill::NonZero,
+        Some("evenodd") => Fill::EvenOdd,
+        Some(value) => return Err(Error::runtime(format!("{owner}: unknown fill rule {value:?}"))),
+    };
     let mut items = Vec::new();
     match spec.get::<Value>("fill")? {
         Value::Nil => {}
         fill => {
             let brush = paint(fill, vars, &format!("{owner}.fill"))?;
-            items.push(Item::fill(path.clone(), Arc::new(brush), Fill::NonZero));
+            items.push(Item::fill(path.clone(), Arc::new(brush), rule));
         }
     }
     if let Some(stroke) = spec.get::<Option<Table>>("stroke")? {
-        if positional_len(&stroke, &format!("{owner}.stroke"))? != 2 {
-            return Err(Error::runtime(format!(
-                "{owner}.stroke needs width and color"
-            )));
+        let at = format!("{owner}.stroke");
+        // `{ width, color }`, then the style by name; unnamed, an outline joins and caps round.
+        for pair in stroke.clone().pairs::<Value, Value>() {
+            match pair?.0 {
+                Value::Integer(1 | 2) => {}
+                Value::String(k)
+                    if ["cap", "join", "miter_limit", "dashes", "dash_offset"]
+                        .contains(&k.to_str()?.as_ref()) => {}
+                Value::String(k) => {
+                    return Err(Error::runtime(format!("{at}: unknown field {}", k.to_str()?)));
+                }
+                _ => return Err(Error::runtime(format!("{at} needs width and color"))),
+            }
+        }
+        if stroke.raw_len() != 2 {
+            return Err(Error::runtime(format!("{at} needs width and color")));
         }
         let ink = vars.colour(stroke.get(2)?, &format!("{owner}.stroke color"))?;
         let brush = Brush::solid(ink).map_err(Error::external)?;
+        let cap = match stroke.get::<Option<String>>("cap")?.as_deref() {
+            None | Some("round") => StrokeCap::Round,
+            Some("butt") => StrokeCap::Butt,
+            Some("square") => StrokeCap::Square,
+            Some(value) => return Err(Error::runtime(format!("{at}: unknown cap {value:?}"))),
+        };
+        let join = match stroke.get::<Option<String>>("join")?.as_deref() {
+            None | Some("round") => StrokeJoin::Round,
+            Some("miter") => StrokeJoin::Miter,
+            Some("bevel") => StrokeJoin::Bevel,
+            Some(value) => return Err(Error::runtime(format!("{at}: unknown join {value:?}"))),
+        };
+        let dashes = match stroke.get::<Option<Table>>("dashes")? {
+            None => Vec::new(),
+            Some(values) => {
+                let len = positional_len(&values, &format!("{at}.dashes"))?;
+                if len > MAX_STROKE_DASHES {
+                    return Err(Error::runtime(format!("{at} has too many dashes: {len}")));
+                }
+                (1..=len).map(|i| values.get(i)).collect::<mlua::Result<Vec<f64>>>()?
+            }
+        };
         let style = StrokeStyle::new(
             vars.number(stroke.get(1)?, &format!("{owner}.stroke width"))?,
-            StrokeCap::Round,
-            StrokeJoin::Round,
-            4.0,
-            Vec::new(),
-            0.0,
+            cap,
+            join,
+            stroke.get::<Option<f64>>("miter_limit")?.unwrap_or(4.0),
+            dashes,
+            stroke.get::<Option<f64>>("dash_offset")?.unwrap_or(0.0),
         )
-        .map_err(Error::external)?;
+        .map_err(|e| Error::runtime(format!("{at}: {e}")))?;
         items.push(Item::stroke(path, Arc::new(brush), style));
     }
     if items.is_empty() {

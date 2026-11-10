@@ -1,0 +1,65 @@
+-- Green Hills: half a kilometre, gentle at first, a kicker, then one long climb to the top and
+-- a run down to the finish. Hand-written; the format is docs/design/hillclimb-maps.md §1:
+--   ground   x, height pairs in metres (x from 0, on the half metre, increasing; height up),
+--            smoothed into the road without overshooting; no slope past 40°
+--   start / finish   metres along
+--   fuel     a can at each x;  coins  rows of { first x, count }
+--   scenery  { "art/<file>.svg", x } stands on the ground; front = true draws it before the car
+return {
+	name = "Green Hills",
+	ground = {
+		0, 0,
+		15, 0,
+		30, 1.5,
+		45, 0,
+		60, 3,
+		75, 1,
+		90, 4,
+		105, 8,     -- a kicker
+		115, 6,
+		135, 2,
+		160, 1,
+		180, 5,
+		200, 4,
+		225, 9,
+		245, 7,
+		270, 13,
+		300, 20,
+		330, 26,    -- the top
+		360, 20,
+		380, 14,
+		400, 10,
+		420, 13,
+		440, 9,
+		460, 6,
+		480, 6,
+		500, 6,
+	},
+	start = 3,
+	finish = 480,
+	fuel = { 120, 260, 400 },
+	coins = { { 20, 5 }, { 62, 5 }, { 100, 4 }, { 150, 6 }, { 215, 5 }, { 300, 6 }, { 345, 5 }, { 430, 6 } },
+	scenery = {
+		{ "art/flag.svg", 1 },
+		{ "art/tree.svg", 12 },
+		{ "art/bush.svg", 24 },
+		{ "art/pine.svg", 40 },
+		{ "art/rock.svg", 52, front = true },
+		{ "art/tree.svg", 70 },
+		{ "art/bush.svg", 96, front = true },
+		{ "art/pine.svg", 128 },
+		{ "art/pine.svg", 134 },
+		{ "art/tree.svg", 170 },
+		{ "art/rock.svg", 196 },
+		{ "art/bush.svg", 232 },
+		{ "art/pine.svg", 262 },
+		{ "art/tree.svg", 292 },
+		{ "art/pine.svg", 330 },
+		{ "art/rock.svg", 352, front = true },
+		{ "art/tree.svg", 390 },
+		{ "art/bush.svg", 425 },
+		{ "art/pine.svg", 452 },
+		{ "art/flag.svg", 480 },
+		{ "art/tree.svg", 492 },
+	},
+}

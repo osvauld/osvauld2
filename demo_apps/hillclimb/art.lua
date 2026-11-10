@@ -4,7 +4,7 @@
 local A = {}
 
 A.colours = {
-	sky = "#9fd3f0", text = "#14202e", panel = "#ffffffcc", muted = "#4b5b6b",
+	sky = "#9fd3f0", sky_top = "#3d8fd6", sky_low = "#cdebf7", text = "#14202e", panel = "#ffffffcc", muted = "#4b5b6b",
 	fuel = "#f0a000", fuel_low = "#e03030",
 	pedal = "#2b2f3a", pedal_held = "#4a8ff0", pedal_text = "#ffffff",
 	-- buggy
@@ -21,7 +21,7 @@ A.colours = {
 	-- land
 	grass = "#4caf50", grass_light = "#7fd36b", grass_dark = "#2f7d32",
 	dirt_top = "#8a5f3a", dirt = "#6b4a2f", dirt_deep = "#3e2a1a", rock = "#8d8478", rock_dark = "#5c554c",
-	hills = "#b9dcc0", hills_far = "#cfe7e6", cloud = "#ffffff",
+	hills = "#b9dcc0", hills_far = "#cfe7e6", cloud = "#ffffff", dust = "#b08a62cc",
 }
 local C = A.colours
 
@@ -146,57 +146,18 @@ local function chassis(w, h, m)
 	return one_part(w, h, s)
 end
 
--- A knobbly tyre, an alloy rim, spokes and hub: a turning wheel shows that it turns.
-local function wheel(d)
-	local r = d / 2
-	local s = {}
-	local knobs = {}
-	for k = 0, 17 do
-		local a, half = k * math.pi * 2 / 18, 0.07
-		local function at(rr, da) return r + math.cos(a + da) * rr, r + math.sin(a + da) * rr end
-		local x1, y1 = at(r * 0.88, -half)
-		local x2, y2 = at(r * 1.0, -half * 0.8)
-		local x3, y3 = at(r * 1.0, half * 0.8)
-		local x4, y4 = at(r * 0.88, half)
-		for _, c in ipairs({ { "move", x1, y1 }, { "line", x2, y2 }, { "line", x3, y3 }, { "line", x4, y4 }, { "close" } }) do
-			table.insert(knobs, c)
-		end
-	end
-	table.insert(s, { path = knobs, fill = C.tyre_edge })
-	table.insert(s, { path = disc(r, r, r * 0.92), fill = radial(r, r, r * 0.92, { { 0.55, C.tread }, { 1, C.tyre } }) })
-	table.insert(s, { path = disc(r, r, r * 0.78), stroke = { 1.5, "#3a3e46" } })
-	table.insert(s, { path = disc(r, r, r * 0.6), fill = radial(r * 0.8, r * 0.75, r * 0.7, { { 0, "#ffffff" }, { 0.4, C.rim }, { 1, C.rim_dark } }), stroke = { 2, C.tyre_edge } })
-	for k = 0, 4 do
-		local a = k * math.pi * 2 / 5
-		local dx, dy = math.cos(a), math.sin(a)
-		table.insert(s, {
-			path = poly({ r + dx * r * 0.16 - dy * 3, r + dy * r * 0.16 + dx * 3, r + dx * r * 0.55 - dy * 2, r + dy * r * 0.55 + dx * 2,
-				r + dx * r * 0.55 + dy * 2, r + dy * r * 0.55 - dx * 2, r + dx * r * 0.16 + dy * 3, r + dy * r * 0.16 - dx * 3 }),
-			fill = C.rim_dark,
-		})
-	end
-	table.insert(s, { path = disc(r, r, r * 0.2), fill = C.metal_dark, stroke = { 1.5, C.tyre_edge } })
-	local nuts = {}
-	for k = 0, 4 do
-		local a = k * math.pi * 2 / 5 + 0.6
-		disc(r + math.cos(a) * r * 0.11, r + math.sin(a) * r * 0.11, 1.4, nuts)
-	end
-	table.insert(s, { path = nuts, fill = C.rim })
-	return one_part(d, d, s)
+-- Drawn in an SVG editor: art/wheel.svg (a knobbly tyre, an alloy rim, spokes, so a turning
+-- wheel shows that it turns) and art/helmet.svg. Each is drawn at the size its body has; a
+-- tuned car with another size needs its file redrawn, so a mismatch is an error, not a stretch.
+local function from_svg(name, d)
+	local spec = gfx.svg(name)
+	assert(spec.size[1] == d and spec.size[2] == d,
+		string.format("%s is drawn %gx%g; this body needs %gx%g", name, spec.size[1], spec.size[2], d, d))
+	return gfx.drawing(spec)
 end
 
--- A helmet facing right: lit dome, a stripe, a visor with a glint, a chin guard.
-local function head(d)
-	local r = d / 2
-	return one_part(d, d, {
-		{ path = disc(r, r, r), fill = radial(r * 0.7, r * 0.6, r * 1.3, { { 0, "#fff3b8" }, { 0.45, C.helmet }, { 1, C.helmet_dark } }), stroke = { 1.5, C.dirt_deep } },
-		{ path = { { "move", r * 0.25, r * 0.35 }, { "quad", r, -r * 0.15, r * 1.75, r * 0.35 } }, stroke = { 3, C.stripe } },
-		{ path = { { "move", r * 0.95, r * 0.6 }, { "line", r * 1.95, r * 0.65 }, { "quad", r * 2.02, r * 0.95, r * 1.92, r * 1.25 }, { "line", r * 0.95, r * 1.2 }, { "close" } },
-			fill = vertical(r * 0.6, r * 1.25, { { 0, "#3d5a80" }, { 1, C.visor } }) },
-		{ path = { { "move", r * 1.15, r * 0.72 }, { "line", r * 1.65, r * 0.74 } }, stroke = { 1.5, "#ffffffaa" } },
-		{ path = { { "move", r * 1.1, r * 1.45 }, { "quad", r * 1.6, r * 1.6, r * 1.85, r * 1.4 } }, stroke = { 2.5, C.helmet_dark } },
-	})
-end
+local function wheel(d) return from_svg("art/wheel.svg", d) end
+local function head(d) return from_svg("art/helmet.svg", d) end
 
 -- A jerrycan: shaded body, a carry handle, the spout cap, the X pressed into its side.
 local function fuel_can(w, h)
@@ -297,13 +258,13 @@ local function backdrop(points, w, h)
 	end
 	local clouds = {}
 	for x = 400, w, 900 do
-		local cx, cy = x + rand() * 500, points[math.max(2, math.floor(x / 50) * 2)] - 600 - rand() * 400
+		local cx, cy = x + rand() * 500, points[math.max(2, math.floor(x / 50) * 2)] - 300 - rand() * 150
 		for k = 0, 3 do disc(cx + k * 34, cy + ((k % 2 == 0) and 0 or -14), 26 + rand() * 10, clouds) end
 	end
 	return one_part(w, h, {
 		{ path = clouds, fill = C.cloud },
-		ridge(420, 160, 900, C.hills_far),
-		ridge(220, 120, 520, C.hills),
+		ridge(150, 90, 900, C.hills_far),
+		ridge(70, 60, 520, C.hills),
 	})
 end
 
@@ -334,6 +295,8 @@ function A.build(sizes, stage, mounts)
 		fuel = fuel_can(2 * A.PICKUP_R.fuel, 2 * A.PICKUP_R.fuel),
 		coin = coin(2 * A.PICKUP_R.coin),
 		cliff = cliff(A.CLIFF[1], A.CLIFF[2]),
+		-- Under the rear tyre, in the chassis box: where its dust leaves from.
+		dust_at = { mounts.axles[1][1], mounts.axles[1][2] + mounts.axles[1].r - 6 },
 	}
 	for id, size in pairs(sizes) do
 		if id:sub(1, 5) == "wheel" then looks[id] = wheel(size[1]) end

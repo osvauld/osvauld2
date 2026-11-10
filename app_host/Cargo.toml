@@ -15,7 +15,10 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 runtime = { path = "../runtime" }
 world = { path = "../world" }
+audio = { path = "../audio" }
 csscolorparser = "0.8.3"
+# SVG → drawing data (`gfx.svg`). No `text` (no fonts, no filesystem), no svgz.
+usvg = { version = "0.48", default-features = false }
 glam = "0.30"
 uuid = { version = "1.24.0", features = ["v4"] }
 # The manifest's rules, judged before a Lua write commits (`owned-entries.md` §2.4, site 1).

@@ -23,7 +23,7 @@ fn live_handle() -> AppThread {
         instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed), layout_revision: 0, tx, ws_id: "ws".into(),
         frame: TileFrame::default(), latest: Arc::new(Mutex::new(None)),
         closed: Arc::new(AtomicBool::new(false)), done, offscreen: false, shown: true,
-        size: Some((400.0, 300.0)), doc_names: Vec::new(), beat: Arc::new(Beat::default()),
+        size: Some((400.0, 300.0)), doc_names: Vec::new(), beat: Arc::new(Beat::default()), sound: None,
     }
 }
 

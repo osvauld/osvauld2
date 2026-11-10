@@ -15,6 +15,7 @@ adb-debug = []
 [dependencies]
 runtime = { path = "../runtime" }
 app_host = { path = "../app_host" }
+audio = { path = "../audio" }
 mlua = { version = "0.10", features = ["luau"] }
 world = { path = "../world" }
 vault = { path = "../vault" }
@@ -38,6 +39,8 @@ ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { version = "0.17.2", optional = true }
+# The speaker (sound.rs). Android plays silently until its output is wired.
+cpal = "0.18"
 
 [dev-dependencies]
 tempfile = "3"
