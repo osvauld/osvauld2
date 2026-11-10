@@ -1,5 +1,7 @@
 # Multiplayer as a platform feature — proved by Jetpack
 
+**Integration revision 2026-11-10:** The implemented multiplayer steps are integrated into dev with the newer laptop-host and owned-entry work. Results, device acceptance and the optional Jetpack Rapier port remain unfinished. Combined verification is recorded in [the integration plan](game-branch-integration.md).
+
 Status: **in progress — steps 1–7 and 9 built on branch `jetpack-mp` (2026-11-04).** Worktree `.claude/worktrees/jetpack-mp`, branch
 `jetpack-mp` off `laptop-host` (a87ab8b, which already holds dev's Jetpack). Builds on
 [laptop-host](laptop-host.md) sessions and, for step 10 only, [owned entries](owned-entries.md)

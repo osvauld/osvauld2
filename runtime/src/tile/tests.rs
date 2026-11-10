@@ -520,6 +520,8 @@ fn a_tiles_3d_view_lands_in_its_slot() {
         scale: Vec3::ONE,
         color: [1.0; 4],
         surface: None,
+        texture: None,
+        attach: None,
     };
     let mut guest = Tile::new(Viewer(Scene3d::new(camera, vec![cube]).unwrap()), (300.0, 100.0));
     let frame = TileFrame {

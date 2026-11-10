@@ -706,3 +706,30 @@ fn finding_by_name_requires_an_unlocked_account() {
     let got = vault.item_named(&"a".repeat(32), "hero", ItemKind::Asset);
     assert!(matches!(got, Err(VaultError::Locked)));
 }
+
+#[test]
+fn blobs_are_sealed_checked_and_deletable() {
+    let (mut vault, _tmp) = fresh();
+    vault.signup("me", "pw").unwrap();
+    let (ws_id, item_id) = app_item(&vault);
+    let blob = Vault::new_blob_id();
+    let bytes = b"glTF\x00\xffmodel-bytes-marker".repeat(8);
+    vault.put_blob(&ws_id, &item_id, &blob, &bytes).unwrap();
+    assert_eq!(vault.get_blob(&ws_id, &item_id, &blob).unwrap(), Some(bytes.clone()));
+    let raw = vault
+        .store()
+        .unwrap()
+        .get(&crate::item::blob_key(&ws_id, &item_id, &blob))
+        .unwrap()
+        .unwrap();
+    assert!(!raw.windows(18).any(|w| w == &bytes[..18]), "blob stored in plaintext");
+    // A blob key is not a meta key: the item list is unchanged.
+    assert_eq!(vault.items(&ws_id).unwrap().len(), 1);
+    for bad in ["", "../src", "ABCDEF0123456789abcdef0123456789"] {
+        assert!(vault.put_blob(&ws_id, &item_id, bad, b"x").is_err(), "{bad:?}");
+    }
+    vault.delete_blob(&ws_id, &item_id, &blob).unwrap();
+    assert_eq!(vault.get_blob(&ws_id, &item_id, &blob).unwrap(), None);
+    vault.lock();
+    assert!(vault.put_blob(&ws_id, &item_id, &blob, b"x").is_err());
+}

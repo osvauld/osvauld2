@@ -19,6 +19,7 @@ fn roundtrip<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(value: &T) 
 fn every_request_roundtrips() {
     let all: Vec<Request> = vec![
         Request::Ping,
+        Request::Performance,
         Request::ListAccounts,
         Request::Signup {
             name: "abe".into(),
@@ -68,6 +69,18 @@ fn every_request_roundtrips() {
             item_id: "i-9".into(),
             path: "main.lua".into(),
             content: "ui.col({})".into(),
+        },
+        Request::WriteBinaryFile {
+            item_id: "i-9".into(),
+            path: "models/rover.glb".into(),
+            base64: "Z2xURg==".into(),
+        },
+        Request::ListBinaryFiles {
+            item_id: "i-9".into(),
+        },
+        Request::ReadBinaryFile {
+            item_id: "i-9".into(),
+            path: "models/rover.glb".into(),
         },
         Request::ReloadItem {
             item_id: "i-9".into(),
@@ -216,4 +229,16 @@ fn framing_length_prefix_is_correct() {
     write_msg(&mut buf, b"hello").unwrap();
     assert_eq!(&buf[..4], &5u32.to_be_bytes());
     assert_eq!(&buf[4..], b"hello");
+}
+
+#[test]
+fn message_limits_are_checked_before_reading_the_body() {
+    let header = ((crate::MAX_MSG + 1) as u32).to_be_bytes();
+    assert_eq!(read_msg(&mut Cursor::new(header)).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    let mut buf = Vec::new();
+    write_msg(&mut buf, b"hello").unwrap();
+    let mut input = Cursor::new(&buf);
+    assert_eq!(crate::read_msg_limited(&mut input, 4).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(input.position(), 4);
+    assert_eq!(crate::read_msg_limited(&mut Cursor::new(&buf), 5).unwrap(), b"hello");
 }

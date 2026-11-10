@@ -4,6 +4,7 @@
 //! `view()` walks a Lua `ui.*` tree directly into `runtime::El<LuaMsg>`; the runtime's update
 //! loop is unchanged — dispatch just calls whatever the latest view registered under that key.
 //! The author's guide — app shape, `ui.*`, the doc binding, state — is docs/lua-apps.md.
+mod binary_files;
 mod crdt;
 mod gfx;
 pub mod host;
@@ -18,8 +19,15 @@ mod props;
 mod sound;
 pub(crate) mod signal;
 mod ui_group;
+pub use binary_files::{
+    BinaryFile, BoundFile, MAX_BINARY_FILE, MAX_BINARY_ITEM, binary_file, binary_files,
+    bind_binary_file,
+};
 pub use budget::{Budget, Policy};
 pub use crdt::{Cores, DocKey, Docs, Me, Resolve, Rules, Wake};
+/// Reads one binary item file's sealed bytes by blob id (`BinaryFile::blob`); `Ok(None)` when
+/// absent. Rust loaders (`gfx.load_glb`) use it; Lua never receives the bytes.
+pub type Files = Rc<dyn Fn(&str) -> Result<Option<Vec<u8>>, String>>;
 pub use index::{SearchFn, SearchHit};
 pub use sound::SoundOut;
 
@@ -460,6 +468,8 @@ pub struct LuaApp<M> {
     resolve: Resolve,
     /// See [`LuaApp::open_as`].
     me: Option<Rc<crdt::Me>>,
+    files: Files,
+    binary_revision: Rc<binary_files::Revision>,
     wake: Wake,
     /// The host's index for this item, behind `search.query`. Outlives the VM like the cores.
     search: index::SearchHook,
@@ -567,6 +577,9 @@ pub fn edit_source_file(
 }
 
 pub fn write_source_file(doc: &LoroDoc, path: &str, content: &str) -> Result<Vec<u8>, String> {
+    if binary_files::is_binary_path(doc, path) {
+        return Err(format!("{path} is a binary file"));
+    }
     let files = doc.get_map("files");
     let text = match files.get(path) {
         Some(ValueOrContainer::Container(Container::Text(t))) => t,
@@ -625,12 +638,36 @@ impl<M: Clone + 'static> LuaApp<M> {
         to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
         me: Option<crdt::Me>,
     ) -> mlua::Result<Self> {
+        Self::open_full(src, resolve, Rc::new(|_| Ok(None)), wake, to_msg, setup, entry, me)
+    }
+
+    /// [`open`](Self::open) for a host that stores the app's binary files.
+    pub fn open_with_files(
+        src: LoroDoc, resolve: Resolve, files: Files, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>,
+    ) -> mlua::Result<Self> {
+        Self::open_with_files_as(src, resolve, files, wake, to_msg, None)
+    }
+
+    /// Binary-file access with the same identity and write rules as [`open_as`](Self::open_as).
+    pub fn open_with_files_as(
+        src: LoroDoc, resolve: Resolve, files: Files, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>, me: Option<crdt::Me>,
+    ) -> mlua::Result<Self> {
+        Self::open_full(src, resolve, files, wake, to_msg, None, "main.lua", me)
+    }
+
+    fn open_full(
+        src: LoroDoc, resolve: Resolve, files: Files, wake: Wake,
+        to_msg: Rc<dyn Fn(LuaMsg) -> M>, setup: Option<host::VmSetup>, entry: &str,
+        me: Option<crdt::Me>,
+    ) -> mlua::Result<Self> {
         let me = me.map(Rc::new);
         let cores: Cores = Rc::new(RefCell::new(HashMap::new()));
         let src = Rc::new(Source::new(src, wake.clone()));
         let search: index::SearchHook = Rc::new(RefCell::new(None));
         let mut app = Self::build(
-            src, cores, resolve, wake, to_msg, search, sound::Hook::default(), Worlds::default(),
+            src, cores, resolve, files, wake, to_msg, search, sound::Hook::default(), Worlds::default(),
             gfx::world3d::Host::default(), net::Net::default(), setup, false, Rc::from(entry), me,
         )?;
         if app.error.is_none() {
@@ -654,6 +691,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         src: Rc<Source>,
         cores: Cores,
         resolve: Resolve,
+        files: Files,
         wake: Wake,
         to_msg: Rc<dyn Fn(LuaMsg) -> M>,
         search: index::SearchHook,
@@ -694,6 +732,11 @@ impl<M: Clone + 'static> LuaApp<M> {
         signal::install(&vm, viewing.clone(), tracker.clone())?;
         // Before `main.lua` runs, because its first line will be a `require`.
         modules::install(&vm, &src.doc)?;
+        // Paths resolve through the source this VM was built from, so a VM reads only its own
+        // revision's files.
+        let binary_revision = Rc::new(binary_files::Revision::new(&src.doc, files.clone()));
+        let from = binary_revision.clone();
+        gfx::glb::set_reader(&vm, Rc::new(move |path| from.read(path)));
         let host_context = host::HostContext::new(budget.clone());
         let net_handlers = net::Handlers::default();
         let matches = net_match::Matches::default();
@@ -724,6 +767,8 @@ impl<M: Clone + 'static> LuaApp<M> {
             cores,
             resolve,
             me,
+            files,
+            binary_revision,
             wake,
             search,
             sound,
@@ -757,14 +802,14 @@ impl<M: Clone + 'static> LuaApp<M> {
     /// The three stages are load, setup and **first render**, and the third is not optional: a
     /// `main.lua` that compiles and returns a closure which throws on its first call is the
     /// ordinary case, and without the trial frame we would have swapped before finding out.
-    /// Where this app's `sound` calls play from now on. Without it they play nothing.
-    pub fn set_sound(&self, out: SoundOut) {
-        sound::connect(&self.sound, out);
-    }
-
     pub fn reload(&mut self) -> Result<(), String> {
         *self = self.stage_reload(self.src.clone(), false)?;
         Ok(())
+    }
+
+    /// Where this app's `sound` calls play from now on. Without it they play nothing.
+    pub fn set_sound(&self, out: SoundOut) {
+        sound::connect(&self.sound, out);
     }
 
     /// Validate an independent source without activating it. Hosts can persist the candidate
@@ -778,6 +823,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             source,
             self.cores.clone(),
             self.resolve.clone(),
+            self.files.clone(),
             self.wake.clone(),
             self.to_msg.clone(),
             self.search.clone(),
@@ -976,6 +1022,20 @@ impl<M: Clone + 'static> LuaApp<M> {
 
     pub fn write_source_file(&self, path: &str, content: &str) -> Result<Vec<u8>, String> {
         write_source_file(&self.src.doc, path, content)
+    }
+
+    pub fn binary_files(&self) -> Vec<BinaryFile> {
+        binary_files(&self.src.doc)
+    }
+
+    pub fn bind_binary_file(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        store: impl FnOnce(&[u8]) -> Result<String, String>,
+    ) -> Result<BoundFile, String> {
+        self.binary_revision.retain(path)?;
+        bind_binary_file(&self.src.doc, path, bytes, store)
     }
 
     pub fn source_snapshot(&self) -> Result<Vec<u8>, String> {
@@ -1446,6 +1506,7 @@ impl<M: Clone + 'static> LuaApp<M> {
         let _scope = self.host_context.enter();
         self.worlds3d.commanding.set(matches!(key.name,
             "on_click" | "on_input" | "on_enter" | "on_esc" | "on_drag" | "on_drop" | "on_wheel" | "on_key" | "on_touch"));
+        self.worlds3d.control_input.set(key.name == "on_hover");
         let result = match msg {
             // Nothing to mis-order: no arguments, and one string that can only be itself.
             LuaMsg::Call(_) => h.call::<()>(()),
@@ -1456,6 +1517,7 @@ impl<M: Clone + 'static> LuaApp<M> {
             },
         };
         self.worlds3d.commanding.set(false);
+        self.worlds3d.control_input.set(false);
         if let Err(e) = result {
             eprintln!("handler error: {e}");
             self.log(format!("handler error: {e}"));

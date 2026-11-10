@@ -29,7 +29,7 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
     left, right = before["objects"]
     assert left["mesh"] == right["mesh"] == "triangles"
     assert left["mesh_resource"] == right["mesh_resource"]
-    assert (left["vertices"], left["triangles"], left["mesh_bytes"]) == (475, 864, 16584)
+    assert (left["vertices"], left["triangles"], left["mesh_bytes"]) == (475, 864, 25568)
     viewport = next(r for r in rpc.rects() if r["id"] == "mesh-view")
     rpc.click_at(*project(before["camera"], left["position"], viewport))
     status = next(n["text"] for n in nodes(rpc.dump_tree(item)) if n.get("id", "").endswith("mesh-status"))

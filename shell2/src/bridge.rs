@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use osvauld_rpc::{Request, Response, read_msg, write_msg};
+use osvauld_rpc::{Request, Response, read_msg_limited, write_msg};
 use runtime::EventLoopProxy;
 
 use crate::Msg;
@@ -29,6 +29,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the bridge waits for a connected client to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+// This private socket carries base64 item files; node traffic keeps read_msg's 16 MiB cap.
+const MAX_REQUEST: usize = app_host::MAX_BINARY_FILE.div_ceil(3) * 4 + 64 * 1024;
 
 fn socket_path() -> PathBuf {
     std::env::var_os("OSVAULD_SOCKET")
@@ -77,7 +80,7 @@ fn handle(mut conn: UnixStream, proxy: &EventLoopProxy<Msg>) -> io::Result<()> {
     conn.set_read_timeout(Some(READ_TIMEOUT))?;
     // A request the shell cannot read (an op it does not have yet) is answered, not dropped:
     // a closed connection reads as a crash to the client, an error names the op.
-    let req: Request = match serde_json::from_slice(&read_msg(&mut conn)?) {
+    let req: Request = match serde_json::from_slice(&read_msg_limited(&mut conn, MAX_REQUEST)?) {
         Ok(req) => req,
         Err(e) => {
             let resp = Response::err(format!("bad request: {e}"));

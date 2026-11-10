@@ -1,5 +1,7 @@
 # Sound — a mixer, generated sounds, sound files
 
+**Integration revision 2026-11-10:** Steps 1–2 are integrated into dev. Described loops, Hillclimb game sounds and file decoding remain unbuilt. Combined verification is recorded in [the integration plan](game-branch-integration.md).
+
 Status: **plan agreed 2026-11-06; steps 1–2 built 2026-11-06 (U-1, U-2, S-1, S-2 pass), not
 landed.** Found in step 2: a bus that has played nothing yet has no samples, so a capture pads
 the time before its first sound with silence. Worktree

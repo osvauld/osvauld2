@@ -29,7 +29,7 @@ from pathlib import Path
 from .session import ROOT, Session
 
 KUNKI_BINARY = Path(os.environ.get("OSVAULD_KUNKI_BINARY") or ROOT / "target" / "debug" / "kunki")
-SHELL_BINARY = ROOT / "target" / "debug" / "shell2"
+SHELL_BINARY = Path(os.environ.get("OSVAULD_SHELL_BINARY") or ROOT / "target" / "debug" / "shell2")
 PASSPHRASE = "demo"
 
 

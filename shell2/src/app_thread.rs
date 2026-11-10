@@ -433,7 +433,13 @@ fn build(open: Open, wake: app_host::Wake, bus: u64) -> Result<Hosted, String> {
         ),
         (None, true) => resolver(&open.vault, &open.ws_id, &open.item_id),
     };
-    let mut app = LuaApp::open_as(doc, resolve, wake, std::rc::Rc::new(|m| m), Some(open.me))
+    // Read-only, so even a tab that persists nothing loads the app's models.
+    let files = {
+        let (v, ws, it) = (open.vault.clone(), open.ws_id.clone(), open.item_id.clone());
+        std::rc::Rc::new(move |blob: &str| v.get_blob(&ws, &it, blob).map_err(|e| e.to_string()))
+            as app_host::Files
+    };
+    let mut app = LuaApp::open_with_files_as(doc, resolve, files, wake, std::rc::Rc::new(|m| m), Some(open.me))
         .map_err(|e| e.to_string())?;
     let opened = if open.persist {
         indexer::ItemIndex::open(&open.vault, &open.ws_id, &open.item_id)

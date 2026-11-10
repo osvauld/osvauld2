@@ -8,6 +8,9 @@ struct GpuCurve {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> glyph_curves: array<GpuCurve>;
+// The object's texture; untextured objects bind a 1x1 white one.
+@group(1) @binding(0) var base_texture: texture_2d<f32>;
+@group(1) @binding(1) var base_sampler: sampler;
 
 struct In {
     @location(0) position: vec3<f32>,
@@ -21,6 +24,7 @@ struct In {
     @location(7) text_curves: vec4<f32>,
     // This object's shaped text, in em-space: (min.x, min.y, max.x, max.y).
     @location(8) text_bounds: vec4<f32>,
+    @location(9) uv: vec2<f32>,
 };
 
 struct Out {
@@ -31,6 +35,7 @@ struct Out {
     @location(3) @interpolate(flat) text_bounds: vec4<f32>,
     @location(4) @interpolate(flat) has_surface: u32,
     @location(5) @interpolate(flat) face_aspect: f32,
+    @location(6) uv: vec2<f32>,
 };
 
 @vertex
@@ -50,6 +55,7 @@ fn vs_main(input: In) -> Out {
     out.position = camera.view_proj * model * vec4<f32>(input.position, 1.0);
     out.color = vec4<f32>(input.color.rgb * shade, input.color.a);
     out.panel_uv = uv;
+    out.uv = input.uv;
     out.face_aspect = length(input.model_0.xyz) / length(input.model_1.xyz);
     out.text_curves = input.text_curves;
     out.text_bounds = input.text_bounds;
@@ -112,8 +118,10 @@ fn fs_main(input: Out) -> @location(0) vec4<f32> {
     // Computed before the early-return branch below: fwidth needs uniform control flow across a
     // pixel quad, and panel_uv (unlike glyph_uv below) is always defined, branch or not.
     let panel_delta = fwidth(input.panel_uv);
+    // Sampled here for the same reason: implicit-LOD sampling needs uniform control flow.
+    let color = input.color * textureSample(base_texture, base_sampler, input.uv);
     if input.has_surface == 0u {
-        return input.color;
+        return color;
     }
     // A little breathing room around the shaped text.
     let pad = (input.text_bounds.zw - input.text_bounds.xy) * 0.1;
@@ -142,5 +150,5 @@ fn fs_main(input: Out) -> @location(0) vec4<f32> {
         }
     }
     coverage /= 16.0;
-    return vec4<f32>(mix(input.color.rgb, vec3<f32>(1.0), coverage), input.color.a);
+    return vec4<f32>(mix(color.rgb, vec3<f32>(1.0), coverage), color.a);
 }

@@ -1,5 +1,7 @@
 # SVG drawings — art from a real editor, as Lua data
 
+**Integration revision 2026-11-10:** The implemented SVG support is integrated into dev. Combined verification is recorded in [the integration plan](game-branch-integration.md).
+
 Status: **steps 1–4 built 2026-11-05, not landed** (see docs/status.md). Plan agreed the same day. Option B: the
 runtime parses, Lua gets data. Worktree `.claude/worktrees/hillclimb`, branch `hillclimb`.
 

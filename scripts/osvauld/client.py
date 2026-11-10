@@ -11,6 +11,9 @@ import socket
 from typing import Any
 
 
+BINARY_EXTENSIONS = (".glb", ".png", ".jpg", ".jpeg")
+
+
 class BridgeError(RuntimeError):
     """The shell answered with an error response."""
 
@@ -75,6 +78,10 @@ class Bridge:
     # ── vocabulary: one method per request ──────────────────────────────────────
     def ping(self) -> str:
         return self.request("Ping")
+
+    def performance(self) -> dict:
+        """Cached native frame work and presentation FPS; offscreen FPS is unavailable."""
+        return self.request("Performance")
 
     def list_accounts(self) -> list:
         return self.request("ListAccounts")
@@ -157,6 +164,20 @@ class Bridge:
 
     def write_file(self, item_id: str, path: str, content: str) -> str:
         return self.request("WriteFile", item_id=item_id, path=path, content=content)
+
+    def write_binary_file(self, item_id: str, path: str, data: bytes) -> dict:
+        """Store bytes at `path` (a model, an image); sealed in the vault, read only by Rust."""
+        import base64
+        return self.request("WriteBinaryFile", item_id=item_id, path=path,
+                            base64=base64.b64encode(data).decode("ascii"))
+
+    def list_binary_files(self, item_id: str) -> list:
+        """[{path, size, sha256}], sorted by path."""
+        return self.request("ListBinaryFiles", item_id=item_id)
+
+    def read_binary_file(self, item_id: str, path: str) -> bytes:
+        import base64
+        return base64.b64decode(self.request("ReadBinaryFile", item_id=item_id, path=path))
 
     def reload_item(self, item_id: str) -> str:
         return self.request("ReloadItem", item_id=item_id)
@@ -357,20 +378,28 @@ class Bridge:
         )
 
     def upload_folder(self, item_id: str, root) -> list:
-        """Mirror the shell's GUI upload: walk `root`, keep *.lua/*.osv/*.svg (skipping dotfiles),
-        one WriteFile per file. Root main.lua is required — the same contract as the picker."""
+        """Upload Lua/OSV/SVG source and binary models/images, skipping dotfiles.
+        Root main.lua is required. The native folder picker currently imports text only."""
         from pathlib import Path
         root = Path(root)
-        files = []
+        files, binaries = [], []
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
             for fn in sorted(filenames):
-                if fn.startswith(".") or os.path.splitext(fn)[1] not in (".lua", ".osv", ".svg"):
+                ext = os.path.splitext(fn)[1].lower()
+                if fn.startswith(".") or ext not in (".lua", ".osv", ".svg") + BINARY_EXTENSIONS:
                     continue
                 full = Path(dirpath) / fn
-                files.append((full.relative_to(root).as_posix(), full.read_text(encoding="utf-8")))
+                rel = full.relative_to(root).as_posix()
+                if ext in BINARY_EXTENSIONS:
+                    binaries.append((rel, full.read_bytes()))
+                else:
+                    files.append((rel, full.read_text(encoding="utf-8")))
         if not any(p == "main.lua" for p, _ in files):
             raise BridgeError(f"no main.lua in {root}")
+        # Binaries first: a loader in main.lua may read them on the first activation.
+        for path, body in sorted(binaries):
+            self.write_binary_file(item_id, path, body)
         for path, body in sorted(files):
             self.write_file(item_id, path, body)
-        return [p for p, _ in sorted(files)]
+        return [p for p, _ in sorted(files + binaries)]

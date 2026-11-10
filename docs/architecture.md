@@ -10,8 +10,7 @@ A local-first, end-to-end-encrypted workspace of **typed items** — `.app`, `.d
 `.canvas` — synced between peers through CRDTs (Loro). The desktop shell (`shell2`) hosts
 apps authored in **Lua (Luau)**, frequently written by an agent over MCP: the agent writes
 `.lua`, the shell runs it, the window repaints. Rust is the substrate; Lua is the product
-surface. Accounts own a local encrypted store (`vault`); sync is designed-for but not yet
-built.
+surface. Accounts own a local encrypted store (`vault`); hosted workspace sync runs over iroh sessions.
 
 ## The era break (2026-06)
 
@@ -62,6 +61,18 @@ Rust screen: El builders (typed M) ───────────────
   promise that arbitrary user handlers cannot mutate state during capture. Offscreen ordinary
   bridge requests repaint without advancing virtual time; frame/advance and pointer drivers move
   the clock explicitly, so inspection and captures create no time debt.
+- **New 3D physics components are native; application assemblies and policies are Lua.** Rust owns
+  rigid bodies, wheel support, springs/dampers, physical actuation, contacts and fixed-step
+  scheduling. Lua composes a rover or educational apparatus and chooses throttle mapping,
+  brake priority, steering convention and motor targets. Native wheel commands are SI
+  torque/angle/velocity values; no vehicle recipe or normalized driving command remains.
+  Future native joints/pulleys follow this same boundary, not a native car/elevator API.
+- **Performance observations do not drive the clock.** Optional `OSVAULD_PERFORMANCE=1` keeps
+  bounded CPU/wait and normal-presentation samples in the surface Runner, renders a native
+  diagnostic overlay, and delivers plain `App::frame_performance` snapshots to its host.
+  Shell's `Performance` RPC reads its primary surface's cache. Offscreen rendering and app tiles
+  never report display FPS; captures are excluded. The diagnostic neither executes Lua nor
+  requests an extra repaint. Presentation cadence is distinct from GPU completion/scanout.
 - **External event sources start at `App::ready`.** Runner calls it once after winit has a
   window/renderer and is actively polling. Publishing a bridge socket from `run_with`'s builder
   creates a startup race: `EventLoopProxy::send_event` can succeed before events are deliverable.
@@ -78,7 +89,7 @@ Rust screen: El builders (typed M) ───────────────
 | crate | what it is |
 |---|---|
 | `runtime` | the UI substrate: `El<M>` → taffy → `Placed` → vello; ids + keyed state store, scroll, drag, overlay, animation, text (parley), editor island. Owns the `App`/`Runner` loop, `ControlFlow::Wait` on-demand paint, and live/custom-frame PNG capture. |
-| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
+| `world` | retained simulation over private Bevy ECS/Rapier types: 2D controllers/bodies/sensors, commands, timers and contact events; metre-scale 3D bodies/zones, body properties and composable ray wheel/motor components, atomic pose/motion commands, bounded fixed-step clocks, observational/paused snapshots and whole-batch reload preflight. Shell dispatches Runner's capture-excluding hook into app-local worlds; `app_host` exposes experimental `gfx.world3d` handles. Depends on runtime visual data, never on Lua. |
 | `audio` | sound as sample maths: generated sounds (`Synth`) and a `Mixer` of voices on one bus per app, with a per-bus event log and recent samples for tests. No device, no Lua, no clock: shell2 renders it from the sound card (`cpal`) or, offscreen, the virtual frame clock; `app_host` binds `sound.*` ([sound](design/sound.md)). |
 | `app_host` | the app layer: sandboxed Luau VM (mlua), the `ui.*` walk, the props registry, `doc:open` mirror binding, multi-file `require`, `ui.state`, staged reload. The app-facing guide is [`lua-apps.md`](lua-apps.md). **2026-11-05, [jetpack-mp](design/jetpack-mp.md):** `net` (app channels: `net.send`/`on`/`peers`, checked against the app's manifest) and `net.match` (lockstep with rollback, driven worlds, checkpoint hashes, desync and drop-out); `net_sim` runs N apps over a fake network for tests and the player-cap sim. |
 | `shell2` | the live shell: accounts over `vault`, workspaces/items, app upload, tabs (one running instance per item), theme. **2026-11-02:** also the host of its own spaces and a member of joined ones — `host.rs` is the shell's `Sink` for `kunki::host`, which accepts sessions on the device endpoint (`net`); `sessions.rs` dials a joined space's host, `node.rs` routes a request in-process, over a session, or over the pre-pivot socket; a member's update is merged on the UI thread into the open app's live doc ("one copy per doc", [laptop-host](design/laptop-host.md) §2). **2026-11-05:** `channels.rs` carries app channels — a member's second session stream, a hosting shell's own app as a relay peer — signing each message with the device key. |
@@ -129,6 +140,13 @@ mirror is patched in place at the top of the next `view()`, and snapshots persis
 ## Invariants — don't break these
 
 - **Messages stay plain data**; the VM never leaks into the runtime.
+- **RPC frame limits are service-specific and checked before allocation.** Node/default
+  reads stay capped at 16 MiB. The private shell automation socket permits the base64 encoding
+  of one 64 MiB item file plus a 64 KiB JSON envelope; item size validation still applies.
+- **Native physics is reusable components.** Rust owns bodies, collision, constraints,
+  suspension and physical actuator commands. Lua assembles vehicles and apparatus and owns
+  controls, brake priority, speed targets, missions and game rules
+  ([component boundary](design/physics-components.md)).
 - **Paint order == reverse hit-test order**, both from tree order; overlays paint last and
   hit first.
 - **`walk` is the hot path** (~80% of a frame's Lua cost). New per-element reads need a cost

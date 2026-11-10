@@ -1,8 +1,11 @@
 //! Lua declarations for immutable runtime Frame resources. This module validates and compiles
 //! aggregate values; it never renders or retains VM callbacks.
 
+pub(crate) mod glb;
+mod image;
 mod mesh;
 mod svg;
+mod texture;
 pub(crate) mod world3d;
 
 use std::cell::Cell;
@@ -106,6 +109,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     let gfx = lua.create_table()?;
     mesh::install(lua, &gfx)?;
     svg::install(lua, &gfx)?;
+    texture::install(lua, &gfx)?;
+    glb::install(lua, &gfx)?;
     gfx.set(
         "path",
         lua.create_function(|lua, commands: Table| {
@@ -235,7 +240,7 @@ fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
         &spec,
         &format!("scene3d object {index}"),
         &[
-            "id", "mesh", "position", "rotation", "scale", "color", "surface",
+            "id", "mesh", "position", "rotation", "scale", "color", "texture", "surface", "attach",
         ],
     )?;
     let mesh = match spec.get::<Value>("mesh")? {
@@ -269,6 +274,17 @@ fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
             .transpose()?
             .unwrap_or(Vec3::ONE),
         color,
+        texture: match spec.get::<Value>("texture")? {
+            Value::Nil => None,
+            Value::UserData(handle) => Some(
+                handle
+                    .borrow::<texture::LuaTexture>()
+                    .map_err(|_| Error::runtime("object.texture must be a gfx texture"))?
+                    .0
+                    .clone(),
+            ),
+            _ => return Err(Error::runtime("object.texture must be a gfx texture")),
+        },
         surface: spec
             .get::<Option<mlua::AnyUserData>>("surface")?
             .map(|surface| {
@@ -277,6 +293,7 @@ fn object3d(spec: Table, index: usize) -> mlua::Result<Object3d> {
                     .map(|surface| surface.0.clone())
             })
             .transpose()?,
+        attach: spec.get::<Option<String>>("attach")?.map(Into::into),
     })
 }
 

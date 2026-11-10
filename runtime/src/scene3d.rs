@@ -12,11 +12,13 @@ mod glyph_outline;
 mod gpu;
 pub mod mesh;
 mod text_mesh;
+pub mod texture;
 pub(crate) use gpu::SceneRenderer;
 
 const MAX_OBJECTS: usize = 256;
-const MAX_SCENE_MESH_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SCENE_TRIANGLES: usize = 131_072;
+const MAX_SCENE_MESH_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SCENE_TRIANGLES: usize = 1_048_576;
+const MAX_SCENE_TEXTURE_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) const MAX_TEXT_SURFACES: usize = 8;
 const MAX_ID_BYTES: usize = 128;
 const MAX_SURFACE_TEXT_BYTES: usize = 1024;
@@ -53,8 +55,13 @@ pub struct Object3d {
     pub rotation: Quat,
     pub scale: Vec3,
     pub color: [f32; 4],
+    /// Multiplies `color` per pixel through the mesh's UVs; `None` is plain white.
+    pub texture: Option<Arc<texture::TextureData>>,
     /// A GPU-rendered text panel attached to the cube's local +Z face.
     pub surface: Option<Arc<TextSurface>>,
+    /// In a 3D world: the body or wheel this visual rides on. `position` and `rotation` are then
+    /// in that host's frame. Plain scenes draw it where authored.
+    pub attach: Option<Arc<str>>,
 }
 
 impl Object3d {
@@ -82,6 +89,8 @@ pub struct ObjectInspection {
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
     pub color: [f32; 4],
+    /// (resource id, width, height) of the object's texture.
+    pub texture: Option<(u64, u32, u32)>,
     pub surface_text: Option<Arc<str>>,
 }
 
@@ -108,7 +117,7 @@ pub struct SceneInspection {
 pub enum SceneError {
     #[error("scene has more than {MAX_OBJECTS} objects")]
     TooManyObjects,
-    #[error("scene mesh budget exceeded (16 MiB unique payload or 131072 instanced triangles)")]
+    #[error("scene mesh budget exceeded (64 MiB unique payload or 1048576 instanced triangles)")]
     MeshBudget,
     #[error("camera is invalid")]
     InvalidCamera,
@@ -116,6 +125,8 @@ pub enum SceneError {
     InvalidId(String),
     #[error("object {0} has an invalid transform, color, or text surface")]
     InvalidObject(String),
+    #[error("scene texture budget exceeded (128 MiB unique, mips included)")]
+    TextureBudget,
     #[error("scene has more than {MAX_TEXT_SURFACES} text surfaces")]
     TooManyTextSurfaces,
 }
@@ -151,7 +162,17 @@ impl Scene3d {
         let mut meshes = HashSet::new();
         let mut mesh_bytes = 0;
         let mut triangles = 0;
+        let mut textures = HashSet::new();
+        let mut texture_bytes = 0;
         for object in &objects {
+            if let Some(texture) = &object.texture
+                && textures.insert(texture.resource_id())
+            {
+                texture_bytes += texture.payload_bytes();
+                if texture_bytes > MAX_SCENE_TEXTURE_BYTES {
+                    return Err(SceneError::TextureBudget);
+                }
+            }
             if meshes.insert(object.mesh.resource_id()) {
                 mesh_bytes += object.mesh.payload_bytes();
             }
@@ -296,6 +317,10 @@ impl Scene3d {
                     rotation: object.rotation.to_array(),
                     scale: object.scale.to_array(),
                     color: object.color,
+                    texture: object.texture.as_ref().map(|t| {
+                        let (w, h) = t.size();
+                        (t.resource_id(), w, h)
+                    }),
                     surface_text: object.surface.as_ref().map(|surface| surface.text.clone()),
                 })
                 .collect(),

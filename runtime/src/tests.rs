@@ -402,6 +402,8 @@ fn scene_click_picks_the_visible_object_through_normal_routing() {
         scale: Vec3::ONE,
         color: [1.0; 4],
         surface: None,
+        texture: None,
+        attach: None,
     };
     let scene = Scene3d::new(camera, vec![object]).unwrap();
     let mut headless = Headless::new(

@@ -20,6 +20,8 @@ fn cube(id: &str) -> Object3d {
         scale: Vec3::ONE,
         color: [1.0, 0.0, 0.0, 1.0],
         surface: None,
+        texture: None,
+        attach: None,
     }
 }
 
@@ -82,7 +84,7 @@ fn built_in_cube_is_a_valid_mesh() {
     assert_eq!(mesh.bounds(), (Vec3::splat(-0.5), Vec3::splat(0.5)));
     assert_eq!(mesh.vertex_count(), 24);
     assert_eq!(mesh.triangle_count(), 12);
-    assert_eq!(mesh.payload_bytes(), 24 * 24 + 36 * 2);
+    assert_eq!(mesh.payload_bytes(), 24 * 32 + 36 * 4);
 }
 
 fn triangle_mesh() -> Arc<mesh::MeshData> {
@@ -92,14 +94,17 @@ fn triangle_mesh() -> Arc<mesh::MeshData> {
             mesh::Vertex {
                 position: [-2.0, -2.0, 0.0],
                 normal,
+                uv: [0.0, 0.0],
             },
             mesh::Vertex {
                 position: [2.0, -2.0, 0.0],
                 normal,
+                uv: [0.0, 0.0],
             },
             mesh::Vertex {
                 position: [0.0, 2.0, 0.0],
                 normal,
+                uv: [0.0, 0.0],
             },
         ],
         vec![0, 1, 2],
@@ -123,7 +128,7 @@ fn arbitrary_meshes_are_shared_inspectable_and_picked_as_triangles() {
     let b = &info.objects[1];
     assert_eq!(a.mesh, MeshKind::Triangles);
     assert_eq!(a.mesh_resource, b.mesh_resource);
-    assert_eq!((a.vertex_count, a.triangle_count, a.mesh_bytes), (3, 1, 78));
+    assert_eq!((a.vertex_count, a.triangle_count, a.mesh_bytes), (3, 1, 108));
     assert_eq!(a.local_bounds, ([-2.0, -2.0, 0.0], [2.0, 2.0, 0.0]));
     let hit = scene.raycast((800.0, 600.0), (400.0, 300.0)).unwrap();
     assert_eq!(
@@ -185,7 +190,7 @@ fn picking_respects_camera_clipping_and_back_faces() {
 fn scene_triangle_budget_counts_instances_not_just_shared_resources() {
     let base = triangle_mesh();
     let vertices = base.vertices.to_vec();
-    let big = mesh::MeshData::new(vertices, [0, 1, 2].repeat(65_536)).unwrap();
+    let big = mesh::MeshData::new(vertices, [0, 1, 2].repeat(524_288)).unwrap();
     let mut object = cube("a");
     object.mesh = big;
     let mut other = object.clone();
@@ -224,4 +229,33 @@ fn allocation_is_bounded() {
         Scene3d::new(camera(), objects).unwrap_err(),
         SceneError::TooManyObjects
     );
+}
+
+#[test]
+fn texture_budget_counts_unique_images_and_inspection_names_them() {
+    let big = || texture::TextureData::new(2048, 2048, vec![200; 2048 * 2048 * 4]).unwrap();
+    let shared = big();
+    let textured = |id: &str, t: &Arc<texture::TextureData>| Object3d {
+        texture: Some(t.clone()),
+        ..cube(id)
+    };
+    // One image on many objects is paid once.
+    let many: Vec<_> = (0..8).map(|i| textured(&format!("s{i}"), &shared)).collect();
+    let scene = Scene3d::new(camera(), many).unwrap();
+    let seen = scene.inspect().objects[0].texture.unwrap();
+    assert_eq!(seen, (shared.resource_id(), 2048, 2048));
+    // 2048² with mips is just under 21⅓ MiB: six distinct fit in 128 MiB, a seventh does not.
+    // (Results are checked with `matches!`: a failing assert would print every pixel.)
+    let six: Vec<_> = (0..6).map(|_| big()).collect();
+    let objects = |extra: Option<Arc<texture::TextureData>>| {
+        let mut v: Vec<_> =
+            six.iter().enumerate().map(|(i, t)| textured(&i.to_string(), t)).collect();
+        v.extend(extra.map(|t| textured("extra", &t)));
+        v
+    };
+    assert!(Scene3d::new(camera(), objects(None)).is_ok());
+    assert!(matches!(
+        Scene3d::new(camera(), objects(Some(big()))),
+        Err(SceneError::TextureBudget)
+    ));
 }

@@ -483,6 +483,51 @@ impl Vault {
         };
         self.put_sealed(&item::doc_key(ws_id, item_id, name), snapshot)
     }
+    /// A fresh id for [`put_blob`](Self::put_blob).
+    pub fn new_blob_id() -> String {
+        workspace::new_id()
+    }
+
+    /// Sealed bytes of one binary item file. Same id checks as [`get_src`](Self::get_src);
+    /// `blob` must be a minted id too.
+    pub fn put_blob(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        blob: &str,
+        bytes: &[u8],
+    ) -> Result<(), VaultError> {
+        self.check_blob(ws_id, item_id, blob)?;
+        self.put_sealed(&item::blob_key(ws_id, item_id, blob), bytes)
+    }
+
+    pub fn get_blob(
+        &self,
+        ws_id: &str,
+        item_id: &str,
+        blob: &str,
+    ) -> Result<Option<Vec<u8>>, VaultError> {
+        self.check_blob(ws_id, item_id, blob)?;
+        self.get_sealed(&item::blob_key(ws_id, item_id, blob))
+    }
+
+    pub fn delete_blob(&self, ws_id: &str, item_id: &str, blob: &str) -> Result<(), VaultError> {
+        self.check_blob(ws_id, item_id, blob)?;
+        let guard = self.active.lock().unwrap();
+        let active = guard.as_ref().ok_or(VaultError::Locked)?;
+        Ok(active.store.delete(&item::blob_key(ws_id, item_id, blob))?)
+    }
+
+    fn check_blob(&self, ws_id: &str, item_id: &str, blob: &str) -> Result<(), VaultError> {
+        if !workspace::is_minted_id(ws_id) || !workspace::is_minted_id(item_id) {
+            return Err(VaultError::BadItemId(item_id.to_string()));
+        }
+        if !workspace::is_minted_id(blob) {
+            return Err(VaultError::BadItemId(blob.to_string()));
+        }
+        Ok(())
+    }
+
     /// Opaque sealed records this account keeps for itself, outside the workspace/item tree:
     /// the node's tokens and revocations, a desktop's node relationships. Vault seals and
     /// stores them without interpreting them, under a reserved key namespace.

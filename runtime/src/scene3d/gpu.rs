@@ -5,6 +5,7 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::mesh::{MeshData, Vertex};
+use super::texture::TextureData;
 use super::text_mesh::layout_text;
 use super::{MAX_OBJECTS, MAX_TEXT_SURFACES, Scene3d};
 
@@ -72,6 +73,74 @@ impl GpuMesh {
     }
 }
 
+struct GpuTexture {
+    group: wgpu::BindGroup,
+    /// Kept so the pointer key cannot be reused while cached.
+    _source: Option<Arc<TextureData>>,
+}
+
+impl GpuTexture {
+    /// `None` uploads the 1x1 white stand-in untextured objects sample.
+    fn upload(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        source: Option<Arc<TextureData>>,
+    ) -> Self {
+        let white: [Box<[u8]>; 1] = [Box::new([255; 4])];
+        let (width, height) = source.as_ref().map_or((1, 1), |t| t.size());
+        let mips = source.as_ref().map_or(&white[..], |t| &t.mips[..]);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3d texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: mips.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Colours stay in the sRGB-encoded space the rest of the 3D pass shades in.
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let (mut w, mut h) = (width, height);
+        for (level, pixels) in mips.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * w),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+        let view = texture.create_view(&Default::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3d texture group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        Self { group, _source: source }
+    }
+}
+
 // Remap a full viewport's clip coordinates into its clipped/scissored sub-rectangle without
 // changing camera aspect or the screen ray. This also handles content extending offscreen.
 pub(super) fn viewport_crop(full: [f32; 4], clip: [u32; 4]) -> Mat4 {
@@ -89,6 +158,10 @@ pub(crate) struct SceneRenderer {
     camera: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     meshes: HashMap<usize, GpuMesh>,
+    texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    textures: HashMap<usize, GpuTexture>,
+    white: Option<GpuTexture>,
     instances: wgpu::Buffer,
     glyph_curves: wgpu::Buffer,
 }
@@ -96,6 +169,7 @@ pub(crate) struct SceneRenderer {
 impl SceneRenderer {
     pub fn clear(&mut self) {
         self.meshes.clear();
+        self.textures.clear();
     }
 
     pub fn new(device: &wgpu::Device) -> Self {
@@ -156,13 +230,44 @@ impl SceneRenderer {
                 },
             ],
         });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3d texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("3d texture sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 4,
+            ..Default::default()
+        });
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("3d pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(&texture_layout)],
             immediate_size: 0,
         });
-        let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        let vertex_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 9 => Float32x2];
         let instance_attrs = wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4,
             4 => Float32x4, 5 => Float32x4, 6 => Float32x4,
             7 => Float32x4, 8 => Float32x4];
@@ -219,6 +324,10 @@ impl SceneRenderer {
             camera,
             camera_group,
             meshes: HashMap::new(),
+            texture_layout,
+            sampler,
+            textures: HashMap::new(),
+            white: None,
             instances,
             glyph_curves,
         }
@@ -243,6 +352,22 @@ impl SceneRenderer {
             self.meshes
                 .entry(*key)
                 .or_insert_with(|| GpuMesh::upload(device, mesh.clone()));
+        }
+        let texture_keys: Vec<_> = scene
+            .objects
+            .iter()
+            .map(|o| o.texture.as_ref().map_or(0, |t| Arc::as_ptr(t) as usize))
+            .collect();
+        self.textures.retain(|key, _| texture_keys.contains(key));
+        for (key, object) in texture_keys.iter().zip(scene.objects.iter()) {
+            if let Some(texture) = &object.texture {
+                self.textures.entry(*key).or_insert_with(|| {
+                    GpuTexture::upload(device, queue, &self.texture_layout, &self.sampler, Some(texture.clone()))
+                });
+            }
+        }
+        if self.white.is_none() {
+            self.white = Some(GpuTexture::upload(device, queue, &self.texture_layout, &self.sampler, None));
         }
         let [x, y, width, height] = viewport;
         if width == 0 || height == 0 {
@@ -345,13 +470,21 @@ impl SceneRenderer {
         let mut start = 0;
         while start < keys.len() {
             let mut end = start + 1;
-            while end < keys.len() && keys[end] == keys[start] {
+            while end < keys.len()
+                && keys[end] == keys[start]
+                && texture_keys[end] == texture_keys[start]
+            {
                 end += 1;
             }
+            let texture = match texture_keys[start] {
+                0 => self.white.as_ref().unwrap(),
+                key => &self.textures[&key],
+            };
+            pass.set_bind_group(1, &texture.group, &[]);
             let mesh = &self.meshes[&keys[start]];
             debug_assert!(Arc::ptr_eq(&mesh.source, &geometry[start]));
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint16);
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, start as u32..end as u32);
             start = end;
         }

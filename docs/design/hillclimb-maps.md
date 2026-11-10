@@ -1,5 +1,7 @@
 # Hillclimb maps — courses an agent writes, art from any tool
 
+**Integration revision 2026-11-10:** The implemented Lua map support is integrated into dev. Combined verification is recorded in [the integration plan](game-branch-integration.md).
+
 Status: **plan agreed 2026-11-05; steps 1–3 built 2026-11-05, not landed.** Found while building
 step 3: worlds outlive hot reload, so the world id carries a fingerprint of the course (§1.7). Worktree `.claude/worktrees/hillclimb`,
 branch `hillclimb`. Follows [Hillclimb](hillclimb.md) and [SVG drawings](svg-drawings.md).

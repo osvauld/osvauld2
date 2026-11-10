@@ -739,20 +739,69 @@ opens on click or on E, through `on_action`.
 objects. Display it with `ui.scene3d({ scene = scene, ...normal layout props... })`; the viewport
 size comes from ordinary layout. Camera fields are `eye`, `target`, optional `up`, `fov_y` in
 degrees, `near` and `far`. Object fields are a stable `id`, optional `mesh` (a `gfx.mesh` handle,
-or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale` and
-CSS `color`. Coordinates are right-handed with Y up.
+or `"cube"` by default), `position`, quaternion `rotation = {x, y, z, w}`, positive `scale`,
+CSS `color` and an optional `texture` (a `gfx.load_texture` or GLB material handle) that
+multiplies `color` per pixel through the mesh's UVs. Coordinates are right-handed with Y up.
 
 `gfx.mesh({ vertices = {...}, indices = {...} })` constructs an immutable shared triangle mesh.
-Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz} }`; indices are a dense **1-based**
+Each vertex is `{ position = {x,y,z}, normal = {nx,ny,nz}, uv = {u,v} }` (`uv` optional,
+`{0,0}` top-left of the image, repeating outside 0..1); indices are a dense **1-based**
 list, three per triangle. Counterclockwise winding is front-facing; back faces are neither
 rendered nor picked. Positions/normals must be finite and bounded; normals cannot be zero,
 and triangles cannot be degenerate. Unknown fields, sparse arrays and fractional indices fail.
-At most 65,536 vertices and 65,536 triangles per mesh; a VM may hold at most 128 generated
-resources and 32 MiB of live mesh payload, including resources still retained by scene handles.
-Scene limits are 16 MiB of unique mesh payload and 131,072 triangles counted across instances.
+At most 262,144 vertices and 524,288 triangles per mesh (32-bit indices); a VM may hold at most
+128 generated resources and 64 MiB of live mesh payload, including resources still retained by
+scene handles and meshes from `gfx.load_glb`. Scene limits are 64 MiB of unique mesh payload and
+1,048,576 triangles counted across instances. *(Raised 2026-11-05 from 65,536/65,536, 32 MiB,
+16 MiB and 131,072 for Blender terrain, [blender-import](design/blender-import.md).)*
+The built-in cube shows a whole texture on each face.
 Create meshes outside `view`; reuse handles across objects and views. Edits create a new handle.
 `DumpTree` reports mesh resource identity (process-local, not persistent), local bounds, counts
 and payload bytes. No raw vertex dump or general curve/sweep/material constructor ships yet.
+
+#### Models from Blender: binary files, `gfx.load_glb`, textures *(2026-11-05)*
+
+An app's item can hold **binary files** next to its Lua source — `.glb`, `.png`, `.jpg`. They
+are stored sealed in the vault and read by Rust; Lua never sees their bytes. Agents write them
+with the bridge's `WriteBinaryFile` (`rpc.write_binary_file(item, path, data)`;
+`upload_folder` sends them too) and list/read them with `ListBinaryFiles` / `ReadBinaryFile`.
+The native folder picker currently imports Lua/OSV/SVG source only; use the bridge uploader
+for models and images.
+At most 64 MiB per file and 256 MiB per item; a path is text or binary, never both. Replacing
+a file the open app loaded reloads the app, like a source edit.
+Binary paths are pinned to each VM's source revision. If activation fails, the fallback VM
+can still load its original assets from handlers; repair the persisted candidate before reopening.
+
+`gfx.load_glb(path)` reads a GLB (glTF binary, embedded buffers only — export from Blender as
+*glTF Binary*) and returns plain data. Rust gives no node a meaning; the app decides what each
+node is (a collider, a wheel, a prop):
+
+```lua
+local model = gfx.load_glb("models/rover.glb")
+-- model.nodes[i]    = { name, parent (index or nil), translation, rotation, scale,
+--                       mesh (index or nil), extras (Blender custom properties) }
+-- model.meshes[i]   = { { mesh = <gfx.mesh>, material = index or nil }, ... }  -- one per primitive
+-- model.materials[i] = { name, color = "#rrggbbaa", texture = <texture> or nil }
+-- model.roots       = { index, ... }   -- the scene's top-level nodes
+```
+
+Everything is 1-based. Transforms are local to the parent; compose them in Lua
+(`demo_apps/glb_scene/glb.lua` has `world` and `objects` helpers to copy). Missing normals are
+generated, zero-area triangles dropped. A material's `color` is the base colour converted to
+sRGB; its `texture` is the base-colour image (PNG or JPEG, at most 2048×2048, read through the
+material's UV set). Other material maps, animation clips and skins are not read.
+`gfx.load_texture(path)` loads a PNG/JPEG binary file as a texture handle directly.
+
+Refused with the reason: not a GLB, truncated, external buffer or image URIs, required
+extensions, non-triangle primitives, over 4,096 nodes or 128 primitives, oversize images.
+Meshes count against the VM's mesh budget above; textures against their own — 64 live
+textures and 128 MiB (mips included) per VM, and 128 MiB of unique textures per scene. A load
+is all-or-nothing: a refused file leaves both budgets as they were.
+
+Decoding is native work inside the calling entry, so it counts against the app's 1 s CPU
+budget: a 12 MB model with eight 1024² textures loads in ~0.2 s in a release build, but takes
+several seconds in a debug build — run heavy models on a release shell. Load models at module
+level, not in `view`.
 
 An optional `surface = gfx.text_surface({ text = "label", font_size = 32,
 color = "#ffffff", background = "#171923" })` is supported only on the built-in cube resource;
@@ -762,15 +811,14 @@ This is a rendering proof, not the public Environment API. It currently supports
 viewport, 4× MSAA, simple directional lighting and app-driven rebuilds. The model-viewer demo uses
 `on_drag` for orbit and `on_wheel` for zoom. An `on_click` on the scene leaf ray-picks the
 nearest rendered triangle and reports its stable ID, world hit point, normal and distance.
-Camera near/far clipping and back-face culling apply to picking. GLB assets,
-hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
+Camera near/far clipping and back-face culling apply to picking. Hover picking and correct foreground Vello overlay composition remain unbuilt. `DumpTree` includes
 the validated camera,
 objects, transforms, colors and mesh summaries so an agent can inspect the same scene declaration
 that renders.
 
 ### Retained 3D physics (experimental)
 
-Create `gfx.world3d({ id, scene, bodies })` at module scope. `scene` is a compiled
+Create `gfx.world3d({ id, scene, bodies, gravity, wheels })` at module scope. `scene` is a compiled
 `gfx.scene3d`; `bodies` is a dense list of `{ id, position = {x,y,z}, sphere = radius }`
 or `{ id, position = {x,y,z}, box = {width,height,depth} }`, optionally `dynamic = true`
 (default fixed). Optional `rotation = {x,y,z,w}` supplies initial orientation, default identity.
@@ -778,14 +826,37 @@ Quaternion components must be finite and bounded to 10,000, with length at least
 physics normalizes them. Exactly one shape is required; unknown fields are errors. Dimensions
 and positions are metre-scale, finite and bounded to 10,000; dimensions must be at least 0.0001.
 At most eight worlds per app and 256 bodies per world; IDs are nonempty and at most 128 bytes.
+
+**2026-11-04, fixed mesh surfaces:** a body may instead use `mesh = terrain`, where `terrain`
+is an existing `gfx.mesh` handle. Exactly one of `sphere`, `box` or `mesh` is required. Mesh
+bodies must be fixed and nonsensor. The validated mesh's vertex positions and triangle indices
+are the collision surface; normals affect rendering only. Local vertex coordinates are metres,
+bounded to ±10,000. Body position/rotation place it; visual `scale` does not resize collision.
+Reuse one handle for the scene object and the body, with unit visual scale, to share the exact
+surface (`demo_apps/moon_rover`). Each world allows at most 524,288 collision triangles (131,072 before 2026-11-05),
+counted across mesh-body instances and checked before any world changes/native allocation.
+Equivalent positions/indices survive reload even when recreated under a new resource ID or
+with new visual normals. Different positions/indices require removing the body in an accepted
+revision before recreating it, like existing collider changes.
+
+Optional `gravity = {x,y,z}` is acceleration in metres per second squared, right-handed Y-up;
+the default is `{0,-9.81,0}`, and `{0,0,0}` is valid. Components must be finite numbers bounded
+to ±10,000. Gravity belongs to the module-initialized recipe, not a per-frame command.
+A successful reload changes gravity while retaining poses and clocks, waking dynamic bodies
+only if the vector changed. Whole-batch preflight and failed load/trial-view validation preserve
+all running worlds' gravity and state. As with other app edits, failed activation may still
+persist the candidate source; repair it with a revision-checked edit before reopening.
 `sensor = true` makes the body's sphere/box a nonblocking zone. Sensors are fixed-only initially:
 combining `sensor` and `dynamic` is an error. No separate collider or offset sensor is built yet.
 
 `ui.scene3d({ scene = game:scene(camera), ... })` displays simulated poses for matching
 visual IDs. Omit `camera` to use the original scene camera. Meshes, visual scale and colliders
-are independent: scale does not resize a collider. Bound visuals must have identity authored
-rotation; initial physical orientation belongs in the body recipe, and resolved snapshots rotate
-the visual with the body. Invisible bodies and unbound decoration are allowed.
+are independent: scale does not resize a collider. A bound visual's authored rotation is its
+orientation in the body's frame (a model exported facing another way); initial physical
+orientation belongs in the body recipe, and resolved snapshots rotate the visual with the body.
+*(Revised 2026-11-05: bound visuals required identity rotation.)* A visual with
+`attach = "<body id>"` rides that body with its whole authored pose (position, rotation) in the
+body's frame — one body, many parts (an imported model's pieces). Invisible bodies and unbound decoration are allowed.
 `demo_apps/marble_gates` generates its sphere in Lua and offers drop and tilted-ramp modes,
 sharing visual meshes between independent worlds; the inactive level stays paused. Its
 **Play gates** mode is a complete Lua-authored level with Release, live tilt, goal/fall zones,
@@ -821,7 +892,7 @@ cannot. Missing handlers discard moments. At each tick leaves precede enters, ea
 sensor/body ID. Removing a sensor emits leave for surviving bodies; removing a body clears its
 memberships quietly. Pause, inspection and captures produce no new events.
 
-`DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `tick`,
+`DumpTree` includes app-local `worlds3d` at the tree root, keyed by world ID, with `gravity`, `tick`,
 `dropped_seconds` and ID-sorted `entities`. Each entity separates `authored` (shape, position,
 quaternion rotation, dynamic, sensor) from `resolved` (position, quaternion rotation,
 linear/angular velocity and sleeping). Entity `zones` are sorted sensor IDs sampled on the last
@@ -830,6 +901,152 @@ Each world buffers at most 4096 moments;
 newest overflow is discarded and counted by `dropped_zone_events`. Raw membership remains
 accurate despite event overflow. Fixed-pose resets and membership changes request a refresh tick
 even if dynamic bodies sleep. Spatial-query RPCs remain unbuilt.
+
+### 3D body properties and wheel components (experimental, 2026-11-05)
+
+Rust owns reusable physics components; Lua assembles an apparatus and defines its behavior.
+A rover, wheel bench, car or lesson is Lua composition. The engine accepts physical actuator
+commands and has no vehicle recipe, normalized throttle, driver steering convention, brake
+priority or game speed limit. Hinge/rope/pulley constraints and standalone springs are future
+native components; wheel suspension already uses native spring/damper physics.
+
+Ordinary body recipes additionally accept `mass` (kg, optional), `center` (local centre of
+mass, default `{0,0,0}`), `friction` (default 0.5) and `restitution` (default 0.35). Mass and
+nonzero centre require a dynamic body. Omitted mass keeps the collider's unit-density mass.
+Mass is 0.001–100000 kg, centre components ±10 m, friction 0–5 and restitution 0–1; every
+number must be finite and numeric strings reject. Retained properties are immutable: remove
+and recreate the body to change them. Spawn position/rotation still change reset targets only.
+These properties work without any wheels.
+
+Optional flat `wheels` attaches components to existing dynamic body IDs; no body is created
+implicitly. At most 128 wheels per world and 1–8 per parent body. Example:
+
+```lua
+bodies = {
+    {id="platform", position={0,1.2,0}, box={1.6,0.35,2.6}, dynamic=true,
+     mass=400, center={0,-0.1,0}},
+    -- floor / other ordinary bodies
+},
+wheels = {
+    {id="wheel-a", body="platform", at={-0.9,-0.15,0.9}, radius=0.35, width=0.26,
+     rest=0.28, travel=0.18, stiffness=2500, damping=500, grip=1.1},
+    -- author a stable support arrangement; a single component is valid
+}
+```
+
+Local +Y is up, +Z forward and X the axle. Distances are metres, spring stiffness N/m and
+damping N·s/m. `grip` is Rapier's traction tuning, not a measured Coulomb coefficient. Mount
+components are bounded to ±20 m, radius 0.05–2, width 0.02–2, rest 0.02–2, travel 0–rest,
+stiffness 1–1000000, damping 0–100000 and grip 0–5. All fields are required. Wheel IDs are
+unique across bodies/wheels, nonempty and at most 128 bytes. Existing physical setup is
+immutable; remove/recreate a wheel to change it. A changed support membership rebuilds that
+parent's wheel solver, preserving the body's pose/clock and clearing that group's wheel state.
+Unchanged groups retain physical actuation and wheel state through successful reloads.
+
+`world:set_wheels(commands)` atomically replaces commands for the named wheel IDs. Unmentioned
+wheels retain their commands. Omitted command fields are zero/absent. A command is
+`{id, torque, brake, steering, motor}`: torque is signed N·m, brake a nonnegative friction-torque
+bound in N·m and steering a signed physical angle in radians about +Y. Positive physical steering
+turns +Z toward +X; Lua chooses the driver's convention. Optional `motor={velocity,max_torque}`
+is a velocity servo in rad/s with a nonnegative N·m torque bound. It replaces direct torque;
+combining a motor with nonzero `torque` rejects. Motors and friction brakes compete physically,
+so a stronger motor can overcome a weaker brake; the rover's brake priority is explicitly Lua.
+The contact-speed servo is torque-bounded, not a rigid velocity clamp. Set no motor/torque/brake
+to freewheel. Example from an input handler:
+
+```lua
+world:set_wheels({
+    {id="wheel-a", motor={velocity=8,max_torque=1}, steering=0.1},
+    {id="wheel-b", torque=0, brake=4},
+})
+```
+
+Torque magnitude and brake/max-torque bounds are at most 100000 N·m, motor angular velocity
+magnitude at most 10000 rad/s, steering magnitude at most pi. Commands allow input/zone handlers
+and held-hover input; load, view, frame and animation handlers cannot actuate wheels. Hover gains
+no permission to set/reset bodies. A missing wheel, duplicate ID or invalid final command rejects
+the whole batch before any actuation changes. Resetting a parent clears all its wheel actuation,
+contacts and roll; Lua may then apply a parking brake.
+
+Wheel support remains ray-based with massless cylindrical obstacle contact shapes following
+suspension/steering, at 94% of tire radius to avoid replacing spring support with rigid contact.
+Independent unsprung wheel mass and airborne motor reaction torque are unbuilt. This component
+is not a rigid pulley model. Matching wheel visuals use the actual native wheel poses, their authored rotation kept as an
+orientation in the wheel's frame. `demo_apps/mechanics_lab` is an independent educational wheel
+bench; `moon_rover/vehicle.lua` assembles the rover and maps its controls into these components.
+Neither needs per-tick Lua or document writes.
+
+`world:get(id)` observationally copies a body's position, quaternion rotation, velocity,
+`angular_velocity` (rad/s), sleeping flag and tick, or returns nil. Wheel IDs are component visual
+bindings, not bodies returned by `get`. `DumpTree.worlds3d` now contains flat, ID-sorted `wheels`
+with parent `body`, physical `input` (nullable motor), `authored` dimensions/tuning, pose, contact,
+suspension length/force, steering and roll angle. Each entity also exposes resolved `mass` and
+its `properties`. No `vehicles` inspection field or `drive` method remains. Native clocks,
+pause, captures, world isolation and staged whole-batch validation retain the same semantics.
+
+<details>
+<summary>Superseded first vehicle API (history; unavailable in current code)</summary>
+
+### Earlier ray-vehicle API — superseded 2026-11-05
+
+Optional `vehicles` is a dense list of at most 16 recipes. Each adds one dynamic box chassis
+(counting toward the 256-body cap) and 2–8 ray wheels. Local +Z is forward, +Y is up, and
+wheel axles run along X. `demo_apps/moon_rover/vehicle.lua` is the parameter example:
+
+```lua
+vehicles = {{
+    id="rover", position={0,1.2,0}, box={1.6,0.35,2.6}, mass=400,
+    center={0,-0.1,0}, speed_limit=6,
+    wheels={ -- repeat with unique IDs and mount points for each wheel
+        {id="front-left", at={-0.9,-0.15,0.9}, radius=0.35, width=0.26,
+         rest=0.28, travel=0.18, stiffness=2500, damping=500, grip=1.1,
+         engine_force=120, brake_force=300, steer=28},
+        -- at least one more wheel is required
+    },
+}}
+```
+
+Distances are metres, mass kilograms, spring stiffness N/m, damping N·s/m, engine/brake
+limits newtons per wheel, and maximum steering degrees. `center` is the chassis-local centre
+of mass (default zero); optional `rotation` is an x/y/z/w spawn quaternion. `engine_force`,
+`brake_force` and `steer` default to zero; `width` defaults to 0.26 m. `grip` is Rapier's ray-vehicle traction tuning,
+not a measured tyre friction coefficient. The native adapter accounts for Rapier's internal
+mass-normalized springs and per-step brake impulses; Lua uses SI values without 2D drawing scales.
+
+All fields are strict, with finite numbers: mass 1–100000, speed limit 0.1–100 m/s, box dimensions
+0.05–20, centre components ±10, wheel mount components ±20, radius 0.05–2, width 0.02–2, rest 0.02–2,
+travel 0–rest, stiffness 1–1000000, damping 0–100000, grip 0–5, forces 0–100000 and steer 0–60.
+Wheel IDs must be unique across bodies, chassis and wheels. Matching chassis/wheel visuals use
+native poses; authored rotation orients the visual within them. Terrain support uses suspension rays. Massless cylindrical obstacle contact shapes follow
+wheel suspension and steering, at 94% of the tyre radius to avoid replacing spring support
+with rigid ground contact. They collide with blocks and other vehicles, while sharing the
+chassis rigid body; unsprung wheel mass and airborne motor reaction torque are not simulated.
+Seats, rails and equipment remain decorative geometry above the chassis collider.
+
+`game:drive("rover", {throttle=1, steering=0, brake=0})` replaces held controls; omitted fields
+become zero. Throttle/steering range from -1 to 1, brake from 0 to 1. Positive steering turns toward
+the driver’s right (-X when initially facing +Z); negative steering turns left. Negative throttle reverses;
+braking suppresses propulsion. Opposite throttle slows existing forward motion before reversing.
+Releasing throttle coasts: passive rolling resistance and motor/gearbox behavior are not built.
+Speed limiting cuts propulsion above the configured forward/reverse
+speed, rather than clamping momentum. Drive accepts input/zone handlers, plus `on_hover` for
+held mouse pedals; load, view, frame and animation handlers cannot drive. Hover gains no permission
+to `set` or `reset`. Clear controls on release/cancel and when leaving a held pedal.
+
+`game:get(id)` returns a copy of a body's position, quaternion rotation, velocity,
+`angular_velocity` (radians/s), sleeping flag and tick, or nil for a missing/inactive body.
+It is observational and allowed in view, enabling a chase camera. Wheel IDs are visual bindings,
+not bodies returned by `get`. Bridge `worlds3d` inspection adds `vehicles`, with authored setup,
+input, mass, signed speed and wheel poses, contacts, suspension length/force, steering and roll
+angle (radians). Inspection does not step physics.
+
+Retained vehicle setup is immutable except spawn position/rotation, which become reset targets.
+Remove a vehicle in an accepted revision before changing its setup or converting it to/from a
+normal body. Successful reload retains controls/contacts and current chassis poses. Reset clears
+controls, wheel roll and contacts along with chassis motion. App code can then choose a parking
+brake. Pausing and screenshots follow the existing retained-world clock rules.
+
+</details>
 
 ### 3D commands and Lua game rules
 
@@ -1530,6 +1747,12 @@ where to look:
 | composer — `ui.input` + button, draft in `ui.state("draft:" .. col_id)`, cleared on send | `main.lua` |
 | spacer — `ui.col({ grow = true })` pushes what follows to the far end | throughout |
 
+The Moon rover mission (`demo_apps/moon_rover/mission.lua`) also shows a native-world game
+with local cargo/held input/pause state and a single document write on successful delivery.
+The guarded `crater-mission.stats` map stores only the completed-run count; reload/reopen
+starts a fresh run. Fixed seeded geometry is constructed once in `mission_world.lua`, while
+native zone callbacks recover falls. The view reads poses and builds UI; it never steps physics.
+
 ### Resize, in full
 
 Column resizing is achieved and shipping in kanban, and it's the most instructive pattern in
@@ -1627,6 +1850,34 @@ The fastest agent authoring loop is: upload once, then use the Python bridge cli
 rendered tree and console after activation, then repair against the new revision if needed.
 `WriteFile` is for initial upload, file creation or an explicit wholesale replacement—not the
 normal edit loop. Keep files small enough that a reported line number means one obvious thing.
+
+## Native performance diagnostics
+
+Launch the shell with `OSVAULD_PERFORMANCE=1` to show a small native FPS/work-time overlay.
+It adds no Lua callback, hit region or diagnostic repaint loop. Recent FPS counts normal
+surface presentations using monotonic wall time; it is not simulation Hz, GPU completion or
+scanout timing. Paused/on-demand apps need not repaint continuously. Offscreen FPS is unavailable,
+even when the driver advances at 60 virtual frames per second. Captures and app tiles do not
+add display FPS. The overlay keeps recent sample text until another normal frame is painted.
+
+`rpc.performance()` reads the cached native snapshot. Disabled diagnostics return
+`{enabled=false}`; enabled snapshots include mode, FPS (null for offscreen, stale or insufficient
+samples), work-time last/p50/p95/max in milliseconds, counts, 240-sample capacity, a 60 FPS target,
+16.67 ms budget, viewport/scale, adapter, debug/release profile and sample age. CPU work includes
+waits; `gpu_ms` is null because GPU timestamp queries are not built. Samples/text publish at
+most four times per second. A screenshot can contain the last overlay but does not become a
+performance sample. `OSVAULD_FRAME_TIMINGS=1` additionally logs CPU stages per host/app thread;
+use `scripts/summarize_frame_timings.py` to keep threads and captures separate.
+
+Measure a release preview with `scripts/measure_rover_performance.py`, using an explicitly built
+`OSVAULD_SHELL_BINARY`; it never builds. Add `--mission` for the larger crater mission rather
+than the original test course. The report records hardware, viewport, FPS, physics tick
+rate/drop time and actual scene/world budgets. Its steady drive is a held 10% native throttle
+from the normal click handler in an isolated source/store. `--foreground` targets only that
+session's window on Sway, for a comparable visible-window run; background compositor throttling
+is a different condition. `--loader` can launch a fetched Linux binary through an ABI-compatible
+host dynamic loader, without modifying the artifact or rebuilding locally. See
+[the measurement plan](design/rover-performance.md).
 
 ## App-shipped tests
 

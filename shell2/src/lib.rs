@@ -7,10 +7,11 @@
 
 mod app_src;
 mod app_thread;
-mod bundled;
 mod channels;
 mod native_rects;
+mod binary_files;
 mod bridge;
+mod bundled;
 mod indexer;
 mod item;
 mod launcher;
@@ -21,6 +22,7 @@ mod clock;
 mod host;
 mod node;
 mod sessions;
+mod performance;
 mod shell_api;
 mod signup;
 mod sound;
@@ -105,7 +107,11 @@ pub enum Msg {
     Space(SpaceScreenMsg),
     Items(ItemsScreenMsg),
     Launcher(u64, app_host::LuaMsg),
-    WorkspaceCreated { account: String, job: u64, result: Result<WorkspaceMeta, String> },
+    WorkspaceCreated {
+        account: String,
+        job: u64,
+        result: Result<WorkspaceMeta, String>,
+    },
     /// Pointer, wheel or keys for an app's tile, in its coordinates — forwarded to its thread.
     TileInput(Arc<str>, TileEvent),
     /// An app's thread changed what it shows on its own (a bridge call, a wake, a push): paint.
@@ -245,7 +251,11 @@ pub enum Msg {
 #[derive(Clone)]
 enum DriverReply {
     Rpc(std::sync::mpsc::Sender<Response>),
-    NativeRects(std::sync::mpsc::Sender<Response>, u64, Vec<native_rects::Snapshot>),
+    NativeRects(
+        std::sync::mpsc::Sender<Response>,
+        u64,
+        Vec<native_rects::Snapshot>,
+    ),
     Test(std::sync::mpsc::Sender<Result<DriverReport, String>>),
 }
 
@@ -580,7 +590,11 @@ fn attach_index<M: Clone + 'static>(
     }
 }
 
-fn reindex<M: Clone + 'static>(index: &Option<indexer::Shared>, app: &LuaApp<M>, dirtied: &[String]) {
+fn reindex<M: Clone + 'static>(
+    index: &Option<indexer::Shared>,
+    app: &LuaApp<M>,
+    dirtied: &[String],
+) {
     if let Some(ix) = index {
         if let Err(e) = indexer::index_dirty(ix, app, dirtied) {
             app.note(format!("search: {e}"));
@@ -657,14 +671,32 @@ fn serve(h: &mut app_thread::Hosted, req: Request, vault: &Vault) -> Response {
             if let Err(e) = valid_source_path(&path) {
                 return Response::err(e);
             }
-            match h.app.write_source_file(&path, &content).and_then(|bytes| {
-                vault
-                    .put_src(&ws, &item, &bytes)
-                    .map_err(|e| e.to_string())
-            }) {
+            match h
+                .app
+                .write_source_file(&path, &content)
+                .and_then(|bytes| vault.put_src(&ws, &item, &bytes).map_err(|e| e.to_string()))
+            {
                 Ok(()) => Response::ok("written"),
                 Err(e) => Response::err(e),
             }
+        }
+        Request::WriteBinaryFile { path, base64, .. } => {
+            let bytes = match valid_source_path(&path).and_then(|()| binary_files::decode(&base64)) {
+                Ok(b) => b,
+                Err(e) => return Response::err(e),
+            };
+            match h
+                .app
+                .bind_binary_file(&path, &bytes, binary_files::store(vault, &ws, &item))
+            {
+                Ok(bound) => binary_files::finish(vault, &ws, &item, bound),
+                Err(e) => Response::err(e),
+            }
+        }
+        Request::ListBinaryFiles { .. } => binary_files::list(h.app.binary_files()),
+        Request::ReadBinaryFile { path, .. } => {
+            let file = h.app.binary_files().into_iter().find(|f| f.path == path);
+            binary_files::read(vault, &ws, &item, file)
         }
         Request::ReloadItem { .. } => h
             .app
@@ -1003,6 +1035,9 @@ fn scene3d_json(scene: &runtime::scene3d::SceneInspection) -> serde_json::Value 
                 "rotation": object.rotation,
                 "scale": object.scale,
                 "color": object.color,
+                "texture": object.texture.map(|(resource, width, height)| serde_json::json!({
+                    "resource": resource, "width": width, "height": height,
+                })),
             })
         })
         .collect::<Vec<_>>();
@@ -1048,22 +1083,37 @@ fn worlds_json(
 fn world3d_json(world: &world::world3d::WorldInspection3d) -> serde_json::Value {
     use world::world3d::Shape3d;
     let entities: Vec<_> = world.entities.iter().map(|e| {
-        let shape = match e.authored.shape {
+        let shape = match &e.authored.shape {
             Shape3d::Sphere(radius) => serde_json::json!({ "sphere": radius }),
             Shape3d::Box(size) => serde_json::json!({ "box": size }),
+            Shape3d::Mesh(mesh) => serde_json::json!({ "mesh": {
+                "resource": mesh.resource_id(), "vertices": mesh.vertex_count(),
+                "triangles": mesh.triangle_count(),
+            } }),
         };
         serde_json::json!({
             "authored": { "id": e.authored.id, "shape": shape,
                 "position": e.authored.position, "rotation": e.authored.rotation,
                 "dynamic": e.authored.dynamic, "sensor": e.authored.sensor },
             "zones": e.zones,
+            "mass":e.mass, "properties":{"mass":e.properties.mass,"center":e.properties.center,
+                "friction":e.properties.friction,"restitution":e.properties.restitution},
             "resolved": { "position": e.resolved.position, "rotation": e.resolved.rotation,
                 "velocity": e.resolved.velocity, "angular_velocity": e.resolved.angular_velocity,
                 "sleeping": e.resolved.sleeping },
         })
     }).collect();
-    serde_json::json!({ "tick": world.tick, "dropped_seconds": world.dropped_seconds,
-        "dropped_zone_events": world.dropped_zone_events, "entities": entities })
+    let wheels:Vec<_>=world.wheels.iter().map(|w| {
+        let motor=w.input.motor.map(|m|serde_json::json!({"velocity":m.velocity,"max_torque":m.max_torque}));
+        serde_json::json!({"id":w.spec.id,"body":w.spec.body,"position":w.position,"rotation":w.rotation,
+            "contact":w.contact,"suspension_length":w.suspension_length,"force":w.force,
+            "steering":w.steering,"angle":w.angle,
+            "input":{"torque":w.input.torque,"brake":w.input.brake,"steering":w.input.steering,"motor":motor},
+            "authored":{"at":w.spec.at,"radius":w.spec.radius,"width":w.spec.width,"rest":w.spec.rest,
+                "travel":w.spec.travel,"stiffness":w.spec.stiffness,"damping":w.spec.damping,"grip":w.spec.grip}})
+    }).collect();
+    serde_json::json!({"tick":world.tick,"gravity":world.gravity,"dropped_seconds":world.dropped_seconds,
+        "dropped_zone_events":world.dropped_zone_events,"entities":entities,"wheels":wheels})
 }
 
 fn world_json(world: &world::WorldInspection) -> serde_json::Value {
@@ -1082,12 +1132,17 @@ fn world_json(world: &world::WorldInspection) -> serde_json::Value {
             "attached": attached, "zones": e.zones, "clip": clip, "particles": e.particles,
         })
     });
-    let timers = world.timers.iter().map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
-    let camera = world.camera.as_ref().map(|c| serde_json::json!({
-        "at": [c.at.0, c.at.1], "follow": c.follow, "lost": c.lost, "ease": c.ease,
-        "bounds": c.bounds.map(|(x, y, w, h)| [x, y, w, h]), "view": [c.view.0, c.view.1],
-        "drawn": c.drawn,
-    }));
+    let timers = world
+        .timers
+        .iter()
+        .map(|t| serde_json::json!({ "name": t.name, "left": t.left }));
+    let camera = world.camera.as_ref().map(|c| {
+        serde_json::json!({
+            "at": [c.at.0, c.at.1], "follow": c.follow, "lost": c.lost, "ease": c.ease,
+            "bounds": c.bounds.map(|(x, y, w, h)| [x, y, w, h]), "view": [c.view.0, c.view.1],
+            "drawn": c.drawn,
+        })
+    });
     serde_json::json!({ "entities": entities.collect::<Vec<_>>(), "timers": timers.collect::<Vec<_>>(),
         "tick": world.tick, "dropped": world.dropped, "camera": camera })
 }
@@ -1220,6 +1275,7 @@ pub struct Shell {
     clock: f64,
     /// The one mixer every app plays into (`sound.rs`).
     sound: sound::SoundHost,
+    performance: Option<runtime::FramePerformance>,
     error: Option<String>,
     reset_launcher_pending: bool,
     fullscreen: bool,
@@ -2399,8 +2455,10 @@ impl Shell {
     fn sync_launcher(&mut self) {
         match &self.screen {
             Screen::Items(screen) => self.launcher.bind(&self.vault, Some(screen.inventory())),
-            Screen::Spaces(screen) => self.launcher.bind_context(&self.vault,
-                Some(launcher::context::Context::Spaces(screen.inventory()))),
+            Screen::Spaces(screen) => self.launcher.bind_context(
+                &self.vault,
+                Some(launcher::context::Context::Spaces(screen.inventory())),
+            ),
             _ => self.launcher.bind(&self.vault, None),
         }
     }
@@ -2443,6 +2501,7 @@ impl Shell {
                 }
                 None => Response::err("item is not open"),
             },
+            Request::Performance => Response::ok(performance::json(self.performance.as_ref())),
             Request::SelectWorkspace { ws_id } => {
                 let workspace =
                     self.vault
@@ -2594,6 +2653,47 @@ impl Shell {
                         Err(e) => Response::err(e),
                     }
                 }
+            },
+            Request::WriteBinaryFile {
+                item_id,
+                path,
+                base64,
+            } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => {
+                    let (ws, item) = (wi.ws_id.as_str(), wi.id.as_str());
+                    let bound = valid_source_path(&path)
+                        .and_then(|()| binary_files::decode(&base64))
+                        .and_then(|bytes| {
+                            let doc = source_doc(&self.vault, ws, item)?;
+                            app_host::bind_binary_file(
+                                &doc,
+                                &path,
+                                &bytes,
+                                binary_files::store(&self.vault, ws, item),
+                            )
+                        });
+                    match bound {
+                        Ok(bound) => binary_files::finish(&self.vault, ws, item, bound),
+                        Err(e) => Response::err(e),
+                    }
+                }
+            },
+            Request::ListBinaryFiles { item_id } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => source_doc(&self.vault, &wi.ws_id, &wi.id)
+                    .map(|doc| binary_files::list(app_host::binary_files(&doc)))
+                    .unwrap_or_else(Response::err),
+            },
+            Request::ReadBinaryFile { item_id, path } => match find_item(&self.vault, &item_id) {
+                Err(e) => Response::err(e),
+                Ok(wi) => match source_doc(&self.vault, &wi.ws_id, &wi.id) {
+                    Err(e) => Response::err(e),
+                    Ok(doc) => {
+                        let file = app_host::binary_file(&doc, &path);
+                        binary_files::read(&self.vault, &wi.ws_id, &wi.id, file)
+                    }
+                },
             },
             Request::ReloadItem { .. } => Response::err("item is not open"),
             // Slice 1 runs only source-only `t.expect` tests, but it still opens a non-persisting
@@ -2824,12 +2924,14 @@ impl Shell {
         if let Some(state) = &rejected.state {
             self.node_vv.insert(key, state.vv.clone());
         }
-        let Some(a) = self.apps.get(item_id) else { return };
+        let Some(a) = self.apps.get(item_id) else {
+            return;
+        };
         let id = item_id.clone();
         a.call(move |h| {
-            let back = h
-                .app
-                .with_doc(&name, |doc| desktop_roll_back(doc, since.as_deref(), &rejected));
+            let back = h.app.with_doc(&name, |doc| {
+                desktop_roll_back(doc, since.as_deref(), &rejected)
+            });
             match back {
                 Some(Ok(doc)) => {
                     h.app.replace_doc(&name, doc);
@@ -2870,6 +2972,9 @@ impl Shell {
             | Request::ReadFileVersioned { item_id, .. }
             | Request::EditFile { item_id, .. }
             | Request::WriteFile { item_id, .. }
+            | Request::WriteBinaryFile { item_id, .. }
+            | Request::ListBinaryFiles { item_id }
+            | Request::ReadBinaryFile { item_id, .. }
             | Request::ReloadItem { item_id }
             | Request::DumpTree { item_id }
             | Request::Click { item_id, .. }
@@ -2899,7 +3004,11 @@ impl Shell {
         Self::with_viewport(proxy, vault, None)
     }
 
-    fn with_viewport(proxy: EventLoopProxy<Msg>, vault: Vault, offscreen: Option<(f32, f32)>) -> Self {
+    fn with_viewport(
+        proxy: EventLoopProxy<Msg>,
+        vault: Vault,
+        offscreen: Option<(f32, f32)>,
+    ) -> Self {
         let screen = if vault.is_empty() {
             Screen::Signup(SignupForm::default())
         } else {
@@ -2919,6 +3028,7 @@ impl Shell {
             sound: sound::SoundHost::new(offscreen.is_some()),
             offscreen,
             clock: 0.0,
+            performance: None,
             error: None,
             reset_launcher_pending: false,
             fullscreen: false,
@@ -3173,7 +3283,12 @@ impl Shell {
                 row().h(28.0).px(8.0).radius(6.0).align_center().no_shrink()
                     .id("shell:fullscreen").hover_fill(theme::bg_2())
                     .on_click(Msg::SetFullscreen(true))
-                    .child(text("Full screen").font_size(11.0).no_wrap().color(theme::fg_3()))
+                    .child(
+                        text("Full screen")
+                            .font_size(11.0)
+                            .no_wrap()
+                            .color(theme::fg_3()),
+                    )
             }))
             .child(
                 row()
@@ -3214,6 +3329,9 @@ impl Shell {
 }
 
 impl App for Shell {
+    fn frame_performance(&mut self, snapshot: runtime::FramePerformance) {
+        self.performance = Some(snapshot);
+    }
     type Msg = Msg;
 
     fn fullscreen(&self) -> bool {
@@ -3299,8 +3417,10 @@ impl App for Shell {
                     .id("shell:exit-fullscreen").on_click(Msg::SetFullscreen(false))
                     .child(text("Exit").font_size(11.0).no_wrap().color(theme::fg_2())),
                 None,
-                runtime::Placement { side: runtime::PlacementSide::Bottom,
-                    align: runtime::PlacementAlign::Start },
+                runtime::Placement {
+                    side: runtime::PlacementSide::Bottom,
+                    align: runtime::PlacementAlign::Start,
+                },
                 runtime::Anchor::Point(8.0, 80.0),
             );
         }
@@ -3339,7 +3459,11 @@ impl App for Shell {
                 self.error = self.open_tab(wi).err();
                 None
             }
-            Msg::WorkspaceCreated { account, job, result } => {
+            Msg::WorkspaceCreated {
+                account,
+                job,
+                result,
+            } => {
                 if let Screen::Spaces(screen) = &mut self.screen {
                     screen.finish_creation(&self.vault, &account, job, result);
                 }
@@ -3372,33 +3496,42 @@ impl App for Shell {
             }
             Msg::Items(ItemsScreenMsg::Launcher(ws_id, instance, msg)) => {
                 let commands = match &mut self.screen {
-                    Screen::Items(i) if self.focused == 0 && i.ws().id == ws_id => {
-                        self.launcher.get_mut()
-                            .map(|launcher| launcher.update(instance, msg)).unwrap_or_default()
-                    }
+                    Screen::Items(i) if self.focused == 0 && i.ws().id == ws_id => self
+                        .launcher
+                        .get_mut()
+                        .map(|launcher| launcher.update(instance, msg))
+                        .unwrap_or_default(),
                     _ => Vec::new(),
                 };
                 let mut next = None;
                 for command in commands {
                     self.error = match command {
-                        launcher::Command::SelectWorkspace(_) | launcher::Command::CreateWorkspace(_) => Err("focus the workspace list to select or create".into()),
+                        launcher::Command::SelectWorkspace(_)
+                        | launcher::Command::CreateWorkspace(_) => {
+                            Err("focus the workspace list to select or create".into())
+                        }
                         launcher::Command::Workspace { ws_id, action } => {
                             let home_ws = match &self.screen {
                                 Screen::Items(i) => Some(i.ws().id.as_str()),
                                 _ => None,
                             };
-                            launcher::navigation::validate(&self.vault, home_ws, self.focused, &ws_id)
-                                .and_then(|_| {
-                                    let Screen::Items(i) = &mut self.screen else {
-                                        return Err("launcher workspace changed".into());
-                                    };
-                                    let msg = match action {
-                                        launcher::WorkspaceAction::Back => ItemsScreenMsg::Back,
-                                        launcher::WorkspaceAction::Import => ItemsScreenMsg::Upload,
-                                    };
-                                    next = i.update(msg, &self.vault, &self.proxy);
-                                    Ok(())
-                                })
+                            launcher::navigation::validate(
+                                &self.vault,
+                                home_ws,
+                                self.focused,
+                                &ws_id,
+                            )
+                            .and_then(|_| {
+                                let Screen::Items(i) = &mut self.screen else {
+                                    return Err("launcher workspace changed".into());
+                                };
+                                let msg = match action {
+                                    launcher::WorkspaceAction::Back => ItemsScreenMsg::Back,
+                                    launcher::WorkspaceAction::Import => ItemsScreenMsg::Upload,
+                                };
+                                next = i.update(msg, &self.vault, &self.proxy);
+                                Ok(())
+                            })
                         }
                         launcher::Command::OpenItem(command) => {
                             let item = self
@@ -3901,8 +4034,16 @@ impl App for Shell {
                     return;
                 }
                 self.native_rects_pending = true;
-                let requests: Vec<_> = self.apps.iter().filter(|(_, a)| a.is_shown())
-                    .map(|(id, a)| native_rects::Request { id: id.clone(), scope: a.rect_scope(), reply: a.rects() }).collect();
+                let requests: Vec<_> = self
+                    .apps
+                    .iter()
+                    .filter(|(_, a)| a.is_shown())
+                    .map(|(id, a)| native_rects::Request {
+                        id: id.clone(),
+                        scope: a.rect_scope(),
+                        reply: a.rects(),
+                    })
+                    .collect();
                 let proxy = self.proxy.clone();
                 let generation = self.gen_();
                 std::thread::spawn(move || {
@@ -3924,7 +4065,10 @@ impl App for Shell {
                         for snapshot in &snapshots {
                             if let Some(a) = self.apps.get_mut(&snapshot.id) { a.frame.rects = snapshot.rects.clone(); }
                         }
-                        self.driver = Some(PendingDriver { reply: DriverReply::NativeRects(reply, generation, snapshots), op: DriverOp::Rects });
+                        self.driver = Some(PendingDriver {
+                            reply: DriverReply::NativeRects(reply, generation, snapshots),
+                            op: DriverOp::Rects,
+                        });
                     }
                 }
                 None
@@ -3950,7 +4094,11 @@ impl App for Shell {
                         DriverOp::Advance(secs)
                     }
                     Request::Rects {} => DriverOp::Rects,
-                    Request::Touch { id, phase, x, y } => DriverOp::Touch { id, phase, at: (x, y) },
+                    Request::Touch { id, phase, x, y } => DriverOp::Touch {
+                        id,
+                        phase,
+                        at: (x, y),
+                    },
                     Request::PointerMove { x, y } => DriverOp::PointerMove((x, y)),
                     Request::PointerPress {} => DriverOp::PointerPress,
                     Request::PointerRelease {} => DriverOp::PointerRelease,

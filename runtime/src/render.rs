@@ -257,8 +257,13 @@ pub struct SceneView3d {
 }
 
 fn physical_rect(rect: Rect, scale: f32) -> [f32; 4] {
-    [rect.x0 as f32, rect.y0 as f32, rect.width() as f32, rect.height() as f32]
-        .map(|v| v * scale)
+    [
+        rect.x0 as f32,
+        rect.y0 as f32,
+        rect.width() as f32,
+        rect.height() as f32,
+    ]
+    .map(|v| v * scale)
 }
 
 fn physical_viewport(rect: Rect, scale: f32, width: u32, height: u32) -> [u32; 4] {
@@ -273,16 +278,25 @@ fn physical_viewport(rect: Rect, scale: f32, width: u32, height: u32) -> [u32; 4
     [x0, y0, x1 - x0, y1 - y0]
 }
 
-fn new_renderer(device: &wgpu::Device, pipeline_cache: Option<wgpu::PipelineCache>) -> Arc<Mutex<Renderer>> {
-    Arc::new(Mutex::new(Renderer::new(device, RendererOptions {
-        antialiasing_support: if cfg!(target_os = "android") {
-            AaSupport::area_only()
-        } else {
-            AaSupport::all()
-        },
-        pipeline_cache,
-        ..Default::default()
-    }).expect("create vello renderer")))
+fn new_renderer(
+    device: &wgpu::Device,
+    pipeline_cache: Option<wgpu::PipelineCache>,
+) -> Arc<Mutex<Renderer>> {
+    Arc::new(Mutex::new(
+        Renderer::new(
+            device,
+            RendererOptions {
+                antialiasing_support: if cfg!(target_os = "android") {
+                    AaSupport::area_only()
+                } else {
+                    AaSupport::all()
+                },
+                pipeline_cache,
+                ..Default::default()
+            },
+        )
+        .expect("create vello renderer"),
+    ))
 }
 
 impl Render {
@@ -291,7 +305,10 @@ impl Render {
     }
 
     #[cfg(target_os = "android")]
-    pub(crate) async fn new_cached(window: Arc<Window>, directory: Option<&std::path::Path>) -> Self {
+    pub(crate) async fn new_cached(
+        window: Arc<Window>,
+        directory: Option<&std::path::Path>,
+    ) -> Self {
         Self::new_inner(window, directory).await
     }
 
@@ -378,7 +395,12 @@ impl Render {
     /// Identical either way — a frame is built the same with and without a window.
     fn assemble(
         presenter: Option<Presenter>,
-        (instance, adapter, device, queue): (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue),
+        (instance, adapter, device, queue): (
+            wgpu::Instance,
+            wgpu::Adapter,
+            wgpu::Device,
+            wgpu::Queue,
+        ),
         config: wgpu::SurfaceConfiguration,
         scale: f64,
         renderer: Option<Arc<Mutex<Renderer>>>,
@@ -477,6 +499,11 @@ impl Render {
     /// driver says and an animating app cannot free-run.
     pub fn window_id(&self) -> Option<winit::window::WindowId> {
         self.presenter.as_ref().map(|p| p.window.id())
+    }
+
+    pub(crate) fn graphics_adapter(&self) -> String {
+        let info = self.adapter.get_info();
+        format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend)
     }
 
     pub fn request_redraw(&self) {

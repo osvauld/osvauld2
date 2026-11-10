@@ -1,8 +1,11 @@
 use super::*;
 
-mod runner;
 mod commands;
+mod gravity;
 mod rotation;
+mod runner;
+mod terrain;
+mod wheels;
 mod zones;
 
 fn body_count(world: &mut World3d) -> usize {
@@ -49,6 +52,8 @@ fn resolved_scene_is_observational_preserves_authored_data_and_shares_meshes() {
         scale: Vec3::ONE,
         color: [0.2, 0.4, 0.6, 1.0],
         surface: None,
+        texture: None,
+        attach: None,
     };
     let scene = Scene3d::new(
         Camera3d {
@@ -102,6 +107,24 @@ fn resolved_scene_is_observational_preserves_authored_data_and_shares_meshes() {
         World3dError::Scene(SceneError::InvalidCamera)
     );
     assert_eq!(world.inspect(), state);
+
+    // An attached visual rides its body: authored pose is in the body's frame.
+    let mut part = object("marble-hat", Vec3::new(0.0, 1.0, 0.0));
+    part.rotation = Quat::from_rotation_y(0.5);
+    part.attach = Some("marble".into());
+    let riding = Scene3d::new(scene.camera.clone(), vec![part.clone()]).unwrap();
+    let resolved = world.resolved_scene(&riding).unwrap();
+    let body = world.body("marble").unwrap();
+    let rotation = Quat::from_array(body.rotation);
+    let expected = Vec3::from(body.position) + rotation * Vec3::Y;
+    assert!(resolved.objects[0].position.distance(expected) < 1e-5);
+    assert!(resolved.objects[0].rotation.angle_between(rotation * part.rotation) < 1e-5);
+    part.attach = Some("nobody".into());
+    let orphan = Scene3d::new(scene.camera.clone(), vec![part]).unwrap();
+    assert_eq!(
+        world.resolved_scene(&orphan).unwrap_err(),
+        World3dError::Missing("nobody".into())
+    );
 }
 
 #[test]

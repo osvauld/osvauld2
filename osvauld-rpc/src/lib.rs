@@ -49,6 +49,14 @@ pub struct VersionedFile {
     pub revision: String,
 }
 
+/// One binary item file (a model, an image): sealed bytes, read by Rust loaders only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryFileInfo {
+    pub path: String,
+    pub size: usize,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceTextEdit {
     pub old_text: String,
@@ -308,6 +316,22 @@ pub enum Request {
         path: String,
         content: String,
     },
+    /// Store bytes (standard base64 on the wire) at a binary path. A path is text or binary,
+    /// never both; at most 64 MiB a file, 256 MiB an item.
+    WriteBinaryFile {
+        item_id: String,
+        path: String,
+        base64: String,
+    },
+    /// The item's binary files, sorted by path: [`BinaryFileInfo`].
+    ListBinaryFiles {
+        item_id: String,
+    },
+    /// One binary file's bytes, standard base64.
+    ReadBinaryFile {
+        item_id: String,
+        path: String,
+    },
     /// Force the item's staged reload: a whole second VM; doc cores and scratch survive.
     ReloadItem {
         item_id: String,
@@ -323,6 +347,9 @@ pub enum Request {
     DumpTree {
         item_id: String,
     },
+    /// Cached native surface diagnostics, opt-in with OSVAULD_PERFORMANCE=1.
+    /// Offscreen work never reports display FPS. Does not advance simulation.
+    Performance,
     /// Click the element with `el_id` — by id, not by coordinates.
     Click {
         item_id: String,
@@ -370,7 +397,12 @@ pub enum Request {
     /// Release it. Offscreen only.
     PointerRelease {},
     /// One finger through native touch routing. Logical coordinates; offscreen only.
-    Touch { id: u64, phase: String, x: f32, y: f32 },
+    Touch {
+        id: u64,
+        phase: String,
+        x: f32,
+        y: f32,
+    },
     /// One bounded physical/logical key transition through the normal offscreen keyboard path.
     /// Separate from `Key`, which invokes Enter/Esc on a named text input.
     Keyboard {
@@ -491,13 +523,18 @@ pub fn write_msg<W: Write>(w: &mut W, payload: &[u8]) -> io::Result<()> {
 pub const MAX_MSG: usize = 16 * 1024 * 1024;
 
 pub fn read_msg<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
+    read_msg_limited(r, MAX_MSG)
+}
+
+/// A service-specific bound, checked before allocating or reading the body.
+pub fn read_msg_limited<R: Read>(r: &mut R, limit: usize) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_MSG {
+    if len > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("message of {len} bytes over the {MAX_MSG} cap"),
+            format!("message of {len} bytes over the {limit} cap"),
         ));
     }
     let mut buf = vec![0u8; len];

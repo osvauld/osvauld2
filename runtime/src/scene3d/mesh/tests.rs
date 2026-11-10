@@ -1,19 +1,22 @@
 use super::*;
 
-fn triangle() -> (Vec<Vertex>, Vec<u16>) {
+fn triangle() -> (Vec<Vertex>, Vec<u32>) {
     (
         vec![
             Vertex {
                 position: [0.0, 0.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [2.0, 0.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
             },
             Vertex {
                 position: [0.0, 3.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                uv: [0.0, 0.0],
             },
         ],
         vec![0, 1, 2],
@@ -34,13 +37,13 @@ fn accepts_exact_limits_and_shares_the_immutable_payload() {
     let mut vertices = vec![v[0]; MAX_VERTICES];
     vertices[1] = v[1];
     vertices[MAX_VERTICES - 1] = v[2];
-    let indices = [0, 1, u16::MAX].repeat(MAX_INDICES / 3);
+    let indices = [0, 1, MAX_VERTICES as u32 - 1].repeat(MAX_INDICES / 3);
     let mesh = MeshData::new(vertices, indices).unwrap();
     let shared = mesh.clone();
     assert!(Arc::ptr_eq(&mesh, &shared));
     assert_eq!(mesh.vertex_count(), MAX_VERTICES);
     assert_eq!(mesh.triangle_count(), MAX_INDICES / 3);
-    assert_eq!(mesh.payload_bytes(), 1_966_080);
+    assert_eq!(mesh.payload_bytes(), MAX_VERTICES * 32 + MAX_INDICES * 4);
     assert_eq!(shared.bounds(), (Vec3::ZERO, Vec3::new(2.0, 3.0, 0.0)));
 }
 

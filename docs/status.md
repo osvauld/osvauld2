@@ -10,6 +10,38 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Game branches integrated into dev (2026-11-10; validated)
+
+Jetpack multiplayer, Hillclimb (including the formerly uncommitted SVG, Lua maps and sound
+foundations), and Moon Rover are combined with dev's laptop hosting and owned-entry rules.
+Jetpack Arena and laptop-host were already on dev. Earlier branch checkpoint entries below
+retain their historical verification and uncommitted/unmerged wording; this integration
+supersedes that branch-location status. Combined verification passes across the full sweep and corrective reruns.
+
+Native physics remains reusable: 2D colliders, joints/motors and surface grip; 3D bodies,
+materials and wheel/suspension/motor components. Vehicle assembly, throttle/brake policy,
+missions and gameplay stay in Lua; `mechanics_lab` independently exercises the wheel API.
+Binary file access and identity/write rules are installed together for hosted apps.
+
+Still unfinished: sound loops, Hillclimb's actual game sounds, WAV/OGG decoding, signed match
+results, Jetpack's optional Rapier port, and Pixel/cross-architecture multiplayer acceptance.
+The Moon Rover surface smoke generates the ignored `models/moon_surface.glb` automatically;
+for manual upload run `python3 scripts/fixtures/make_moon.py` first. E-2000's GLB is tracked;
+Curiosity is optional local content. See [integration acceptance](design/game-branch-integration.md).
+
+Verified through LoadTable: workspace check (2716), 1,376 workspace tests with 26 ignored
+(2694), post-fix app-host rerun 381 passed / 8 ignored (2707), and RPC framing 7 passed
+(2713). The 54-script smoke sweep (2709) passed 53 scripts, including two optional Android
+skips; its binary-file failure exposed the 16 MiB/default versus 64 MiB/item mismatch. The
+private bridge now has a bounded base64-file allowance while node/default framing stays at
+16 MiB. Corrective bridge/binary/GLB/host/multiplayer rerun (2715) passes all five scripts.
+The failed-asset-reload regression passes, including lazy access to a never-loaded original
+asset. M2/M3/M5/M8/M9/M10 all pass (2711), complementing M1/M4/M6 in the smoke. Stock-Lua
+Jetpack and Hillclimb/terrain/course checks pass (2690, 2691); release binaries build (2714).
+Further review was skipped at the user's request. Native folder import still keeps text
+Lua/OSV/SVG only; binary models/images use the bridge uploader.
+
+
 ### Multiplayer as a platform feature (2026-11-05, branch `jetpack-mp`, not landed) — [plan](design/jetpack-mp.md)
 - Same math on every device (software `libm`, `math`/`vector` compiled mutable, unfused `%`
   probe); signed channel envelopes (`courier::net`) and manifest `channel … { size }`.
@@ -118,6 +150,109 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
   same twice, a rolling ball bit-identical with and without a stream, bad streams refused; the
   smoke sees none at rest and dust under gas, the drive unchanged (288 m). Verified: world 189,
   app_host lib, workspace check, smoke_hillclimb. Next: stage sections.
+
+### Blender import — binary files, `gfx.load_glb`, textures (2026-11-05, `moon-rover` worktree)
+
+[Plan](design/blender-import.md), steps 1–5. Apps hold sealed **binary item files** (`.glb`,
+`.png`, `.jpg`; bridge `WriteBinaryFile`/`ListBinaryFiles`/`ReadBinaryFile`, 64 MiB per file,
+256 MiB per item) that only Rust reads. `gfx.load_glb(path)` returns plain node/mesh/material
+data — names, parents, TRS, Blender custom properties as `extras`, `gfx.mesh` handles and
+base-colour textures — and no Rust gives a node a meaning; Lua composes it
+(`demo_apps/glb_scene`). Meshes use 32-bit indices (262,144 vertices / 524,288 triangles per
+mesh) and carry UVs; scene objects take a `texture`; `gfx.load_texture` reads a PNG/JPEG.
+NASA's Curiosity GLB (12 MB, eight 1024² PNGs) renders textured, loading in ~0.2 s on a release
+shell (seconds on a debug one, past the 1 s entry budget — use release for heavy models).
+E1 `smoke_binary_files.py` and E2 `smoke_glb_scene.py` (hierarchy, extras, texture pixels,
+refusals, live model reload) pass; `cargo test --workspace` passes (job 2639).
+all 46 smokes green on the release build (2026-11-05) Next: hull colliders (step 6), then the moon rover from GLB (step 7).
+
+### Moon rover — gravity, terrain and first vehicle in review worktree (2026-11-05)
+
+**Earlier gravity-only checkpoint (2026-11-04):** implemented in `moon-rover`, uncommitted and awaiting acceptance
+([plan](design/moon-rover.md), step 1a): optional module-initialized
+`gfx.world3d({gravity={x,y,z}, ...})` in m/s², defaulting to Earth gravity. Zero and lunar
+gravity work; vector changes wake dynamic bodies without resetting poses or clocks. Whole-batch
+preflight and failed reloads preserve running worlds. Bridge `worlds3d` inspection reports gravity.
+Focused tests and `smoke_world3d_gravity.py` pass, including real pixels, paused time,
+observational captures, revision-checked failed activation/repair and restart from sealed source.
+Verified through LoadTable: workspace check, 1,112 workspace tests (23 ignored), and the full
+39-script smoke sweep. The two optional Android smokes skip without emulator opt-in. Terrain,
+vehicle controller, detailed rover and agent navigation remain unbuilt. `pi` review skipped
+at the user's request.
+
+**2026-11-04 terrain continuation (step 1b):** fixed, nonsensor mesh bodies reuse `gfx.mesh`
+geometry with local metre bounds and a 131,072 instanced collision-triangle cap per world.
+Equivalent geometry reloads without resetting physics; changed geometry rejects before mutation.
+`demo_apps/moon_rover` supplies a half-metre sampled course (flat, ramp, bumps, crater), shared
+visible/collision geometry, probes and Release/Pause/Reset. Grid/height contours, inspection
+presets, close focus/zoom and a default ground-following camera address play feedback. Mouse
+and keyboard controls work through the real input path; camera navigation preserves paused physics.
+The contour regression fixes ambiguous lines at a plateau's height without changing terrain.
+Workspace check and 1,116 workspace tests pass (23 ignored), as do the terrain smoke, plain-Lua
+contour test and full 40-script smoke sweep. The two optional Android smokes skip without
+emulator opt-in. A local preview uses an isolated test store; a physical rover/controller and
+agent navigation remain unbuilt.
+
+**2026-11-05 first vehicle continuation (step 1c, verified):** a bounded Rapier3D
+ray vehicle adds SI chassis mass/centre of mass, spring/damper tuning, steering, drive/brake
+forces, pose read-back and observable wheel contact/pose. Four wheels visually follow suspension,
+steering and roll. The demo has a procedural rover, keyboard/held-mouse pedals and a ground-level
+chase camera. Hillclimb's 2D work informed parameter separation, SI conventions and suspension
+sag/terrain-join tests; no 2D code or unit scaling was merged. Terrain support remains ray-based;
+wheels now have massless cylindrical obstacle contact shapes following suspension/steering. Unsprung mass and airborne motor reaction torque
+remain unbuilt. Low-block play feedback drove a failing-then-passing collision regression.
+Focused native/host and real driving checks pass; workspace check and 1,124 workspace tests
+pass (23 ignored). An additional quantitative regression verifies acceleration, coasting,
+brake priority/stopping and reversing while moving; passive rolling resistance remains unbuilt.
+The full 41-script smoke sweep passes; two optional Android smokes skip without opt-in.
+Final direction fixes also pass the 162-test native world suite (6 ignored) and repeated
+terrain/driving smokes. Positive steering now turns driver-right; chase-camera arrow orbit
+agrees with overview directions. Changes remain uncommitted/unmerged.
+
+**2026-11-05 diagnostics continuation (in review):** opt-in `OSVAULD_PERFORMANCE=1` adds a
+native FPS/work-time overlay and a read-only `Performance` RPC. History is bounded to 240 work
+samples, text/snapshots publish at 4 Hz, captures are excluded and offscreen FPS is null.
+No per-frame Lua callback or diagnostic repaint loop is added. NixOS builds/tests use LoadTable
+`--peer nixos`; the fetched release runs locally through a compatible loader. The controlled
+1920×1080 Intel Iris Xe foreground sample reports 63.37 median recent presentation FPS,
+12.89 ms median rolling-p95 CPU+wait work, 120.17 Hz physics and zero dropped time. State,
+suspension, gravity, mass, speed and actual scene/world budgets pass. These are short samples,
+not GPU timestamp/scanout or long-soak measurements. Visibility-dependent surface waiting was
+observed and recorded in the [performance plan](design/rover-performance.md). Workspace check,
+1127 workspace tests (23 ignored), timing unit tests and the diagnostics smoke pass, as does the full
+42-script sweep (two optional Android checks skip without opt-in). Uncommitted/unmerged.
+
+**2026-11-05 crater mission continuation (in review):** Lua adds a seeded 96×96 m fictional
+lunar landscape with three craters, lander, fixed rocks, route markers, a sample/return objective
+and map/chase views. Visible terrain/rock meshes are reused for collision. Stop upright near the
+site/home and press E to collect/deliver; only successful-return history is durable. A native
+fall sensor clears cargo, motion and held controls, resets at the lander and pauses. The original
+course remains selectable. No Rust was added for this continuation. Terrain sampling/slope
+checks and the actual keyboard-driven round-trip/recovery/reopen smoke pass. The controlled
+1920×1080 Iris Xe release sample reports 63.52 median presentation-call FPS, 10.85 ms median
+rolling-p95 CPU+wait work, 119.99 Hz physics and zero dropped time; all 14 audit checks pass.
+37 bodies, 53 objects and 8,336 collision triangles remain within existing limits. The live
+laptop preview includes the mission and FPS overlay. The 43-script verification is complete:
+42 pass in sweep 2556 (two optional Android skips), and the mission passes focused rerun 2559
+after correcting its assertion for an intentionally rejected edit. See the [mission plan](design/crater-mission.md)
+for verification and short-sample limits. Uncommitted/unmerged; detailed model polish and agent
+navigation remain next work.
+
+**2026-11-05 physics boundary revision (in review):** the user requires reusable native physics
+components and Lua assemblies/policies. The unmerged 3D `vehicles` recipe, normalized `drive`
+command and grouped vehicle inspection are removed. Ordinary bodies expose mass, centre of
+mass and materials; flat wheel components attach to dynamic bodies, with independent physical
+commands for torque, friction-brake torque, steering angle and bounded velocity motors. Lua
+assembles the rover and owns brake priority, input conventions and motor targets. An independent
+`mechanics_lab` wheel bench demonstrates educational reuse without a vehicle API. General
+joints, standalone springs and ideal pulleys remain unbuilt. Existing 2D APIs are untouched.
+Workspace check and 1,132 workspace tests pass (23 ignored); the earlier five focused bench/
+rover smokes pass. The full 44-script verification is complete: 43 scripts pass in sweep 2576
+(two optional Android skips), and bench rerun 2579 passes after correcting its pixel helper
+for a noninteractive viewport. The live preview includes both apps. The Nix-built release's controlled
+1080p Iris Xe run reports 63.56 median presentation-call FPS, 8.88 ms median rolling-p95 CPU+wait
+work, 120.18 Hz physics and zero drops; all 14 audit checks pass. See
+[physics-components.md](design/physics-components.md). Uncommitted/unmerged.
 
 ### iOS (2026-10-31, in progress) — [plan](design/ios.md)
 - `shell2` builds for `aarch64-apple-ios-sim` (I1); `scripts/ios/run_sim.sh` on the loadtable
