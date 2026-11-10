@@ -636,3 +636,51 @@ fn a_reload_picks_up_a_changed_module() {
 
     assert_eq!(rendered(&app), "light", "the module cache outlived its VM");
 }
+
+/// L-C4 (docs/design/2d-characters.md): a reload that fails leaves the running drawing's pictures
+/// drawn, even after the file under them was replaced and its old bytes deleted; the fix then
+/// reads the new file.
+#[test]
+fn a_failed_reload_leaves_the_running_drawings_pictures_alive() {
+    let solid = |rgba: [u8; 4]| png(4, 4, |_, _| rgba);
+    let main = r#"
+        local d = gfx.drawing({ size = { 4, 4 }, parts = { { id = "p", pivot = { 0, 0 },
+            shapes = { { image = "pics/p.png", src = { 0, 0, 2, 2 } } } } } })
+        local f = d:pose()
+        return function() return ui.col{ ui.frame{ id = "pic", visual = f } } end
+    "#;
+    let blobs: Rc<RefCell<HashMap<String, Vec<u8>>>> = Rc::default();
+    let store = |bytes: &[u8]| {
+        let id = format!("blob{}", blobs.borrow().len());
+        blobs.borrow_mut().insert(id.clone(), bytes.to_vec());
+        Ok(id)
+    };
+    let src = LoroDoc::new();
+    let t = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    t.insert(0, main).unwrap();
+    src.commit();
+    bind_binary_file(&src, "pics/p.png", &solid([255, 0, 0, 255]), store).unwrap();
+    let held = blobs.clone();
+    let files: Files = Rc::new(move |blob| Ok(held.borrow().get(blob).cloned()));
+    let mut app = LuaApp::open_with_files(src, Rc::new(|_| Ok(None)), files, noop_wake(), identity()).unwrap();
+    let drawn = |app: &LuaApp<LuaMsg>| -> Vec<u8> {
+        let tree = app.view_fn.as_ref().unwrap().call::<Table>(()).unwrap();
+        let visual = tree.get::<Table>(1).unwrap().get::<mlua::AnyUserData>("visual").unwrap();
+        let frame = visual.borrow::<gfx::LuaFrame>().unwrap();
+        let pictures = frame.0.pictures();
+        assert_eq!(pictures.len(), 1);
+        pictures[0].texture().pixels()[..4].to_vec()
+    };
+    assert_eq!(drawn(&app), [255, 0, 0, 255]);
+
+    // Replace the file, delete its old bytes as the shell does, and break the source.
+    let bound = app.bind_binary_file("pics/p.png", &solid([0, 0, 255, 255]), store).unwrap();
+    blobs.borrow_mut().remove(&bound.orphan.expect("the red bytes are orphaned"));
+    rewrite(&app, "main.lua", "return function( -- unclosed");
+    assert!(app.reload().is_err());
+    assert_eq!(drawn(&app), [255, 0, 0, 255], "the running drawing lost its picture");
+
+    rewrite(&app, "main.lua", main);
+    app.reload().unwrap();
+    assert_eq!(drawn(&app), [0, 0, 255, 255], "the fixed source reads the new file");
+}

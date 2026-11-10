@@ -88,7 +88,7 @@ impl GpuTexture {
         sampler: &wgpu::Sampler,
         source: Option<Arc<TextureData>>,
     ) -> Self {
-        let white: [Box<[u8]>; 1] = [Box::new([255; 4])];
+        let white = [peniko::Blob::from(vec![255u8; 4])];
         let (width, height) = source.as_ref().map_or((1, 1), |t| t.size());
         let mips = source.as_ref().map_or(&white[..], |t| &t.mips[..]);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -111,7 +111,7 @@ impl GpuTexture {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                pixels,
+                pixels.data(),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * w),

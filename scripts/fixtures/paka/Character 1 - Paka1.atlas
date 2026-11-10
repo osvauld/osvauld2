@@ -1,0 +1,627 @@
+
+Character 1 - Paka1.png
+size: 1858,910
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+skin_paka_0_classic/amulet
+  rotate: false
+  xy: 1456, 464
+  size: 347, 130
+  orig: 347, 130
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/arm_back
+  rotate: false
+  xy: 1332, 44
+  size: 170, 208
+  orig: 170, 208
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/arm_front
+  rotate: false
+  xy: 1133, 10
+  size: 197, 224
+  orig: 197, 224
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/body
+  rotate: false
+  xy: 1033, 486
+  size: 421, 422
+  orig: 421, 422
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/dark_eye_back
+  rotate: false
+  xy: 1504, 87
+  size: 104, 181
+  orig: 104, 181
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/dark_eye_front
+  rotate: false
+  xy: 1410, 270
+  size: 208, 192
+  orig: 208, 192
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_back
+  rotate: false
+  xy: 1719, 2
+  size: 60, 61
+  orig: 60, 61
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_back_blink
+  rotate: false
+  xy: 1504, 24
+  size: 94, 61
+  orig: 94, 61
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_front
+  rotate: false
+  xy: 1719, 65
+  size: 70, 71
+  orig: 70, 71
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_front_blink
+  rotate: true
+  xy: 666, 25
+  size: 136, 75
+  orig: 136, 75
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_white_back
+  rotate: true
+  xy: 1610, 49
+  size: 87, 107
+  orig: 87, 107
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/eye_white_front
+  rotate: false
+  xy: 1610, 138
+  size: 132, 124
+  orig: 132, 124
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_ciolca
+  rotate: false
+  xy: 1456, 596
+  size: 397, 312
+  orig: 397, 312
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_ear_back
+  rotate: false
+  xy: 933, 202
+  size: 169, 251
+  orig: 169, 251
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_ear_front
+  rotate: false
+  xy: 736, 185
+  size: 195, 268
+  orig: 195, 268
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_main
+  rotate: false
+  xy: 476, 455
+  size: 555, 453
+  orig: 555, 453
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_neck
+  rotate: false
+  xy: 2, 5
+  size: 335, 154
+  orig: 335, 154
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_nose
+  rotate: true
+  xy: 864, 74
+  size: 109, 65
+  orig: 109, 65
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/head_smile
+  rotate: true
+  xy: 1805, 465
+  size: 129, 27
+  orig: 129, 27
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/hoof-back
+  rotate: false
+  xy: 339, 2
+  size: 162, 157
+  orig: 162, 157
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/hoof_front
+  rotate: false
+  xy: 503, 4
+  size: 161, 157
+  orig: 161, 157
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/leg_back
+  rotate: false
+  xy: 933, 2
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/leg_front
+  rotate: false
+  xy: 1620, 264
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/palm_back
+  rotate: false
+  xy: 743, 55
+  size: 119, 128
+  orig: 119, 128
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/palm_front
+  rotate: false
+  xy: 1744, 147
+  size: 112, 115
+  orig: 112, 115
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/shoulder_back
+  rotate: false
+  xy: 1104, 236
+  size: 204, 248
+  orig: 204, 248
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/shoulder_front
+  rotate: false
+  xy: 476, 163
+  size: 258, 290
+  orig: 258, 290
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/sword
+  rotate: false
+  xy: 2, 161
+  size: 472, 747
+  orig: 472, 747
+  offset: 0, 0
+  index: -1
+skin_paka_0_classic/tie
+  rotate: false
+  xy: 1310, 254
+  size: 98, 230
+  orig: 98, 230
+  offset: 0, 0
+  index: -1
+
+Character 1 - Paka12.png
+size: 1858,910
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+skin_paka_1_dark/amulet
+  rotate: false
+  xy: 1456, 464
+  size: 347, 130
+  orig: 347, 130
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/arm_back
+  rotate: false
+  xy: 1332, 44
+  size: 170, 208
+  orig: 170, 208
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/arm_front
+  rotate: false
+  xy: 1133, 10
+  size: 197, 224
+  orig: 197, 224
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/body
+  rotate: false
+  xy: 1033, 486
+  size: 421, 422
+  orig: 421, 422
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/dark_eye_back
+  rotate: false
+  xy: 1504, 87
+  size: 104, 181
+  orig: 104, 181
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/dark_eye_front
+  rotate: false
+  xy: 1410, 270
+  size: 208, 192
+  orig: 208, 192
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_back
+  rotate: false
+  xy: 1719, 2
+  size: 60, 61
+  orig: 60, 61
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_back_blink
+  rotate: false
+  xy: 1504, 24
+  size: 94, 61
+  orig: 94, 61
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_front
+  rotate: false
+  xy: 1719, 65
+  size: 70, 71
+  orig: 70, 71
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_front_blink
+  rotate: true
+  xy: 666, 25
+  size: 136, 75
+  orig: 136, 75
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_white_back
+  rotate: true
+  xy: 1610, 49
+  size: 87, 107
+  orig: 87, 107
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/eye_white_front
+  rotate: false
+  xy: 1610, 138
+  size: 132, 124
+  orig: 132, 124
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_ciolca
+  rotate: false
+  xy: 1456, 596
+  size: 397, 312
+  orig: 397, 312
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_ear_back
+  rotate: false
+  xy: 933, 202
+  size: 169, 251
+  orig: 169, 251
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_ear_front
+  rotate: false
+  xy: 736, 185
+  size: 195, 268
+  orig: 195, 268
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_main
+  rotate: false
+  xy: 476, 455
+  size: 555, 453
+  orig: 555, 453
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_neck
+  rotate: false
+  xy: 2, 5
+  size: 335, 154
+  orig: 335, 154
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_nose
+  rotate: true
+  xy: 864, 74
+  size: 109, 65
+  orig: 109, 65
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/head_smile
+  rotate: true
+  xy: 1805, 465
+  size: 129, 27
+  orig: 129, 27
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/hoof-back
+  rotate: false
+  xy: 339, 2
+  size: 162, 157
+  orig: 162, 157
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/hoof_front
+  rotate: false
+  xy: 503, 4
+  size: 161, 157
+  orig: 161, 157
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/leg_back
+  rotate: false
+  xy: 933, 2
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/leg_front
+  rotate: false
+  xy: 1620, 264
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/palm_back
+  rotate: false
+  xy: 743, 55
+  size: 119, 128
+  orig: 119, 128
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/palm_front
+  rotate: false
+  xy: 1744, 147
+  size: 112, 115
+  orig: 112, 115
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/shoulder_back
+  rotate: false
+  xy: 1104, 236
+  size: 204, 248
+  orig: 204, 248
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/shoulder_front
+  rotate: false
+  xy: 476, 163
+  size: 258, 290
+  orig: 258, 290
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/sword
+  rotate: false
+  xy: 2, 161
+  size: 472, 747
+  orig: 472, 747
+  offset: 0, 0
+  index: -1
+skin_paka_1_dark/tie
+  rotate: false
+  xy: 1310, 254
+  size: 98, 230
+  orig: 98, 230
+  offset: 0, 0
+  index: -1
+
+Character 1 - Paka13.png
+size: 1858,910
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+skin_paka_2_pop/amulet
+  rotate: false
+  xy: 1456, 464
+  size: 347, 130
+  orig: 347, 130
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/arm_back
+  rotate: false
+  xy: 1332, 44
+  size: 170, 208
+  orig: 170, 208
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/arm_front
+  rotate: false
+  xy: 1133, 10
+  size: 197, 224
+  orig: 197, 224
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/body
+  rotate: false
+  xy: 1033, 486
+  size: 421, 422
+  orig: 421, 422
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/dark_eye_back
+  rotate: false
+  xy: 1504, 87
+  size: 104, 181
+  orig: 104, 181
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/dark_eye_front
+  rotate: false
+  xy: 1410, 270
+  size: 208, 192
+  orig: 208, 192
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_back
+  rotate: false
+  xy: 1719, 2
+  size: 60, 61
+  orig: 60, 61
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_back_blink
+  rotate: false
+  xy: 1504, 24
+  size: 94, 61
+  orig: 94, 61
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_front
+  rotate: false
+  xy: 1719, 65
+  size: 70, 71
+  orig: 70, 71
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_front_blink
+  rotate: true
+  xy: 666, 25
+  size: 136, 75
+  orig: 136, 75
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_white_back
+  rotate: true
+  xy: 1610, 49
+  size: 87, 107
+  orig: 87, 107
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/eye_white_front
+  rotate: false
+  xy: 1610, 138
+  size: 132, 124
+  orig: 132, 124
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_ciolca
+  rotate: false
+  xy: 1456, 596
+  size: 397, 312
+  orig: 397, 312
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_ear_back
+  rotate: false
+  xy: 933, 202
+  size: 169, 251
+  orig: 169, 251
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_ear_front
+  rotate: false
+  xy: 736, 185
+  size: 195, 268
+  orig: 195, 268
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_main
+  rotate: false
+  xy: 476, 455
+  size: 555, 453
+  orig: 555, 453
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_neck
+  rotate: false
+  xy: 2, 5
+  size: 335, 154
+  orig: 335, 154
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_nose
+  rotate: true
+  xy: 864, 74
+  size: 109, 65
+  orig: 109, 65
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/head_smile
+  rotate: true
+  xy: 1805, 465
+  size: 129, 27
+  orig: 129, 27
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/hoof-back
+  rotate: false
+  xy: 339, 2
+  size: 162, 157
+  orig: 162, 157
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/hoof_front
+  rotate: false
+  xy: 503, 4
+  size: 161, 157
+  orig: 161, 157
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/leg_back
+  rotate: false
+  xy: 933, 2
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/leg_front
+  rotate: false
+  xy: 1620, 264
+  size: 198, 198
+  orig: 198, 198
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/palm_back
+  rotate: false
+  xy: 743, 55
+  size: 119, 128
+  orig: 119, 128
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/palm_front
+  rotate: false
+  xy: 1744, 147
+  size: 112, 115
+  orig: 112, 115
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/shoulder_back
+  rotate: false
+  xy: 1104, 236
+  size: 204, 248
+  orig: 204, 248
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/shoulder_front
+  rotate: false
+  xy: 476, 163
+  size: 258, 290
+  orig: 258, 290
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/sword
+  rotate: false
+  xy: 2, 161
+  size: 472, 747
+  orig: 472, 747
+  offset: 0, 0
+  index: -1
+skin_paka_2_pop/tie
+  rotate: false
+  xy: 1310, 254
+  size: 98, 230
+  orig: 98, 230
+  offset: 0, 0
+  index: -1

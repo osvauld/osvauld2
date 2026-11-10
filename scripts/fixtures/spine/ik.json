@@ -1,0 +1,15 @@
+{
+	"skeleton": { "spine": "3.8.75" },
+	"bones": [
+		{ "name": "root" },
+		{ "name": "a", "parent": "root", "length": 100 },
+		{ "name": "b", "parent": "a", "x": 100, "length": 100 },
+		{ "name": "target", "parent": "root", "x": 100, "y": 100 }
+	],
+	"slots": [ { "name": "b", "bone": "b", "attachment": "upper" } ],
+	"ik": [ { "name": "leg", "bones": [ "a", "b" ], "target": "target" } ],
+	"skins": [ { "name": "default", "attachments": { "b": { "upper": { "x": 50, "width": 16, "height": 8 } } } } ],
+	"animations": {
+		"reach": { "bones": { "target": { "translate": [ { "time": 0 }, { "time": 1, "x": -100, "y": 100 } ] } } }
+	}
+}

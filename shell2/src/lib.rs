@@ -1182,6 +1182,17 @@ fn info_json(i: &ElInfo) -> serde_json::Value {
     if let Some(scene) = &i.scene3d {
         o.insert("scene3d".into(), scene3d_json(scene));
     }
+    // `bytes` are the pixels drawn; `shared` when they are the texture's own, not a copy.
+    if !i.pictures.is_empty() {
+        let pictures = i.pictures.iter().map(|p| {
+            let [_, _, w, h] = p.src();
+            serde_json::json!({
+                "path": p.name(), "src": p.src(), "bytes": w as usize * h as usize * 4,
+                "shared": p.copied_bytes() == 0,
+            })
+        });
+        o.insert("pictures".into(), pictures.collect());
+    }
     if !i.handlers.is_empty() {
         o.insert(
             "handlers".into(),

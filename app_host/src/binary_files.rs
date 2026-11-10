@@ -42,6 +42,10 @@ impl Revision {
         (self.read)(&file.blob)?.ok_or_else(|| format!("{path}: stored bytes are missing"))
     }
 
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.bindings.keys().cloned().collect()
+    }
+
     // A failed reload keeps this VM alive after the source's old blob is deleted. Preserve
     // its bytes before replacement, including assets this VM has not loaded yet.
     pub(crate) fn retain(&self, path: &str) -> Result<(), String> {

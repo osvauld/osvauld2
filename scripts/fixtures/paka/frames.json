@@ -1,0 +1,232 @@
+{
+    "skin": "classic",
+    "scale": 0.2,
+    "fps": 60,
+    "time": "frame / fps, seconds from the animation's start",
+    "frames": [
+        {
+            "file": "frames/run_f000_t0.0000.png",
+            "anim": "run",
+            "frame": 0,
+            "time": 0.0,
+            "source": "Character 1 - Paka-classic-run_00.png"
+        },
+        {
+            "file": "frames/run_f006_t0.1000.png",
+            "anim": "run",
+            "frame": 6,
+            "time": 0.1,
+            "source": "Character 1 - Paka-classic-run_06.png"
+        },
+        {
+            "file": "frames/run_f012_t0.2000.png",
+            "anim": "run",
+            "frame": 12,
+            "time": 0.2,
+            "source": "Character 1 - Paka-classic-run_12.png"
+        },
+        {
+            "file": "frames/run_f018_t0.3000.png",
+            "anim": "run",
+            "frame": 18,
+            "time": 0.3,
+            "source": "Character 1 - Paka-classic-run_18.png"
+        },
+        {
+            "file": "frames/run_f024_t0.4000.png",
+            "anim": "run",
+            "frame": 24,
+            "time": 0.4,
+            "source": "Character 1 - Paka-classic-run_24.png"
+        },
+        {
+            "file": "frames/run_f030_t0.5000.png",
+            "anim": "run",
+            "frame": 30,
+            "time": 0.5,
+            "source": "Character 1 - Paka-classic-run_30.png"
+        },
+        {
+            "file": "frames/run_f036_t0.6000.png",
+            "anim": "run",
+            "frame": 36,
+            "time": 0.6,
+            "source": "Character 1 - Paka-classic-run_36.png"
+        },
+        {
+            "file": "frames/run_f042_t0.7000.png",
+            "anim": "run",
+            "frame": 42,
+            "time": 0.7,
+            "source": "Character 1 - Paka-classic-run_42.png"
+        },
+        {
+            "file": "frames/attack_f000_t0.0000.png",
+            "anim": "attack",
+            "frame": 0,
+            "time": 0.0,
+            "source": "Character 1 - Paka-classic-attack_00.png"
+        },
+        {
+            "file": "frames/attack_f005_t0.0833.png",
+            "anim": "attack",
+            "frame": 5,
+            "time": 0.0833,
+            "source": "Character 1 - Paka-classic-attack_05.png"
+        },
+        {
+            "file": "frames/attack_f010_t0.1667.png",
+            "anim": "attack",
+            "frame": 10,
+            "time": 0.1667,
+            "source": "Character 1 - Paka-classic-attack_10.png"
+        },
+        {
+            "file": "frames/attack_f015_t0.2500.png",
+            "anim": "attack",
+            "frame": 15,
+            "time": 0.25,
+            "source": "Character 1 - Paka-classic-attack_15.png"
+        },
+        {
+            "file": "frames/attack_f020_t0.3333.png",
+            "anim": "attack",
+            "frame": 20,
+            "time": 0.3333,
+            "source": "Character 1 - Paka-classic-attack_20.png"
+        },
+        {
+            "file": "frames/attack_f025_t0.4167.png",
+            "anim": "attack",
+            "frame": 25,
+            "time": 0.4167,
+            "source": "Character 1 - Paka-classic-attack_25.png"
+        },
+        {
+            "file": "frames/attack_f030_t0.5000.png",
+            "anim": "attack",
+            "frame": 30,
+            "time": 0.5,
+            "source": "Character 1 - Paka-classic-attack_30.png"
+        },
+        {
+            "file": "frames/attack_f035_t0.5833.png",
+            "anim": "attack",
+            "frame": 35,
+            "time": 0.5833,
+            "source": "Character 1 - Paka-classic-attack_35.png"
+        },
+        {
+            "file": "frames/jump_f000_t0.0000.png",
+            "anim": "jump",
+            "frame": 0,
+            "time": 0.0,
+            "source": "Character 1 - Paka-classic-jump_00.png"
+        },
+        {
+            "file": "frames/jump_f005_t0.0833.png",
+            "anim": "jump",
+            "frame": 5,
+            "time": 0.0833,
+            "source": "Character 1 - Paka-classic-jump_05.png"
+        },
+        {
+            "file": "frames/jump_f010_t0.1667.png",
+            "anim": "jump",
+            "frame": 10,
+            "time": 0.1667,
+            "source": "Character 1 - Paka-classic-jump_10.png"
+        },
+        {
+            "file": "frames/jump_f015_t0.2500.png",
+            "anim": "jump",
+            "frame": 15,
+            "time": 0.25,
+            "source": "Character 1 - Paka-classic-jump_15.png"
+        },
+        {
+            "file": "frames/jump_f020_t0.3333.png",
+            "anim": "jump",
+            "frame": 20,
+            "time": 0.3333,
+            "source": "Character 1 - Paka-classic-jump_20.png"
+        },
+        {
+            "file": "frames/jump_f025_t0.4167.png",
+            "anim": "jump",
+            "frame": 25,
+            "time": 0.4167,
+            "source": "Character 1 - Paka-classic-jump_25.png"
+        },
+        {
+            "file": "frames/jump_f030_t0.5000.png",
+            "anim": "jump",
+            "frame": 30,
+            "time": 0.5,
+            "source": "Character 1 - Paka-classic-jump_30.png"
+        },
+        {
+            "file": "frames/jump_f035_t0.5833.png",
+            "anim": "jump",
+            "frame": 35,
+            "time": 0.5833,
+            "source": "Character 1 - Paka-classic-jump_35.png"
+        },
+        {
+            "file": "frames/idle_f000_t0.0000.png",
+            "anim": "idle",
+            "frame": 0,
+            "time": 0.0,
+            "source": "Character 1 - Paka-classic-idle_000.png"
+        },
+        {
+            "file": "frames/idle_f015_t0.2500.png",
+            "anim": "idle",
+            "frame": 15,
+            "time": 0.25,
+            "source": "Character 1 - Paka-classic-idle_015.png"
+        },
+        {
+            "file": "frames/idle_f030_t0.5000.png",
+            "anim": "idle",
+            "frame": 30,
+            "time": 0.5,
+            "source": "Character 1 - Paka-classic-idle_030.png"
+        },
+        {
+            "file": "frames/idle_f045_t0.7500.png",
+            "anim": "idle",
+            "frame": 45,
+            "time": 0.75,
+            "source": "Character 1 - Paka-classic-idle_045.png"
+        },
+        {
+            "file": "frames/idle_f060_t1.0000.png",
+            "anim": "idle",
+            "frame": 60,
+            "time": 1.0,
+            "source": "Character 1 - Paka-classic-idle_060.png"
+        },
+        {
+            "file": "frames/idle_f075_t1.2500.png",
+            "anim": "idle",
+            "frame": 75,
+            "time": 1.25,
+            "source": "Character 1 - Paka-classic-idle_075.png"
+        },
+        {
+            "file": "frames/idle_f090_t1.5000.png",
+            "anim": "idle",
+            "frame": 90,
+            "time": 1.5,
+            "source": "Character 1 - Paka-classic-idle_090.png"
+        },
+        {
+            "file": "frames/idle_f105_t1.7500.png",
+            "anim": "idle",
+            "frame": 105,
+            "time": 1.75,
+            "source": "Character 1 - Paka-classic-idle_105.png"
+        }
+    ]
+}

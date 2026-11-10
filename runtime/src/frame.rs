@@ -4,10 +4,11 @@
 use std::sync::Arc;
 
 use crate::id::Id;
+use crate::scene3d::texture::TextureData;
 use kurbo::{Affine, BezPath, Cap, Join, ParamCurveNearest, PathEl, Point, Rect, Shape, Stroke};
 use peniko::{
-    Brush as PenikoBrush, Color, ColorStop as PenikoColorStop, Extend as PenikoExtend, Fill,
-    Gradient,
+    Blob, Brush as PenikoBrush, Color, ColorStop as PenikoColorStop, Extend as PenikoExtend, Fill,
+    Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageSampler,
 };
 use vello::Scene;
 
@@ -212,6 +213,90 @@ impl Brush {
     }
 }
 
+/// Pixels an image item draws: all of a texture's level 0, shared with it, or a region copied
+/// out of it. A region is its own image because the renderer clamps sampling only at an image's
+/// edge: drawn as a clipped rectangle of the whole atlas, a scaled or turned region would blend
+/// its neighbours' pixels in along its border.
+pub struct Picture {
+    name: Arc<str>,
+    src: [u32; 4],
+    texture: Arc<TextureData>,
+    image: ImageData,
+}
+
+/// Name and region only, like `TextureData`'s.
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Picture")
+            .field("name", &self.name)
+            .field("src", &self.src)
+            .finish()
+    }
+}
+
+impl Picture {
+    /// `src` is `[x, y, w, h]` in the texture's pixels; `None` is all of it. `name` is the
+    /// caller's label for inspection and means nothing here.
+    pub fn new(
+        name: impl Into<Arc<str>>,
+        texture: Arc<TextureData>,
+        src: Option<[u32; 4]>,
+    ) -> Result<Arc<Self>, FrameError> {
+        let (tw, th) = texture.size();
+        let src = src.unwrap_or([0, 0, tw, th]);
+        let [x, y, w, h] = src.map(u64::from);
+        if w == 0 || h == 0 || x + w > u64::from(tw) || y + h > u64::from(th) {
+            return Err(FrameError::PictureSource { src, size: (tw, th) });
+        }
+        let data = if src == [0, 0, tw, th] {
+            texture.level0().clone()
+        } else {
+            let (x, y, w, row) = (x as usize, y as usize, w as usize, tw as usize * 4);
+            let pixels = texture.pixels();
+            let copy: Vec<u8> = (y..y + h as usize)
+                .flat_map(|r| &pixels[r * row + x * 4..r * row + (x + w) * 4])
+                .copied()
+                .collect();
+            Blob::from(copy)
+        };
+        let image = ImageData {
+            data,
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: src[2],
+            height: src[3],
+        };
+        Ok(Arc::new(Self {
+            name: name.into(),
+            src,
+            texture,
+            image,
+        }))
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn src(&self) -> [u32; 4] {
+        self.src
+    }
+    /// Natural size: one unit per pixel.
+    pub fn size(&self) -> (f64, f64) {
+        (f64::from(self.src[2]), f64::from(self.src[3]))
+    }
+    pub fn texture(&self) -> &Arc<TextureData> {
+        &self.texture
+    }
+    /// Bytes this picture holds beyond its texture: zero when it draws the texture itself.
+    pub fn copied_bytes(&self) -> usize {
+        if self.image.data.id() == self.texture.level0().id() {
+            0
+        } else {
+            self.image.data.len()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StrokeCap {
     Butt,
@@ -292,6 +377,12 @@ enum ItemKind {
         transform: Affine,
         frame: Arc<Frame>,
     },
+    /// The picture at natural size, its pixel (u, v) at (u, v), placed by `transform`. Hit as
+    /// that rectangle, whatever its alpha.
+    Image {
+        picture: Arc<Picture>,
+        transform: Affine,
+    },
     /// `rect` with corners rounded by `radius`, blurred by `blur` (the gaussian's standard
     /// deviation). Vello's fast path for soft shadows; paint only — never hit.
     Shadow {
@@ -325,6 +416,11 @@ impl Item {
     pub fn instance(transform: Affine, frame: Arc<Frame>) -> Result<Self, FrameError> {
         valid_transform(transform)?;
         Ok(Self::new(ItemKind::Instance { transform, frame }))
+    }
+
+    pub fn image(picture: Arc<Picture>, transform: Affine) -> Result<Self, FrameError> {
+        valid_transform(transform)?;
+        Ok(Self::new(ItemKind::Image { picture, transform }))
     }
 
     pub fn shadow(rect: Rect, radius: f64, blur: f64, color: Color) -> Result<Self, FrameError> {
@@ -401,6 +497,11 @@ pub enum FrameError {
     InvalidShadow,
     #[error("Frame nesting depth exceeds {MAX_FRAME_DEPTH}")]
     TooDeep,
+    #[error(
+        "picture src {{{}, {}, {}, {}}} is empty or outside the {}x{} picture",
+        src[0], src[1], src[2], src[3], size.0, size.1
+    )]
+    PictureSource { src: [u32; 4], size: (u32, u32) },
 }
 
 impl Frame {
@@ -470,6 +571,27 @@ impl Frame {
             return None; // what spills past a clipped box is not drawn, so not touchable
         }
         find(&self.items, p, Affine::IDENTITY)
+    }
+
+    /// Each picture this frame draws, once, in the order first drawn — for inspection.
+    pub fn pictures(&self) -> Vec<Arc<Picture>> {
+        fn walk(items: &[Item], seen: &mut Vec<Arc<Picture>>) {
+            for item in items {
+                match &item.kind {
+                    ItemKind::Image { picture, .. } => {
+                        if !seen.iter().any(|p| Arc::ptr_eq(p, picture)) {
+                            seen.push(picture.clone());
+                        }
+                    }
+                    ItemKind::Group { items, .. } => walk(items, seen),
+                    ItemKind::Instance { frame, .. } => walk(frame.items(), seen),
+                    _ => {}
+                }
+            }
+        }
+        let mut seen = Vec::new();
+        walk(&self.items, &mut seen);
+        seen
     }
 }
 
@@ -576,6 +698,10 @@ fn covers(kind: &ItemKind, p: Point) -> bool {
                     .segments()
                     .any(|seg| seg.nearest(p, HIT_ACCURACY).distance_sq <= reach * reach)
         }
+        ItemKind::Image { picture, transform } => child_point(*transform, p).is_some_and(|q| {
+            let (w, h) = picture.size();
+            Rect::new(0.0, 0.0, w, h).contains(q)
+        }),
         _ => false,
     }
 }
@@ -615,6 +741,17 @@ fn draw_items(scene: &mut Scene, items: &[Item], transform: Affine, alpha: f32) 
             } => {
                 draw_items(scene, frame.items(), transform * *local, alpha);
             }
+            // Pad (the default) clamps sampling at the picture's own edge; see `Picture`.
+            ItemKind::Image {
+                picture,
+                transform: local,
+            } => {
+                let brush = ImageBrush {
+                    image: &picture.image,
+                    sampler: ImageSampler::new().with_alpha(alpha),
+                };
+                scene.draw_image(brush, transform * *local);
+            }
             ItemKind::Shadow {
                 rect,
                 radius,
@@ -644,7 +781,7 @@ fn item_stats(items: &[Item], depth: usize) -> Result<FrameStats, FrameError> {
                 ..FrameStats::default()
             },
             ItemKind::Group { items, .. } => item_stats(items, depth + 1)?,
-            ItemKind::Shadow { .. } => FrameStats::default(),
+            ItemKind::Shadow { .. } | ItemKind::Image { .. } => FrameStats::default(),
             // A reused visual keeps its own names to itself — fifty instances of one resource
             // would otherwise all answer to the same ones.
             ItemKind::Instance { frame, .. } => FrameStats {

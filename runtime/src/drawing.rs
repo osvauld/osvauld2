@@ -20,12 +20,17 @@ pub struct PartSpec {
 }
 
 /// A part's offset from rest: moved by `x, y`, rotated (degrees) and scaled about its pivot.
+/// `scale_x`/`scale_y` act along the part's own axes and multiply `scale`. A part with
+/// `show: false` paints and hits nothing, but still places its children.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub x: f64,
     pub y: f64,
     pub rot: f64,
     pub scale: f64,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub show: bool,
 }
 
 impl Default for Pose {
@@ -35,6 +40,9 @@ impl Default for Pose {
             y: 0.0,
             rot: 0.0,
             scale: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            show: true,
         }
     }
 }
@@ -149,7 +157,10 @@ impl Drawing {
         }
         let mut memo = vec![None; self.parts.len()];
         let items = (0..self.parts.len())
-            .filter(|&i| !self.parts[i].shapes.is_empty())
+            .filter(|&i| {
+                let shown = overrides.get(&*self.parts[i].id).is_none_or(|p| p.show);
+                shown && !self.parts[i].shapes.is_empty()
+            })
             .map(|i| {
                 let part = &self.parts[i];
                 let world = self.world(i, overrides, &mut memo);
@@ -181,8 +192,10 @@ impl Drawing {
         let local = Affine::translate((pose.x, pose.y))
             * Affine::translate(pivot)
             * Affine::rotate(pose.rot.to_radians())
-            * Affine::scale(pose.scale)
+            * Affine::scale_non_uniform(pose.scale * pose.scale_x, pose.scale * pose.scale_y)
             * Affine::translate(-pivot);
+        // A plain product: under a parent's unequal scale a rotated child shears, as Spine's
+        // default bone does.
         let world = match part.parent {
             Some(parent) => self.world(parent, overrides, memo) * local,
             None => local,

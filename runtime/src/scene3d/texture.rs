@@ -1,6 +1,7 @@
-//! Validated immutable RGBA8 images for 3D objects, with their mip chain. Decoding image formats
+//! Validated immutable RGBA8 images for 3D objects and 2D pictures, with their mip chain. Decoding image formats
 //! lives outside this boundary; this owns size limits and filtering.
 
+use peniko::Blob;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -14,7 +15,8 @@ pub struct TextureData {
     width: u32,
     height: u32,
     /// Level 0 first, each level half the previous (rounded down, at least 1), down to 1x1.
-    pub(super) mips: Box<[Box<[u8]>]>,
+    /// Blobs so a 2D picture draws level 0 itself rather than a copy.
+    pub(super) mips: Box<[Blob<u8>]>,
 }
 
 /// Size and identity only: pixel dumps in a failed assertion are megabytes of noise.
@@ -58,10 +60,10 @@ impl TextureData {
             return Err(TextureError::InvalidData);
         }
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        let mut mips = vec![rgba.into_boxed_slice()];
+        let mut mips = vec![Blob::from(rgba)];
         let (mut w, mut h) = (width as usize, height as usize);
         while w > 1 || h > 1 {
-            let next = downsample(mips.last().unwrap(), w, h);
+            let next = Blob::from(downsample(mips.last().unwrap().data(), w, h));
             w = (w / 2).max(1);
             h = (h / 2).max(1);
             mips.push(next);
@@ -81,6 +83,9 @@ impl TextureData {
         (self.width, self.height)
     }
     pub fn pixels(&self) -> &[u8] {
+        self.mips[0].data()
+    }
+    pub(crate) fn level0(&self) -> &Blob<u8> {
         &self.mips[0]
     }
     pub fn payload_bytes(&self) -> usize {
@@ -100,7 +105,7 @@ fn to_srgb(c: f32) -> u8 {
 
 /// Box filter to the next level, averaging colour in linear light so edges do not darken.
 /// Both conversions are tables: a powf per channel per pixel dominated large loads.
-fn downsample(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+fn downsample(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     const STEPS: usize = 4096;
     let linear: Vec<f32> = (0..=255).map(to_linear).collect();
     let encode: Vec<u8> = (0..STEPS).map(|i| to_srgb(i as f32 / (STEPS - 1) as f32)).collect();
@@ -128,7 +133,7 @@ fn downsample(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
             o[3] = (sum[3] / n).round() as u8;
         }
     }
-    out.into_boxed_slice()
+    out
 }
 
 #[cfg(test)]

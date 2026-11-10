@@ -784,3 +784,154 @@ fn bench_frame_encode() {
         });
     }
 }
+
+const RED: [u8; 4] = [255, 0, 0, 255];
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 255, 255];
+const YELLOW: [u8; 4] = [255, 255, 0, 255];
+
+/// `side` x `side`, a colour per quadrant: red, green over blue, yellow.
+fn quads(side: u32) -> Arc<TextureData> {
+    let half = side / 2;
+    let rgba = (0..side * side)
+        .flat_map(|i| match (i % side >= half, i / side >= half) {
+            (false, false) => RED,
+            (true, false) => GREEN,
+            (false, true) => BLUE,
+            (true, true) => YELLOW,
+        })
+        .collect();
+    TextureData::new(side, side, rgba).unwrap()
+}
+
+/// Turned 90° and scaled ×3, then moved: a 2-pixel region lands on x 4..10, y 20..26.
+fn turned() -> Affine {
+    Affine::translate((10.0, 20.0)) * Affine::rotate(90f64.to_radians()) * Affine::scale(3.0)
+}
+
+#[test]
+fn a_whole_picture_shares_level_zero_and_a_region_is_its_own_pixels() {
+    let t = quads(4);
+    let whole = Picture::new("q.png", t.clone(), None).unwrap();
+    assert_eq!(whole.src(), [0, 0, 4, 4]);
+    assert_eq!(whole.size(), (4.0, 4.0));
+    assert_eq!(whole.copied_bytes(), 0);
+    assert_eq!(whole.image.data.id(), t.level0().id(), "the texture's own level 0, not a copy");
+    let named_whole = Picture::new("q.png", t.clone(), Some([0, 0, 4, 4])).unwrap();
+    assert_eq!(named_whole.image.data.id(), t.level0().id());
+
+    let green = Picture::new("q.png", t.clone(), Some([2, 0, 2, 2])).unwrap();
+    assert_eq!((green.size(), green.copied_bytes(), green.name()), ((2.0, 2.0), 16, "q.png"));
+    assert!(green.image.data.data().chunks(4).all(|p| p == GREEN), "only the region's pixels");
+    let strip = Picture::new("q.png", t.clone(), Some([1, 3, 3, 1])).unwrap();
+    assert_eq!(strip.image.data.data(), [BLUE, YELLOW, YELLOW].concat());
+
+    for src in [[3, 0, 2, 2], [0, 0, 0, 1], [0, 4, 1, 1], [0, 0, 4, 5], [u32::MAX, 0, 2, 1]] {
+        assert_eq!(
+            Picture::new("q.png", t.clone(), Some(src)).unwrap_err(),
+            FrameError::PictureSource { src, size: (4, 4) },
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn an_image_is_hit_as_its_rectangle_through_its_transform() {
+    let green = Picture::new("q.png", quads(4), Some([2, 0, 2, 2])).unwrap();
+    let frame = |items| Frame::new(64.0, 48.0, None, items).unwrap();
+    let alone = frame(vec![Item::image(green.clone(), turned()).unwrap().with_id("g")]);
+    let hit = alone.hit(Point::new(7.0, 23.0)).unwrap();
+    assert_eq!((&*hit.id, hit.local), ("g", Point::new(7.0, 23.0)));
+    for miss in [(3.9, 23.0), (10.1, 23.0), (7.0, 19.9), (7.0, 26.1)] {
+        assert!(alone.hit(miss.into()).is_none(), "{miss:?}");
+    }
+
+    // A clear picture is still hit over its whole rectangle: a box, not its alpha.
+    let clear = TextureData::new(2, 2, vec![0; 16]).unwrap();
+    let clear = Picture::new("clear.png", clear, None).unwrap();
+    let ghost = frame(vec![Item::image(clear, turned()).unwrap().with_id("ghost")]);
+    assert_eq!(&*ghost.hit(Point::new(5.0, 25.0)).unwrap().id, "ghost");
+
+    // Inside a named part it answers as the part, as a posed drawing's groups do.
+    let part = Item::group(Affine::translate((1.0, 0.0)), vec![Item::image(green.clone(), turned()).unwrap()])
+        .unwrap()
+        .with_id("arm");
+    let posed = frame(vec![part]);
+    assert_eq!(&*posed.hit(Point::new(10.5, 21.0)).unwrap().id, "arm");
+    assert!(posed.hit(Point::new(4.5, 21.0)).is_none());
+    assert_eq!(alone.stats().hittable, 1);
+
+    let bad = Affine::new([f64::NAN, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(Item::image(green, bad).unwrap_err(), FrameError::InvalidTransform);
+}
+
+#[test]
+fn a_frame_lists_each_picture_it_draws_once() {
+    let t = quads(4);
+    let green = Picture::new("q.png", t.clone(), Some([2, 0, 2, 2])).unwrap();
+    let whole = Picture::new("q.png", t, None).unwrap();
+    let image = |p: &Arc<Picture>| Item::image(p.clone(), Affine::IDENTITY).unwrap();
+    let inner = Arc::new(Frame::new(4.0, 4.0, None, vec![image(&whole)]).unwrap());
+    let items = vec![
+        image(&green),
+        Item::group(Affine::IDENTITY, vec![image(&green), image(&whole)]).unwrap(),
+        Item::instance(Affine::IDENTITY, inner).unwrap(),
+    ];
+    let frame = Frame::new(8.0, 8.0, None, items).unwrap();
+    let seen: Vec<[u32; 4]> = frame.pictures().iter().map(|p| p.src()).collect();
+    assert_eq!(seen, [[2, 0, 2, 2], [0, 0, 4, 4]]);
+}
+
+/// The no-bleed proof, in real pixels: one quadrant of a four-colour atlas, turned 90° and
+/// scaled ×3, shows only its own colour out to its edges. Drawn as a clip over the whole atlas
+/// its border pixels would blend in the red and yellow beside it.
+///
+/// `cargo test -p runtime --lib -- --ignored a_turned_region_shows_no_neighbour` runs it.
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn a_turned_region_shows_no_neighbour() {
+    let atlas = quads(8);
+    // 4 px turned and ×3 from (40, 10): x 28..40, y 10..22.
+    let at = Affine::translate((40.0, 10.0)) * Affine::rotate(90f64.to_radians()) * Affine::scale(3.0);
+    let mut render = pollster::block_on(crate::render::Render::offscreen(64, 48));
+    let mut shoot = |scene: &Scene| {
+        let shot = render
+            .capture_scene(peniko::Color::BLACK, scene, (64.0, 48.0), 1.0, None)
+            .expect("capture the scene");
+        let mut png = png::Decoder::new(std::io::Cursor::new(shot.png)).read_info().unwrap();
+        let mut buf = vec![0; png.output_buffer_size().unwrap()];
+        let width = png.next_frame(&mut buf).unwrap().width;
+        move |x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2]]
+        }
+    };
+
+    let green = Picture::new("q.png", atlas.clone(), Some([4, 0, 4, 4])).unwrap();
+    let frame = Frame::new(64.0, 48.0, None, vec![Item::image(green, at).unwrap()]).unwrap();
+    let mut scene = Scene::new();
+    frame.draw(&mut scene, Affine::IDENTITY, 1.0);
+    let px = shoot(&scene);
+    for y in 10..22 {
+        for x in 28..40 {
+            assert_eq!(px(x, y), [0, 255, 0], "({x}, {y}) inside the region");
+        }
+    }
+    for (x, y) in [(27, 15), (40, 15), (33, 9), (33, 22)] {
+        assert_eq!(px(x, y), [0, 0, 0], "({x}, {y}) just outside");
+    }
+
+    // The approach not taken: the whole atlas, clipped to the region. Its border blends in red
+    // and yellow, which is why a region is copied.
+    let whole = Picture::new("q.png", atlas, None).unwrap();
+    let shifted = at * Affine::translate((-4.0, 0.0));
+    let mut scene = Scene::new();
+    scene.push_clip_layer(Fill::NonZero, shifted, &Rect::new(4.0, 0.0, 8.0, 4.0));
+    Frame::new(64.0, 48.0, None, vec![Item::image(whole, shifted).unwrap()])
+        .unwrap()
+        .draw(&mut scene, Affine::IDENTITY, 1.0);
+    scene.pop_layer();
+    let px = shoot(&scene);
+    let edge = (10..22).flat_map(|y| [(28, y), (39, y)]).chain((28..40).flat_map(|x| [(x, 10), (x, 21)]));
+    assert!(edge.into_iter().any(|(x, y)| px(x, y) != [0, 255, 0]), "a clipped atlas bled nothing");
+}

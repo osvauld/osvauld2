@@ -3859,3 +3859,41 @@ fn bench_world_particles() {
         });
     }
 }
+
+// U-C5: poses come from the clock, so a restored world draws what the straight run drew.
+#[test]
+fn a_world_restored_mid_clip_draws_the_straight_runs_frames() {
+    use crate::clip::{ShowKey, ShowTrack};
+    let d = drawing();
+    let clip = Arc::new(
+        Arc::try_unwrap(slide())
+            .unwrap()
+            .with_shows(vec![ShowTrack {
+                part: "body".into(),
+                keys: vec![ShowKey { time: 0.0, show: true }, ShowKey { time: 0.2, show: false }, ShowKey { time: 0.4, show: true }],
+            }])
+            .unwrap(),
+    );
+    let fresh = || {
+        let mut w = World2d::default();
+        w.reconcile(vec![playing("hero", &d, &clip)]).unwrap();
+        w
+    };
+    // What is drawn at `t`: the hero where the slide has put it, if its part is shown.
+    let seen = |w: &mut World2d, t: f64| {
+        w.show_at(t);
+        (at(w, 6.0 + 100.0 * t), w.digest())
+    };
+    let times = [0.1, 0.3, 0.5, 0.7];
+    let mut straight = fresh();
+    let want: Vec<_> = times.iter().map(|&t| seen(&mut straight, t)).collect();
+    assert_eq!(want.iter().map(|w| w.0.is_some()).collect::<Vec<_>>(), [true, false, true, true], "the track hides it mid-clip");
+
+    let mut other = fresh();
+    seen(&mut other, 0.3);
+    let snap = other.snapshot();
+    seen(&mut other, 0.9);
+    other.restore(&snap).unwrap();
+    let got: Vec<_> = times[1..].iter().map(|&t| seen(&mut other, t)).collect();
+    assert_eq!(got, want[1..]);
+}

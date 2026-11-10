@@ -183,8 +183,9 @@ implicit clip or scale.
 | `gfx.group({…items})` | `transform = {xx, yx, xy, yy, dx, dy}` + items | |
 | `gfx.instance({…})` | `visual` (another frame) · `transform` | placed by its local origin — account for a centered shape's radius |
 | `gfx.shadow({…})` | `rect = {x, y, w, h}` · `blur` · `color` · (`radius`) | a blurred rounded rect; paint only, never hit, even with an `id` |
+| `gfx.image({…})` | `texture` (a `gfx.load_texture` handle) · (`src = {x, y, w, h}` · `transform`) | the picture at natural size, one unit a pixel, its top-left at the origin; `src` is a region in whole pixels (all of it by default); hit as its rectangle whatever its alpha *(2026-11-10)* |
 
-`fill`, `stroke`, `group` and `instance` take an optional **`id`** — and that is what makes the
+`fill`, `stroke`, `group`, `instance` and `image` take an optional **`id`** — and that is what makes the
 drawing touchable. Put the pointer handler on the `ui.frame` itself, and `on_click`/`on_hover`
 report which named shape the pointer is on and where on it:
 
@@ -211,6 +212,12 @@ error, not an ignored extra.
 
 There is no text inside a frame, no arcs, and no internal clips yet; labels are `ui.text`
 siblings positioned by layout, which is what the demo charts' axes do.
+
+A picture's `src` region is copied out of the file's pixels when the frame is built (so a scaled
+or turned region shows none of its neighbours at its edges) and counts against the texture budget
+below; all of a picture draws the texture's own pixels. Build image frames once, at module level,
+not in `view`. Colours are drawn as stored, straight alpha, smoothed when scaled; there is no
+tint, opacity or blend yet beyond the frame's own fade.
 
 ## Drawings (experimental)
 
@@ -245,8 +252,13 @@ ui.frame({ id = "hero", visual = waving })
 - `parent` is the hierarchy and list order is draw order, independently: a far arm belongs to the
   body and still draws behind it. A parent may be listed after its child.
 - Coordinates, paths and `pivot` (required) are all in the drawing's own space.
-- A pose override is `{ x, y, rot, scale }` — `rot` in degrees — about the part's pivot; children
-  follow. Naming a part that doesn't exist is an error.
+- A pose override is `{ x, y, rot, scale, scale_x, scale_y, show }` — `rot` in degrees — about the
+  part's pivot; children follow. `scale_x`/`scale_y` stretch along the part's own axes (after its
+  rotation) and multiply `scale`; all three default to 1. A child of a part whose two scales differ
+  is sheared by it when it rotates — as a Spine bone is. `show = false` hides the part's own
+  shapes (nothing painted, nothing hit) but not its children, which are still placed by its
+  transform and drawn; it must be a boolean and defaults to `true`. Naming a part that doesn't exist is an
+  error.
 - Each posed part is a named group, so `on_hover`/`on_click` on the `ui.frame` report the part id
   as `e.shape`.
 - A shape's `fill` is a colour string or one gradient as data — `{ linear = {…} }`,
@@ -254,6 +266,17 @@ ui.frame({ id = "hero", visual = waving })
   (e.g. `fill = { linear = { from = {x, y}, to = {x, y}, stops = { {0, "#4aa3ff"}, {1, "#1b2a6b"} } } }`).
   Points and radii are in the drawing's space, so the gradient moves with its part. A stroke's
   colour is solid only.
+- A shape can instead be a **picture** *(2026-11-10)*: `{ image = "characters/x/atlas.png",
+  src = {x, y, w, h}, transform = {a, b, c, d, e, f} }`. The picture's own space is its `src`
+  region at natural size — pixel (u, v) of the region at (u, v) — and `transform` maps it into the
+  drawing's space, in `gfx.group`'s order: x' = a·x + c·y + e, y' = b·x + d·y + f. `src` defaults
+  to the whole picture and `transform` to none. `image` names a PNG or JPEG binary file of your
+  app (as `gfx.load_texture` reads it), so the drawing stays data; every shape naming a file shares
+  one decode and one place in the texture budget, and each distinct region one copy. A shape has
+  `image` or `path`, never both, and takes no `fill`, `stroke` or `rule`. A missing file (the error
+  lists the app's `.png`/`.jpg` files), a `src` outside the picture or not in whole pixels, and a
+  picture past the budget are errors naming the shape. A posed picture is hit as its rectangle.
+  `demo_apps/clip_picture` is the reference.
 - A shape can instead be a **soft shadow**: `{ shadow = { rect = {x, y, w, h}, radius = 16,
   blur = 6, color = "#00000066" } }` — a rounded rectangle blurred by `blur` (the gaussian's
   standard deviation; positive), `radius` 0 by default. A circle is a rect with `radius` half its
@@ -408,11 +431,18 @@ ui.world({ id = "room", width = 720, height = 400,
 })
 ```
 
-- `tracks` maps a part id to properties `x`, `y`, `rot` (degrees) and `scale`, each a list of
-  keys `{time, value, easing?}` — offsets from the rest pose about the part's pivot, like
-  `pose`. Key times rise strictly within `0..length`.
-- Easing is `"linear"` (the default) or `"in_out"`, and shapes the segment *arriving* at that
-  key. Before its first key a track holds the first value; after its last, the last. A looped
+- `tracks` maps a part id to properties `x`, `y`, `rot` (degrees), `scale`, `scale_x` and
+  `scale_y`, each a list of keys `{time, value, easing?}` — offsets from the rest pose about the
+  part's pivot, like `pose`. Key times rise strictly within `0..length`. A part may also have a
+  `show` track, `show = { {0, true}, {0.6, false} }`: keys `{time, boolean}`, always stepped — the
+  latest key at or before `t` rules, and before the first key the first key's value does. A
+  `show` key takes no easing, and a non-boolean is an error naming the track and key. Part ids
+  need not be identifiers: `tracks = { ["slot:sword"] = { show = … } }`.
+- Easing is `"linear"` (the default), `"in_out"`, `"step"` or a curve `{x1, y1, x2, y2}`, and
+  shapes the segment *arriving* at that key. `"step"` holds the previous key's value until the
+  key's own time, then jumps. A curve is CSS `cubic-bezier(x1, y1, x2, y2)`: `x1` and `x2` must be
+  within 0–1 (an error naming the track and key otherwise), `y1`/`y2` may overshoot. It is solved
+  the same to the bit on every machine, so a rollback match agrees on it. Before its first key a track holds the first value; after its last, the last. A looped
   clip's last key should match its first.
 - A clip plays from the moment its **handle** first appears on the entity, on the runtime's
   frame clock (virtual offscreen, so `rpc.advance` lands on exact times). Re-sending the same
@@ -426,7 +456,7 @@ ui.world({ id = "room", width = 720, height = 400,
 - A world with a clip playing drives its own frame ticks, so `on_frame` on a `ui.world` is an
   error; put it on an element around the world.
 - **Without a world**, `clip:at(t)` gives each tracked part's pose `t` seconds in — `{ knob = { x,
-  y, rot, scale }, … }`, sampled exactly as the world samples it (a looped clip wraps, a once clip
+  y, rot, scale, scale_x, scale_y, show }, … }`, sampled exactly as the world samples it (a looped clip wraps, a once clip
   holds its ends) — and `drawing:pose(clip:at(t))` draws it on a plain `ui.frame`. Lua keeps `t`:
   declare `on_frame` only while a clip moves, so a resting widget asks for no frames.
   `clip.length` and `clip.loop` read back the spec. This is how a UI asset is a widget —
@@ -795,7 +825,9 @@ material's UV set). Other material maps, animation clips and skins are not read.
 Refused with the reason: not a GLB, truncated, external buffer or image URIs, required
 extensions, non-triangle primitives, over 4,096 nodes or 128 primitives, oversize images.
 Meshes count against the VM's mesh budget above; textures against their own — 64 live
-textures and 128 MiB (mips included) per VM, and 128 MiB of unique textures per scene. A load
+textures and 128 MiB (mips included) per VM, and 128 MiB of unique textures per scene. 2D
+pictures share it: a drawing's `image` file is one texture, and each `src` region copied for a
+drawing or `gfx.image` adds its bytes (not to the 64). A load
 is all-or-nothing: a refused file leaves both budgets as they were.
 
 Decoding is native work inside the calling entry, so it counts against the app's 1 s CPU

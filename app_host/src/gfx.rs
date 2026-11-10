@@ -23,7 +23,7 @@ use runtime::frame::{
 use runtime::scene3d::{Camera3d, Object3d, Scene3d, TextSurface, mesh::MeshData};
 use runtime::vello::kurbo::{Affine, PathEl, Point, Rect};
 use runtime::vello::peniko::{Color, Fill};
-use world::clip::{Clip, Easing, Key, Prop, Track};
+use world::clip::{Clip, Easing, Key, Prop, ShowKey, ShowTrack, Track};
 
 #[derive(Clone)]
 #[allow(dead_code)] // Frame compilation consumes the path handle in the next Lua slice.
@@ -52,15 +52,19 @@ impl UserData for LuaDrawing {
             let overrides = overrides.unwrap_or(lua.create_table()?);
             for pair in overrides.pairs::<String, Table>() {
                 let (part, spec) = pair?;
-                named_fields(&spec, "pose", &["x", "y", "rot", "scale"])?;
+                named_fields(&spec, "pose", &["x", "y", "rot", "scale", "scale_x", "scale_y", "show"])?;
                 let rest = Pose::default();
+                let get = |name, or: f64| Ok::<_, Error>(spec.get::<Option<f64>>(name)?.unwrap_or(or));
                 poses.push((
                     part,
                     Pose {
-                        x: spec.get::<Option<f64>>("x")?.unwrap_or(rest.x),
-                        y: spec.get::<Option<f64>>("y")?.unwrap_or(rest.y),
-                        rot: spec.get::<Option<f64>>("rot")?.unwrap_or(rest.rot),
-                        scale: spec.get::<Option<f64>>("scale")?.unwrap_or(rest.scale),
+                        x: get("x", rest.x)?,
+                        y: get("y", rest.y)?,
+                        rot: get("rot", rest.rot)?,
+                        scale: get("scale", rest.scale)?,
+                        scale_x: get("scale_x", rest.scale_x)?,
+                        scale_y: get("scale_y", rest.scale_y)?,
+                        show: show(spec.get("show")?, "pose")?.unwrap_or(rest.show),
                     },
                 ));
             }
@@ -90,6 +94,9 @@ impl UserData for LuaClip {
                 pose.set("y", p.y)?;
                 pose.set("rot", p.rot)?;
                 pose.set("scale", p.scale)?;
+                pose.set("scale_x", p.scale_x)?;
+                pose.set("scale_y", p.scale_y)?;
+                pose.set("show", p.show)?;
                 poses.set(part, pose)?;
             }
             Ok(poses)
@@ -120,7 +127,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     gfx.set(
         "drawing",
         lua.create_function(|lua, (spec, options): (Table, Option<Table>)| {
-            lua.create_userdata(LuaDrawing(Arc::new(drawing(&spec, options.as_ref())?)))
+            lua.create_userdata(LuaDrawing(Arc::new(drawing(lua, &spec, options.as_ref())?)))
         })?,
     )?;
     gfx.set(
@@ -198,7 +205,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         "frame",
         lua.create_function(|lua, spec: Table| {
             frame_fields(&spec)?;
-            let items = items(&spec)?;
+            let items = items(lua, &spec)?;
             let frame = Frame::new(
                 need(&spec, "frame", "width")?,
                 need(&spec, "frame", "height")?,
@@ -217,6 +224,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         function gfx.group(t) t._gfx = "group" return t end
         function gfx.instance(t) t._gfx = "instance" return t end
         function gfx.shadow(t) t._gfx = "shadow" return t end
+        function gfx.image(t) t._gfx = "image" return t end
         "#,
     )
     .exec()
@@ -333,7 +341,7 @@ fn path(commands: &Table, owner: &str) -> mlua::Result<Path> {
 /// A drawing module is pure data — paths are command lists, not `gfx.path` handles — so the same
 /// table can be rewritten by an editor or moved into a document without changing shape.
 /// `options.vars` makes a variant: values for some of the drawing's own vars, by name.
-fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
+fn drawing(lua: &Lua, spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
     named_fields(spec, "drawing", &["size", "parts", "vars"])?;
     let mut vars = match spec.get::<Option<Table>>("vars")? {
         Some(t) => Vars::read(&t, "drawing.vars")?,
@@ -363,7 +371,7 @@ fn drawing(spec: &Table, options: Option<&Table>) -> mlua::Result<Drawing> {
             Some(list) => {
                 let mut shapes = Vec::new();
                 for i in 1..=positional_len(&list, &format!("{owner}.shapes"))? {
-                    shapes.extend(shape(list.get(i)?, &vars, &format!("{owner} shape {i}"))?);
+                    shapes.extend(shape(lua, list.get(i)?, &vars, &format!("{owner} shape {i}"))?);
                 }
                 shapes
             }
@@ -1144,10 +1152,27 @@ fn clip(spec: &Table) -> mlua::Result<Clip> {
     }
     parts.sort_by(|a, b| a.0.cmp(&b.0));
     let mut tracks = Vec::new();
+    let mut shows = Vec::new();
     for (part, props) in parts {
         let owner = format!("clip track {part}");
-        named_fields(&props, &owner, &["x", "y", "rot", "scale"])?;
-        let props_by_name = [("x", Prop::X), ("y", Prop::Y), ("rot", Prop::Rot), ("scale", Prop::Scale)];
+        let props_by_name = [
+            ("x", Prop::X),
+            ("y", Prop::Y),
+            ("rot", Prop::Rot),
+            ("scale", Prop::Scale),
+            ("scale_x", Prop::ScaleX),
+            ("scale_y", Prop::ScaleY),
+        ];
+        let known = props_by_name.map(|(name, _)| name);
+        named_fields(&props, &owner, &[&known[..], &["show"]].concat())?;
+        if let Some(list) = props.get::<Option<Table>>("show")? {
+            let owner = format!("{owner}.show");
+            let mut keys = Vec::new();
+            for i in 1..=positional_len(&list, &owner)? {
+                keys.push(show_key(list.get(i)?, &format!("{owner} key {i}"))?);
+            }
+            shows.push(ShowTrack { part: part.clone(), keys });
+        }
         for (name, prop) in props_by_name {
             let Some(list) = props.get::<Option<Table>>(name)? else {
                 continue;
@@ -1161,21 +1186,45 @@ fn clip(spec: &Table) -> mlua::Result<Clip> {
         }
     }
     let looped = spec.get::<Option<bool>>("loop")?.unwrap_or(false);
-    Clip::new(need(spec, "clip", "length")?, looped, tracks).map_err(Error::external)
+    Clip::new(need(spec, "clip", "length")?, looped, tracks)
+        .and_then(|clip| clip.with_shows(shows))
+        .map_err(Error::external)
+}
+
+/// `{time, boolean}`: a show key always steps, so it takes no easing.
+fn show_key(spec: Table, owner: &str) -> mlua::Result<ShowKey> {
+    match positional_len(&spec, owner)? {
+        2 => {}
+        3 => {
+            return Err(Error::runtime(format!(
+                "{owner}: a show key is {{time, boolean}} and always steps, got 3 values"
+            )));
+        }
+        n => {
+            return Err(Error::runtime(format!("{owner}: a show key is {{time, boolean}}, got {n} values")));
+        }
+    }
+    let show = show(spec.get(2)?, owner)?
+        .ok_or_else(|| Error::runtime(format!("{owner}: show must be a boolean, got nil")))?;
+    Ok(ShowKey { time: spec.get(1)?, show })
+}
+
+/// A `show` value: nil is None, a boolean is itself, anything else names its type.
+fn show(value: Value, owner: &str) -> mlua::Result<Option<bool>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::Boolean(b) => Ok(Some(b)),
+        other => Err(Error::runtime(format!(
+            "{owner}: show must be a boolean, got {}",
+            if other.is_number() || other.is_integer() { "number" } else { other.type_name() }
+        ))),
+    }
 }
 
 fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
     let easing = match positional_len(&spec, owner)? {
         2 => Easing::Linear,
-        3 => match spec.get::<String>(3)?.as_str() {
-            "linear" => Easing::Linear,
-            "in_out" => Easing::InOut,
-            other => {
-                return Err(Error::runtime(format!(
-                    "{owner}: unknown easing {other:?}, expected linear or in_out"
-                )));
-            }
-        },
+        3 => easing(spec.get(3)?, owner)?,
         n => {
             return Err(Error::runtime(format!(
                 "{owner} must be {{time, value, easing?}}, got {n} values"
@@ -1183,6 +1232,57 @@ fn key(spec: Table, owner: &str) -> mlua::Result<Key> {
         }
     };
     Ok(Key { time: spec.get(1)?, value: spec.get(2)?, easing })
+}
+
+/// A name, or `{x1, y1, x2, y2}` for CSS `cubic-bezier`.
+fn easing(spec: Value, owner: &str) -> mlua::Result<Easing> {
+    let curve = match spec {
+        Value::String(name) => {
+            return match &*name.to_str()? {
+                "linear" => Ok(Easing::Linear),
+                "in_out" => Ok(Easing::InOut),
+                "step" => Ok(Easing::Step),
+                other => Err(Error::runtime(format!(
+                    "{owner}: unknown easing {other:?}, expected linear, in_out, step or {{x1, y1, x2, y2}}"
+                ))),
+            };
+        }
+        Value::Table(curve) => curve,
+        other => {
+            return Err(Error::runtime(format!(
+                "{owner}: an easing is a name or {{x1, y1, x2, y2}}, got {}",
+                if other.is_number() || other.is_integer() { "number" } else { other.type_name() }
+            )));
+        }
+    };
+    let n = positional_len(&curve, owner)?;
+    if n != 4 {
+        return Err(Error::runtime(format!(
+            "{owner}: a bezier easing is {{x1, y1, x2, y2}}, got {n} values"
+        )));
+    }
+    let mut v = [0.0; 4];
+    for (i, slot) in v.iter_mut().enumerate() {
+        *slot = match curve.get::<Value>(i + 1)? {
+            Value::Number(n) => n,
+            Value::Integer(n) => n as f64,
+            _ => {
+                return Err(Error::runtime(format!(
+                    "{owner}: bezier value {} must be a number",
+                    i + 1
+                )));
+            }
+        };
+    }
+    let [x1, y1, x2, y2] = v;
+    if !(y1.is_finite() && y2.is_finite()) {
+        return Err(Error::runtime(format!("{owner}: bezier y1 and y2 must be finite")));
+    }
+    Easing::bezier(x1, y1, x2, y2).map_err(|_| {
+        Error::runtime(format!(
+            "{owner}: bezier x1 and x2 must be within 0..=1, got {x1} and {x2}"
+        ))
+    })
 }
 
 /// The fields every gradient shares: `stops = { {offset, color}, … }` and `extend`.
@@ -1320,7 +1420,10 @@ fn shadow(spec: &Table, vars: &Vars, owner: &str) -> mlua::Result<Item> {
 
 /// Fill under stroke, sharing one path. Outlines join and cap round unless the stroke names a
 /// style — drawn art by default, an imported SVG's exact strokes when it says so.
-fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
+fn shape(lua: &Lua, spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
+    if spec.contains_key("image")? {
+        return picture_shape(lua, &spec, owner).map(|item| vec![item]);
+    }
     if let Some(s) = spec.get::<Option<Table>>("shadow")? {
         named_fields(&spec, owner, &["shadow"])?;
         let owner = format!("{owner}.shadow");
@@ -1404,6 +1507,55 @@ fn shape(spec: Table, vars: &Vars, owner: &str) -> mlua::Result<Vec<Item>> {
     Ok(items)
 }
 
+/// `{ image = "file.png", src = {x, y, w, h}, transform = {a, b, c, d, e, f} }`: the picture's
+/// `src` at natural size, pixel (u, v) of it at (u, v), then `transform` into the part's space.
+/// The file is named, not a handle, so the drawing stays data.
+fn picture_shape(lua: &Lua, spec: &Table, owner: &str) -> mlua::Result<Item> {
+    if spec.contains_key("path")? {
+        return Err(Error::runtime(format!("{owner}: a shape has image or path, not both")));
+    }
+    named_fields(spec, owner, &["image", "src", "transform"])?;
+    let path = match spec.get::<Value>("image")? {
+        Value::String(s) => s.to_str()?.to_string(),
+        other => {
+            let what = if other.is_number() || other.is_integer() { "number" } else { other.type_name() };
+            return Err(Error::runtime(format!("{owner}.image must be a file name, got {what}")));
+        }
+    };
+    let at = |field: &str, e: String| Error::runtime(format!("{owner}.{field}: {e}"));
+    let texture = texture::picture_file(lua, &path).map_err(|e| at("image", e))?;
+    let src = picture_src(spec, owner)?;
+    let picture = texture::picture(lua, &path.into(), &texture, src).map_err(|e| at("src", e))?;
+    let place = transform(spec).map_err(|e| Error::runtime(format!("{owner}: {}", said(&e))))?;
+    Item::image(picture, place).map_err(|e| Error::runtime(format!("{owner}: {e}")))
+}
+
+/// A runtime error's own words, without mlua's "runtime error: " in front, to prefix an owner.
+fn said(e: &Error) -> String {
+    match e {
+        Error::RuntimeError(m) => m.clone(),
+        e => e.to_string(),
+    }
+}
+
+/// An optional `src = {x, y, w, h}` in whole pixels.
+fn picture_src(spec: &Table, owner: &str) -> mlua::Result<Option<[u32; 4]>> {
+    let Some(t) = maybe_table(spec, owner, "src")? else { return Ok(None) };
+    let wrong = || Error::runtime(format!("{owner}.src must be {{x, y, w, h}} in whole pixels"));
+    if positional_len(&t, &format!("{owner}.src"))? != 4 {
+        return Err(wrong());
+    }
+    let mut src = [0u32; 4];
+    for (i, slot) in src.iter_mut().enumerate() {
+        *slot = match t.get::<Value>(i + 1)? {
+            Value::Integer(n) => u32::try_from(n).map_err(|_| wrong())?,
+            Value::Number(n) if n.fract() == 0.0 && (0.0..=u32::MAX as f64).contains(&n) => n as u32,
+            _ => return Err(wrong()),
+        };
+    }
+    Ok(Some(src))
+}
+
 fn command(command: Table, index: usize) -> mlua::Result<PathEl> {
     let len = positional_len(&command, &format!("path command {index}"))?;
     let name = command.get::<String>(1)?;
@@ -1436,13 +1588,13 @@ fn command(command: Table, index: usize) -> mlua::Result<PathEl> {
     })
 }
 
-fn items(table: &Table) -> mlua::Result<Vec<Item>> {
+fn items(lua: &Lua, table: &Table) -> mlua::Result<Vec<Item>> {
     (1..=table.raw_len())
-        .map(|index| item(table.get(index)?, index))
+        .map(|index| item(lua, table.get(index)?, index))
         .collect()
 }
 
-fn item(spec: Table, index: usize) -> mlua::Result<Item> {
+fn item(lua: &Lua, spec: Table, index: usize) -> mlua::Result<Item> {
     let kind = spec.get::<String>("_gfx")?;
     match kind.as_str() {
         "fill" => {
@@ -1487,7 +1639,7 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
         }
         "group" => {
             item_fields(&spec, "group", &["_gfx", "id", "transform"])?;
-            let group = Item::group(transform(&spec)?, items(&spec)?).map_err(Error::external)?;
+            let group = Item::group(transform(&spec)?, items(lua, &spec)?).map_err(Error::external)?;
             named(&spec, group)
         }
         "instance" => {
@@ -1506,6 +1658,18 @@ fn item(spec: Table, index: usize) -> mlua::Result<Item> {
             let fields = ["_gfx", "id", "rect", "radius", "blur", "color"];
             named_fields(&spec, "shadow", &fields)?;
             named(&spec, shadow(&spec, &Vars::default(), "shadow")?)
+        }
+        // A `src` region is copied when the frame is built: build frames once, not per view.
+        "image" => {
+            named_fields(&spec, "image", &["_gfx", "id", "texture", "src", "transform"])?;
+            let (texture, name) = need_gfx(&spec, "image", "texture", "a gfx texture", |t: &texture::LuaTexture| {
+                (t.0.clone(), t.1.clone())
+            })?;
+            let src = picture_src(&spec, "image")?;
+            let picture = texture::picture(lua, &name, &texture, src)
+                .map_err(|e| Error::runtime(format!("image.src: {e}")))?;
+            let place = transform(&spec).map_err(|e| Error::runtime(format!("image: {}", said(&e))))?;
+            named(&spec, Item::image(picture, place).map_err(|e| Error::runtime(format!("image: {e}")))?)
         }
         _ => Err(Error::runtime(format!(
             "Frame item {index}: unknown kind {kind:?}"

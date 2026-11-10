@@ -4,6 +4,7 @@ use runtime::HoverPhase;
 use std::rc::Rc;
 
 mod camera;
+mod characters;
 mod host;
 mod entry;
 mod limits;
@@ -39,6 +40,56 @@ fn own(name: &str) -> DocKey {
 
 fn noop_wake() -> Wake {
     std::sync::Arc::new(|| {})
+}
+
+/// An 8-bit RGBA PNG of `px(x, y)`.
+pub(crate) fn png(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    let data: Vec<u8> = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).flat_map(|(x, y)| px(x, y)).collect();
+    let mut w = e.write_header().unwrap();
+    w.write_image_data(&data).unwrap();
+    w.finish().unwrap();
+    out
+}
+
+/// S-C3 / S-C5's app, `demo_apps/clip_picture`, opened with the pictures its smoke writes: the
+/// turned quadrant and the prop reach the element tree with the dump's pictures.
+#[test]
+fn the_clip_picture_demo_loads_its_pictures() {
+    let quads = png(64, 64, |x, y| match (x >= 32, y >= 32) {
+        (false, false) => [255, 0, 0, 255],
+        (true, false) => [0, 255, 0, 255],
+        (false, true) => [0, 0, 255, 255],
+        (true, true) => [255, 255, 0, 255],
+    });
+    let blobs: Rc<RefCell<HashMap<String, Vec<u8>>>> = Rc::default();
+    let store = |bytes: &[u8]| {
+        let id = format!("blob{}", blobs.borrow().len());
+        blobs.borrow_mut().insert(id.clone(), bytes.to_vec());
+        Ok(id)
+    };
+    let src = LoroDoc::new();
+    let main = include_str!("../../demo_apps/clip_picture/main.lua");
+    let t = src.get_map("files").insert_container("main.lua", LoroText::new()).unwrap();
+    t.insert(0, main).unwrap();
+    src.commit();
+    bind_binary_file(&src, "pics/quads.png", &quads, store).unwrap();
+    bind_binary_file(&src, "pics/crate.png", &png(40, 24, |_, _| [0xb0, 0x70, 0x30, 255]), store).unwrap();
+    let held = blobs.clone();
+    let files: Files = Rc::new(move |blob| Ok(held.borrow().get(blob).cloned()));
+    let app = LuaApp::open_with_files(src, Rc::new(|_| Ok(None)), files, noop_wake(), identity()).unwrap();
+    let info = app.view().info();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    let pictures = |at: usize| -> Vec<(String, [u32; 4], usize)> {
+        let pictures = &info.children[at].pictures;
+        pictures.iter().map(|p| (p.name().to_string(), p.src(), p.copied_bytes())).collect()
+    };
+    assert_eq!(info.children[0].id.as_deref(), Some("turned"));
+    assert_eq!(pictures(0), [("pics/quads.png".to_string(), [32, 0, 32, 32], 4096)]);
+    assert_eq!(pictures(1), [("pics/crate.png".to_string(), [0, 0, 40, 24], 0)]);
 }
 
 #[test]
@@ -482,6 +533,55 @@ fn a_posed_drawing_is_an_ordinary_frame_named_by_part() {
     let mut handlers = Handlers::new();
     let mut ctx = Ctx::new(&mut handlers, identity());
     assert_eq!(walk(node, &mut ctx).unwrap().info().kind, "frame");
+}
+
+/// L-C1 / L-C2 (step 2): `show` in a pose and a clip track, strictly; `clip:at` reads it back;
+/// ids need not be identifiers.
+#[test]
+fn show_tracks_and_poses_are_strict_and_read_back() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let clip = |body: &str| format!("return gfx.clip({{ length = 1, tracks = {{ [\"slot:sword\"] = {{ show = {body} }} }} }})");
+    let cases = [
+        (clip("{ {0, true}, {0.5, 1} }"), "clip track slot:sword.show key 2: show must be a boolean, got number"),
+        (clip("{ {0, true}, {0.5, 'no'} }"), "clip track slot:sword.show key 2: show must be a boolean, got string"),
+        (clip("{ {0, true}, {0.5, false, 'step'} }"), "clip track slot:sword.show key 2: a show key is {time, boolean} and always steps, got 3 values"),
+        (clip("{ {0, true}, {0.5, false, 'linear'} }"), "clip track slot:sword.show key 2: a show key is {time, boolean} and always steps, got 3 values"),
+        (clip("{ {0, true}, {0.5} }"), "clip track slot:sword.show key 2: a show key is {time, boolean}, got 1 values"),
+        (clip("{}"), "show track slot:sword has no keys"),
+        (clip("{ {0.5, true}, {0.2, false} }"), "show track slot:sword has a key outside 0..=length or out of order"),
+        (format!("{HERO} hero:pose({{ body = {{ show = 0 }} }})"), "pose: show must be a boolean, got number"),
+        (format!("{HERO} hero:pose({{ body = {{ show = 'false' }} }})"), "pose: show must be a boolean, got string"),
+    ];
+    for (source, wanted) in cases {
+        let err = lua.load(&source).eval::<Value>().unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+
+    let seen: String = lua
+        .load(&format!(
+            r##"{HERO}
+            local c = gfx.clip({{ length = 1, tracks = {{
+                ["slot:sword"] = {{ show = {{ {{0.2, false}}, {{0.4, true}} }} }},
+                ["hoof-back"] = {{ x = {{ {{0, 0}}, {{1, 10}} }}, show = {{ {{0, true}}, {{0.6, false}} }} }},
+            }} }})
+            local function say(t)
+                local p = c:at(t)
+                return tostring(p["slot:sword"].show) .. "/" .. tostring(p["hoof-back"].show)
+            end
+            return table.concat({{ say(0), say(0.3), say(0.5), say(0.7) }}, " ")
+            "##
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(seen, "false/true false/true true/true true/false");
+
+    let ids = |source: &str| -> Vec<String> {
+        let frame: mlua::AnyUserData = lua.load(source).eval().unwrap();
+        let frame = frame.borrow::<gfx::LuaFrame>().unwrap();
+        frame.0.items().iter().map(|i| i.id().unwrap().to_string()).collect()
+    };
+    assert_eq!(ids(&format!("{HERO} return hero:pose({{ body = {{ show = false }} }})")), ["leg"], "the hidden body's child is still drawn");
+    assert_eq!(ids(&format!("{HERO} return hero:pose({{ body = {{ show = true }} }})")), ["leg", "body"]);
 }
 
 /// Probe for docs/design/assets.md: a drawing stored in a CRDT doc, read back through the mirror,
@@ -1361,6 +1461,49 @@ fn a_clip_is_checked_strictly() {
     let ticking = room("on_frame = function() end,").replace("CLIP", "slide");
     let err = walk_world(&lua, &worlds, &ticking).unwrap_err();
     assert!(err.to_string().contains("runs its own frame clock"), "{err}");
+}
+
+/// L-C1 (step 1): the two scales and the two new easings, strictly; errors name the part, the
+/// track and the key.
+#[test]
+fn scale_tracks_and_new_easings_are_checked_strictly() {
+    let (lua, _) = sandboxed_vm().unwrap();
+    let clip = |keys: &str| format!("return gfx.clip({{ length = 1, tracks = {{ arm = {{ scale_y = {{ {{0, 1}}, {keys} }} }} }} }})");
+    let cases = [
+        (clip("{1, 2, {0.1, 0.2, 0.3}}"), "clip track arm.scale_y key 2: a bezier easing is {x1, y1, x2, y2}, got 3 values"),
+        (clip("{1, 2, {0.1, 0.2, 0.3, 0.4, 0.5}}"), "clip track arm.scale_y key 2: a bezier easing is {x1, y1, x2, y2}, got 5 values"),
+        (clip("{1, 2, {1.5, 0, 0.5, 1}}"), "clip track arm.scale_y key 2: bezier x1 and x2 must be within 0..=1, got 1.5 and 0.5"),
+        (clip("{1, 2, {0.5, 0, -0.1, 1}}"), "clip track arm.scale_y key 2: bezier x1 and x2 must be within 0..=1, got 0.5 and -0.1"),
+        (clip("{1, 2, {0.5, 'up', 0.5, 1}}"), "clip track arm.scale_y key 2: bezier value 2 must be a number"),
+        (clip("{1, 2, {x1 = 0.5}}"), "clip track arm.scale_y key 2: named or sparse fields are not allowed"),
+        (clip("{1, 2, 'steps'}"), "clip track arm.scale_y key 2: unknown easing \"steps\", expected linear, in_out, step or {x1, y1, x2, y2}"),
+        (clip("{1, 2, 7}"), "clip track arm.scale_y key 2: an easing is a name or {x1, y1, x2, y2}, got number"),
+        ("return gfx.clip({ length = 1, tracks = { arm = { scale_z = {} } } })".into(), "clip track arm: unknown field scale_z"),
+        (format!("{HERO} hero:pose({{ body = {{ scale_z = 2 }} }})"), "pose: unknown field scale_z"),
+    ];
+    for (source, wanted) in cases {
+        let err = lua.load(&source).eval::<Value>().unwrap_err().to_string();
+        assert!(err.contains(wanted), "wanted {wanted:?}, got {err}");
+    }
+
+    let seen: String = lua
+        .load(&format!(
+            r##"{HERO}
+            local c = gfx.clip({{ length = 1, tracks = {{ body = {{
+                scale_x = {{ {{0, 1}}, {{0.5, 3, "step"}}, {{1, 5, {{0.42, 0, 0.58, 1}}}} }},
+                scale_y = {{ {{0, 1}}, {{1, 0.5}} }} }} }} }})
+            hero:pose({{ body = {{ scale_x = 2, scale_y = 0.5, scale = 1 }} }})
+            hero:pose(c:at(0.75))
+            local function say(t)
+                local p = c:at(t).body
+                return string.format("%g,%g,%g", p.scale_x, p.scale_y, p.scale)
+            end
+            return table.concat({{ say(0.25), say(0.5), say(0.75), say(1) }}, " ")
+            "##
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(seen, "1,0.875,1 3,0.75,1 4,0.625,1 5,0.5,1");
 }
 
 /// A missing required field used to surface as mlua's raw "error converting Lua nil to f64",

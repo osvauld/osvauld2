@@ -21,6 +21,9 @@ use super::texture::{LuaTexture, TextureBudget};
 /// (globals are frozen once the VM is sandboxed); Lua never sees the bytes.
 pub type ReadFile = Rc<dyn Fn(&str) -> Result<Vec<u8>, String>>;
 pub(crate) struct Reader(pub ReadFile);
+/// The paths of the app's binary files, for an error that says what is there.
+pub type ListFiles = Rc<dyn Fn() -> Vec<String>>;
+pub(crate) struct Listing(pub ListFiles);
 
 const MAX_NODES: usize = 4096;
 const MAX_PRIMITIVES: usize = 128;
@@ -387,7 +390,7 @@ fn seq(lua: &Lua, v: &[f32]) -> mlua::Result<Table> {
     lua.create_sequence_from(v.iter().copied())
 }
 
-fn to_lua(lua: &Lua, glb: Glb) -> mlua::Result<Table> {
+fn to_lua(lua: &Lua, glb: Glb, path: &str) -> mlua::Result<Table> {
     let sizes: Vec<(usize, usize)> = glb
         .meshes
         .iter()
@@ -439,7 +442,11 @@ fn to_lua(lua: &Lua, glb: Glb) -> mlua::Result<Table> {
     // One handle per image, shared by every material that uses it.
     let texture_handles = textures
         .into_iter()
-        .map(|t| t.map(|t| lua.create_userdata(LuaTexture(t))).transpose())
+        .enumerate()
+        .map(|(i, t)| {
+            t.map(|t| lua.create_userdata(LuaTexture(t, format!("{path} image {}", i + 1).into())))
+                .transpose()
+        })
         .collect::<mlua::Result<Vec<_>>>()?;
 
     let model = lua.create_table()?;
@@ -501,13 +508,17 @@ pub(super) fn install(lua: &Lua, gfx: &Table) -> mlua::Result<()> {
                 .ok_or_else(|| Error::runtime("this host stores no binary files"))?;
             let bytes = read(&path).map_err(Error::runtime)?;
             let glb = parse(&bytes).map_err(|e| Error::runtime(format!("{path}: {e}")))?;
-            to_lua(lua, glb).map_err(|e| Error::runtime(format!("{path}: {e}")))
+            to_lua(lua, glb, &path).map_err(|e| Error::runtime(format!("{path}: {e}")))
         })?,
     )
 }
 
 pub(crate) fn set_reader(lua: &Lua, read: ReadFile) {
     lua.set_app_data(Reader(read));
+}
+
+pub(crate) fn set_listing(lua: &Lua, list: ListFiles) {
+    lua.set_app_data(Listing(list));
 }
 
 #[cfg(test)]

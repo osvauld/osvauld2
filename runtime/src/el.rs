@@ -1117,6 +1117,7 @@ impl<M> El<M> {
                 .scene3d
                 .as_ref()
                 .map(|scene| scene.inspect()),
+            pictures: self.appearance.frame.as_ref().map_or_else(Vec::new, |f| f.pictures()),
             handlers,
             children,
         }
@@ -1236,6 +1237,8 @@ pub struct ElInfo {
     pub id: Option<String>,
     pub text: Option<String>,
     pub scene3d: Option<crate::scene3d::SceneInspection>,
+    /// A frame's pictures, each once.
+    pub pictures: Vec<Arc<crate::frame::Picture>>,
     pub handlers: Vec<&'static str>,
     pub children: Vec<ElInfo>,
 }

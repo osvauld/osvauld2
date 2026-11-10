@@ -737,6 +737,8 @@ impl<M: Clone + 'static> LuaApp<M> {
         let binary_revision = Rc::new(binary_files::Revision::new(&src.doc, files.clone()));
         let from = binary_revision.clone();
         gfx::glb::set_reader(&vm, Rc::new(move |path| from.read(path)));
+        let from = binary_revision.clone();
+        gfx::glb::set_listing(&vm, Rc::new(move || from.paths()));
         let host_context = host::HostContext::new(budget.clone());
         let net_handlers = net::Handlers::default();
         let matches = net_match::Matches::default();

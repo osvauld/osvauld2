@@ -1,0 +1,796 @@
+{
+ "input": "Character 1 - Paka.json",
+ "spine": "3.8.75",
+ "skin": "classic",
+ "atlas_page": "Character 1 - Paka1.png",
+ "image": "characters/paka/atlas.png",
+ "scale": 0.2,
+ "fps": 60,
+ "origin": [
+  197.504,
+  239.0
+ ],
+ "size": [
+  396,
+  239
+ ],
+ "reach": {
+  "attack": [
+   104.3,
+   -75.4,
+   433.0,
+   303.0
+  ],
+  "attack_no_weapon": [
+   104.3,
+   -16.1,
+   306.9,
+   243.2
+  ],
+  "blink (need track combination)": [
+   128.9,
+   0.0,
+   395.2,
+   242.2
+  ],
+  "defeat": [
+   -206.5,
+   -52.3,
+   265.4,
+   331.4
+  ],
+  "defeat_no_weapon": [
+   -206.5,
+   -52.3,
+   265.4,
+   308.8
+  ],
+  "defeat_weapon": [
+   -328.4,
+   -213.7,
+   395.2,
+   308.8
+  ],
+  "fall_swim": [
+   94.5,
+   -5.5,
+   299.2,
+   246.8
+  ],
+  "fall_swim_no_weapon": [
+   94.5,
+   -5.5,
+   299.2,
+   246.8
+  ],
+  "fall_swim_weapon": [
+   94.5,
+   -5.5,
+   393.6,
+   246.8
+  ],
+  "idle": [
+   112.8,
+   -6.2,
+   265.4,
+   242.2
+  ],
+  "idle_no_weapon": [
+   128.9,
+   -6.2,
+   265.4,
+   242.2
+  ],
+  "idle_weapon": [
+   128.9,
+   -6.2,
+   398.7,
+   262.0
+  ],
+  "interact": [
+   112.8,
+   -6.2,
+   285.7,
+   242.2
+  ],
+  "interact_no_weapon": [
+   128.9,
+   -6.2,
+   285.7,
+   242.2
+  ],
+  "jump": [
+   104.3,
+   -37.8,
+   287.7,
+   246.4
+  ],
+  "jump_no_weapon": [
+   128.1,
+   -37.8,
+   287.7,
+   246.4
+  ],
+  "jump_weapon": [
+   128.1,
+   -37.8,
+   407.3,
+   287.2
+  ],
+  "run": [
+   105.5,
+   -14.8,
+   266.4,
+   245.3
+  ],
+  "run_no_weapon": [
+   105.5,
+   -14.8,
+   266.4,
+   245.3
+  ],
+  "run_weapon": [
+   105.5,
+   -14.8,
+   397.0,
+   289.4
+  ],
+  "talk": [
+   112.8,
+   -6.2,
+   265.8,
+   242.2
+  ],
+  "talk_no_weapon": [
+   125.5,
+   -6.2,
+   265.8,
+   242.2
+  ],
+  "walk": [
+   107.8,
+   -8.4,
+   265.5,
+   242.3
+  ],
+  "walk_no_weapon": [
+   126.1,
+   -8.4,
+   265.5,
+   242.3
+  ],
+  "walk_weapon": [
+   126.1,
+   -8.4,
+   399.5,
+   281.5
+  ]
+ },
+ "slot_parts": {
+  "sword": "slot:sword",
+  "palm_back": "slot:palm_back",
+  "sword_forward": "slot:sword_forward",
+  "arm_back": "slot:arm_back",
+  "shoulder_back": "slot:shoulder_back",
+  "head_neck": "slot:head_neck",
+  "hoof-back": "slot:hoof-back",
+  "leg_back": "slot:leg_back",
+  "hoof_front": "slot:hoof_front",
+  "leg_front": "slot:leg_front",
+  "body": "slot:body",
+  "tie": "slot:tie",
+  "amulet": "slot:amulet",
+  "palm_front": "slot:palm_front",
+  "arm_front": "slot:arm_front",
+  "head_ear_front": "slot:head_ear_front",
+  "head_ear_back": "slot:head_ear_back",
+  "head_main": "slot:head_main",
+  "dark_eye_front": "slot:dark_eye_front",
+  "dark_eye_back": "slot:dark_eye_back",
+  "head_ciolca": "slot:head_ciolca",
+  "eye_white_front": "slot:eye_white_front",
+  "eye_front": "slot:eye_front",
+  "head_smile": "slot:head_smile",
+  "head_nose": "slot:head_nose",
+  "eye_white_back": "slot:eye_white_back",
+  "eye_back": "slot:eye_back",
+  "shoulder_front": "slot:shoulder_front",
+  "path_death": "slot:path_death",
+  "blink_front": "slot:blink_front",
+  "blink_back": "slot:blink_back"
+ },
+ "drawn_on": {
+  "sword": "sword",
+  "palm_back": "palm_back3",
+  "sword_forward": "sword_forward",
+  "arm_back": "arm_back",
+  "shoulder_back": "shoulder_back",
+  "head_neck": "head_neck",
+  "hoof-back": "hoof-back",
+  "leg_back": "leg_back",
+  "hoof_front": "hoof_front",
+  "leg_front": "leg_front",
+  "body": "body4",
+  "tie": "tie",
+  "amulet": "amulet",
+  "palm_front": "palm_front3",
+  "arm_front": "arm_front",
+  "head_ear_front": "head_ear_front",
+  "head_ear_back": "head_ear_back",
+  "head_main": "head_main",
+  "dark_eye_front": "dark_eye_front",
+  "dark_eye_back": "dark_eye_back",
+  "head_ciolca": "head_ciolca",
+  "eye_white_front": "eye_white_front",
+  "eye_front": "eye_front2",
+  "head_smile": "head_smile2",
+  "head_nose": "head_smile",
+  "eye_white_back": "eye_white_back2",
+  "eye_back": "eye_back",
+  "shoulder_front": "shoulder_front",
+  "blink_front": "blink_front",
+  "blink_back": "blink_back"
+ },
+ "reparented": [
+  {
+   "slot": "palm_back",
+   "slot_bone": "palm_back4",
+   "drawn_on": "palm_back3"
+  },
+  {
+   "slot": "palm_front",
+   "slot_bone": "palm_front4",
+   "drawn_on": "palm_front3"
+  },
+  {
+   "slot": "head_smile",
+   "slot_bone": "head_smile3",
+   "drawn_on": "head_smile2"
+  },
+  {
+   "slot": "head_nose",
+   "slot_bone": "head_nose",
+   "drawn_on": "head_smile"
+  }
+ ],
+ "empty_slots": [
+  "path_death"
+ ],
+ "baked": [
+  "leg_back",
+  "hoof-back",
+  "leg_front",
+  "hoof_front",
+  "head_ciolca",
+  "head_ear_back",
+  "head_ear_front",
+  "head_nose",
+  "eyes_control",
+  "eye_white_back",
+  "eye_front",
+  "head_control_back"
+ ],
+ "baked_by": {
+  "leg_back": [
+   "target"
+  ],
+  "hoof-back": [
+   "target"
+  ],
+  "leg_front": [
+   "target2"
+  ],
+  "hoof_front": [
+   "target2"
+  ],
+  "head_ciolca": [
+   "head_control_hair"
+  ],
+  "head_ear_back": [
+   "head_control_ear_back"
+  ],
+  "head_ear_front": [
+   "head_control_ear_front"
+  ],
+  "head_nose": [
+   "head_control_nose"
+  ],
+  "eyes_control": [
+   "head_control_eyes"
+  ],
+  "eye_white_back": [
+   "head_control_eye_back"
+  ],
+  "eye_front": [
+   "head_control_eye_front"
+  ],
+  "head_control_back": [
+   "head_control"
+  ]
+ },
+ "baked_max_shear_degrees": 0.038914,
+ "replaced_keys": {
+  "attack": {
+   "leg_back": 5,
+   "leg_front": 5,
+   "head_ear_back": 5,
+   "head_ear_front": 6,
+   "eye_front": 1,
+   "head_control_back": 1
+  },
+  "attack_no_weapon": {
+   "leg_back": 5,
+   "leg_front": 5,
+   "head_ear_back": 5,
+   "head_ear_front": 6,
+   "eye_front": 1,
+   "head_control_back": 1
+  },
+  "defeat": {
+   "leg_back": 12,
+   "leg_front": 11,
+   "head_ear_back": 7,
+   "head_ear_front": 6
+  },
+  "defeat_no_weapon": {
+   "leg_back": 12,
+   "leg_front": 11,
+   "head_ear_back": 7,
+   "head_ear_front": 6
+  },
+  "defeat_weapon": {
+   "leg_back": 12,
+   "leg_front": 11,
+   "head_ear_back": 7,
+   "head_ear_front": 6
+  },
+  "fall_swim": {
+   "leg_back": 4,
+   "leg_front": 4,
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "fall_swim_no_weapon": {
+   "leg_back": 4,
+   "leg_front": 4,
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "fall_swim_weapon": {
+   "leg_back": 4,
+   "leg_front": 4,
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "idle": {
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "idle_no_weapon": {
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "idle_weapon": {
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "interact": {
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "interact_no_weapon": {
+   "head_ear_back": 4,
+   "head_ear_front": 4
+  },
+  "jump": {
+   "leg_back": 3,
+   "leg_front": 3,
+   "head_ear_back": 3,
+   "head_ear_front": 3
+  },
+  "jump_no_weapon": {
+   "leg_back": 3,
+   "leg_front": 3,
+   "head_ear_back": 3,
+   "head_ear_front": 3
+  },
+  "jump_weapon": {
+   "leg_back": 3,
+   "leg_front": 3,
+   "head_ear_back": 3,
+   "head_ear_front": 3
+  },
+  "run": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 7,
+   "head_ear_front": 7
+  },
+  "run_no_weapon": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 7,
+   "head_ear_front": 7
+  },
+  "run_weapon": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 7,
+   "head_ear_front": 7
+  },
+  "talk": {
+   "head_ciolca": 3,
+   "head_ear_back": 3,
+   "head_ear_front": 3
+  },
+  "talk_no_weapon": {
+   "head_ciolca": 3,
+   "head_ear_back": 3,
+   "head_ear_front": 3
+  },
+  "walk": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 6,
+   "head_ear_front": 6
+  },
+  "walk_no_weapon": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 6,
+   "head_ear_front": 6
+  },
+  "walk_weapon": {
+   "leg_back": 6,
+   "hoof-back": 1,
+   "leg_front": 6,
+   "hoof_front": 1,
+   "head_ear_back": 6,
+   "head_ear_front": 6
+  }
+ },
+ "rigid": [
+  {
+   "slot": "palm_back",
+   "attachment": "palm_back",
+   "bone": "palm_back3",
+   "weights": {
+    "palm_back3": 0.4265,
+    "palm_back4": 0.3689,
+    "palm_back": 0.2046
+   },
+   "fit_error": 0.0015,
+   "max_deviation": {
+    "distance": 0.003,
+    "clip": "defeat",
+    "time": 0.6333
+   }
+  },
+  {
+   "slot": "tie",
+   "attachment": "tie",
+   "bone": "tie",
+   "weights": {
+    "tie": 0.4027,
+    "tie3": 0.3666,
+    "tie2": 0.2307
+   },
+   "fit_error": 0.0011,
+   "max_deviation": {
+    "distance": 19.911,
+    "clip": "fall_swim",
+    "time": 0.1667
+   }
+  },
+  {
+   "slot": "palm_front",
+   "attachment": "palm_front",
+   "bone": "palm_front3",
+   "weights": {
+    "palm_front3": 0.3983,
+    "palm_front4": 0.3955,
+    "palm_front": 0.2062
+   },
+   "fit_error": 0.0014,
+   "max_deviation": {
+    "distance": 0.001,
+    "clip": "jump",
+    "time": 0.127
+   }
+  },
+  {
+   "slot": "head_ear_front",
+   "attachment": "head_ear_front",
+   "bone": "head_ear_front",
+   "weights": {
+    "head_ear_front": 0.3021,
+    "head_ear_front3": 0.2998,
+    "head_ear_front2": 0.2051,
+    "head_ear_front4": 0.193
+   },
+   "fit_error": 0.003,
+   "max_deviation": {
+    "distance": 17.201,
+    "clip": "defeat",
+    "time": 0.3667
+   }
+  },
+  {
+   "slot": "head_ear_back",
+   "attachment": "head_ear_back",
+   "bone": "head_ear_back",
+   "weights": {
+    "head_ear_back": 0.3488,
+    "head_ear_back4": 0.335,
+    "head_ear_back2": 0.1685,
+    "head_ear_back3": 0.1478
+   },
+   "fit_error": 0.002,
+   "max_deviation": {
+    "distance": 16.635,
+    "clip": "defeat",
+    "time": 0.1333
+   }
+  },
+  {
+   "slot": "head_ciolca",
+   "attachment": "head_ciolca",
+   "bone": "head_ciolca",
+   "weights": {
+    "head_ciolca": 0.5743,
+    "head_ciolca4": 0.1793,
+    "head_ciolca3": 0.159,
+    "head_ciolca2": 0.0875
+   },
+   "fit_error": 1.4267,
+   "max_deviation": {
+    "distance": 18.417,
+    "clip": "attack",
+    "time": 0.3492
+   }
+  },
+  {
+   "slot": "head_smile",
+   "attachment": "head_smile",
+   "bone": "head_smile2",
+   "weights": {
+    "head_smile2": 0.5449,
+    "head_smile3": 0.2781,
+    "head_smile": 0.177
+   },
+   "fit_error": 0.001,
+   "max_deviation": {
+    "distance": 0.001,
+    "clip": "defeat",
+    "time": 0.4
+   }
+  }
+ ],
+ "exact_fit_error": {
+  "sword": 0.001572,
+  "sword_forward": 0.001482,
+  "arm_back": 0.00159,
+  "shoulder_back": 0.00094,
+  "head_neck": 0.001123,
+  "hoof-back": 0.001263,
+  "leg_back": 0.001072,
+  "hoof_front": 0.001101,
+  "leg_front": 0.001631,
+  "body": 0.001653,
+  "amulet": 0.001427,
+  "arm_front": 0.001355,
+  "head_main": 0.001456,
+  "dark_eye_front": 0.001246,
+  "dark_eye_back": 0.001312,
+  "eye_white_front": 0.001156,
+  "eye_front": 0.0,
+  "head_nose": 0.001032,
+  "eye_white_back": 0.0,
+  "eye_back": 0.000636,
+  "shoulder_front": 0.001604,
+  "blink_front": 0.000997,
+  "blink_back": 0.00114
+ },
+ "curve_runtime_gap": 1.0698,
+ "clips": [
+  {
+   "name": "attack",
+   "file": "attack",
+   "length": 0.6667,
+   "loop": false,
+   "keys": 1521
+  },
+  {
+   "name": "attack_no_weapon",
+   "file": "attack_no_weapon",
+   "length": 0.6667,
+   "loop": false,
+   "keys": 1513
+  },
+  {
+   "name": "blink (need track combination)",
+   "file": "blink_need_track_combination",
+   "length": 2.0,
+   "loop": false,
+   "keys": 175
+  },
+  {
+   "name": "defeat",
+   "file": "defeat",
+   "length": 1.5,
+   "loop": false,
+   "keys": 3069
+  },
+  {
+   "name": "defeat_no_weapon",
+   "file": "defeat_no_weapon",
+   "length": 1.5,
+   "loop": false,
+   "keys": 3063
+  },
+  {
+   "name": "defeat_weapon",
+   "file": "defeat_weapon",
+   "length": 1.5,
+   "loop": false,
+   "keys": 3062
+  },
+  {
+   "name": "fall_swim",
+   "file": "fall_swim",
+   "length": 1.0,
+   "loop": true,
+   "keys": 2074
+  },
+  {
+   "name": "fall_swim_no_weapon",
+   "file": "fall_swim_no_weapon",
+   "length": 1.0,
+   "loop": true,
+   "keys": 2074
+  },
+  {
+   "name": "fall_swim_weapon",
+   "file": "fall_swim_weapon",
+   "length": 1.0,
+   "loop": true,
+   "keys": 2075
+  },
+  {
+   "name": "idle",
+   "file": "idle",
+   "length": 2.0,
+   "loop": true,
+   "keys": 2618
+  },
+  {
+   "name": "idle_no_weapon",
+   "file": "idle_no_weapon",
+   "length": 2.0,
+   "loop": true,
+   "keys": 2619
+  },
+  {
+   "name": "idle_weapon",
+   "file": "idle_weapon",
+   "length": 2.0,
+   "loop": true,
+   "keys": 2618
+  },
+  {
+   "name": "interact",
+   "file": "interact",
+   "length": 3.0,
+   "loop": false,
+   "keys": 3817
+  },
+  {
+   "name": "interact_no_weapon",
+   "file": "interact_no_weapon",
+   "length": 3.0,
+   "loop": false,
+   "keys": 3818
+  },
+  {
+   "name": "jump",
+   "file": "jump",
+   "length": 0.6667,
+   "loop": false,
+   "keys": 1465
+  },
+  {
+   "name": "jump_no_weapon",
+   "file": "jump_no_weapon",
+   "length": 0.6667,
+   "loop": false,
+   "keys": 1466
+  },
+  {
+   "name": "jump_weapon",
+   "file": "jump_weapon",
+   "length": 0.6667,
+   "loop": false,
+   "keys": 1465
+  },
+  {
+   "name": "run",
+   "file": "run",
+   "length": 0.8,
+   "loop": true,
+   "keys": 1406
+  },
+  {
+   "name": "run_no_weapon",
+   "file": "run_no_weapon",
+   "length": 0.8,
+   "loop": true,
+   "keys": 1410
+  },
+  {
+   "name": "run_weapon",
+   "file": "run_weapon",
+   "length": 0.8,
+   "loop": true,
+   "keys": 1409
+  },
+  {
+   "name": "talk",
+   "file": "talk",
+   "length": 2.0,
+   "loop": true,
+   "keys": 2485
+  },
+  {
+   "name": "talk_no_weapon",
+   "file": "talk_no_weapon",
+   "length": 2.0,
+   "loop": true,
+   "keys": 2486
+  },
+  {
+   "name": "walk",
+   "file": "walk",
+   "length": 1.5,
+   "loop": true,
+   "keys": 2433
+  },
+  {
+   "name": "walk_no_weapon",
+   "file": "walk_no_weapon",
+   "length": 1.5,
+   "loop": true,
+   "keys": 2434
+  },
+  {
+   "name": "walk_weapon",
+   "file": "walk_weapon",
+   "length": 1.5,
+   "loop": true,
+   "keys": 2433
+  }
+ ],
+ "approximations": [
+  "meshes skinned to several bones are drawn rigid on their heaviest bone (see rigid)",
+  "every mesh is drawn as its whole atlas rectangle, not clipped to the mesh hull",
+  "constrained bones are linear between 60 Hz samples",
+  "the engine solves each bezier exactly; Spine's runtime uses 10 straight segments (curve_runtime_gap is the largest bone offset that makes)",
+  "baked bones carry up to 0.0389 degrees of shear, which the engine drops"
+ ],
+ "ignored": [
+  "skeleton hash/images/audio/bounds",
+  "bone colours; bone lengths outside IK",
+  "mesh triangles/edges/hull and width/height",
+  "attachments of other skins",
+  "loop: Spine data does not say; set with --loop"
+ ]
+}

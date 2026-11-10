@@ -10,6 +10,57 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### 2D characters step 5 — our own robots (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
+
+`character_lab` shows Paka beside three generic robots (Scout, Brute, Volt): vector shapes only,
+built by `characters/robot/build.lua` from a palette and a head kind over Paka's own rig data, and
+playing Paka's clip files unchanged. S-C7 in `scripts/smoke_characters.py` (whole smoke green on
+the laptop, S-C4's numbers unchanged) and `app_host` `the_robots_play_pakas_clips_as_vector_shapes`
+(job 2777) pass.
+
+### 2D characters step 4 — Paka plays (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
+
+`demo_apps/character_lab`: the converted Paka (`--scale 0.2`, the pack's frame scale; 25 clips,
+55,008 keys, 1.2 MB of Lua plus a 141 KB atlas) with a clip picker, play/pause, a time readout and
+an exact time field; a list of characters by path, all on one clip name. C-1's engine half
+(`app_host` `the_character_lab_plays_the_converted_paka`, job 2756/2759) loads the rig and all 26
+clip files unchanged and puts parts within 1e-6 of the converter's evaluator. The smokes now run
+on the laptop and `scripts/smoke_characters.py` passes whole: S-C1–S-C3, S-C5 after fixing their
+blind assumptions (handler-less elements aren't in `rects()`; layout stretches leaves), S-C4
+against the pack's 32 frames (IoU 0.971–0.991, mean colour distance 3.4–9.2), S-C6 hot edit.
+
+### 2D characters step 1 — scale and easing (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
+
+A pose and a clip track take `scale_x`/`scale_y` (multiplying `scale`; a child of an unequally
+scaled parent shears), and easing takes `"step"` and a CSS `cubic-bezier` `{x1, y1, x2, y2}`,
+solved with a fixed 60-step bisection of `+ − × ÷` only. Unit tests U-C1–U-C3 and L-C1's step-1
+part pass (LoadTable 2722, 2723, 2725, all on the mac peer). **Not yet run:** the Linux workspace
+check, the shell2 build and so S-C1 (`scripts/smoke_characters.py`, not yet in `SMOKES`) and the
+S-C8 smokes — the nixos worker was offline.
+
+### 2D characters step 2 — the `show` track (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
+
+`Pose.show` (default true) and a boolean, always-stepped `show` track in clips, with
+`clip:at(t).part.show` so a plain `ui.frame` and a world draw the same pose. A hidden part paints
+and hits nothing; its children are still placed and drawn. Unit and Luau tests U-C4, U-C5, L-C1
+(show), L-C2 pass (`cargo test -p world --lib` job 2736, `-p runtime --lib` 2737, `-p app_host --lib`
+2739). **Not run:** the workspace check, the shell2 build and so S-C2 (`scripts/smoke_characters.py`,
+app `demo_apps/clip_show`, not in `SMOKES`) — nixos was offline.
+
+### 2D characters step 3 — pictures in 2D (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
+
+A frame item `Image` (a `runtime::frame::Picture`, hit as its rectangle) drawn with Vello's
+`draw_image`; a drawing shape `{ image = "file.png", src = {x, y, w, h}, transform = {a…f} }` read
+through the binary-file reader, decoded once per VM per file and counted once against the shared
+64-texture / 128 MiB budget; `gfx.image({ texture, src, transform, id })` on a plain frame; the
+dump lists each frame's pictures. All of a picture shares `TextureData`'s level 0 (now a
+`peniko::Blob`); a `src` region is copied into its own image so no neighbour bleeds in. Tests pass
+on the laptop: runtime (`--lib` job 2741, GPU no-bleed pixel test 2746), app_host L-C3, L-C4, the
+failed-reload half, `gfx.image`, a real converted Paka shape and the `clip_picture` demo (2749),
+world (2747). **Not run:** the workspace check, the shell2 build (its dump change is uncompiled)
+and so S-C3/S-C5 (`picture_main` in `scripts/smoke_characters.py`, app `demo_apps/clip_picture`,
+not in `SMOKES`) — nixos was offline.
+
 ### Game branches integrated into dev (2026-11-10; validated)
 
 Jetpack multiplayer, Hillclimb (including the formerly uncommitted SVG, Lua maps and sound
