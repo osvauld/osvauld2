@@ -10,22 +10,27 @@ U.library = require("library").load()
 U.compiled = U.map.compile(require("maps/yard"), U.library, { body = { w = U.tune.body_w, h = U.tune.body_h } })
 U.yard = U.compiled.stage
 
-function U.rules() return U.F.rules({ stage = U.yard, tune = U.tune }) end
+-- `cast` (optional): each fighter's `ctl`, { "human" } by default; a dummy takes no input.
+function U.rules(cast) return U.F.rules({ stage = U.yard, tune = U.tune, cast = cast }) end
 
-function U.fresh()
-	local rules = U.rules()
-	return U.F.new(rules, 1), rules
+function U.fresh(cast)
+	local rules = U.rules(cast)
+	return U.F.new(rules), rules
 end
 
--- A plain input; presses are counts (fighter.lua acts when one grows).
+-- A plain input; presses are counts (fighter.lua acts when one grows). `heavy` is held.
 function U.input(t)
 	t = t or {}
 	return { x = t.x or 0, y = t.y or 0, jump = t.jump or false, jump_n = t.jump_n or 0,
-		down_n = t.down_n or 0, dash_n = t.dash_n or 0, restart_n = t.restart_n or 0 }
+		down_n = t.down_n or 0, dash_n = t.dash_n or 0, restart_n = t.restart_n or 0,
+		light_n = t.light_n or 0, heavy_n = t.heavy_n or 0, dodge_n = t.dodge_n or 0, heavy = t.heavy or false,
+		pct_n = t.pct_n or 0, pct = t.pct or 0 }
 end
 
+-- `input` is fighter 1's, or a list of every fighter's ({ [1] = ..., [2] = ... }) when it has `[1]`.
 function U.step(s, rules, input, n)
-	for _ = 1, n or 1 do U.F.step(s, { input or U.input() }, rules) end
+	local inputs = input and input[1] and input or { input or U.input() }
+	for _ = 1, n or 1 do U.F.step(s, inputs, rules) end
 end
 
 -- Is `v` plain data by net.match's rules? Returns false and why.

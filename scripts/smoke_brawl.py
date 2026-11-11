@@ -43,7 +43,7 @@ RESPAWN = (0, -700)
 RESPAWN_TICKS = 120
 # demo_apps/brawl/maps/yard.lua: the camera's bounds, the body, and the art the dump must list
 CAMERA = (-1500, -1100, 3000, 1800)
-BODY = (80, 200)
+BODY = (60, 150)
 # (maps step 4: the tilemap block's top, caps and walls, the fog and the light hills; the clouds are SVG)
 ART = {"art/background_mountain_1.png", "art/background_mountain_2.png", "art/background_fog_2.png",
        "art/foreground_basic_1.png", "art/foreground_basic_3.png", "art/ground_block_top.png", "art/ground_cap_l.png",
@@ -65,6 +65,7 @@ CLIPS = {"idle": (2.0, True), "run": (0.8, True), "rise": (0.3, False), "apex": 
 BLEND_TICKS = 4
 # the robot drawing's box and its root pivot (the feet): characters/paka/rig.lua
 ROBOT_SIZE, ROBOT_FEET = (396, 239), (198, 239)
+SCALE = 0.75  # Look.SCALE: the robot is drawn at this fraction of its drawing
 
 
 def clip_index(clip, act_t):
@@ -108,6 +109,10 @@ def main():
         item = r.create_item(ws["id"], "Brawl", "app")["id"]
         r.upload_folder(item, ROOT / "demo_apps/brawl")
         r.open_item(item)
+        r.frame(2)
+        # Fighting step 1: the app opens against the training dummy; this smoke is the movement
+        # plan's, one fighter alone (brawl-fighting.md S-F8).
+        r.click(item, "vs:none")
         r.frame(2)
 
         def pictures():
@@ -167,8 +172,8 @@ def main():
             assert abs(ls["x"] - st["x"]) <= abs(st["vx"]) + 1e-9 and abs(ls["y"] - st["y"]) <= abs(st["vy"]) + 1e-9, (label, st, ls)
             rects = {x["id"]: x for x in r.rects()}
             robot, box, corner, k = rects["fighter:robot"], rects["fighter"], rects["script"], ls["k"]
-            want = (corner["x"] + (ls["x"] - ROBOT_FEET[0] - cam["x"]) * k, corner["y"] + (ls["y"] - ls["feet"] - cam["y"]) * k,
-                    ROBOT_SIZE[0] * k, ROBOT_SIZE[1] * k)
+            want = (corner["x"] + (ls["x"] - ROBOT_FEET[0] * SCALE - cam["x"]) * k, corner["y"] + (ls["y"] - ls["feet"] * SCALE - cam["y"]) * k,
+                    ROBOT_SIZE[0] * SCALE * k, ROBOT_SIZE[1] * SCALE * k)
             got = (robot["x"], robot["y"], robot["w"], robot["h"])
             assert all(abs(a - b) <= 1.0 for a, b in zip(got, want)), (label, got, want)
             assert abs(k - SCREEN[0] / cam["w"]) < 1e-9, (label, k, cam)
@@ -176,7 +181,7 @@ def main():
             # (look.lua plants it), the root's pivot in the air.
             planted = st["act"] in ("idle", "run", "turn", "dash", "land")
             assert ls["feet"] == (ls["sole"] if planted else ROBOT_FEET[1]), (label, ls)
-            feet = (robot["x"] + ROBOT_FEET[0] * k, robot["y"] + ls["feet"] * k)
+            feet = (robot["x"] + ROBOT_FEET[0] * SCALE * k, robot["y"] + ls["feet"] * SCALE * k)
             floor = box["y"] + box["h"]
             assert abs(feet[0] - (box["x"] + box["w"] / 2)) <= 1.0 and abs(feet[1] - floor) <= 1.0, (label, feet, box)
             gap = None
@@ -189,7 +194,7 @@ def main():
                     # until a row has none, is within 2 px of the floor line.
                     img = Image(path.read_bytes())
                     assert img.width == SCREEN[0], img.width
-                    cols = [int(robot["x"] + u * k) for u in range(150, 250, 2)]
+                    cols = [int(robot["x"] + u * SCALE * k) for u in range(150, 250, 2)]
 
                     def dark(x, y):
                         rr, g, b = img.at(x, y)
@@ -230,7 +235,7 @@ def main():
                 prev = cam
             for v in rows:
                 robot = {x["id"]: x for x in r.rects()}["fighter:robot"]
-                k = robot["w"] / ROBOT_SIZE[0]
+                k = robot["w"] / ROBOT_SIZE[0]  # already includes SCALE
                 for u in range(102, 295, step):
                     r.move_to(robot["x"] + u * k, robot["y"] + v * k)
                     part = find(r.dump_tree(item), "look:hover")["text"]
@@ -460,6 +465,33 @@ def main():
         # The respawn point is over the top platform: it lands there.
         st = frames(200, until=lambda st: st["act"] == "idle")
         assert st["y"] == TOP_TOP and st["x"] == 0, st
+
+        # --- S-10: no shimmer after a stop. Run a few frames, stop on the platform, let the camera settle
+        # (within 0.5 px it lands on its target): screenshots a few frames apart are the same pixels.
+        key("ArrowRight", "ArrowRight", True)
+        frames(8)
+        key("ArrowRight", "ArrowRight", False)
+        st = frames(30, until=lambda st: st["act"] == "idle")
+        assert st["act"] == "idle" and st["y"] == TOP_TOP, st
+        frames(90)  # past the camera's settle (about 1.4 s from the farthest) and the idle blend
+        # The robot's own breathing animates (a different frame now and then), so the check is on
+        # everything outside its rect and below the drifting clouds (rows < 160), and the rect must not move.
+        shots, boxes = [], []
+        for i in range(3):
+            frames(3)
+            path = SHOTS / f"s10_still{i}.png"
+            r.save_screenshot(item, str(path))
+            shots.append(Image(path.read_bytes()))
+            rb = {x["id"]: x for x in r.rects()}["fighter:robot"]
+            boxes.append((rb["x"], rb["y"], rb["w"], rb["h"]))
+        assert boxes[0] == boxes[1] == boxes[2] and all(float(v).is_integer() for v in boxes[0][:2]), ("S-10", boxes)
+        x0, y0, bw, bh = (int(v) for v in boxes[0])
+        for img in shots[1:]:
+            for y in range(160, img.height):
+                ra, rb_ = shots[0].rows[y], img.rows[y]
+                if y0 - 2 <= y <= y0 + bh + 2:
+                    ra, rb_ = ra[: (x0 - 2) * 4] + ra[(x0 + bw + 2) * 4:], rb_[: (x0 - 2) * 4] + rb_[(x0 + bw + 2) * 4:]
+                assert ra == rb_, f"S-10: row {y} of a still scene differs between frames"
 
         # --- S-9: the scripted timeline twice; the same checkpoint hashes and final state both times.
         def scripted_run():

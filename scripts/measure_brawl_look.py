@@ -6,6 +6,11 @@ runs on it. Prints the app's own pose timing (`look:cost`, wall clock around cli
 each thread's frame stages from the timing log, per run. Never builds: pass OSVAULD_SHELL_BINARY.
 
     OSVAULD_OFFSCREEN=900x700 OSVAULD_SHELL_BINARY=target/debug/shell2 python3 scripts/measure_brawl_look.py [--one]
+
+`--fight` (fighting plan S-F7): the dummy match as is (two robots, the rules, the hit phase, the HUD) and
+the hidden `script:fight` (1 800 ticks: every move, both dodges, the jet) instead of the movement script,
+cold then warm; prints the frame stages and `look:cost`, the cache size and the blends. Gate: warm app
+frame p50 under 4 ms in a release shell.
 """
 
 import math
@@ -65,17 +70,18 @@ def main():
             node = find(r.dump_tree(item), "art:loaded")
             if node and node["text"].split("/")[0] == node["text"].split("/")[1]:
                 break
-        pair = "--one" not in sys.argv  # --one: the baseline, a single robot
+        fight = "--fight" in sys.argv
+        pair = "--one" not in sys.argv and not fight  # --one: the baseline, a single robot
         if pair:
             r.click(item, "pair")
-        print("robots:", 2 if pair else 1)
+        print("robots:", 2 if (pair or fight) else 1)
         perf = r.performance()
         print("build:", perf.get("profile"), "adapter:", perf.get("adapter"))
         for run in ("cold", "warm"):
             before = len(log.read_text().splitlines())
-            r.click(item, "script")
+            r.click(item, "script:fight" if fight else "script")
             r.frame(2)
-            for _ in range(61):
+            for _ in range(91 if fight else 61):
                 r.frame(10)
             lines = log.read_text().splitlines()[before:]
             print(f"{run} run: {find(r.dump_tree(item), 'look:cost')['text']}")

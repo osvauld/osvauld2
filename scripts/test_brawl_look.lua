@@ -20,7 +20,7 @@ end
 do
 	local files = { "characters/paka/rig.lua", "characters/paka/setup.lua",
 		"characters/robot/build.lua", "characters/robot/scout.lua", "characters/robot/brute.lua",
-		"characters/robot/volt.lua", "characters/robot/author.lua" }
+		"characters/robot/volt.lua", "characters/robot/author.lua", "characters/robot/pack.lua" }
 	for _, name in ipairs(Look.all_clips()) do files[#files + 1] = Look.path(name) .. ".lua" end
 	for _, file in ipairs(files) do
 		local canonical = read("demo_apps/character_lab/" .. file)
@@ -28,10 +28,10 @@ do
 		assert(read("demo_apps/brawl/" .. file) == canonical, "P-X1: brawl/" .. file .. " differs from character_lab/" .. file)
 	end
 	assert(read("demo_apps/brawl/characters/paka/atlas.png") == nil, "P-X1: brawl carries no atlas")
-	assert(#Look.CLIPS == 2 and #Look.OWN == 8, "P-X1: two of Paka's clips, eight of the robot's")
+	assert(#Look.CLIPS == 2 and #Look.OWN == 8 and #Look.FIGHT == 17, "P-X1: two of Paka's clips, eight movement and 17 fighting clips of the robot's")
 	-- character_lab lists the robot's clips (cast.lua), so they are authored where the picker is
 	local cast = read("demo_apps/character_lab/cast.lua")
-	for _, name in ipairs(Look.OWN) do
+	for _, name in ipairs(Look.all_clips()) do
 		assert(cast:find('"' .. name .. '"', 1, true), "P-X1: character_lab's cast does not list " .. name)
 	end
 end
@@ -167,7 +167,7 @@ do
 	local root = byid.root.pivot
 	local bx0, _, bx1, by1 = bounds({ "slot:body", "slot:hoof_front", "slot:hoof-back" })
 	local _, hy0 = bounds({ "slot:head_main" })
-	local w, h = bx1 - bx0, root[2] - hy0
+	local w, h = (bx1 - bx0) * Look.SCALE, (root[2] - hy0) * Look.SCALE
 	print(string.format("robot measured (setup pose): chassis and boots %.1f wide, helmet top %.1f above the feet, boots' soles %.1f below the root", w, h, by1 - root[2]))
 	assert(math.abs(T.body_w - w) <= 4, "body_w " .. T.body_w .. " is not the robot's width " .. w)
 	assert(math.abs(T.body_h - h) <= 4, "body_h " .. T.body_h .. " is not the robot's height " .. h)
@@ -185,6 +185,24 @@ do
 	-- move the root and legs, so not exactly the setup's)
 	assert(math.abs(Look.sole(scout, nil) - Look.sole(scout, {})) < 1e-12, "no pose is the rest pose")
 	assert(root[1] * 2 == scout.size[1], "the root pivot is the drawing's centre line, so mirroring about it keeps the box")
+end
+
+-- The fighting clips are built a view at a time (L:warm, after the robots): until one is, its act draws
+-- its stand-in, and the pick says so; the same state gives the same key once it is.
+do
+	local partial = {}
+	for name, c in pairs(info) do partial[name] = c end
+	partial.sheavy = nil
+	local p = Look.pick("sheavy", 30, partial)
+	assert(p.clip == "idle" and p.plant, "stand-in while unwarmed: " .. p.clip)
+	local q = Look.pick("sheavy", 30, info)
+	assert(q.clip == "sheavy" and q.index == 15 and q.key == "sheavy@15", "the move's own frame: " .. q.key)
+	assert(Look.pick("nair", 9, partial).clip == "nair" and Look.pick("nair", 9, { apex = info.apex }).clip == "apex", "an aerial stands in on apex")
+	assert(Look.blend_of({ act = "sheavy", act_t = 1, prev_act = "nlight", prev_t = 3 }, { idle = info.idle }) == nil,
+		"two stand-ins on one clip don't blend")
+	local all = {}
+	for _, n in ipairs(Look.all_clips()) do all[n] = true end
+	for _, n in ipairs(Look.FIGHT) do assert(all[n] and not Look.STARTUP[n], "fight clip " .. n .. " is warmed, not built at load") end
 end
 
 -- P-A2: the blend. Computed from state alone (prev_act, prev_t, act_t); at the switch tick the pose
@@ -259,6 +277,53 @@ do
 	end
 	assert(n > 50, "P-A2: the script blends " .. n .. " frames")
 	print("P-A2: the scripted run is in a blend on " .. n .. " of " .. Script.length .. " ticks")
+end
+
+-- P-A7: the flame is a view override from state. Hidden at jet_pow 0; otherwise its scale_y is the
+-- clip's (the flicker) times FLAME[jet_pow]. The frame's cache key carries jet_pow, so one state gives
+-- one frame; the number of distinct frames the fight script draws is printed.
+do
+	local A = require("characters/robot/author")
+	assert(#Look.FLAME == 3 and Look.FLAME[1] < Look.FLAME[2] and Look.FLAME[2] < Look.FLAME[3], "P-A7: three flame sizes, growing")
+	local hover = require(Look.path("jet_hover"))
+	for pow = 0, 3 do
+		for _, t in ipairs({ 0, 1 / 60, 3 / 60 }) do
+			local clip_pose = A.at(hover, t)
+			local pose = Look.flame(A.at(hover, t), pow)
+			if pow == 0 then
+				assert(pose.flame.show == false, "P-A7: hidden at jet_pow 0")
+			else
+				assert(pose.flame.show == true and pose.flame.scale_y == clip_pose.flame.scale_y * Look.FLAME[pow],
+					"P-A7: scale_y is the flicker x FLAME[" .. pow .. "]")
+			end
+		end
+	end
+	-- a clip that doesn't track the flame (Paka's idle): the override adds it
+	local idle = Look.flame({}, 0)
+	assert(idle.flame and idle.flame.show == false, "P-A7: an untracked flame is hidden at 0")
+	assert(Look.flame({}, 2).flame.scale_y == Look.FLAME[2], "P-A7: and sized from rest otherwise")
+	local k0, k1 = Look.pick("jet_hover", 5, info, 1).key, Look.pick("jet_hover", 5, info, 2).key
+	assert(k0 ~= k1, "P-A7: the key carries jet_pow")
+	assert(Look.pick("jet_hover", 5, info, 1).key == k0, "P-A7: one state, one key")
+	assert(Look.pick("idle", 5, info).key == Look.pick("idle", 5, info, 0).key, "P-A7: no jet_pow is 0")
+	-- the fight script's distinct frames (robot, key, face), both fighters, blends aside
+	local Fight = require("script_fight")
+	local s, rules = U.fresh({ "human", "dummy" })
+	local seen, n, lit = {}, 0, 0
+	for t = 1, Fight.length do
+		U.F.step(s, { Fight.at(t) }, rules)
+		for i, g in ipairs(s.fighters) do
+			if not Look.ACTS[g.act].hidden and not Look.blend_of(g, info) then
+				local key = i .. ":" .. Look.pick(g.act, g.act_t, info, g.jet_pow).key .. ":" .. g.face
+				if not seen[key] then
+					seen[key], n = true, n + 1
+					if g.jet_pow > 0 then lit = lit + 1 end
+				end
+			end
+		end
+	end
+	print(string.format("P-A7: the fight script draws %d distinct cached frames, %d of them with the flame", n, lit))
+	assert(lit > 0, "P-A7: the fight script lights the flame")
 end
 
 print("brawl look ok")

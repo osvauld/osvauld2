@@ -34,6 +34,41 @@ return {
 	air_jumps = 1,
 	air_dashes = 1,
 	wall_jumps = 3,
-	body_w = 80, -- the box, feet at its bottom centre; the robot's chassis and boots are 81.5 wide
-	body_h = 208, -- measured from the robot (step 4): helmet top 210 above the feet
+	-- fighting (docs/design/brawl-fighting.md §1): hits, knockback, the buffer
+	hitstun_k = 2, -- hitstun ticks per unit of kb, floored
+	hitlag_base = 4, -- hitlag = this + floor(dmg / 2), both fighters frozen
+	kb_decay = 0.125, -- launch speed lost a tick
+	atk_buffer = 8, -- a press this many ticks before a move or lag ends starts on the first free tick
+	respawn_inv = 120, -- invulnerable ticks after a respawn
+	dmg_max = 999,
+	-- dodges (fighting step 2): lengths and invulnerable ticks are 1-based dodge ticks
+	dodge_spot_total = 30,
+	dodge_spot_from = 3,
+	dodge_spot_to = 22,
+	dodge_dir_total = 32,
+	dodge_dir_from = 3,
+	dodge_dir_to = 20,
+	dodge_speed = 8, -- directional: this a tick for dodge_run ticks (128), then x dodge_keep
+	dodge_run = 16,
+	dodge_keep = 0.25,
+	dodge_cd = 48, -- ground: ticks from one dodge's start to the next's
+	air_dodges = 1, -- per airtime, refreshed by landing, respawn and a hit
+	-- the jetpack (fighting step 4): heavy in the air, neutral or Up, is the ignite; K held burns the tank
+	jet_kick = 8, -- ignite: vy = -jet_kick on the press tick (12 ticks rise 76.5)
+	jet_cost = 24, -- fuel an ignite takes
+	jet_fuel = 120, -- a full tank: jet ticks after the ignite are jet_fuel - jet_cost
+	jet_accel = 0.375, -- how fast hover, climb and thrust reach their target speed
+	jet_rise = 6, -- climb speed, Up held
+	jet_side = 8, -- thrust speed, a side held
+	jet_refill = 4, -- fuel back a tick on the ground (30 ticks from empty)
+	cut_ticks = 10, -- `jet_cut` length
+	-- the CPU (fighting step 5, bot.lua)
+	bot_react = 12, -- ticks late it sees the others
+	bot_think = 10, -- ticks between plans
+	bot_dodge = 0.5, -- odds it dodges an attack it sees coming (on the 1/1024 grid)
+	kill_pct = 100, -- from here it prefers heavies
+	spacing = 140, -- the farthest it closes to
+	edge_margin = 120, -- how close to a ledge it walks
+	body_w = 60, -- the box, feet at its bottom centre; the robot's chassis and boots are 81.5 wide, drawn at Look.SCALE (0.75)
+	body_h = 156, -- 208 (measured from the robot, step 4: helmet top 210 above the feet) * Look.SCALE
 }

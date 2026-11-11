@@ -13,7 +13,12 @@ M.names = {
 
 -- The robots' own movement clips (characters/robot/author.lua, docs/design/brawl-movement.md step
 -- 5), copied into brawl. Made on Paka's skeleton, so every character plays them.
-M.own = { "rise", "apex", "fall", "land", "jump2", "dash", "wall", "turn" }
+M.own = { "rise", "apex", "fall", "land", "jump2", "dash", "wall", "turn",
+	-- Brawl's moves and dodges (docs/design/brawl-fighting.md step 3)
+	"nlight", "slight", "dlight", "nheavy", "sheavy", "dheavy", "nair", "sair", "dair", "shair", "dhair",
+	"dodge_spot", "dodge_dir",
+	-- the jetpack (brawl-fighting.md step 4)
+	"jet", "jet_hover", "jet_thrust", "jet_cut" }
 local own = {}
 for _, name in ipairs(M.own) do
 	table.insert(M.names, name)

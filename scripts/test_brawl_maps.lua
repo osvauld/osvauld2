@@ -92,12 +92,13 @@ do
 		assert(compiled.stage.platforms[i].id == p.id, "P-K2: platform order " .. i) -- `on` is an index into this list
 	end
 	assert(U.yard.platforms and U.yard.solids and U.same(U.yard, v1), "P-K2: every P-B and P-M test runs on the compiled yard")
-	-- P-M12's printed final state is the one printed before this plan.
+	-- P-M12's printed final state: the one printed before this plan, until the 75% body (2026-11-11,
+	-- body 60x156; the old value was x=-738.5 y=-240.5 vx=-7 vy=3 act=fall act_t=3).
 	local p = io.popen("lua5.4 scripts/test_brawl_moves.lua 2>&1")
 	local out = p:read("a")
 	p:close()
 	local final = out:match("P%-M12 final: ([^\n]*)")
-	assert(final == "tick=1200 x=-738.5 y=-240.5 vx=-7 vy=3 act=fall act_t=3 face=-1 jumps2=1 dashes=1 wall_jumps=3 stocks=2 peak=0 wall=0 drop=0",
+	assert(final == "tick=1200 x=-759.5 y=-226 vx=-7 vy=4 act=fall act_t=7 face=-1 jumps2=1 dashes=1 wall_jumps=3 stocks=2 peak=0 wall=0 drop=0",
 		"P-K2: P-M12's final state moved: " .. tostring(final))
 end
 
@@ -110,6 +111,7 @@ do
 	local function with(pieces)
 		local m = copy(yard)
 		m.pieces[4].id, m.pieces[5].id = "bush0", "rock0" -- the yard's own bush and rock now collide
+		m.spawns = { m.spawns[1] } -- (2026-11-11) spawn 2, x 450, would stand in this made-up rock
 		for _, p in ipairs(pieces) do m.pieces[#m.pieces + 1] = p end
 		return m
 	end
@@ -186,6 +188,7 @@ do
 	local l = lib_with(function(f) f.props.rock.collide = { solid = { -90, -100, 150, 100 } } end)
 	local m = copy(yard)
 	m.pieces[5].id = "rock0"
+	m.spawns = { m.spawns[1] } -- (2026-11-11) spawn 2, x 450, would stand in this made-up rock
 	m.pieces[#m.pieces + 1] = { asset = "rock", id = "r", x = 400, y = 0, scale = 0.5 }
 	local cc = Map.compile(m, l, { body = BODY })
 	local it, s = find(all_items(cc.scene), "r"), find(cc.stage.solids, "r")

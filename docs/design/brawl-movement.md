@@ -100,6 +100,8 @@ literal only where it proves the arithmetic.
 
 ### The camera (`camera.lua`)
 
+*2026-11-11, P-C6 (shimmer after a stop):* the ease snapped at 0.05 units, so for ~1 s after a stop the camera moved sub-pixel and every layer and the robot resampled. Now the camera snaps within 0.5 screen px (`snap_px`), and the camera offset, robot, boxes and every layer are placed on whole pixels (`Camera.off`/`Camera.at`); the idle clip plants at one sole (`Look.STEADY`).
+
 | id | proof | step |
 |---|---|---|
 | P-C1 | one fighter: the view contains its box plus `margin`, at least `min_view` wide, inside the camera bounds | 3 |
@@ -656,3 +658,16 @@ longer takes an `art` field (P-B7 now expects `unknown field art`). Every P-B an
 compiled yard, and P-M12's final state is byte-identical. The test helper's `U.yard` is the compiled
 stage. P-C5 (art list against the files) moved: sizes against files are P-L1's, and the coverage
 check reads the scene. Decision 9's text above stays as history.
+
+### Smaller robot 2026-11-11: the fighter is drawn and collides at 75%
+
+The user played it: "we need a smaller character". `Look.SCALE = 0.75` (look.lua); main.lua draws
+the frame at `k * Look.SCALE`, placed so the planted sole (and the root pivot in the air) lands on the
+feet line, and `tune.lua` `body_w` 80 → 60, `body_h` 208 → 156. Speeds, gravity and jump impulses are
+unchanged, so the jump is 25% higher *relative to the body*. **P-M12's final state moved**, as it should
+(the hitbox touches walls and ledges at different x/y): was `tick=1200 x=-738.5 y=-240.5 vx=-7 vy=3
+act=fall act_t=3 …`, now `tick=1200 x=-759.5 y=-226 vx=-7 vy=4 act=fall act_t=7 …` (other fields the
+same); `test_brawl_maps.lua` P-K2 and S-9 carry the new value. Tests that pin the size
+(`test_brawl_look` measure, `test_brawl_clips` wall line, `smoke_brawl` S-8 rect, feet and sole pixel
+checks) take the scale; all Lua tests, `smoke_brawl`, `smoke_brawl_maps` and `smoke_characters` pass,
+foot gaps 0-1 px. Twin Isles' tests (bridge, pit, boulder) pass unchanged.

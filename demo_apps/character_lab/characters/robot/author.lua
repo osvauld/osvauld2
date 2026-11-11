@@ -7,6 +7,9 @@
 --            arm_back = { bend = -1, {0, x, y} } },                 -- the hand to (x, y)
 --   })
 --
+-- An arm key's fifth value, if any key of the chain has one, turns the hand (and what it holds: the
+-- blade) by that many degrees from its setup angle in the drawing; a key without one turns it 0.
+--
 -- Every part setup.lua tracks starts at its setup value; a key on x, y or rot adds to it, a key on
 -- scale, scale_x or scale_y multiplies it. The sword stays sheathed (`slot:sword_forward` hidden)
 -- and the blinks shut unless a clip keys their `show`. `ik` is solved here, at load time, at every
@@ -26,6 +29,7 @@ local SHUT = { ["slot:sword_forward"] = false, ["slot:blink_front"] = false, ["s
 
 local byid = {}
 for _, p in ipairs(rig.parts) do byid[p.id] = p end
+for _, p in ipairs(require("characters/robot/pack").parts) do byid[p.id] = p end -- the jetpack
 A.parts = byid
 
 -- The chains `ik` can name. A two-bone chain turns `upper` and `lower` to put `tip`'s pivot on the
@@ -162,8 +166,9 @@ local function wrap(d)
 	return d
 end
 
--- Two bones: the new local rotations of upper and lower that put tip's pivot on (tx, ty).
-local function two_bone(pose, ch, tx, ty, bend)
+-- Two bones: the new local rotations of upper and lower that put tip's pivot on (tx, ty); with
+-- `tip_angle`, the tip turned to that world angle too.
+local function two_bone(pose, ch, tx, ty, bend, tip_angle)
 	local w = A.world(pose)
 	local x0, y0 = A.pivot(pose, ch.upper, w)
 	local x1, y1 = A.pivot(pose, ch.lower, w)
@@ -180,7 +185,14 @@ local function two_bone(pose, ch, tx, ty, bend)
 	local d2 = wrap(angle(tx - x1, ty - y1) - angle(x2 - x1, y2 - y1))
 	local lo = pose[ch.lower]
 	lo.rot = lo.rot + d2
-	return { [ch.upper] = { rot = up.rot }, [ch.lower] = { rot = lo.rot } }
+	local out = { [ch.upper] = { rot = up.rot }, [ch.lower] = { rot = lo.rot } }
+	if tip_angle then
+		local m = A.world(pose)(ch.tip)
+		local tip = pose[ch.tip]
+		tip.rot = tip.rot + wrap(tip_angle - angle(m[1], m[2]))
+		out[ch.tip] = { rot = tip.rot }
+	end
+	return out
 end
 
 -- A piston leg: turned and stretched so the foot's pivot (the ankle) is on (tx, ty); the boot keeps
@@ -261,12 +273,20 @@ function A.clip(spec)
 	if not spec.ik then return clip end
 
 	-- IK: solved at every 1/60 s over the base clip, the targets eased between their keys.
-	local order = {}
+	local order, turned = {}, {}
 	for name, targets in pairs(spec.ik) do
 		local ch = A.CHAINS[name]
 		assert(ch, "ik names no chain: " .. tostring(name) .. " (arm_front, arm_back, leg_front, leg_back)")
 		check_keys("ik " .. name, targets, length)
-		for _, id in ipairs(ch.leg and { ch.leg, ch.foot } or { ch.upper, ch.lower }) do
+		local ids = ch.leg and { ch.leg, ch.foot } or { ch.upper, ch.lower }
+		for _, k in ipairs(targets) do
+			if k[5] ~= nil then
+				assert(not ch.leg and type(k[5]) == "number", "ik " .. name .. ": a turn is a number, on an arm")
+				turned[name] = true
+			end
+		end
+		if turned[name] then ids[#ids + 1] = ch.tip end
+		for _, id in ipairs(ids) do
 			for _, prop in ipairs({ "rot", "scale_x" }) do
 				assert(not keyed[id .. "." .. prop], "ik " .. name .. " sets " .. id .. "." .. prop .. ", which the clip keys too")
 			end
@@ -282,6 +302,9 @@ function A.clip(spec)
 			if ch.foot then
 				local m = w(ch.foot)
 				foot_angle[name] = angle(m[1], m[2])
+			elseif turned[name] then
+				local m = w(ch.tip)
+				foot_angle[name] = angle(m[1], m[2])
 			end
 		end
 	end
@@ -294,13 +317,15 @@ function A.clip(spec)
 		local pose = A.at(clip, t)
 		for _, name in ipairs(order) do
 			local ch, targets = A.CHAINS[name], spec.ik[name]
-			local xs, ys = {}, {}
+			local xs, ys, ts = {}, {}, {}
 			for i, k in ipairs(targets) do
 				xs[i] = { k[1], k[2], k[4] }
 				ys[i] = { k[1], k[3], k[4] }
+				ts[i] = { k[1], k[5] or 0, k[4] }
 			end
 			local tx, ty = value_at(xs, t), value_at(ys, t)
-			local out = ch.leg and piston(pose, ch, tx, ty, foot_angle[name]) or two_bone(pose, ch, tx, ty, targets.bend or 1)
+			local turn = turned[name] and foot_angle[name] + value_at(ts, t) or nil
+			local out = ch.leg and piston(pose, ch, tx, ty, foot_angle[name]) or two_bone(pose, ch, tx, ty, targets.bend or 1, turn)
 			for id, props in pairs(out) do
 				for prop, v in pairs(props) do
 					local key = id .. "." .. prop

@@ -11,7 +11,8 @@ C.params = {
 	margin = 260, -- kept around every fighter in play
 	zoom_min = 0.55, -- the furthest out (the stage's bounds can hold it closer)
 	half_life = 0.12, -- seconds to close half of the gap
-	snap = 0.05, -- closer than this (units) is there
+	snap = 0.05, -- closer than this (units) is there, when the screen scale is not known
+	snap_px = 0.5, -- closer than this (screen px) is there: below it the view only shimmers
 }
 
 local function clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
@@ -58,18 +59,28 @@ end
 
 -- One step toward `target`: a fixed share of the gap per second, so any frame rate gives the same
 -- camera after the same time. Edges interpolate, so a view between two views inside the bounds is
--- inside them too.
-function C.ease(cam, target, dt, p)
+-- inside them too. Within snap_px of the target on every edge, it is the target.
+function C.ease(cam, target, dt, p, pxu)
 	p = p or C.params
 	if cam == nil then return C.copy(target) end
 	local k = 1 - 0.5 ^ (math.max(dt, 0) / p.half_life)
 	local function lerp(a, b) return a + (b - a) * k end
 	local x, y, w, h = lerp(cam.x, target.x), lerp(cam.y, target.y), lerp(cam.w, target.w), lerp(cam.h, target.h)
-	local s = p.snap
+	local s = pxu and p.snap_px / pxu or p.snap -- `pxu`: screen px per unit now
 	if math.abs(x - target.x) < s and math.abs(y - target.y) < s and math.abs(w - target.w) < s and math.abs(h - target.h) < s then
 		return C.copy(target)
 	end
 	return { x = x, y = y, w = w, h = h, zoom = p.ref_w / w }
+end
+
+-- Whole screen pixels: the camera's offset, and a stage point's place under it. Everything drawn is
+-- placed this way (the offset is rounded once, the point's own px relative to it), so a still scene
+-- draws identical frames and the pieces keep their relation while the camera moves.
+local function round(v) return math.floor(v + 0.5) end
+function C.off(cam, k) return round(cam.x * k), round(cam.y * k) end
+function C.at(cam, k, x, y)
+	local ox, oy = C.off(cam, k)
+	return round(x * k) - ox, round(y * k) - oy
 end
 
 -- How far a layer of factor f is shifted so it follows the camera by 1 - f: f = 1 stays on the map,

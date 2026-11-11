@@ -8,11 +8,15 @@ local RIGHT = { KeyD = true, ArrowRight = true }
 local UP = { KeyW = true, ArrowUp = true }
 local DOWN = { KeyS = true, ArrowDown = true }
 local JUMP = { Space = true }
-local DASH = { ShiftLeft = true, ShiftRight = true, KeyK = true }
+local DASH = { ShiftLeft = true, ShiftRight = true } -- Shift alone: K is heavy (brawl-fighting.md decision 5)
+local LIGHT = { KeyJ = true }
+local HEAVY = { KeyK = true }
+local DODGE = { KeyL = true }
 local RESTART = { Enter = true, NumpadEnter = true }
 
 function I.new()
-	return setmetatable({ held = {}, jump_n = 0, down_n = 0, dash_n = 0, restart_n = 0 }, I)
+	return setmetatable({ held = {}, jump_n = 0, down_n = 0, dash_n = 0, restart_n = 0, light_n = 0, heavy_n = 0,
+		dodge_n = 0, pct_n = 0, pct = 0 }, I)
 end
 
 -- An `on_key` event. A cancel (blur, surface change) lets every key go.
@@ -29,6 +33,9 @@ function I:key(e)
 			if DOWN[code] then self.down_n = self.down_n + 1 end
 			if DASH[code] then self.dash_n = self.dash_n + 1 end
 			if RESTART[code] then self.restart_n = self.restart_n + 1 end
+			if LIGHT[code] then self.light_n = self.light_n + 1 end
+			if HEAVY[code] then self.heavy_n = self.heavy_n + 1 end
+			if DODGE[code] then self.dodge_n = self.dodge_n + 1 end
 		end
 		self.held[code] = true
 	else
@@ -43,14 +50,20 @@ local function any(held, set)
 	return false
 end
 
+-- Training: set every dummy's damage to `pct` (a press, like the keys).
+function I:train(pct)
+	self.pct_n, self.pct = self.pct_n + 1, pct
+end
+
 -- This tick's input: a fresh plain table.
 function I:take()
 	local h = self.held
 	return {
 		x = (any(h, RIGHT) and 1 or 0) - (any(h, LEFT) and 1 or 0),
 		y = (any(h, DOWN) and 1 or 0) - (any(h, UP) and 1 or 0),
-		jump = any(h, JUMP),
+		jump = any(h, JUMP), heavy = any(h, HEAVY),
 		jump_n = self.jump_n, down_n = self.down_n, dash_n = self.dash_n, restart_n = self.restart_n,
+		light_n = self.light_n, heavy_n = self.heavy_n, dodge_n = self.dodge_n, pct_n = self.pct_n, pct = self.pct,
 	}
 end
 

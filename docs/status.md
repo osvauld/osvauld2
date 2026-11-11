@@ -10,6 +10,61 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Brawl fighting step 6 — feel and cost (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-fighting.md)
+
+Heavies and side moves hit harder per percent (nheavy 12/64, sheavy 11/64, shair and dheavy 9/64, sair 7/64), nair's first hit
+has base 4.5 so the two hits chain, and two CPUs now KO each other (28 KOs in 8 seeds x 7 200 ticks, median 140 %). The fight
+script was re-searched for the new launches. S-F7: warm app view p50 1.08 ms with two robots (gate 4 ms). Lua only; L-1 passed on nixos (job 2901).
+
+### Brawl fighting step 5 — the CPU (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-fighting.md)
+
+A deterministic Lua CPU (`bot.lua`): a fighter with `ctl = "bot"` whose input `F.step` makes from state,
+seeing the others 12 ticks late through a ring in its memory, with a MINSTD seed in state. It approaches,
+picks a move that reaches (heavies past 100 %), dodges what it sees coming, and recovers with wall jumps,
+the double jump, the jet, the air dash and the air dodge. Mode button Dummy → CPU → Solo. P-CPU1-5
+(`test_brawl_bot.lua`), S-F5: vs the dummy 23 hits / 9 moves / 4 ring-outs in 30 s; no fall-offs in 8 × 7 200
+ticks per stage; Luau's `script:cpu` finals equal stock Lua's. P-M12 and P-F13 unchanged. Lua only.
+
+### Brawl fighting step 4 — the jetpack (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-fighting.md)
+
+A pack on every robot's back (`characters/robot/pack.lua`, threaded through `build.lua`/`author.lua`) with a
+flame the view sizes from `jet_pow`; heavy in the air (neutral or Up) ignites the jet (`jet.lua`): a 12-tick
+uppercut rising 76.5, then K held hovers, climbs or thrusts on a 120-tick tank that refills on the ground.
+Four jet clips. P-J1-J6, P-A7, S-F4; the plan's numbers hold exactly (76.5, 107.375, 96 ticks, 651.625).
+P-M12 unchanged; the fight script's jet segment rewritten (finals: fighter 1 x 850.875 → 839, plus `fuel`/`jet_pow`). Lua only.
+
+### Brawl fighting step 3 — attack clips and the bake (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-fighting.md)
+
+Every move and both dodges draw their own clip (13, authored in `character_lab`, warmed one a view); the
+hitboxes are baked from the clips (`at` on a part, FK at the shown frame, placed as the view places the
+robot), heavies swing the lit blade. P-H2/P-H3/P-A5/P-A6, S-F2 per-move shots, L-1 (`clips=23/23`). P-M12,
+P-F5 and the KO table unchanged; the fight script retimed (11 hits). Lua only.
+
+### Brawl fighting step 2 — dodges (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-fighting.md)
+
+L dodges: spot (invulnerable ticks 3-22 of 30), directional (8/tick for 16 = 128, then x1/4; inv 3-20 of 32),
+a 48-tick ground cooldown, one air dodge per airtime (refreshed by landing and by a hit), no gravity on the
+air inv ticks. Lua only (`combat.lua`, `fighter.lua` seams, `tune.lua`); the robot fades while invulnerable
+(no dodge clips until step 3). P-F9, S-F9 and the fight script's three dodges added; P-M12 unchanged.
+
+### Brawl fighting step 1 — hits on boxes (2026-11-11, branch `2d-characters`, not landed) — [plan](design/brawl-fighting.md)
+
+`demo_apps/brawl` opens against a training dummy (mode button Solo / Dummy). J light, K heavy, Shift
+dash (K no longer dashes); neutral/side/down on the ground and in the air, 11 moves on stand-in clips.
+`combat.lua` (pure, no trig/`pairs`/clock): the move machine, the attack buffer, hits gathered then
+applied (trades are symmetric), hitlag, knockback that grows with percent along a baked angle table,
+decay, hitstun, percent, ring-outs, the winner. Hitboxes are static circles baked by
+`scripts/bake_brawl_moves.lua` into `moves_baked.lua`; the stage check moved to `checks.lua`. F2 shows
+`hurt:`/`hit:` overlays, `hud.lua` the percents and the training line. Tests: `test_brawl_fight.lua`,
+`test_brawl_hitboxes.lua`, `smoke_brawl_fight.py` (in `SMOKES`); movement's P-M12 is byte-identical with
+the dummy present. All Lua tests and `smoke_brawl`, `smoke_brawl_maps`, `smoke_characters`,
+`smoke_brawl_fight` pass offscreen; `cargo test -p app_host --test brawl` not run (loadtable job 2886:
+"local stayed unreachable for 10m"). Dodges, attack clips, the jet and the CPU are steps 2-5.
+
+### Brawl: smaller robot (2026-11-11, branch `2d-characters`, not landed) — [note](design/brawl-movement.md)
+
+The fighter is drawn and collides at 75% (`Look.SCALE`; `body_w` 60, `body_h` 156). P-M12's final state moved (recorded in the plan). Lua tests, `smoke_brawl`, `smoke_brawl_maps`, `smoke_characters` pass offscreen.
+
 ### Brawl steps 1-4 — a box on a stage, the full moveset, the stage art and camera, then the robot (2026-11-10, branch `2d-characters`, not landed) — [plan](design/brawl-movement.md)
 
 `demo_apps/brawl`: one fighter as plain data in a one-player `net.match` (1/120 s ticks, an input
@@ -2137,3 +2192,5 @@ root, so `scripts/deck_upload.py` mounts each demo under `demos/<name>/` with it
 rewritten, and uploads every demo standalone too; `scripts/demo_wave.py` drives the embedded
 arm through its own buttons. Keyboard zoom (Ctrl +/-/0) is Lua-side `scale` + `offset` around
 the last hover point. The shell's app grid now scrolls. `README.md` added.
+
+- 2026-11-11: Brawl camera shimmer after a stop fixed (whole-pixel placement, 0.5 px snap, steady idle sole); P-C6 and smoke S-10.

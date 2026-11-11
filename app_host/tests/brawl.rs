@@ -71,25 +71,30 @@ fn brawl_opens_with_its_map_art_inside_the_texture_budget() {
     let started = Instant::now();
     let app = brawl();
     let opened = started.elapsed();
-    // The stage decodes a few pictures a view (a debug build spends its 1 s on about a megapixel):
-    // look until "n/n", and say how many views that took.
+    // The stage decodes a few pictures a view (a debug build spends its 1 s on about a megapixel), and
+    // the look builds a robot or a fighting clip a view: look until both are done, and say how many
+    // views that took.
     let mut views = 0;
     let view = loop {
         let view = app.view().info();
         views += 1;
         assert!(app.console(20).is_empty(), "view {views}: {:?}", app.console(20));
-        let mut loaded = None;
-        walk_info(&view, &mut |i| {
-            if i.id.as_deref() == Some("art:loaded") {
-                loaded = i.text.clone();
-            }
+        let (mut loaded, mut look) = (None, None);
+        walk_info(&view, &mut |i| match i.id.as_deref() {
+            Some("art:loaded") => loaded = i.text.clone(),
+            Some("look:loaded") => look = i.text.clone(),
+            _ => {}
         });
         let loaded = loaded.expect("the art readout");
+        let look = look.expect("the look readout");
         let (n, total) = loaded.split_once('/').unwrap();
-        if n == total {
+        let (c, rest) = look.trim_start_matches("clips=").split_once(' ').unwrap();
+        let (cn, ct) = c.split_once('/').unwrap();
+        let (rn, rt) = rest.trim_start_matches("robots=").split_once('/').unwrap();
+        if n == total && cn == ct && rn == rt {
             break view;
         }
-        assert!(views < 60, "still {loaded} after {views} views");
+        assert!(views < 60, "still {loaded}, {look} after {views} views");
     };
     let all_views = started.elapsed();
 
@@ -153,9 +158,10 @@ fn brawl_opens_with_its_map_art_inside_the_texture_budget() {
     assert!(textures.len() >= 12, "the stage uses about fifteen pictures");
     assert!(app.console(20).is_empty(), "{:?}", app.console(20));
 
-    // L-1 (steps 4-5): every clip file in the app passed `gfx.clip` (at module scope: Paka's two and
-    // the robot's eight, built by author.lua) and every robot variant compiled (one a view,
-    // look.lua), and the fighter is the posed robot.
+    // L-1 (steps 4-5; fighting step 3): every clip file in the app passed `gfx.clip` (at module scope:
+    // Paka's two and the robot's eight movement clips; a view at a time: its 17 fighting clips, all
+    // built by author.lua; the jetpack, pack.lua, is part of every robot) and every robot variant compiled (one a view, look.lua), and the fighter is
+    // the posed robot. The module load is printed (fighting plan: under 0.5 s in debug).
     let clip_files = all
         .iter()
         .filter(|(rel, _)| (rel.starts_with("characters/paka/clips/") || rel.starts_with("characters/robot/clips/")) && rel.ends_with(".lua"))
@@ -168,14 +174,16 @@ fn brawl_opens_with_its_map_art_inside_the_texture_budget() {
                 && rel.ends_with(".lua")
                 && !rel.ends_with("/build.lua")
                 && !rel.ends_with("/author.lua")
+                && !rel.ends_with("/pack.lua")
         })
         .count();
-    assert_eq!((clip_files, robot_files), (10, 3), "two of Paka's clips, eight of the robot's and three robots are in the folder");
+    assert_eq!((clip_files, robot_files), (27, 3), "two of Paka's clips, 25 of the robot's and three robots are in the folder");
     let text = |name: &str| texts.iter().find(|(id, _)| id == name).map(|(_, t)| t.clone()).unwrap_or_default();
-    assert_eq!(text("look:loaded"), format!("clips={clip_files} robots={robot_files}/{robot_files}"));
+    assert_eq!(text("look:loaded"), format!("clips={clip_files}/{clip_files} robots={robot_files}/{robot_files}"));
     assert!(ids.contains("fighter:robot"), "the robot is drawn: {ids:?}");
     assert!(text("look:state").starts_with("robot=scout clip=idle index=0 "), "{}", text("look:state"));
-    assert!(text("look:cost").starts_with("poses=1 "), "one pose, then the cache: {}", text("look:cost"));
+    // Two robots since fighting step 1 (the player's scout and the dummy's brute): one pose each, then the cache.
+    assert!(text("look:cost").starts_with("poses=2 "), "one pose a robot, then the cache: {}", text("look:cost"));
     println!("brawl look: {}; {}", text("look:loaded"), text("look:cost"));
 }
 

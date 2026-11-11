@@ -2,7 +2,8 @@
 -- the act picks a clip, `act_t / 120` is the time in it, quantized to the clips' 1/60 s, and
 -- `face` mirrors it. Posed frames are cached per (robot, clip, frame index, face). For
 -- `blend_ticks` after a switch the old act's pose is lerped into the new one's, from `prev_act` and
--- `prev_t` in state, so a rewind redraws the same blend; blended frames bypass the cache.
+-- `prev_t` in state, so a rewind redraws the same blend; blended frames bypass the cache. The jet's
+-- flame is a view override from `jet_pow` (Look.flame), which the cache key carries.
 --
 -- The table, the time and the blend are pure (scripts/test_brawl_look.lua runs them under stock
 -- Lua); `gfx` is touched only inside `Look.new` and its methods.
@@ -12,8 +13,18 @@ Look.CLIP_DIR = "characters/paka/clips/"
 Look.CLIPS = { "idle", "run" } -- Paka's, copied from character_lab (P-X1)
 Look.OWN_DIR = "characters/robot/clips/"
 Look.OWN = { "rise", "apex", "fall", "land", "jump2", "dash", "wall", "turn" } -- authored on the robot
+-- The moves' and dodges' clips (brawl-fighting.md step 3), in OWN_DIR too. Built one a view (`L:warm`).
+Look.FIGHT = { "nlight", "slight", "dlight", "nheavy", "sheavy", "dheavy", "nair", "sair", "dair", "shair", "dhair",
+	"dodge_spot", "dodge_dir", "jet", "jet_hover", "jet_thrust", "jet_cut" }
+-- Built when the look is made.
+Look.STARTUP = {}
+for _, n in ipairs(Look.CLIPS) do Look.STARTUP[n] = true end
+for _, n in ipairs(Look.OWN) do Look.STARTUP[n] = true end
 Look.ROBOTS = { "scout", "brute", "volt" }
 Look.BLEND_TICKS = 4
+-- The robot is drawn at this fraction of its drawing's size (2026-11-11: "we need a smaller character");
+-- body_w / body_h in tune.lua are the measured size times it.
+Look.SCALE = 0.75
 
 -- Every act fighter.lua sets. `hidden` acts are not drawn. `plant`: the lowest boot point of each
 -- posed frame is put on the feet line (see `Look.sole`).
@@ -30,20 +41,35 @@ Look.ACTS = {
 	wall = { clip = "wall" },
 	out = { clip = "idle", hidden = true },
 	ko = { clip = "idle", hidden = true },
+	-- Fighting (brawl-fighting.md P-A5): each move and dodge its own clip; `stand` is drawn until that
+	-- clip is warmed. `hurt` borrows `apex` (hit reactions are after).
+	lag = { clip = "idle", plant = true },
+	hurt = { clip = "apex" },
+	nlight = { clip = "nlight", stand = "idle", plant = true }, slight = { clip = "slight", stand = "idle", plant = true },
+	dlight = { clip = "dlight", stand = "idle", plant = true }, nheavy = { clip = "nheavy", stand = "idle", plant = true },
+	sheavy = { clip = "sheavy", stand = "idle", plant = true }, dheavy = { clip = "dheavy", stand = "idle", plant = true },
+	nair = { clip = "nair", stand = "apex" }, sair = { clip = "sair", stand = "apex" }, dair = { clip = "dair", stand = "apex" },
+	shair = { clip = "shair", stand = "apex" }, dhair = { clip = "dhair", stand = "apex" },
+	dodge_spot = { clip = "dodge_spot", stand = "idle", plant = true }, dodge_dir = { clip = "dodge_dir", stand = "dash", plant = true },
+	jet = { clip = "jet", stand = "apex" }, jet_hover = { clip = "jet_hover", stand = "apex" },
+	jet_thrust = { clip = "jet_thrust", stand = "apex" }, jet_cut = { clip = "jet_cut", stand = "apex" },
 }
 
 -- Where each clip's file is.
 function Look.path(clip)
-	for _, name in ipairs(Look.OWN) do
-		if name == clip then return Look.OWN_DIR .. name end
+	for _, list in ipairs({ Look.OWN, Look.FIGHT }) do
+		for _, name in ipairs(list) do
+			if name == clip then return Look.OWN_DIR .. name end
+		end
 	end
 	return Look.CLIP_DIR .. clip
 end
 
 function Look.all_clips()
 	local out = {}
-	for _, n in ipairs(Look.CLIPS) do out[#out + 1] = n end
-	for _, n in ipairs(Look.OWN) do out[#out + 1] = n end
+	for _, list in ipairs({ Look.CLIPS, Look.OWN, Look.FIGHT }) do
+		for _, n in ipairs(list) do out[#out + 1] = n end
+	end
 	return out
 end
 
@@ -80,13 +106,37 @@ function Look.at(c, act_t)
 	return { t = t, index = index, time = time }
 end
 
--- act + act_t → { clip, t, index, time, key, hidden, plant }; `info[clip]` is { length, loop }.
-function Look.pick(act, act_t, info)
+-- The clip act draws: its own, or its stand-in while that is not built (not in `info`).
+local function clip_of(a, info)
+	if info[a.clip] or not a.stand then return a.clip end
+	return a.stand
+end
+
+-- act + act_t (+ jet_pow, 0 if nil) → { clip, t, index, time, key, hidden, plant, pow }; `info[clip]`
+-- is { length, loop }.
+function Look.pick(act, act_t, info, jet_pow)
 	local a = Look.ACTS[act]
-	local p = Look.at(info[a.clip], act_t)
-	p.clip, p.hidden, p.plant = a.clip, a.hidden == true, a.plant == true
-	p.key = a.clip .. "@" .. p.index
+	local clip = clip_of(a, info)
+	local p = Look.at(info[clip], act_t)
+	p.clip, p.hidden, p.plant, p.pow = clip, a.hidden == true, a.plant == true, jet_pow or 0
+	p.key = clip .. "@" .. p.index .. (p.pow > 0 and "^" .. p.pow or "")
 	return p
+end
+
+-- The flame's size per jet_pow (1 hover, 2 climb or thrust, 3 the ignite), times the clip's flicker.
+Look.FLAME = { 0.625, 1, 1.375 }
+
+-- The flame over a pose (clip:at's table, changed in place and returned): hidden at jet_pow 0, else
+-- shown with its scale_y times FLAME[jet_pow]. A clip that doesn't track it gets it at rest.
+function Look.flame(pose, jet_pow)
+	local f = pose.flame
+	if not f then
+		f = { x = 0, y = 0, rot = 0, scale = 1, scale_x = 1, scale_y = 1, show = true }
+		pose.flame = f
+	end
+	f.show = jet_pow > 0
+	if jet_pow > 0 then f.scale_y = f.scale_y * Look.FLAME[jet_pow] end
+	return pose
 end
 
 -- The blend a fighter is in, from its state alone: nil, or { from = the old act's pick at the time
@@ -97,7 +147,7 @@ function Look.blend_of(f, info)
 	local prev = f.prev_act
 	if prev == nil or prev == f.act or f.act_t >= Look.BLEND_TICKS then return nil end
 	local a, b = Look.ACTS[prev], Look.ACTS[f.act]
-	if a.hidden or b.hidden or a.clip == b.clip then return nil end
+	if a.hidden or b.hidden or clip_of(a, info) == clip_of(b, info) then return nil end
 	return { from = Look.pick(prev, f.prev_t + f.act_t, info), w = f.act_t / Look.BLEND_TICKS }
 end
 
@@ -129,6 +179,10 @@ function Look.blend(a, b, w)
 	for id in pairs(b) do one(id) end
 	return out
 end
+
+-- Clips whose frames all plant at the clip's first sole: its breathing moves the sole by a fraction of
+-- a pixel, which would shimmer the standing robot against the floor.
+Look.STEADY = { idle = true }
 
 -- The soles: the boots' parts, whose lowest drawn point is where the robot touches the floor.
 Look.SOLES = { "slot:hoof_front", "slot:hoof-back" }
@@ -191,16 +245,20 @@ end
 local L = {}
 L.__index = L
 
--- The clips are built at once (ten files). Robots are built one a view (`L:warm`), or when first
--- drawn: a debug build's module load has a 1 s CPU budget, and each robot's build.lua plus
--- gfx.drawing is a large share of it (character_lab's three-robot load has run over it on a busy
--- machine). Posing waits for the view.
+-- The movement clips are built at once (ten files). Robots, then the fighting clips, are built one a
+-- view (`L:warm`), a robot also when first drawn: a debug build's module load has a 1 s CPU budget,
+-- and each robot's build.lua plus gfx.drawing is a large share of it (character_lab's three-robot load
+-- has run over it on a busy machine), as is a clip's IK. Posing waits for the view.
+function L:build(name)
+	local h = gfx.clip(require(Look.path(name)))
+	self.clips[name], self.info[name] = h, { length = h.length, loop = h.loop }
+end
+
 function Look.new()
 	local self = setmetatable({ clips = {}, info = {}, drawings = {}, cache = {}, soles = {},
 		misses = 0, pose_s = 0, max_s = 0, blends = 0, blend_s = 0 }, L)
 	for _, name in ipairs(Look.all_clips()) do
-		local h = gfx.clip(require(Look.path(name)))
-		self.clips[name], self.info[name] = h, { length = h.length, loop = h.loop }
+		if Look.STARTUP[name] then self:build(name) end
 	end
 	return self
 end
@@ -214,7 +272,8 @@ function L:drawing(robot)
 	return d
 end
 
--- Builds the next robot not built yet, at most one a call; true once all are.
+-- Builds the next robot, else the next fighting clip, not built yet: at most one a call; true once
+-- all are.
 function L:warm()
 	for _, robot in ipairs(Look.ROBOTS) do
 		if not self.drawings[robot] then
@@ -222,15 +281,24 @@ function L:warm()
 			return false
 		end
 	end
+	for _, name in ipairs(Look.FIGHT) do
+		if not self.clips[name] then
+			self:build(name)
+			return false
+		end
+	end
 	return true
 end
 
 function L:loaded()
-	local n = 0
+	local n, c = 0, 0
 	for _, robot in ipairs(Look.ROBOTS) do
 		if self.drawings[robot] then n = n + 1 end
 	end
-	return string.format("clips=%d robots=%d/%d", #Look.all_clips(), n, #Look.ROBOTS)
+	for _, name in ipairs(Look.all_clips()) do
+		if self.clips[name] then c = c + 1 end
+	end
+	return string.format("clips=%d/%d robots=%d/%d", c, #Look.all_clips(), n, #Look.ROBOTS)
 end
 
 -- The robot's posed frame for fighter `f`, what was picked, and `p.sole`: the boots' lowest point
@@ -238,13 +306,13 @@ end
 -- call (`p.blend` is its weight); otherwise it is cached. A pose is timed with `now()` (wall clock; a
 -- diagnostic only, never state).
 function L:frame(robot, f)
-	local p = Look.pick(f.act, f.act_t, self.info)
+	local p = Look.pick(f.act, f.act_t, self.info, f.jet_pow)
 	if p.hidden then return nil, p end
 	local b = Look.blend_of(f, self.info)
 	if b then
 		local d = self:drawing(robot)
 		local t0 = now()
-		local pose = Look.blend(self.clips[b.from.clip]:at(b.from.time), self.clips[p.clip]:at(p.time), b.w)
+		local pose = Look.flame(Look.blend(self.clips[b.from.clip]:at(b.from.time), self.clips[p.clip]:at(p.time), b.w), p.pow)
 		p.sole = Look.sole(require("characters/robot/" .. robot), pose)
 		if f.face < 0 then mirror(pose) end
 		local fr = d:pose(pose)
@@ -260,9 +328,9 @@ function L:frame(robot, f)
 		local d = self:drawing(robot)
 		local t0 = now()
 		local pose = self.clips[p.clip]:at(p.time)
-		soles[robot .. ":" .. p.key] = soles[robot .. ":" .. p.key] or Look.sole(require("characters/robot/" .. robot), pose)
+		soles[robot .. ":" .. p.key] = soles[robot .. ":" .. p.key] or Look.sole(require("characters/robot/" .. robot), Look.STEADY[p.clip] and self.clips[p.clip]:at(0) or pose)
 		if f.face < 0 then mirror(pose) end
-		fr = d:pose(pose)
+		fr = d:pose(Look.flame(pose, p.pow))
 		local dt = now() - t0
 		self.misses, self.pose_s = self.misses + 1, self.pose_s + dt
 		if dt > self.max_s then self.max_s = dt end

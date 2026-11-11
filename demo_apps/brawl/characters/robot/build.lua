@@ -7,6 +7,7 @@
 -- head drawn there would lie on its side.
 local paka = require("characters/paka/rig")
 local setup = require("characters/paka/setup")
+local pack = require("characters/robot/pack") -- the jetpack's parts, added before `slot:body`
 
 local K = 0.5523 -- cubic handle for a quarter circle
 
@@ -48,6 +49,9 @@ do
 		return m
 	end
 	for _, p in ipairs(paka.parts) do world(p.id) end
+	-- the pack's parts have no setup track: each is set up where its parent is
+	setup_world.pack = setup_world.body
+	setup_world.flame = setup_world.pack
 end
 
 -- Colours ------------------------------------------------------------------------------------
@@ -390,6 +394,10 @@ local function pieces(v)
 		hilt(hand_q)
 	)
 
+	local kit = { ink = ink, plate = plate, trim = trim, glow = glow, box = box, ball = ball, cat = cat, rrect = rrect, poly = poly,
+		ellipse = ellipse }
+	for id, shapes in pairs(pack.pieces(kit)) do P[id] = shapes end
+
 	return P
 end
 
@@ -421,10 +429,16 @@ return function(variant)
 		return out
 	end
 	local parts = {}
-	for _, p in ipairs(paka.parts) do
+	local function add(p)
 		local part = { id = p.id, parent = p.parent, pivot = p.pivot }
 		if P[p.id] then part.shapes = place(inverse(setup_world[p.id]), P[p.id]) end
 		table.insert(parts, part)
+	end
+	for _, p in ipairs(paka.parts) do
+		if p.id == pack.before then
+			for _, q in ipairs(pack.parts) do add(q) end
+		end
+		add(p)
 	end
 	return { size = paka.size, parts = parts }
 end

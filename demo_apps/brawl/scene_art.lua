@@ -319,8 +319,12 @@ local function elements(items, art, cam, k, ox, oy, t)
 			local x = it.x
 			if it.drift then x = Depth.drift(it.x + it.w / 2, it.drift, it.span, t or 0) - it.w / 2 end
 			local sx, sy, s
-			if it.f == 1 then sx, sy, s = (x - cam.x) * k, (it.y - cam.y) * k, k
-			else sx, sy, s = Depth.place(cam, it.f, art.home, x, it.y, k1) end
+			if it.f == 1 then sx, sy, s = Camera.at(cam, k, x, it.y)
+				s = k
+			else
+				sx, sy, s = Depth.place(cam, it.f, art.home, x, it.y, k1)
+				sx, sy = math.floor(sx + 0.5), math.floor(sy + 0.5) -- whole px: a still view must not shimmer
+			end
 			-- `piece:<id>`: a piece that makes collision answers to its id, so the overlay's `col:<id>` can be
 			-- held against it (S-M3). The handler is what makes an id reachable to rects().
 			out[#out + 1] = ui.frame({ id = it.id and ("piece:" .. it.id) or nil, visual = it.frame, absolute = true,

@@ -1756,6 +1756,19 @@ redraw the same picture, so the picture is a function of `state`, never of the r
   cached frame, and place the frame so that lowest point is on the floor. In the air, place by the
   root's pivot.
 
+**A deterministic bot inside `step`** *(2026-11-11, `demo_apps/brawl/bot.lua`)*. A CPU player in a
+`net.match` is a fighter in `state`, not a device: every peer computes its input inside `step`, so a
+rewind replays it and nothing is sent.
+
+- **Input from state, before anyone moves.** `step` asks the bot for an ordinary input record (the
+  same fields a key input has) from the state as the tick begins, then steps everyone. Presses are
+  the fighter's own consumed counts + 1.
+- **Its memory is plain state.** Seed, timers, the plan and what it saw live in the fighter's table;
+  `math.random` and the clock are out. MINSTD (`seed × 48271 % 2147483647`) is exact in doubles and in
+  Lua 5.4 integers alike.
+- **It sees late.** A ring of the others' snapshots, `react` ticks long, written in place; it decides
+  from the oldest. That is its reaction time, and it can't read anyone's input, only state.
+
 ## Animation
 
 Presentation animation is declarative:

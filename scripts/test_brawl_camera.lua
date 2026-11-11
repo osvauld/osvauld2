@@ -136,4 +136,46 @@ do
 	print("P-C5 pictures: " .. #scene.images)
 end
 
+-- P-C6: no shimmer after a stop. Run, stop somewhere new, camera eases (60 Hz, 900 px wide screen): its
+-- screen-px offset is whole pixels, reaches its target's exactly within 2 s, then frame to frame is
+-- identical; the robot's left/top are integers and constant once it is still and the camera settled.
+do
+	local SW = 900
+	local f, rules = U.fresh()
+	local cam, settled_at, last
+	local run = { x = 1 }
+	local drawn = {}
+	for frame = 1, 60 * 6 do
+		local running = frame <= 40
+		U.step(f, rules, running and U.input(run) or U.input(), 2)
+		local fi = f.fighters[1]
+		local tg = target({ fi })
+		cam = Camera.ease(cam, tg, 1 / 60, nil, cam and SW / cam.w or SW / tg.w)
+		local k = SW / cam.w
+		local ox, oy = Camera.off(cam, k)
+		assert(ox == math.floor(ox) and oy == math.floor(oy), "P-C6: whole-pixel camera offset")
+		local l, t = Camera.at(cam, k, fi.x - 40, fi.y - 120)
+		assert(l == math.floor(l) and t == math.floor(t), "P-C6: whole-pixel robot position")
+		local tx, ty = Camera.off(tg, k)
+		if not running and Camera.same(cam, tg) and not settled_at then settled_at = frame end
+		if settled_at then
+			assert(ox == Camera.off(tg, SW / tg.w), "P-C6: the camera reached its target exactly")
+			drawn[#drawn + 1] = { ox, oy, l, t }
+		end
+	end
+	assert(settled_at and settled_at - 40 <= 120, "P-C6: settled within 2 s of the stop, at " .. tostring(settled_at))
+	local d1 = drawn[1]
+	for i, d in ipairs(drawn) do
+		for j = 1, 4 do assert(d[j] == d1[j], "P-C6: frame " .. i .. " of the settled scene differs") end
+	end
+	-- a long way: still bounded
+	local c, n = Camera.copy(target({ fighter(-800, 0) })), 0
+	local far = target({ fighter(800, -300) })
+	while not Camera.same(c, far) do
+		c = Camera.ease(c, far, 1 / 60, nil, SW / c.w)
+		n = n + 1
+		assert(n < 60 * 3, "P-C6: bounded settle over the longest trip")
+	end
+end
+
 print("brawl camera ok")

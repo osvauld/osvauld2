@@ -33,6 +33,7 @@ return {
 		{ asset = "wood_ledge", id = "right", x = 300, y = -260, w = 320, scale = 1.25 },
 		{ asset = "wood_ledge", id = "top", x = -160, y = -520, w = 320, scale = 1.25 },
 	},
-	spawns = { { x = 0, y = 0 } }, respawn = { x = 0, y = -700 },
+	-- spawn 2 (2026-11-11, brawl-fighting.md): the dummy's and the second fighter's; spawn 1 is untouched.
+	spawns = { { x = 0, y = 0 }, { x = 450, y = 0 } }, respawn = { x = 0, y = -700 },
 	blast = { x = -2100, y = -1700, w = 4200, h = 2800 }, camera = { x = -1500, y = -1100, w = 3000, h = 1800 },
 }
