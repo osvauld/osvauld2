@@ -10,6 +10,65 @@ Plan of record for the *unbuilt* milestones: `design/runtime-rebuild-plan.md` §
 
 ## Built
 
+### Brawl steps 1-4 — a box on a stage, the full moveset, the stage art and camera, then the robot (2026-11-10, branch `2d-characters`, not landed) — [plan](design/brawl-movement.md)
+
+`demo_apps/brawl`: one fighter as plain data in a one-player `net.match` (1/120 s ticks, an input
+every tick). `fighter.lua` holds the pure rules: run and turn skid, full jump and short hop, double
+jump, coyote time, jump buffer, fast fall, ground and air dash, wall slide and wall jump, gravity,
+solids, one-way platforms, drop-through, walls, blast zone, stocks, respawn, restart and stage
+validation. It runs unchanged in stock Lua and in the app. The stage and fighter are drawn as
+rectangles under a fixed camera, and the game is playable from the keyboard (Shift/K dashes). The
+hidden `script` button runs `script.lua`'s 1 200-tick timeline, which uses every move. P-B1–B7 and
+P-M1–M12 pass in `scripts/run_brawl_lua_tests.sh`; S-1 to S-6 and S-9 pass in
+`scripts/smoke_brawl.py` (in `SMOKES`): two scripted runs give the same checkpoint hashes and the
+same final state as the pure-Lua run. The plan's hand-worked numbers all held. No Rust changed.
+**Step 3:** the yard is drawn from the CC0 Scavenge Legends pack (12 PNGs in `art/`, 14.3 MiB of the
+128 MiB texture budget, 12 of 64 textures): sky gradient, three parallax layers, tiled grass ground,
+platforms, props behind the fighter and grass in front. `camera.lua` (pure) frames N fighters with
+margin, `min_view`, zoom limits and the stage's bounds, eased on render time and view-side only
+(`camera:view` readout). P-C1–C5 pass in `scripts/run_brawl_lua_tests.sh`, `app_host/tests/brawl.rs`
+(L-1's pictures) and S-7 in the smoke pass; screenshots in `shots/brawl/step3_*.png`.
+**Step 4:** the fighter is the Scout robot, posed from state by `look.lua` (act → one of Paka's four
+reused clips, time `act_t / 120` quantized to 1/60 s, mirrored by a root pose so parts stay
+hoverable, frames cached per robot/clip/frame/face; standing and running, the boots' lowest point,
+found by forward kinematics, is put on the floor line). `body` is measured from the robot: 80 × 208.
+P-A1 and P-X1 pass (`scripts/test_brawl_look.lua`), L-1 compiles every clip and robot (robots one a view), S-8 passes
+(position, clip, mirror by hover, feet within 2 px of the floor by pixels). Pose cost (release):
+1.0 ms a miss, two robots add about 1.4 ms to the app thread's p50 frame; the whole app-thread frame
+with two robots is 4.7 ms p50, over the plan's 4 ms gate (details in the step note). Open: the
+platform picture's grass is drawn 7.5 units under the platform line (stage art, left to the map plan).
+**Step 5 (2026-11-11):** the robot's own clips. `characters/robot/author.lua` builds clips as changes
+from the setup pose, with a two-bone arm IK and a piston leg IK solved at load time; eight clips
+(`rise`, `apex`, `fall`, `land`, `jump2`, `dash`, `wall`, `turn`) authored in `character_lab` and copied
+into brawl; `fighter.lua` adds the picture acts `apex` and `land` and keeps `prev_act`/`prev_t`, from
+which `look.lua` blends a switch over 4 ticks (uncached). P-A2–A4 pass (`scripts/test_brawl_clips.lua`,
+`test_brawl_look.lua`), L-1 and the smoke pass, contact sheets in `shots/brawl/clips/`
+(`scripts/clip_sheet.py`). Release, two robots: app-thread frame 1.7 ms p50, under the 4 ms gate.
+Next: the user plays and judges the clips; then the geometry module (§1a) or step 6's jetpack.
+**Maps step 1 (2026-11-11), [plan](design/brawl-maps.md):** the asset library, ahead of the maps
+that will use it. `library.lua` (pure) loads `maps/assets/{sky,backdrop,ground,platforms,props,clouds}.lua`
+(15 assets: today's 12 pictures, the `day` sky, a `haze`, and a soft SVG cloud), checks them with
+errors naming `family.asset.field`, and estimates the budget (12 textures, 14.35 MiB). P-L1–L3 pass
+in `scripts/test_brawl_library.lua`; L-3 passes in `app_host/tests/brawl.rs` (a broken asset draws
+the stage plain and names itself in a hidden readout; an app's `print` doesn't reach the console).
+`scripts/brawl_pack.py` rebuilds and checks `art/` from the pack zip per `art/SOURCES.txt`. The game
+still draws `stages/yard.lua`; nothing on screen changed.
+**Maps step 2 (2026-11-11):** the yard on the library. `map.lua` (pure) checks a map that only places
+assets and compiles it into the rules' `stage` (collision derived from the placements, on the 1/8
+grid, in pieces order) and a view-only `scene`; `maps/yard.lua` + `maps/index.lua` replace
+`stages/yard.lua`; `stage_art.lua` became `scene_art.lua`; `fighter.lua` takes no `art`. Art files
+renamed to the pack's names. P-K1–K5 pass in `scripts/test_brawl_maps.lua` (P-K2 incl. P-M12's
+byte-identical final state), L-1 revised in `app_host/tests/brawl.rs`, S-M1 in the new
+`scripts/smoke_brawl_maps.py` (in `SMOKES`). The platform gap is fixed: the drawn grass is under the
+robot's soles within 1 px, and `smoke_brawl.py` fails otherwise. No Rust.
+**Maps step 3 (2026-11-11):** the full library, the sheet and the overlay. `art/` holds 48 pictures
+(51 assets, 3 soft SVG clouds; 48 textures, 32.45 MiB estimated), the tilemap's ground caps and walls
+included; boulders carry solid templates, the bridge is a 3-sliced one-way platform (`rail`), every ledge
+is 3-sliced. `library.lua` gained `extent` and `sheet` (P-V4); `gallery.lua` is the hidden Assets view
+(`assets` button, `gallery:state`), and F2 or `overlay` draws `col:<id>` over every solid and platform
+(S-M2/S-M3 in `smoke_brawl_maps.py`; shots `assets.png`, `maps-yard-overlay.png`). The yard is unchanged
+(P-K2 green; release perf p50 2.14 ms). No Rust.
+
 ### 2D characters step 5 — our own robots (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
 
 `character_lab` shows Paka beside three generic robots (Scout, Brute, Volt): vector shapes only,

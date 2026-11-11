@@ -1,0 +1,54 @@
+# Where each picture in art/ comes from: `out ← pack path [crop WxH+X+Y] [alpha a]`.
+# Pack: "Scavenge Legends: Complete World" V1.1 by Dumivid, CC0 (License.txt, beside these files).
+# Rebuild or check with: python3 -I scripts/brawl_pack.py <the pack's zip> [--check] [--grid]
+# Names follow brawl-maps.md decision 10 (the pack's name without _recommended, (n) as _n); renamed in step 2.
+# Step 3 (brawl-maps.md): the full library, 128 px set. Tilemap cells col,row at 128 px: 0,0 cap_l, 1,0 block_top, 2,0 cap_r, 0,1 wall_l, 2,1 wall_r.
+# Large new layers are cropped to their opaque box in the file (decision 10): their picture's top is the silhouette's top.
+background_fog_1.png ← 128 pixels (recommended size for full HD)/Depth Elements/background_fog (1).png crop 1025x518+0+75
+background_fog_2.png ← 128 pixels (recommended size for full HD)/Depth Elements/background_fog (2).png crop 1025x378+0+215
+background_fog_3.png ← 128 pixels (recommended size for full HD)/Depth Elements/background_fog (3).png crop 1025x442+0+151
+background_mountain_1.png ← 128 pixels (recommended size for full HD)/Depth Elements/background_mountain (1).png
+background_mountain_2.png ← 128 pixels (recommended size for full HD)/Depth Elements/background_mountain (2).png
+boulder.png ← 128 pixels (recommended size for full HD)/boulder_recommended.png
+boulder_2.png ← 128 pixels (recommended size for full HD)/boulder_2_recommended.png
+boulder_3.png ← 128 pixels (recommended size for full HD)/boulder_3_recommended.png
+boulder_5.png ← 128 pixels (recommended size for full HD)/boulder_5_recommended.png
+bridge.png ← 128 pixels (recommended size for full HD)/bridge.png
+bush.png ← 128 pixels (recommended size for full HD)/bush_recommended.png
+bush_1.png ← 128 pixels (recommended size for full HD)/bush_1_recommended.png
+bush_2.png ← 128 pixels (recommended size for full HD)/bush_2_recommended.png
+bush_3.png ← 128 pixels (recommended size for full HD)/bush_3_recommended.png
+chest.png ← 128 pixels (recommended size for full HD)/chest_recommended.png
+cloud.png ← 128 pixels (recommended size for full HD)/cloud_recommended.png
+cloud_1.png ← 128 pixels (recommended size for full HD)/cloud_1_recommended.png
+cloud_2.png ← 128 pixels (recommended size for full HD)/cloud_2_recommended.png
+cloud_3.png ← 128 pixels (recommended size for full HD)/cloud_3_recommended.png
+flag_1.png ← 128 pixels (recommended size for full HD)/flag_1_recommended.png
+foreground_basic_1.png ← 128 pixels (recommended size for full HD)/Depth Elements/foreground_basic (1).png
+foreground_basic_2.png ← 128 pixels (recommended size for full HD)/Depth Elements/foreground_basic (2).png crop 1025x377+0+216
+foreground_basic_3.png ← 128 pixels (recommended size for full HD)/Depth Elements/foreground_basic (3).png crop 1025x443+0+150
+grass.png ← 128 pixels (recommended size for full HD)/grass_recommended.png
+grass_1.png ← 128 pixels (recommended size for full HD)/grass_1_recommended.png
+grass_2.png ← 128 pixels (recommended size for full HD)/grass_2_recommended.png
+grass_3.png ← 128 pixels (recommended size for full HD)/grass_3_recommended.png
+grass_4.png ← 128 pixels (recommended size for full HD)/grass_4_recommended.png
+grass_5.png ← 128 pixels (recommended size for full HD)/grass_5_recommended.png
+ground_block_top.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x128+128+0
+ground_cap_l.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x128+0+0
+ground_cap_r.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x128+256+0
+ground_top.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x97+896+283
+ground_wall_l.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x128+0+128
+ground_wall_r.png ← 128 pixels (recommended size for full HD)/_tilemap_main.png crop 128x128+256+128
+platform.png ← 128 pixels (recommended size for full HD)/platform_recommended.png
+platform_1.png ← 128 pixels (recommended size for full HD)/platform_1_recommended.png
+platform_2.png ← 128 pixels (recommended size for full HD)/platform_2_recommended.png
+platform_3.png ← 128 pixels (recommended size for full HD)/platform_3_recommended.png
+platform_4.png ← 128 pixels (recommended size for full HD)/platform_4_recommended.png
+rock.png ← 128 pixels (recommended size for full HD)/rock_recommended.png
+rock_1.png ← 128 pixels (recommended size for full HD)/rock_1_recommended.png
+rock_2.png ← 128 pixels (recommended size for full HD)/rock_2_recommended.png
+sign.png ← 128 pixels (recommended size for full HD)/sign_recommended.png
+tree.png ← 128 pixels (recommended size for full HD)/tree_recommended.png
+tree_1.png ← 128 pixels (recommended size for full HD)/tree_1_recommended.png
+tree_2.png ← 128 pixels (recommended size for full HD)/tree_2_recommended.png
+vase.png ← 128 pixels (recommended size for full HD)/vase_recommended.png

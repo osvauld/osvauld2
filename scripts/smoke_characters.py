@@ -334,9 +334,12 @@ def our_own_main():
     part is in the same place in both, by the pointer; they are drawn and they move."""
     import test_spine_to_lua as T
 
-    for path in (LAB / "characters" / "robot").iterdir():
+    for path in (LAB / "characters" / "robot").rglob("*.lua"):
         assert "image" not in path.read_text(), ("a picture in the robot", path.name)
-    assert not (LAB / "characters" / "robot" / "clips").exists(), "the robots have no clips of their own"
+    # Their own clips (brawl-movement.md step 5) are authored on the same skeleton and listed in cast.lua.
+    cast = (LAB / "cast.lua").read_text()
+    for path in (LAB / "characters" / "robot" / "clips").glob("*.lua"):
+        assert f'"{path.stem}"' in cast, ("a robot clip the picker doesn't list", path.name)
     rig = T.lua_load(PAKA / "rig.lua")
     setup = T.worlds(rig, T.sample(T.lua_load(PAKA / "setup.lua"), 0))
     clips = {name: T.lua_load(PAKA / "clips" / f"{name}.lua") for name in ("run", "attack")}

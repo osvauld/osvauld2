@@ -291,7 +291,8 @@ ui.frame({ id = "hero", visual = waving })
 - A **variant** is `gfx.drawing(module, { vars = { shirt = "#2ec4b6" } })`: the module's vars with
   those few replaced — another team's shirt, a dark toggle — compiled once like any drawing. It
   may only replace vars the module declares, with the same kind (a colour for a colour).
-- `pose` builds a new frame: pose once at module scope, not in `view`. Clips and `use` are not
+- `pose` builds a new frame: pose once at module scope, not in `view` (a pose that changes every
+  tick is cached instead: "A fighter drawn from match state"). Clips and `use` are not
   built yet — `clips = …` and `use = …` are errors.
 
 `demo_apps/hero` is the reference.
@@ -1731,6 +1732,27 @@ Entities, gravity, wells, joints and `on_*` moments there are errors, and comman
 `demo_apps/mp_dots` and `demo_apps/mp_hockey` are the small examples; `demo_apps/jetpack` the
 big one.
 
+**A fighter drawn from match state** *(2026-11-11, `demo_apps/brawl/look.lua`)*. A rewind must
+redraw the same picture, so the picture is a function of `state`, never of the render clock:
+
+- **Clip time comes from state.** The rules keep `act` and `act_t` (ticks in it); the view plays
+  `clip:at(act_t × tick)` on a plain `ui.frame`, wrapped for a loop, held for a once clip. World
+  clips play on the frame clock and restart when the handle appears, so after a rewind they would
+  disagree with the state.
+- **Cache posed frames.** `drawing:pose` builds a frame; quantize the time to the clip's frames
+  (1/60 s) and cache the frame per (character, clip, frame index, facing). Bounded: a clip has few
+  frames.
+- **Blend from state too.** On a switch the rules keep `prev_act` and where it was (`prev_t`); for a
+  few ticks lerp the two `clip:at` tables by `act_t / blend_ticks` (`rot` the short way) and pose
+  that, uncached. A part only one table has is at rest in the other.
+- **Mirror by the root pose**, not `gfx.instance`: `x → −x`, `rot → −rot`, `scale_x → −scale_x` on a
+  root whose pivot is the drawing's centre line. An instanced visual's part names are unreachable,
+  and hover tests and hitboxes want them.
+- **The sole on the line.** A clip made for another body drifts its feet off the root's pivot; run
+  forward kinematics over the boots' path points (composed as `drawing:pose` composes) once per
+  cached frame, and place the frame so that lowest point is on the floor. In the air, place by the
+  root's pivot.
+
 ## Animation
 
 Presentation animation is declarative:
@@ -1956,7 +1978,9 @@ with Session(shell_binary=shell_binary(), offscreen=(900, 700)) as s:
 ```
 
 `OSVAULD_OFFSCREEN=900x700` makes *every* script in `scripts/` windowless without editing it, and
-`python3 scripts/smoke.py` runs the smokes. `print()` from a handler reaches `read_console`.
+`python3 scripts/smoke.py` runs the smokes. `print()` goes to the shell's stdout, **not** to
+`read_console`, which holds only errors the host logs *(corrected 2026-11-11: the line said
+otherwise; found by Brawl's L-3)*. Put a value an agent must read in a hidden readout element.
 
 `rects()` also works in a live Android/desktop window, for aiming native touch or mouse input.
 Clock-moving and synthetic-input driver requests remain offscreen-only.

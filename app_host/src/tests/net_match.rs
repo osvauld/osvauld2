@@ -37,6 +37,20 @@ fn a_one_player_match_runs_alone() {
 }
 
 #[test]
+fn every_second_paint_is_exactly_one_frame() {
+    // 30 input frames a second painted at 60: the clock's rounding must never drop one.
+    let mut sim = dots(vec![Link::LAN]);
+    let dt = 1.0 / 60.0;
+    sim.run(1.0, dt);
+    let before = sim.apps[0].match_stats()["dots"].frames;
+    for _ in 0..1440 {
+        sim.run(dt * 0.5, dt); // one paint
+    }
+    no_errors(&sim);
+    assert_eq!(sim.apps[0].match_stats()["dots"].frames - before, 720);
+}
+
+#[test]
 fn on_a_lan_inputs_land_in_time_and_little_is_copied() {
     let mut sim = dots(vec![Link::LAN, Link::LAN]);
     sim.run(5.0, 1.0 / 60.0);

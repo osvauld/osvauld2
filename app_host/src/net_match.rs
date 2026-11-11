@@ -32,6 +32,8 @@ pub const WINDOW: u64 = 8;
 const MOST_SLOW: f64 = 0.1;
 /// Input frames run at most per render frame, so a stall's backlog is caught up gradually.
 const CATCH_UP: u32 = 8;
+/// Seconds of rounding the frame clock forgives, so two paints of 1/60 s are two frames of 1/120 s.
+const CARRY_SLACK: f64 = 1e-9;
 /// Seconds stalled on a player before the match says it is waiting for them, and before it ends.
 const WAITING: f64 = 1.0;
 const DROP_OUT: f64 = 10.0;
@@ -627,7 +629,8 @@ impl Match {
         loop {
             let (late, verdict) = {
                 let core = self.core.borrow();
-                if core.carry < core.frame_dt || ran >= CATCH_UP || core.status != Status::Playing {
+                // A paint's `elapsed` is a difference of clock readings: a hair short of a frame is a frame.
+                if core.carry + CARRY_SLACK < core.frame_dt || ran >= CATCH_UP || core.status != Status::Playing {
                     break;
                 }
                 if core.drop_from.get(&core.me).is_some_and(|&d| core.frame >= d) {

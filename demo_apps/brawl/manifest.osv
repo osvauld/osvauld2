@@ -1,0 +1,3 @@
+app "Brawl" {
+  channel brawl { rate 60/s }
+}

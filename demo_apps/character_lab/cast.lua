@@ -11,6 +11,15 @@ M.names = {
 	"walk_no_weapon", "walk_weapon",
 }
 
+-- The robots' own movement clips (characters/robot/author.lua, docs/design/brawl-movement.md step
+-- 5), copied into brawl. Made on Paka's skeleton, so every character plays them.
+M.own = { "rise", "apex", "fall", "land", "jump2", "dash", "wall", "turn" }
+local own = {}
+for _, name in ipairs(M.own) do
+	table.insert(M.names, name)
+	own[name] = true
+end
+
 M.characters = {
 	{ id = "paka", rig = "characters/paka/rig", clips = "characters/paka/clips/", slot = "wide" },
 	{ id = "scout", rig = "characters/robot/scout", clips = "characters/paka/clips/", slot = "narrow" },
@@ -25,7 +34,7 @@ end
 -- Clips load on first use: all 25 are 55k keys, and a module load has a CPU budget.
 local loaded = {}
 function M.clip(c, name)
-	local path = c.clips .. name
+	local path = own[name] and "characters/robot/clips/" .. name or c.clips .. name
 	local h = loaded[path]
 	if not h then
 		h = gfx.clip(require(path))
