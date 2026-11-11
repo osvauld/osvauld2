@@ -217,7 +217,10 @@ A picture's `src` region is copied out of the file's pixels when the frame is bu
 or turned region shows none of its neighbours at its edges) and counts against the texture budget
 below; all of a picture draws the texture's own pixels. Build image frames once, at module level,
 not in `view`. Colours are drawn as stored, straight alpha, smoothed when scaled; there is no
-tint, opacity or blend yet beyond the frame's own fade.
+tint or blend inside a frame. The element's `opacity` (and `fade`) does dim a frame's pictures, but
+item by item, not as one layer: where two pictures (or fills) of a translucent element overlap, the
+overlap is drawn twice and shows lighter *(seen 2026-11-11: Brawl's fog tiles, overlapped 4 px at
+`opacity = 0.35`, showed a 4 px stripe)*. Abut or barely overlap what is drawn translucent.
 
 ## Drawings (experimental)
 
@@ -1864,6 +1867,18 @@ The kanban split, worth copying at any size:
   the write stay in one file.
 - `ui/widgets.lua` — pure functions of their arguments; handlers are passed in, never reached
   for.
+
+### A map from an asset library — art and collision from one placement
+
+Brawl's pattern (`demo_apps/brawl/map.lua`, `library.lua`, `maps/`): pictures, sizes, anchors and
+collision templates live once, in library files (`maps/assets/*.lua`); a map file is plain data that
+only places assets by name (`{ asset = "wood_ledge", id = "left", x = -620, y = -260, w = 320 }`), so
+a picture and its collision rectangle can't drift apart. `Map.compile` returns the rules' `stage`
+(no art; it is what `net.match` carries) and a view-only `scene`. Another map is another file
+listed in `maps/index.lua` (a Lua app can't list its own files); switching recompiles, restarts the
+match and lets the old map's textures go. The map is required at module scope, so an edit that
+doesn't compile errors there, naming the piece (`pieces[9] "right".asset: unknown asset ...`), and
+the shell keeps the running app until the fix.
 
 ## The sandbox, and what happens when you err
 

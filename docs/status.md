@@ -68,6 +68,21 @@ is 3-sliced. `library.lua` gained `extent` and `sheet` (P-V4); `gallery.lua` is 
 (`assets` button, `gallery:state`), and F2 or `overlay` draws `col:<id>` over every solid and platform
 (S-M2/S-M3 in `smoke_brawl_maps.py`; shots `assets.png`, `maps-yard-overlay.png`). The yard is unchanged
 (P-K2 green; release perf p50 2.14 ms). No Rust.
+**Maps step 4 (2026-11-11):** backgrounds that read. `depth.lua` (pure) places layers by depth zoom (far
+layers barely shrink as the camera pulls back) and computes tiles, haze widths and body depths from the
+views the camera can take; the yard's `back` is the plan's recipe (vector sky with a sun glow, a pale vector
+ridge, soft SVG clouds drifting on render time, mountains under hazes, the fog at element opacity 0.35, the
+light hills, the hedge, mist below the stage top so past the edge is depth, not sky); the ground is the
+tilemap block with caps and walls, platforms are 3-sliced. P-V1–V3 pass in `scripts/test_brawl_depth.lua`,
+S-M6 in `smoke_brawl_maps.py` (shots `maps-yard-{idle,edge,top,wide}.png`); collision and P-M12 unchanged;
+16 textures, 18 MiB; release p50 2.15 ms. Element opacity dims pictures item by item (noted in `lua-apps.md`).
+No Rust.
+**Maps step 5 (2026-11-11):** a second map, Twin Isles (`maps/isles.lua`, golden hour: a `golden` sky,
+three warm hazes and a dusk ridge, all vector; every picture is an existing asset), a visible `Map:` button
+(`map:next`) that recompiles, restarts the match and drops the old map's textures, and live edits of the map
+file (a bad edit is named on the console, the fix is clean). P-K6/P-K7 pass in `scripts/test_brawl_isles.lua`
+(P-V2/V3 now run on both maps), L-2 in `app_host/tests/brawl.rs` (yard 16 textures 18.0 MiB, isles 22
+textures 19.8 MiB), S-M4/S-M5 in `smoke_brawl_maps.py` (shots `maps-isles-{idle,pit,top,wide}.png`). No Rust.
 
 ### 2D characters step 5 — our own robots (2026-11-10, branch `2d-characters`, not landed) — [plan](design/2d-characters.md)
 

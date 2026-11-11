@@ -45,6 +45,16 @@ local function first_opaque_row(path)
 	error("no opaque row in " .. path)
 end
 
+-- A picture's opaque box as x, y, w, h, through ImageMagick (nil when it isn't installed).
+local function opaque_box(path)
+	local p = io.popen("command -v magick >/dev/null 2>&1 && magick '" .. APP .. path .. "' -format '%@' info: 2>/dev/null")
+	local out = p:read("a")
+	p:close()
+	local w, h, x, y = out:match("(%d+)x(%d+)%+(%d+)%+(%d+)")
+	if not w then return nil end
+	return tonumber(x), tonumber(y), tonumber(w), tonumber(h)
+end
+
 local lib = Library.load()
 
 -- P-L1: every asset passes check against the files, and every lift is the measured first opaque row.
@@ -69,6 +79,17 @@ do
 				local want = row + (a.rail or 0)
 				assert(math.abs(a.lift - want) <= 1, string.format("P-L1: %s.lift is %g; %s's first opaque row is %d (+ rail %d)", where, a.lift, pic.image, row, a.rail or 0))
 				measured = measured + 1
+			end
+		end
+		-- A capped ground's inset: the left wall is opaque from column inset[1], the right one to
+		-- inset[2] columns short of its right side (step 4: the walls' outer edge is the solid's).
+		if a.kind == "ground" and a.left_wall then
+			local lx = opaque_box(a.left_wall.image)
+			local rx, _, rw = opaque_box(a.right_wall.image)
+			if lx then
+				assert(lx == a.inset[1], "P-L1: " .. where .. ".inset[1] is " .. a.inset[1] .. "; the left wall starts at column " .. lx)
+				local right = a.right_wall.size[1] - (rx + rw)
+				assert(right == a.inset[2], "P-L1: " .. where .. ".inset[2] is " .. a.inset[2] .. "; the right wall stops " .. right .. " short")
 			end
 		end
 	end
@@ -107,6 +128,12 @@ do
 	refused(function(f) f.sky.day.stops = { { 0, "#78c4d6" } } end, "sky.day.stops: needs 2 to 64", "a one-stop sky")
 	refused(function(f) f.sky.day.stops[2][1] = -1 end, "sky.day.stops[2]: needs a number in 0..1", "a stop offset outside 0..1")
 	refused(function(f) f.weather = {} end, "weather: unknown family", "an unknown family")
+	-- Step 4: caps and walls come in pairs, walls hang under caps, caps need an inset.
+	refused(function(f) f.ground.grass_block.right = nil end, "ground.grass_block.right: caps come in pairs", "one cap")
+	refused(function(f) f.ground.grass_block.left_wall = nil end, "ground.grass_block.left_wall: walls come in pairs", "one wall")
+	refused(function(f) f.ground.grass_block.inset = nil end, "ground.grass_block.inset: missing (the caps need it)", "caps with no inset")
+	refused(function(f) f.ground.grass_block.inset = { 29, 128 } end, "ground.grass_block.inset: needs {left, right} whole columns", "an inset past the cap")
+	refused(function(f) f.ground.grass_ground.inset = { 1, 1 } end, "ground.grass_ground.inset: only caps have an inset", "an inset with no caps")
 	-- Valid templates pass, and get fills defaults without touching the library.
 	local fams = copy(lib.families)
 	fams.props.rock.collide = { solid = { -90, -100, 180, 100 } }

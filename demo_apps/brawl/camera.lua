@@ -2,6 +2,7 @@
 -- A view is { x, y, w, h, zoom } in stage units, x and y its top-left; zoom is ref_w / w, so zoom 1
 -- shows 1 600 units across. `target` frames the boxes, `ease` walks a camera toward a target as a
 -- pure function of (camera, target, dt). Nothing here may feed `step`.
+local Depth = require("depth")
 local C = {}
 
 C.params = {
@@ -73,10 +74,8 @@ end
 
 -- How far a layer of factor f is shifted so it follows the camera by 1 - f: f = 1 stays on the map,
 -- 0 stays on the screen. `home` is the camera centre at which the layer sits where it was placed.
-function C.parallax(cam, f, home)
-	local cx, cy = cam.x + cam.w / 2, cam.y + cam.h / 2
-	return (cx - home.x) * (1 - f), (cy - home.y) * (1 - f)
-end
+-- The flat case of depth.lua's placement (the layer drawn at the stage's scale, no depth zoom).
+function C.parallax(cam, f, home) return Depth.shift(cam, f, home) end
 
 function C.copy(v) return { x = v.x, y = v.y, w = v.w, h = v.h, zoom = v.zoom } end
 

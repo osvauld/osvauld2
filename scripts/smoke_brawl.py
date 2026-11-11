@@ -44,9 +44,11 @@ RESPAWN_TICKS = 120
 # demo_apps/brawl/maps/yard.lua: the camera's bounds, the body, and the art the dump must list
 CAMERA = (-1500, -1100, 3000, 1800)
 BODY = (80, 200)
-ART = {"art/cloud.png", "art/cloud_2.png", "art/background_mountain_1.png", "art/background_mountain_2.png",
-       "art/foreground_basic_1.png", "art/ground_top.png", "art/tree.png", "art/tree_2.png", "art/bush.png",
-       "art/rock.png", "art/grass_3.png", "art/platform_4.png"}
+# (maps step 4: the tilemap block's top, caps and walls, the fog and the light hills; the clouds are SVG)
+ART = {"art/background_mountain_1.png", "art/background_mountain_2.png", "art/background_fog_2.png",
+       "art/foreground_basic_1.png", "art/foreground_basic_3.png", "art/ground_block_top.png", "art/ground_cap_l.png",
+       "art/ground_cap_r.png", "art/ground_wall_l.png", "art/ground_wall_r.png", "art/tree.png", "art/tree_2.png",
+       "art/bush.png", "art/rock.png", "art/grass_3.png", "art/platform_4.png"}
 # The drawn grass against the soles (maps step 2): a ledge's lift comes from the asset library (10 rows of
 # transparent pixels above the planks, platforms.lua), so the soles sit on the drawn grass.
 SURFACE_GAP_MAX = 1
@@ -287,6 +289,7 @@ def main():
             if find(r.dump_tree(item), "art:loaded")["text"].split("/")[0] == find(r.dump_tree(item), "art:loaded")["text"].split("/")[1]:
                 break
             r.frame(1)
+        last[0] = state()["tick"]  # the frames spent loading art are not a key's or a frame's ticks
         console = r.read_console(item)
         assert not console, console
         listed = pictures()

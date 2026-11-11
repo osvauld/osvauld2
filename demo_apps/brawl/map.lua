@@ -5,6 +5,8 @@
 -- Pure: runs unchanged under stock Lua 5.4 and Luau (no `+=`, no goto/continue). Errors name the
 -- piece: `pieces[8] "left".x: missing`.
 local Library = require("library")
+local Depth = require("depth")
+local Camera = require("camera")
 local M = {}
 
 -- Depth layers (decision 6): allowed parallax factors and the default. Back entries sit on far,
@@ -18,23 +20,32 @@ local DEPTH = {
 local BACK_LAYERS = { far = true, mid = true, near = true }
 local PIECE_LAYERS = { stage = true, front = true, fore = true }
 
--- Which kinds go where. Haze, ridge and cloud are in the library but not drawn yet (step 4).
-local BACK_KINDS = { layer = true, prop = true }
+-- Which kinds go where.
+local BACK_KINDS = { layer = true, prop = true, haze = true, ridge = true, cloud = true }
 local PIECE_KINDS = { ground = true, platform = true, prop = true }
 
-local MAP_FIELDS = { name = true, sky = true, home = true, bottom = false, back = true, pieces = true,
+local MAP_FIELDS = { name = true, sky = true, home = true, back = true, pieces = true,
 	spawns = true, respawn = true, blast = true, camera = true, shapes = false }
-local BACK_FIELDS = { asset = true, x = true, y = true, scale = false, f = false, layer = false }
+-- `x` is a back entry's centre (0 when left out); `drift` (units a second) and `span` move a prop or a
+-- cloud sideways, wrapping (depth.lua); `opacity` multiplies the asset's own.
+local BACK_FIELDS = { asset = true, x = false, y = true, scale = false, f = false, layer = false, opacity = false,
+	drift = false, span = false }
+local DRIFTS = { prop = true, cloud = true }
 local PIECE_FIELDS = {
 	ground = { asset = true, id = false, x = true, y = true, w = true, h = true, layer = false },
-	platform = { asset = true, id = false, x = true, y = true, w = true, layer = false },
+	platform = { asset = true, id = false, x = true, y = true, w = true, scale = false, layer = false },
 	prop = { asset = true, id = false, x = true, y = true, scale = false, flip = false, layer = false, f = false },
 }
 
--- Layers behind the stage keep a few pixels overlapped between copies (step 3's seam fix); how many
--- copies is fixed for now. Step 4 computes it from the camera bounds.
-local TILES = 3
-local OVERLAP = 4
+-- Layers behind the stage keep a few pixels overlapped between copies (step 3's seam fix), but a
+-- translucent one only its last column (the pack's pictures repeat every 1 024 of their 1 025 columns):
+-- element opacity applies to each picture drawn, not to the layer as a whole, so an overlap shows as a
+-- lighter stripe (step 4, seen in the fog). How many
+-- copies, how wide a haze or ridge is and how deep a body goes are computed from the views the map's
+-- camera can take (depth.lua's cases, at these playfield aspects), plus MARGIN units.
+local OVERLAP, OVERLAP_TRANSLUCENT = 4, 1
+local MARGIN = 64
+M.ASPECTS = { 1, 4 / 3, 1.5, 16 / 9, 2, 2.4 }
 
 local function fail(where, msg) error({ brawl_map = where .. ": " .. msg }, 0) end
 
@@ -124,11 +135,22 @@ local function check_map(map, lib)
 		local a = lookup(lib, e.asset)
 		if not a then fail(at .. ".asset", "unknown asset " .. tostring(e.asset)) end
 		if not BACK_KINDS[a.kind] then fail(at .. ".asset", "a " .. a.kind .. " can't be placed in back") end
-		number(e.x, at .. ".x")
+		if e.x ~= nil then number(e.x, at .. ".x") end
 		number(e.y, at .. ".y")
 		if e.scale ~= nil then
 			number(e.scale, at .. ".scale")
 			if e.scale <= 0 then fail(at .. ".scale", "needs a number above 0") end
+		end
+		if e.opacity ~= nil then
+			number(e.opacity, at .. ".opacity")
+			if e.opacity < 0 or e.opacity > 1 then fail(at .. ".opacity", "needs a number in 0..1") end
+		end
+		if e.drift ~= nil or e.span ~= nil then
+			if not DRIFTS[a.kind] then fail(at .. ".drift", "only a prop or a cloud drifts") end
+			if e.drift == nil or e.span == nil then fail(at .. (e.drift == nil and ".drift" or ".span"), "drift and span go together") end
+			number(e.drift, at .. ".drift")
+			number(e.span, at .. ".span")
+			if e.span <= 0 then fail(at .. ".span", "needs a number above 0") end
 		end
 		local layer = check_layer(e, a, BACK_LAYERS, at)
 		depth(e, layer, at)
@@ -234,15 +256,42 @@ local function placed(a, e, layer)
 	local sc = e.scale or a.scale
 	local W = a.size[1]
 	local left = e.flip and (W - a.anchor[1]) or a.anchor[1]
-	return { kind = "prop", asset = e.asset, id = e.id, a = a, layer = layer, flip = e.flip or false,
-		x = e.x - left * sc, y = e.y - a.anchor[2] * sc, s = sc, w = W * sc, f = 1 }
+	return { kind = a.kind == "cloud" and "cloud" or "prop", asset = e.asset, id = e.id, a = a, layer = layer, flip = e.flip or false,
+		x = e.x - left * sc, y = e.y - a.anchor[2] * sc, s = sc, w = W * sc, f = 1, opacity = a.opacity }
+end
+
+-- A back entry as a scene item. Tiled layers, hazes and ridges are made wide enough, and their
+-- bodies deep enough, for every view in `cases` (decision 7): `x`/`w` are the strip, `bottom` where
+-- its body ends, all in the layer's own units.
+local function back_item(e, a, layer, f, cases, home)
+	local vis = Depth.cover(cases, f, home)
+	local x0, x1, bottom = vis.x0 - MARGIN, vis.x1 + MARGIN, vis.y1 + MARGIN
+	local ex = e.x or 0
+	local opacity = (a.opacity or 1) * (e.opacity or 1)
+	if a.kind == "layer" then
+		local sc = e.scale or a.scale
+		local w = a.src and a.src[3] or a.size[1]
+		local h = a.src and a.src[4] or a.size[2]
+		local overlap = opacity < 1 and OVERLAP_TRANSLUCENT or OVERLAP
+		local n, left, total = Depth.tiles(ex / sc, w, overlap, x0 / sc, x1 / sc)
+		return { kind = "layer", asset = e.asset, a = a, layer = layer, tile = n, overlap = overlap, s = sc, f = f, opacity = opacity,
+			x = left * sc, y = e.y, w = total * sc, h = h, drop = math.max(0, (bottom - e.y) / sc - h), bottom = math.max(bottom, e.y + h * sc) }
+	elseif a.kind == "haze" or a.kind == "ridge" then
+		return { kind = a.kind, asset = e.asset, a = a, layer = layer, f = f, s = 1, opacity = opacity,
+			x = x0, y = e.y, w = x1 - x0, bottom = math.max(bottom, e.y + (a.height or a.h)) }
+	end
+	local item = placed(a, { asset = e.asset, x = ex, y = e.y, scale = e.scale }, layer)
+	item.f, item.opacity, item.drift, item.span = f, opacity, e.drift, e.span
+	return item
 end
 
 -- Everything to draw, in draw order: `under` is behind the fighters, `over` in front. Assumes the
--- map has been checked and `stage` is its compiled stage.
-function M.scene(map, lib, stage)
-	local scene = { name = map.name, home = copy(map.home), bottom = map.bottom or (map.camera.y + map.camera.h),
-		under = {}, over = {}, images = {} }
+-- map has been checked and `stage` is its compiled stage. `opts.aspects` are the playfield shapes
+-- the backdrop must cover (M.ASPECTS by default).
+function M.scene(map, lib, stage, opts)
+	opts = opts or {}
+	local cases = Depth.cases(map.camera, opts.aspects or M.ASPECTS, Camera)
+	local scene = { name = map.name, home = copy(map.home), under = {}, over = {}, images = {} }
 	local sky = Library.get(lib, map.sky)
 	scene.sky = { name = map.sky, stops = copy(sky.stops), sun = copy(sky.sun) }
 	local used = {}
@@ -250,24 +299,14 @@ function M.scene(map, lib, stage)
 	for _, e in ipairs(map.back) do
 		local a = Library.get(lib, e.asset)
 		local layer = e.layer or a.layer
-		local f = depth(e, layer, "")
 		use(a)
-		if a.kind == "layer" then
-			local sc = e.scale or a.scale
-			local w = a.src and a.src[3] or a.size[1]
-			local total = (w - OVERLAP) * (TILES - 1) + w
-			scene.under[#scene.under + 1] = { kind = "layer", asset = e.asset, a = a, layer = layer, tile = TILES, s = sc, f = f,
-				x = e.x - total * sc / 2, y = e.y, w = total * sc }
-		else
-			local item = placed(a, e, layer)
-			item.f = f
-			scene.under[#scene.under + 1] = item
-		end
+		scene.under[#scene.under + 1] = back_item(e, a, layer, depth(e, layer, ""), cases, scene.home)
 	end
 	local front, fore = {}, {}
 	local solids, platforms = {}, {}
 	for _, s in ipairs(stage.solids) do solids[s.id] = s end
 	for _, p in ipairs(stage.platforms) do platforms[p.id] = p end
+	local bottom = map.camera.y + map.camera.h
 	for _, e in ipairs(map.pieces) do
 		local a = Library.get(lib, e.asset)
 		use(a)
@@ -275,15 +314,25 @@ function M.scene(map, lib, stage)
 		if a.kind == "ground" then
 			local s = solids[e.id]
 			local tw = a.top.size[1]
-			local n = math.max(1, math.floor(s.w / tw + 0.5))
-			local k = s.w / (n * tw)
-			scene.under[#scene.under + 1] = { kind = "ground", asset = e.asset, id = e.id, a = a, layer = "stage", tiles = n, f = 1,
-				s = k, x = s.x, y = s.y - a.lift * k, w = s.w, bottom = map.camera.y + map.camera.h }
+			local item = { kind = "ground", asset = e.asset, id = e.id, a = a, layer = "stage", f = 1, x = s.x, w = s.w, bottom = bottom }
+			if a.left and a.right then
+				-- Capped (decision 9): pictures at their own size, the caps' and walls' `inset` columns
+				-- outside the solid, the top strip between the caps stretched to fit.
+				item.s, item.caps = 1, true
+			else
+				local n = math.max(1, math.floor(s.w / tw + 0.5))
+				item.s, item.tiles = s.w / (n * tw), n
+			end
+			item.y = s.y - a.lift * item.s
+			scene.under[#scene.under + 1] = item
 		elseif a.kind == "platform" then
 			local p = platforms[e.id]
-			local k = p.w / a.size[1]
+			-- 3-sliced: the ends at `scale` (1 by default), the middle stretched; ends that wouldn't fit
+			-- shrink the whole.
+			local sc = e.scale or 1
+			if a.slice then sc = math.min(sc, p.w / (a.slice[1] + a.size[1] - a.slice[2])) else sc = p.w / a.size[1] end
 			scene.under[#scene.under + 1] = { kind = "platform", asset = e.asset, id = e.id, a = a, layer = "stage", f = 1,
-				s = k, x = p.x, y = p.y - a.lift * k, w = p.w }
+				s = sc, x = p.x, y = p.y - a.lift * sc, w = p.w }
 		else
 			local item = placed(a, e, layer)
 			item.f = e.f or (layer == "fore" and DEPTH.fore[3]) or 1
@@ -308,7 +357,7 @@ function M.compile(map, lib, opts)
 		if type(stage) == "table" and stage.brawl_map then error(stage.brawl_map, 0) end
 		error(stage, 0)
 	end
-	return { stage = stage, scene = M.scene(map, lib, stage) }
+	return { stage = stage, scene = M.scene(map, lib, stage, opts) }
 end
 
 return M

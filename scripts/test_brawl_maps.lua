@@ -59,6 +59,12 @@ do
 	refused(function(m) m.back[1].asset = "grass_ground" end, "back[1].asset: a ground can't be placed in back", "a ground in back")
 	refused(function(m) m.back[4].f = 0.9 end, "back[4].f: layer far allows 0.02..0.2", "a depth factor outside its layer")
 	refused(function(m) m.sky = "dusk" end, "sky: unknown sky dusk", "an unknown sky")
+	-- Step 4's back fields: drift and span only on a prop or a cloud, and together; opacity in 0..1.
+	refused(function(m) m.back[5].drift, m.back[5].span = 4, 3000 end, "back[5].drift: only a prop or a cloud drifts", "a drifting mountain")
+	refused(function(m) m.back[2].span = nil end, "back[2].span: drift and span go together", "drift without a span")
+	refused(function(m) m.back[2].span = 0 end, "back[2].span: needs a number above 0", "an empty span")
+	refused(function(m) m.back[8].opacity = 1.2 end, "back[8].opacity: needs a number in 0..1", "opacity past 1")
+	refused(function(m) m.back[6].layer = "stage" end, "back[6].layer: a haze can't use layer stage", "a haze on the stage")
 	refused(function(m) m.colour = "red" end, "colour: unknown field", "an unknown map field")
 	refused(function(m) m.spawns = nil end, "spawns: missing", "a map with no spawns")
 	-- A piece's own error beats a later one: first problem in order, back before pieces.
@@ -233,7 +239,8 @@ do
 		n = n + 1
 	end
 	assert(next(want) == nil, "L-1: a named picture is missing from scene.images")
-	assert(n == 12, "L-1: the yard names twelve pictures, saw " .. n)
+	-- 16 PNGs (step 4: the tilemap block's top, caps and walls, the fog and the light hills) and 3 SVG clouds.
+	assert(n == 19, "L-1: the yard names nineteen pictures, saw " .. n)
 	print("L-1 yard pictures: " .. n)
 end
 

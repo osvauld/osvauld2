@@ -120,22 +120,19 @@ do
 	assert(dx == 0, "P-C4: nothing at the home centre")
 end
 
--- P-C5: the scene's back layers against the camera bounds: parallax factors in 0..1, and every
--- tiled layer wide enough to cover the bounds' width (no bare edge at the stage's far sides; clouds
--- are single objects). Picture files against their sizes are P-L1's job now (test_brawl_library.lua);
--- the pictures a map draws are P-K's (test_brawl_maps.lua).
+-- P-C5: the scene's back layers: depth factors in 0..1, five tiled layers, about twenty pictures.
+-- That each layer covers every view is P-V2's (test_brawl_depth.lua): with depth zoom a far layer
+-- needs less than the bounds' width. Picture files against their sizes are P-L1's job
+-- (test_brawl_library.lua); the pictures a map draws are P-K's (test_brawl_maps.lua).
 do
 	local scene = U.compiled.scene
 	local layers = 0
 	for i, it in ipairs(scene.under) do
 		assert(it.f >= 0 and it.f <= 1, "P-C5: under[" .. i .. "] f in 0..1")
-		if it.kind == "layer" then
-			layers = layers + 1
-			assert(it.w >= bounds.w, "P-C5: under[" .. i .. "] spans the bounds")
-		end
+		if it.kind == "layer" then layers = layers + 1 end
 	end
-	assert(layers == 3, "P-C5: the yard has three tiled layers")
-	assert(#scene.images <= 16, "P-C5: about fifteen pictures, not " .. #scene.images)
+	assert(layers == 5, "P-C5: the yard has five tiled layers, saw " .. layers)
+	assert(#scene.images <= 20, "P-C5: about twenty pictures, not " .. #scene.images)
 	print("P-C5 pictures: " .. #scene.images)
 end
 

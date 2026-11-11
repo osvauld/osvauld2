@@ -16,7 +16,8 @@ local KINDS = {
 		fields = { kind = true, color = true, from = true, to = true, height = true, layer = false } },
 	ridge = { family = "backdrop", layers = { "far", "mid" }, fields = { kind = true, color = true, h = true, step = true, layer = false } },
 	ground = { family = "ground", layers = { "stage" },
-		fields = { kind = true, top = true, left = false, right = false, lift = true, body = true, edge = false } },
+		fields = { kind = true, top = true, left = false, right = false, left_wall = false, right_wall = false, inset = false,
+			lift = true, rail = false, body = true, edge = false } },
 	platform = { family = "platforms", layers = { "stage" },
 		fields = { kind = true, image = true, size = true, lift = true, rail = false, slice = false } },
 	prop = { family = "props", layers = { "stage", "far", "mid", "near", "front", "fore" },
@@ -163,16 +164,35 @@ function CHECK.ridge(a, where)
 	number(a.step, where .. ".step", 1)
 end
 
+local GROUND_PICTURES = { "top", "left", "right", "left_wall", "right_wall" }
+
 function CHECK.ground(a, where, opts)
-	for _, side in ipairs({ "top", "left", "right" }) do
+	for _, side in ipairs(GROUND_PICTURES) do
 		if a[side] ~= nil then
 			fields(a[side], PICTURE, where .. "." .. side)
 			picture(a[side], where .. "." .. side, opts)
 		end
 	end
 	lift(a, a.top.size[2], where)
+	if a.rail ~= nil then number(a.rail, where .. ".rail", 0, a.top.size[2] - 1) end
 	color(a.body, where .. ".body")
 	if a.edge ~= nil then color(a.edge, where .. ".edge") end
+	-- Caps come in pairs, as do walls, and the walls hang under caps of the same width. `inset` is
+	-- the transparent columns outside the solid: the left pieces' left, the right pieces' right.
+	if (a.left == nil) ~= (a.right == nil) then fail(where .. (a.left and ".right" or ".left"), "caps come in pairs") end
+	if (a.left_wall == nil) ~= (a.right_wall == nil) then fail(where .. (a.left_wall and ".right_wall" or ".left_wall"), "walls come in pairs") end
+	if a.left_wall and not a.left then fail(where .. ".left_wall", "walls hang under caps") end
+	if a.left_wall and (a.left_wall.size[1] ~= a.left.size[1] or a.right_wall.size[1] ~= a.right.size[1]) then
+		fail(where .. ".left_wall", "a wall is as wide as its cap")
+	end
+	if (a.inset ~= nil) ~= (a.left ~= nil) then fail(where .. ".inset", a.left and "missing (the caps need it)" or "only caps have an inset") end
+	if a.inset then
+		list(a.inset, 2, where .. ".inset", "{left, right} whole columns")
+		if not (is_int(a.inset[1]) and is_int(a.inset[2]) and a.inset[1] >= 0 and a.inset[2] >= 0
+			and a.inset[1] < a.left.size[1] and a.inset[2] < a.right.size[1]) then
+			fail(where .. ".inset", "needs {left, right} whole columns inside the caps")
+		end
+	end
 end
 
 function CHECK.platform(a, where, opts)
@@ -367,7 +387,7 @@ end
 local function pictures(a)
 	if a.kind == "ground" then
 		local out = {}
-		for _, side in ipairs({ "top", "left", "right" }) do
+		for _, side in ipairs(GROUND_PICTURES) do
 			if a[side] then out[#out + 1] = a[side] end
 		end
 		return out

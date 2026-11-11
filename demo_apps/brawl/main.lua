@@ -24,15 +24,22 @@ local scripted = false
 -- A broken library still gives the rules their stage (collision doesn't need the pictures); the
 -- scene is skipped and the stage is drawn plain (SceneArt.problem says why).
 local lib = Library.load()
-local map = require("maps/" .. require("maps/index")[1])
 local body = { w = T.body_w, h = T.body_h }
-local yard, scene
-if SceneArt.problem then
-	yard = Map.stage(map, lib, { body = body })
-else
-	local compiled = Map.compile(map, lib, { body = body })
-	yard, scene = compiled.stage, compiled.scene
+local index = require("maps/index")
+local which = 1 -- the index of the map being played
+local map, yard, scene
+local function load_map(i)
+	which = i
+	map = require("maps/" .. index[i])
+	if SceneArt.problem then
+		yard, scene = Map.stage(map, lib, { body = body }), nil
+	else
+		local compiled = Map.compile(map, lib, { body = body })
+		yard, scene = compiled.stage, compiled.scene
+	end
 end
+-- A map that doesn't compile errors here, naming the piece (map.lua), and the shell keeps the running app.
+load_map(1)
 
 local function start()
 	input = Input.new() -- a new match counts presses from 0 again
@@ -64,10 +71,24 @@ local function art_of(stage)
 	return art
 end
 
+-- `map:next`: the next map in the index, a new match on it. Only the new map's pictures stay in the
+-- texture cache (the ones both maps use are kept, not decoded again), and the camera starts on its spawn.
+local cam, last_elapsed
+local function next_map()
+	load_map(which % #index + 1)
+	art = nil
+	SceneArt.release(scene and scene.images or {})
+	cam, last_elapsed, rules = nil, nil, nil
+	start()
+end
+
 -- The camera is presentation, not state: it eases on render time and nothing in `step` reads it.
 -- `cam` is nil until the first frame, when it starts on its target (the spawn, until a match runs).
-local cam, last_elapsed
 local function aspect() return size.w / size.h end
+-- `wide` (a hidden button, view-only): the camera pulls all the way out, as if fighters stood at
+-- both far corners of its bounds, so the zoomed-out backdrop can be seen and shot (S-M6) while the
+-- match has one fighter.
+local wide = false
 local function camera_target(stage)
 	local fighters = {}
 	if match.state then
@@ -75,7 +96,13 @@ local function camera_target(stage)
 	else
 		for _, p in ipairs(stage.spawns) do fighters[#fighters + 1] = { x = p.x, y = p.y, act = "idle" } end
 	end
-	return Camera.target(Camera.boxes(fighters, T.body_w, T.body_h), stage.camera, aspect())
+	local boxes = Camera.boxes(fighters, T.body_w, T.body_h)
+	if wide then
+		local b = stage.camera
+		boxes[#boxes + 1] = { x = b.x, y = b.y, w = 1, h = 1 }
+		boxes[#boxes + 1] = { x = b.x + b.w - 1, y = b.y + b.h - 1, w = 1, h = 1 }
+	end
+	return Camera.target(boxes, stage.camera, aspect())
 end
 local function follow(e)
 	local stage = rules and rules.stage or yard
@@ -156,12 +183,14 @@ local function scene()
 	look:warm() -- the robots, one a frame; see look.lua
 	cam = cam or camera_target(stage)
 	local k = size.w / cam.w
-	local out = SceneArt.under(art, cam, k, 0, 0, size.w, size.h)
+	local out = SceneArt.under(art, cam, k, 0, 0, size.w, size.h, last_elapsed or 0)
 	out[#out + 1] = control("script", "script", 0, function() scripted = true; start() end)
 	out[#out + 1] = control("play", "play", 60, function() scripted = false; start() end)
 	out[#out + 1] = control("pair", "pair", 120, function() pair = not pair end)
 	out[#out + 1] = control("assets", "assets", 180, function() showing = true end)
 	out[#out + 1] = control("overlay", "overlay", 240, function() overlay = not overlay end)
+	out[#out + 1] = control("wide", "wide", 300, function() wide = not wide end)
+	out[#out + 1] = ui.button({ "Map: " .. stage.name, id = "map:next", absolute = true, right = 16, top = 34, on_click = next_map })
 	if not s then return out end
 	local f = s.fighters[1]
 	local drawn = "hidden"
@@ -183,7 +212,7 @@ local function scene()
 		drawn = string.format("robot=%s clip=%s index=%d time=%.17g face=%d x=%.17g y=%.17g k=%.17g sole=%.17g feet=%.17g blend=%.17g",
 			ROBOT, p.clip, p.index, p.time, f.face, x, y, k, p.sole, p.plant and p.sole or py, p.blend or -1)
 	end
-	for _, e in ipairs(SceneArt.over(art, cam, k, 0, 0)) do out[#out + 1] = e end
+	for _, e in ipairs(SceneArt.over(art, cam, k, 0, 0, last_elapsed or 0)) do out[#out + 1] = e end
 	if overlay then
 		for _, e in ipairs(overlay_elements(stage, k)) do out[#out + 1] = e end
 	end

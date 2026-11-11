@@ -212,3 +212,61 @@ fn a_broken_brawl_asset_is_named_and_the_stage_is_plain() {
     assert_eq!(pictures, 0, "no stage pictures are drawn");
     println!("brawl L-3: {problem}; console: {console:?}");
 }
+
+/// L-2 (docs/design/brawl-maps.md, step 5): each map in turn, with `maps/index.lua` reordered in the
+/// source before opening so that map comes first. The console is clean, `map:state` names the map,
+/// and it stays within a map's budget (32 textures, 48 MiB with mips and copies). Counts are printed.
+#[test]
+fn each_brawl_map_opens_clean_inside_its_own_budget() {
+    for id in ["yard", "isles"] {
+        let app = brawl_with(|path, text| {
+            if path != "maps/index.lua" {
+                return text;
+            }
+            let other = if id == "yard" { "isles" } else { "yard" };
+            let edited = text.replace("return { \"yard\", \"isles\" }", &format!("return {{ \"{id}\", \"{other}\" }}"));
+            assert!(edited.contains(&format!("\"{id}\"")), "the index is where the test edits it: {text}");
+            edited
+        });
+        let mut views = 0;
+        let view = loop {
+            let view = app.view().info();
+            views += 1;
+            assert!(app.console(20).is_empty(), "{id}: view {views}: {:?}", app.console(20));
+            let mut loaded = None;
+            walk_info(&view, &mut |i| {
+                if i.id.as_deref() == Some("art:loaded") {
+                    loaded = i.text.clone();
+                }
+            });
+            let loaded = loaded.expect("the art readout");
+            let (n, total) = loaded.split_once('/').unwrap();
+            if n == total {
+                break view;
+            }
+            assert!(views < 80, "{id}: still {loaded} after {views} views");
+        };
+        let mut state = None;
+        let mut pictures = BTreeMap::new();
+        walk_info(&view, &mut |info| {
+            if info.id.as_deref() == Some("map:state") {
+                state = info.text.clone();
+            }
+            for p in &info.pictures {
+                pictures.insert(std::sync::Arc::as_ptr(p) as usize, p.clone());
+            }
+        });
+        assert_eq!(state.as_deref(), Some(id));
+        let mut textures = BTreeMap::new();
+        for p in pictures.values() {
+            textures.insert(p.texture().resource_id(), p.texture().payload_bytes());
+        }
+        let mips: usize = textures.values().sum();
+        let copies: usize = pictures.values().map(|p| p.copied_bytes()).sum();
+        let mib = (mips + copies) as f64 / (1024.0 * 1024.0);
+        println!("brawl L-2 {id}: {} pictures, {} textures, {:.2} MiB with mips and copies, {} views", pictures.len(), textures.len(), mib, views);
+        assert!(textures.len() <= 32, "{id}: {} textures", textures.len());
+        assert!(mips + copies <= 48 * 1024 * 1024, "{id}: {mib} MiB");
+        assert!(app.console(20).is_empty(), "{id}: {:?}", app.console(20));
+    }
+}

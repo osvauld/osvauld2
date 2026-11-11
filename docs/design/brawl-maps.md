@@ -1,6 +1,6 @@
 # Brawl maps: an asset library first, then maps built from it
 
-Status: **steps 1–3 built (2026-11-11, branch `2d-characters`, not merged): the library, P-L1–L3 and L-3 (revised), the yard on the library (P-K1–K5, L-1 revised, S-M1), then the full library, the sheet and the overlay (P-L3 full size, P-V4, S-M2, S-M3); steps 4–5 not built.** The user answered the §4 questions on 2026-11-10 (Twin Isles, the sheet inside Brawl, the `fore` layer, soft SVG clouds); the other decisions in §1 are *Proposed* and are being built as written. It follows [Brawl movement](brawl-movement.md): steps 1–3 there are built, and this plan replaces its decision 9 (stage art) and the `art` list in `stages/yard.lua`. **No Rust.** Everything here is Lua data, Lua modules, PNGs and test scripts.
+Status: **steps 1–4 built (2026-11-11, branch `2d-characters`, not merged): the library, P-L1–L3 and L-3 (revised), the yard on the library (P-K1–K5, L-1 revised, S-M1), then the full library, the sheet and the overlay (P-L3 full size, P-V4, S-M2, S-M3), then backgrounds that read (P-V1–V3, S-M6), then Twin Isles, map switching and live edit (P-K6, P-K7, L-2, S-M4, S-M5); all five steps built.** The user answered the §4 questions on 2026-11-10 (Twin Isles, the sheet inside Brawl, the `fore` layer, soft SVG clouds); the other decisions in §1 are *Proposed* and are being built as written. It follows [Brawl movement](brawl-movement.md): steps 1–3 there are built, and this plan replaces its decision 9 (stage art) and the `art` list in `stages/yard.lua`. **No Rust.** Everything here is Lua data, Lua modules, PNGs and test scripts.
 
 Why: after playing, the user said *"backgrounds need some work. need a detailed plan on the map as well, make map assets first then the map that uses those assets rather than one map file."* Today one file, `stages/yard.lua`, holds the collision rectangles and a separate `art` list. Nothing ties a platform's picture to its collision rectangle. Pictures are named by file path inside the map. The back layers run out at the stage edge (`shots/brawl/step3_edge.png`: the hedge ends in a green wall over pale sky). The clouds are flat white blobs. The mountains are as sharp and saturated as the ground, so there is no depth.
 
@@ -194,6 +194,7 @@ Test kinds:
    Each haze band lowers contrast toward the sky colour, so the layers step back in depth. Isles uses the `golden` sky and a warm haze (`#f4c99a`) over the same greens, so its backdrop is colour-graded through overlays, not through new pictures. The clouds stay flat pack clouds with opacity and size telling far from near (open question 4).
 
    *Unverified, checked in step 4:* that `opacity` on a `ui.frame` dims a picture. Alpha colours already work (`#rrggbbaa` in Jetpack). Fallback without Rust: `brawl_pack.py` bakes the alpha into the file (fog × 0.35).
+   *(2026-11-11, step 4: verified, it dims a picture, so nothing is baked. It applies item by item, not to the element as one layer, so overlapping tiles of a translucent layer show a lighter stripe; such a layer overlaps its copies by 1 px, not 4. See the step 4 note.)*
 
 9. **Ground and platform edges.** `_tilemap_main.png` is laid out on a 128 px grid. Row 0 has separate cells at x 384, 512, 640 and 768, and column x 896 is the ground that already tiles (step 3). Step 1 catalogues the grid on a contact sheet (each cell labelled col,row with its opaque coverage) and crops the cap cells into `ground_left.png` and `ground_right.png`. If no cell joins cleanly, the cap is vector: the `edge` colour band plus the grass strip rounded over the corner. Platforms are 3-sliced, so a wide ledge keeps its ends instead of stretching. Today a 320-wide ledge squashes a 256 px picture.
 
@@ -482,3 +483,139 @@ Results: lua tests, `cargo test -p app_host --test brawl` (2 passed), `smoke.py`
   (no sky has a sun yet); the `ridge` swatch (no ridge asset yet); the sheet's paging buttons
   (`assets:prev/next`, a single page at the smoke's size); S-M4's texture release after the sheet closes
   (the sheet's frames stay cached once built).
+
+### Step 4 landed 2026-11-11 (branch `2d-characters`, not merged)
+
+Built: `demo_apps/brawl/depth.lua` (pure: `shift`, `scale`, `place`, `visible`, `cases`, `cover`, `tiles`,
+`drift`); `camera.lua`'s `parallax` is now `Depth.shift`; `map.lua` computes every back item's tiles, width and
+body depth from the views the camera can take, accepts `haze`, `ridge` and `cloud` assets and `opacity`,
+`drift`, `span` in `back` (and `scale` on a platform piece), and drops the map field `bottom`; `scene_art.lua`
+draws the vector sky (3 stops and a sun glow, screen-fixed, rebuilt when the playfield's size changes), hazes,
+the ridge, soft SVG clouds that drift on render time, translucent layers by element `opacity`, the capped
+ground (caps, walls, stretched top) and 3-sliced platforms, all placed by depth zoom. Library: the ground
+kind takes `left_wall`, `right_wall`, `inset` and `rail`; new assets `haze_far`, `haze_abyss`, `ridge_pale`,
+and the `day` sky got its third stop and sun. `maps/yard.lua`'s `back` is decision 8's recipe and its ground
+is `grass_block`. `main.lua` has a hidden `wide` button (view only: the camera pulls all the way out).
+Tests: `scripts/test_brawl_depth.lua` (P-V1–V3, new); P-L1 measures the walls' insets, P-L2 refuses unpaired
+caps and walls and bad insets, P-K1 refuses the new back fields' misuse, L-1's count is 19 (16 PNGs, 3 SVGs),
+P-C5 counts 5 tiled layers (coverage moved to P-V2); S-M6 in `scripts/smoke_brawl_maps.py`. No Rust.
+
+- **Tests first:** `test_brawl_depth.lua` was written before `depth.lua` and failed (no module); P-V1's f = 0
+  check was then wrong in the test (it compared views of two shapes, whose centres differ) and was fixed to
+  compare a moved and zoomed view of the same shape. P-V3 went red on the yard's first clouds (spans of 4 200
+  wrapped in view on the left) and the spans became 5 000. S-M6 was written before the yard's new `back` but
+  run after it, so it was never seen red against step 3's yard.
+- **Results:** `sh scripts/run_brawl_lua_tests.sh` all green, P-K2 and P-M12's final state unchanged
+  (`tick=1200 x=-738.5 y=-240.5 … drop=0`); `cargo test -p app_host --test brawl` 2 passed (via loadtable);
+  `smoke.py` with `smoke_brawl`, `smoke_brawl_maps`, `smoke_characters` green (`smoke_brawl` after one fix,
+  below). P-V2 tries 504 layer-and-view pairs (7 aspects, 1 to 2.4).
+- **Budget:** the yard draws 18 pictures, **16 textures, 18.04 MiB** with mips (3.44 MiB of it copied regions),
+  against 32 and 48 per map. The library is 54 assets, 51 files, 48 textures, 32.45 MiB (no new files).
+- **Perf (release shell, offscreen, `perf_brawl.py`):** 1280x720 p50 2.15 ms, p95 2.89, max 3.97; 1920x1080
+  p50 2.26, p95 2.87, max 5.52; 0 frames over 16.7 ms (step 3: p50 2.14).
+- **Depth zoom, as decided:** a layer's px per unit is `k1·(1 + (zoom − 1)·f)`, it follows the camera by f
+  about `home`, and f = 1 takes the stage's own mapping exactly (so `piece:<id>` frames still meet S-M3).
+  `Depth.place` has an optional px-per-unit argument; with the stage's k it is the old parallax (P-V1 checks
+  it against `Camera.parallax`).
+- **Decisions made in the step** (the user may overrule):
+  1. *Coverage is computed, with a margin.* `map.lua` takes the union of what the views of `Depth.cases`
+     (bounds' corners × nearest and furthest zoom × aspects 1, 4/3, 1.5, 16/9, 2, 2.4) show of each layer,
+     plus 64 units, and sizes tiles, haze and ridge widths and body depths to it. A window narrower than
+     1:1 is not covered by construction.
+  2. *A back entry's `x` is optional* (0, its centre); a haze or ridge is as wide as the coverage, wherever x is.
+  3. *Clouds drift on render time* (`on_frame`'s `elapsed`), centred on their placed x, wrapping in `span`;
+     P-V3 asserts every drifting cloud wraps outside the widest coverage, so the jump is never seen.
+  4. *The sky is screen-fixed* (no 0.05 vertical follow): its gradient spans the playfield's height, and the
+     sun's `r` is px on a 1 600 px playfield; the glow fades out to 4 r.
+  5. *Platforms keep the yard's look.* A platform piece may say `scale` (default 1); the 3-slice keeps the
+     ends at that scale and stretches the middle. The yard's ledges say 1.25, which at 320 wide is the
+     picture's own proportions, so the ledges look as before; the 3-slice shows on wider ledges (isles).
+  6. *Ground caps join cleanly, so the yard uses `grass_block`* (the tilemap block judged by eye on a
+     composite: caps, top strip and walls line up) rather than the vector edge, which is not built. The
+     caps and walls sit `inset` columns outside the solid (walls 29 and 25), the top strip runs 2 px under
+     each cap (abutting showed a hairline), walls repeat down to the camera's bottom. The block's grass has
+     tufts above its surface, so the ground kind took `rail` as the bridge did: `lift` 24 = first opaque
+     row 3 + rail 21 (P-L1 checks it). The collision is unchanged (P-K2); only the art moved.
+  7. *No `fore` bushes.* The recipe didn't need them and they would hide the fighters near the corners; the
+     layer stays available.
+  8. *A hidden `wide` button* stands in for the plan's "wide uses the `pair` button": `pair` only draws a
+     second robot, the camera frames one fighter, so it never zooms out. `wide` adds the bounds' corners to
+     the camera's boxes (view only); the shot uses both.
+- **Element opacity, verified:** it dims a picture (the fog at 0.35 reads as mist, no white wall), so no alpha
+  is baked. But it applies item by item: the fog's tiles overlapping 4 px showed a lighter 4 px stripe.
+  A translucent layer now overlaps its copies by 1 px (the pack's pictures repeat every 1 024 of their 1 025
+  columns, and the 1 025th is near transparent); a faint 1 px line is left at 4x zoom. `lua-apps.md` says so.
+- **`smoke_brawl.py` fix:** the yard now takes one more frame to load its art, and the frames spent in the
+  art wait were counted as a 4-tick frame; the smoke now resets its tick count after that wait (as it already
+  did after pointer moves). Its `ART` set is the yard's 16 PNGs.
+- **Look-adjust rounds** (900x700 offscreen, `maps-yard-{idle,edge,top,wide}.png`, against step 3's
+  `maps-yard.png` and `step3_edge.png`):
+  1. First build: the edge already showed mist below the hedge instead of sky, the ground had its rimmed
+     walls and the clouds were soft. But the far and near mountains were the same saturated teal (no depth
+     between them), and the far haze (`haze_day` from 0) left the peaks untouched.
+  2. A new `haze_far` (from 0.3) over the far range: the far mountains went pale and stepped back, but its
+     top drew a hard horizontal line across the sky.
+  3. `haze_far` from 0, placed higher (y −640), so it fades in above the peaks: no line. The hedge (f 0.6 to
+     0.75), the abyss mist (to 0.75) and the light hills (0.4 to 0.45) came nearer, so at the top platform
+     they rise less and the lower view is less of a green wall.
+  4. Seams: a light stripe in the fog (opacity per item, above: overlap 1 px) and a hairline between the
+     ground's left cap and its top strip in a 1600x700 zoomed-out shot (strip under the caps by 2 px). Both
+     gone at 4x zoom.
+- **Screenshots looked at:** `maps-yard-idle.png`, `-edge.png`, `-top.png`, `-wide.png` each round, a 1600x700
+  zoomed-out shot (not kept), zooms of the edge, the seams and the caps, `assets.png` (54 assets, the ridge and
+  hazes as swatches).
+- **Unverified / left:** windows narrower than 1:1 (not in the cases); at very wide windows zoomed out
+  (1600x700) the far haze covers most of the sky and the top reads washed; the robot over the abyss mist has
+  less contrast than over grass (its outline carries it); the vector cap (`edge`) is still unbuilt; S-M6 checks
+  bare sky by colour (the sky's first and last stops), so a backdrop colour close to either would hide a gap.
+
+### Step 5 landed 2026-11-11 (branch `2d-characters`, not merged)
+
+Built: `maps/isles.lua` (Twin Isles) and `maps/index.lua` = `{ "yard", "isles" }`. `main.lua` loads the map by
+index (`load_map`), has a visible `Map: <name>` button (id `map:next`, top right) that compiles the next map,
+restarts the match, drops the old art and camera, and calls the new `SceneArt.release(images)` so the old
+map's textures (not those the new map shares) can be collected. Library: a `golden` sky, `haze_gold_far`,
+`haze_gold`, `haze_abyss_gold` and `ridge_dusk`: vector only, no new texture. No Rust.
+Tests: `scripts/test_brawl_isles.lua` (P-K6, P-K7, new), P-V2/V3 run on both maps through the index,
+L-2 (`each_brawl_map_opens_clean_inside_its_own_budget`) in `app_host/tests/brawl.rs`, S-M4 and S-M5 in
+`scripts/smoke_brawl_maps.py` (shots `maps-isles-{idle,pit,top,wide}.png`).
+
+- **Tests first:** `test_brawl_isles.lua` failed on the index, then on the missing map, before `isles.lua` was
+  written. Two test bugs were fixed against the fighter's real rules: the boulder jump held right all the
+  way up and overshot (or landed on `ledge_l`), so the test lets go of right, and of jump, once the feet clear
+  the top. S-M4/S-M5 passed on their first run once the map existed (they were never seen red).
+- **Results:** `run_brawl_lua_tests.sh` green (P-K2 and P-M12's final state unchanged; P-V2 now 1008 layer-and-view
+  checks); `cargo test -p app_host --test brawl` 3 passed (job 2878 on nixos): **L-2 yard 16 textures 18.04 MiB,
+  isles 22 textures 19.82 MiB** (caps 32 and 48); S-M4: each switch is clean, 22 and 16 textures in the dump, never
+  above the library's 56; S-M5 passes (below).
+- **The layout differs from the plan's in one number:** the boulder is `boulder_5` (a grass-topped square) at scale
+  1.5, a **156 x 156** solid at x −558…−402, not `boulder` at 150. The round boulders in the pack are dark discs
+  (they read as tyres or holes beside a square box); `boulder_5` fits its box. The rest is the plan's: islands
+  x −1100…−260 and 260…1100 (y 0…600), `bridge` platform x −260…260 at y 0, `wood_ledge` at y −280 (x −900 and
+  620, w 280), `platform_1` top at y −420 (w 320), spawns (±700, 0), respawn (0, −700), the plan's blast and camera.
+- **P-K7 as built:** a fighter spawns standing on the left island; Down on the bridge drops it into the pit, the
+  blast takes a stock, the respawn lands on `top` at `y == −420`; at both inner walls (x −220 and 220, y 300) it
+  slides at `wall_slide` and wall jumps; it runs into the boulder (`vx == 0` at x −598) and, jumping, stands on it
+  (`y == −156`, `on == 0`). P-K6: 10 shared assets, yard-only 10, isles-only 15 (the sky and hazes count).
+- **S-M5 as built:** the live edit moves yard's `right` ledge from x 300 to 364 (+64) through `read_file_versioned`
+  and `edit_file` on `maps/yard.lua`; the shell reloads by itself. `piece:right` moves 44.0 px for 64 units at
+  k 0.69. The fighter, jumping at x 650 (only the new place is under it), stands on it at y −260. The broken edit
+  (`wood_ledgee`) puts `reload error: ... pieces[9] "right".asset: unknown asset wood_ledgee` on the console and the
+  old app keeps running; the fix adds nothing more. The state readout has no `on`, so "`on` is set" is read as
+  `y == −260, vy == 0`.
+- **Decisions made in the step** (the user may overrule): (1) the `Map:` button is visible, not hidden, since a player
+  can use it; (2) a switch resets the match (a new match and camera), it does not carry the fighter; (3) the isles'
+  warm colour grading is four new vector assets rather than an opacity trick on the day ones; (4) the isles have
+  cliffs to the camera's bottom, not floating undersides, since the pack has no island underside.
+- **Look-adjust rounds** (900x700 offscreen, `maps-isles-*.png`): round 1: the round boulder read as a tyre and the
+  bush overlapped it, and the far mountains went muddy khaki under the peach haze. Round 2: `boulder_5` at 1.5, the
+  bush moved to the far end behind the tree, and `haze_gold_far` warmer and stronger (to 0.8): the mountains are a
+  warm tan against the peach sky. Looked at each round: idle, pit, top, and wide. S-M6's rule held on both: P-V2 on isles
+  and the bottom row of every isles shot is not the golden sky's first or last colour (S-M6 in `smoke_brawl_maps.py`).
+- **Perf: not measured.** The release build passed on nixos (job 2879) but the fetch of `target/release/shell2`
+  timed out (link lost), a retry (job 2880) never started (nixos unreachable for 10 minutes), and the file at that
+  path is a play window's binary anyway. The map adds no per-frame cost the yard didn't have (22 textures against 16).
+- **Weak spots:** the pit below the bridge is a flat peach mist (readable, not rich); the isles' tree_1 is pale lilac
+  next to the greens; the clouds sit over the HUD's "Stocks" text at the top left; the `Map:` button resets the match
+  (the fighter is not carried over).
+
